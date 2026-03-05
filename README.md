@@ -244,15 +244,13 @@ All processing is **local**. Logs are read from files you select; no data is sen
 
 ## Screenshots
 
-| Description | Placeholder |
+| Description | Link |
 |-------------|-------------|
 | **Hunt mode** — Hypothesis builder, DSL, and hunt results with graph and path table | ![Hunt mode](docs/images/screenshot-hunt.png) |
 | **Explorer + graph** — IOC search, neighborhood expansion, and graph canvas | ![Explorer and graph](docs/images/screenshot-explorer.png) |
 | **Hypothesis & ATT&CK catalog** — Step builder and one-click catalog templates | ![Hypothesis and catalog](docs/images/screenshot-catalog.png) |
 | **Events, Heatmap, Timeline** — Event list, entity/relation heatmap, temporal view | ![Events, Heatmap, Timeline](docs/images/screenshot-views.png) |
 | **GNN Threat Model** — ONNX model load, k-hop config, Compute Scores (optional) | ![GNN Threat Model](docs/images/screenshot-gnn.png) |
-
-*Add the actual image files under `docs/images/` (e.g. `screenshot-hunt.png`, `screenshot-explorer.png`, etc.) or replace with a short [demo video](docs/images/) link.*
 
 ---
 
