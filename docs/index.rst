@@ -11,13 +11,14 @@ Ingest security logs, build an entity-relationship graph with causal ordering, a
 About
 =====
 
-.. image:: images/screenshot-explorer.png
-   :alt: Exploring nodes on map
-   :width: 95%
 
 Graph Hunter is a **graph-based threat hunting engine** that turns heterogeneous security telemetry (Sysmon, Microsoft Sentinel, generic JSON, CSV) into a single **knowledge graph**. Analysts define **hypotheses** as chains of entity types and relation types (e.g. *User →[Auth]→ Host →[Execute]→ Process*). The engine finds all paths that match the pattern while enforcing **causal monotonicity**: each step occurs at or after the previous one in time. Results are explored via an interactive graph canvas, IOC search, timeline and heatmap views, and optional ATT&CK-mapped hypothesis templates.
 
 The engine includes an **endogenous anomaly scoring system** with five components — Entity Rarity, Edge Rarity, Neighborhood Concentration, Temporal Novelty, and **GNN Threat** — that automatically prioritizes the most suspicious paths. The GNN component integrates ONNX models (e.g. exported from GraphOS-APT) that classify k-hop subgraphs into threat categories (Benign, Exfiltration, C2 Beacon, Lateral Movement, Privilege Escalation), with optional **NPU/GPU acceleration** via DirectML.
+
+.. image:: images/screenshot-explorer.png
+   :alt: Exploring nodes on map
+   :width: 80%
 
 Why graph-based hunting?
 ========================
@@ -40,9 +41,9 @@ How it works
 3. **Hunt** — Define a hypothesis as a chain of typed steps (e.g. ``User →[Auth]→ Host →[Execute]→ Process``). The engine finds all paths matching the pattern with **causal monotonicity** (each step at or after the previous one). Optional **k-simplicity** allows a vertex to repeat up to *k* times per path.
 4. **Explore** — Search for IOCs, expand node neighborhoods, inspect metadata and anomaly scores, pivot via Events view, Heatmap, and Timeline.
 
-.. image:: images/screenshot-hunt.png
+.. image:: images/screenshot-exploringnodes.png
    :alt: Ingesting data and running a hunt
-   :width: 75%
+   :width: 80%
 
 Key features
 ============

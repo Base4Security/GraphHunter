@@ -19,13 +19,15 @@ How it works
 Threat classes (ATT&CK-aligned)
 ===============================
 
++-------+----------------------+--------+
 | Logit | Threat class         | ATT&CK |
-|-------|----------------------|--------|
++=======+======================+========+
 | 0     | Benign               | Normal |
 | 1     | Exfiltration         | TA0010 |
 | 2     | C2 Beacon            | TA0011 |
 | 3     | Lateral Movement     | TA0008 |
 | 4     | Privilege Escalation | TA0004 |
++-------+----------------------+--------+
 
 How it is used in the hunt
 ==========================

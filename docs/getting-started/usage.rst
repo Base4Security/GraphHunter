@@ -16,10 +16,6 @@ Quick run
 
 Then in the app: create or select a **session** → **Select Log File** → choose a file (e.g. from ``demo_data/``) → **Auto-detect** → load. Switch to **Hunt Mode**, build or select a hypothesis, and click **Run**.
 
-.. image:: ../images/screenshot-hunt.png
-   :alt: Main window after loading demo data and running a hunt
-   :width: 95%
-
 Sessions
 ========
 
