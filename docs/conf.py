@@ -33,6 +33,7 @@ html_theme_options = {
 # Logo in header (same asset as README: docs/images/GraphHunterLogoBlack.png)
 html_logo = "images/GraphHunterLogoBlack.png"
 html_static_path = ["_static"] if os.path.exists("_static") else []
+html_css_files = ["custom.css"]
 html_show_sourcelink = True
 html_show_copyright = True
 html_last_updated_fmt = "%Y-%m-%d"

@@ -1,0 +1,6 @@
+/* Reduce header/sidebar logo size */
+.wy-side-nav-search > a img.logo,
+.wy-side-nav-search .wy-dropdown > a img.logo {
+  max-height: 36px;
+  width: auto;
+}
