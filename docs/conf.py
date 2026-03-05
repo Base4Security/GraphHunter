@@ -11,7 +11,7 @@ version = "0.1"
 release = "0.1.0"
 language = "en"
 author = "BASE4 Security — Lucas Sotomayor & Diego Staino"
-copyright = "© Copyright BASE4 Security."
+copyright = "BASE4 Security."
 
 extensions = [
     "sphinx_rtd_theme",
