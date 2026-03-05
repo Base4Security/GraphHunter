@@ -251,6 +251,7 @@ All processing is **local**. Logs are read from files you select; no data is sen
 | **Hypothesis & ATT&CK catalog** — Step builder and one-click catalog templates | ![Hypothesis and catalog](docs/images/screenshot-catalog.png) |
 | **Events, Heatmap, Timeline** — Event list, entity/relation heatmap, temporal view | ![Events, Heatmap, Timeline](docs/images/screenshot-views.png) |
 | **GNN Threat Model** — ONNX model load, k-hop config, Compute Scores (optional) | ![GNN Threat Model](docs/images/screenshot-gnn.png) |
+| **AI Analysis** — AI-assisted threat hunting; natural-language hunts | ![AI Analysis](docs/images/screenshot-aianalysis.png) |
 
 ---
 
