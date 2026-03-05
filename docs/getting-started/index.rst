@@ -9,5 +9,6 @@ This section gets you from zero to running your first hunt:
    :maxdepth: 1
 
    installation
+   first-hunt
    usage
    demo-data
