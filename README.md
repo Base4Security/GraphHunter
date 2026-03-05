@@ -282,6 +282,10 @@ The **graph-hunter-mcp** package is an **MCP (Model Context Protocol) server** t
 
 The assistant will translate your request into different searchs, the appropriate hypothesis (e.g. `User -[Auth]-> Host -[Execute]-> Process -[Write]-> File` with filters) and run the hunt.
 
+**Demo**
+
+<video src="docs/video/graphhunterfastdemo.mp4" width="640" controls title="Graph Hunter + MCP demo"></video>
+
 **Quick setup:** See **[graph-hunter-mcp/README.md](graph-hunter-mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required).
 
 ---
