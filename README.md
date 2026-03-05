@@ -284,7 +284,7 @@ The assistant will translate your request into different searchs, the appropriat
 
 **Demo**
 
-<video src="docs/video/graphhunterfastdemo.mp4" width="640" controls title="Graph Hunter + MCP demo"></video>
+![Graph Hunter + MCP demo](docs/images/graphhuntergifdemo.gif)
 
 **Quick setup:** See **[graph-hunter-mcp/README.md](graph-hunter-mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required).
 
