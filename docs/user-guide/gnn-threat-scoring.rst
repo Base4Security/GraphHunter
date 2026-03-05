@@ -51,4 +51,9 @@ UI workflow
 5. Click **Compute Scores** — batch inference runs on all entities.
 6. Run a hunt; results are ranked with GNN-enhanced scores.
 
+Pre-trained model (Hugging Face)
+================================
+
+A pre-trained ONNX model for Graph Hunter GNN threat scoring will be available at: `Hugging Face <https://huggingface.co/Base4Security/GraphHunter-GNN-model>`_. (Placeholder — model will be uploaded there.)
+
 For training and exporting models, see the **training/** README and **docs/GNN_STRATEGY.md** in the repository.

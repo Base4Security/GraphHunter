@@ -139,6 +139,8 @@ Process -[DNS]-> Domain -[Connect]-> IP
 
 Graph Hunter can use **GNN-based threat classification** via ONNX models (e.g. from GraphOS-APT): the engine extracts k-hop subgraphs, runs inference (DirectML/GPU or CPU), and injects a 5-class threat score (Benign, Exfiltration, C2 Beacon, Lateral Movement, Privilege Escalation) into the anomaly scorer as weight **W5**. Hunt results are then ranked by the composite score so high-threat paths appear first. GNN scoring is optional and off by default; load a model and click **Compute Scores** in the GNN Threat Model panel to enable it.
 
+**Pre-trained ONNX model (coming soon):** [Hugging Face](https://huggingface.co/Base4Security/GraphHunter-GNN-model) — the model will be uploaded here for download.
+
 **Full details** (pipeline, threat classes, UI workflow, training): [GNN Threat Scoring](https://graphhunter.readthedocs.io/en/latest/user-guide/gnn-threat-scoring.html) in the documentation.
 
 ---
