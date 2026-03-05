@@ -60,6 +60,6 @@ UI workflow
 Pre-trained model (Hugging Face)
 ================================
 
-A pre-trained ONNX model for Graph Hunter GNN threat scoring will be available at: `Hugging Face <https://huggingface.co/Base4Security/GraphHunter-GNN-model>`_. (Placeholder — model will be uploaded there.)
+A pre-trained ONNX model for Graph Hunter GNN threat scoring is available at `Hugging Face <https://huggingface.co/base4security/gnn-threat-scoring>`_. Download the model and load it in the **GNN Threat Model** panel.
 
 For training and exporting models, see the **training/** README and **docs/GNN_STRATEGY.md** in the repository.
