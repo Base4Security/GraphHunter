@@ -44,6 +44,10 @@ Value to threat hunting
 UI workflow
 ===========
 
+.. image:: ../images/screenshot-gnn.png
+   :alt: GNN Threat Model — ONNX model load, k-hop config, Compute Scores
+   :width: 95%
+
 1. Open the **GNN Threat Model** section in the left panel.
 2. Load an ONNX model (file dialog).
 3. Enable **Anomaly Scoring** and set weights (W1–W5) as desired.

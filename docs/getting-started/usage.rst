@@ -16,9 +16,9 @@ Quick run
 
 Then in the app: create or select a **session** → **Select Log File** → choose a file (e.g. from ``demo_data/``) → **Auto-detect** → load. Switch to **Hunt Mode**, build or select a hypothesis, and click **Run**.
 
-.. placeholder: add docs/images/screenshot-main.png for the main window
-.. .. image:: ../images/screenshot-main.png
-..    :alt: Main window after loading demo data and running a hunt
+.. image:: ../images/screenshot-hunt.png
+   :alt: Main window after loading demo data and running a hunt
+   :width: 95%
 
 Sessions
 ========
@@ -64,12 +64,20 @@ Explorer mode
 4. **Double-click** a node on the graph to expand it (Explorer mode).
 5. **Right-click** a node for: Expand, Center, Copy ID, Add/Remove from Path Nodes, Show neighbours.
 
+.. image:: ../images/screenshot-explorer.png
+   :alt: Explorer and graph — IOC search, neighborhood expansion
+   :width: 95%
+
 Other views
 ===========
 
 * **Events:** Event list for the current graph or selection.
 * **Heatmap:** Entity/relation heatmap view.
 * **Timeline:** Temporal view of activity.
+
+.. image:: ../images/screenshot-views.png
+   :alt: Events, Heatmap, Timeline views
+   :width: 95%
 
 Path nodes and notes
 ====================

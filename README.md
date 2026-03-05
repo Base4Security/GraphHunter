@@ -199,10 +199,6 @@ cd app && npm run tauri dev
 
 Then in the UI: create or select a session → **Select Log File** → choose a file from `demo_data/` (or your own) → **Auto-detect** → load. Switch to **Hunt Mode**, build a hypothesis (or pick one from the ATT&CK catalog), and click **Run**. Results appear in the graph and in the hunt table when there are many paths.
 
-![Main window after loading demo data and running a hunt](docs/images/screenshot-main.png)
-
-*Screenshot: main window with session loaded and hunt results (add `docs/images/screenshot-main.png`).*
-
 ---
 
 ## Demo Data & Try It
@@ -242,19 +238,6 @@ All processing is **local**. Logs are read from files you select; no data is sen
 
 ---
 
-## Screenshots
-
-| Description | Link |
-|-------------|-------------|
-| **Hunt mode** — Hypothesis builder, DSL, and hunt results with graph and path table | ![Hunt mode](docs/images/screenshot-hunt.png) |
-| **Explorer + graph** — IOC search, neighborhood expansion, and graph canvas | ![Explorer and graph](docs/images/screenshot-explorer.png) |
-| **Hypothesis & ATT&CK catalog** — Step builder and one-click catalog templates | ![Hypothesis and catalog](docs/images/screenshot-catalog.png) |
-| **Events, Heatmap, Timeline** — Event list, entity/relation heatmap, temporal view | ![Events, Heatmap, Timeline](docs/images/screenshot-views.png) |
-| **GNN Threat Model** — ONNX model load, k-hop config, Compute Scores (optional) | ![GNN Threat Model](docs/images/screenshot-gnn.png) |
-| **AI Analysis** — AI-assisted threat hunting; natural-language hunts | ![AI Analysis](docs/images/screenshot-aianalysis.png) |
-
----
-
 ## Core Engine Details
 
 The engine provides temporal pattern matching (DFS with causal monotonicity), time-window filtering, 5-component endogenous anomaly scoring (optional GNN), k-simplicity for path constraints, parallel parsing (Rayon), and entity/relation deduplication. Entity and relation types, and full module descriptions, are in the documentation.
@@ -286,6 +269,19 @@ The assistant will translate your request into different searchs, the appropriat
 ![Graph Hunter + MCP demo](docs/images/graphhuntergifdemo.gif)
 
 **Quick setup:** See **[graph-hunter-mcp/README.md](graph-hunter-mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required).
+
+---
+
+## Screenshots
+
+| Description | Link |
+|-------------|-------------|
+| **Hunt mode** — Hypothesis builder, DSL, and hunt results with graph and path table | ![Hunt mode](docs/images/screenshot-hunt.png) |
+| **Explorer + graph** — IOC search, neighborhood expansion, and graph canvas | ![Explorer and graph](docs/images/screenshot-explorer.png) |
+| **Hypothesis & ATT&CK catalog** — Step builder and one-click catalog templates | ![Hypothesis and catalog](docs/images/screenshot-catalog.png) |
+| **Events, Heatmap, Timeline** — Event list, entity/relation heatmap, temporal view | ![Events, Heatmap, Timeline](docs/images/screenshot-views.png) |
+| **GNN Threat Model** — ONNX model load, k-hop config, Compute Scores (optional) | ![GNN Threat Model](docs/images/screenshot-gnn.png) |
+| **AI Analysis** — AI-assisted threat hunting; natural-language hunts | ![AI Analysis](docs/images/screenshot-aianalysis.png) |
 
 ---
 

@@ -71,6 +71,10 @@ The catalog includes pre-built hypotheses mapped to MITRE ATT&CK. Examples:
 
 In the app, open the catalog from Hunt Mode and **load** a hypothesis with one click; you can then run it as-is or edit steps and run.
 
+.. image:: ../images/screenshot-catalog.png
+   :alt: Hypothesis and ATT&CK catalog — step builder and one-click templates
+   :width: 95%
+
 Time window
 ===========
 

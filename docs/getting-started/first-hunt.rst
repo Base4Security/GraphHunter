@@ -61,6 +61,10 @@ Step 3 — Run a hunt
 Step 4 — Interpret the result
 =============================
 
+.. image:: ../images/screenshot-hunt.png
+   :alt: Hunt results with graph and path table
+   :width: 95%
+
 * **Graph view**: Nodes are entities (User, Host, Process, etc.); edges are relations (Auth, Execute). Paths matching your hypothesis are highlighted. Click a node to see its details in the right panel (scores, degrees, neighbors).
 * **Hunt results table** (if shown): Each row is one path. You can sort by score (when anomaly scoring is enabled) and click **View path** to focus that path on the graph.
 * **Scores**: When scoring is enabled, paths include anomaly and optionally GNN threat scores to help prioritize the most suspicious chains.

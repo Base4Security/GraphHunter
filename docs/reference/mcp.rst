@@ -67,6 +67,10 @@ MCP tools
 
 Use these tools from Cursor (or any MCP client) to explore the graph and look for malicious or suspicious paths. Ensure Graph Hunter is running and a session with data is loaded before calling the tools.
 
+.. image:: ../images/screenshot-aianalysis.png
+   :alt: AI-assisted threat hunting; natural-language hunts
+   :width: 95%
+
 **Scoring:** The HTTP API exposes ``GET /hunt_results`` (page, page_size, min_score) for paginated scored paths. When anomaly scoring is enabled in the app, ``run_hunt`` uses score-guided search and ``get_hunt_results`` returns ``anomaly_score`` and ``anomaly_breakdown`` (including ``gnn_threat``). When scoring is off, paths still include structural scores (max_score, total_score).
 
 Troubleshooting
