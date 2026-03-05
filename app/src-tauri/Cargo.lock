@@ -1423,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "graph-hunter-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "dirs 5.0.1",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "graph_hunter_cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "graph_hunter_core",
  "reqwest 0.12.28",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "graph_hunter_core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ahash",
  "chrono",

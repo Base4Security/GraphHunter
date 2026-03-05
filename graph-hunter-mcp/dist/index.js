@@ -40,6 +40,10 @@ function summarizeResult(tool, result) {
             return `edges=${o.edges.length}`;
         if (typeof o.path_count === "number")
             return `path_count=${o.path_count}`;
+        if (typeof o.paths === "object" && Array.isArray(o.paths)) {
+            const total = typeof o.total_paths === "number" ? o.total_paths : o.paths.length;
+            return `paths=${o.paths.length} total_paths=${total}`;
+        }
         if (typeof o.nodes === "object" && Array.isArray(o.nodes))
             return `nodes=${o.nodes.length}`;
         if (typeof o.events === "object" && Array.isArray(o.events))
@@ -299,7 +303,7 @@ server.tool("get_events_for_node", "Get all relations/events for a node (incomin
     }
 });
 // run_hunt – run a hypothesis (DSL) and return path count
-server.tool("run_hunt", "Run a threat-hunting hypothesis. Pass a DSL chain like 'IP -[Connect]-> Host -[Execute]-> Process'. Returns path count and whether results were truncated.", {
+server.tool("run_hunt", "Run a threat-hunting hypothesis. Pass a DSL chain like 'IP -[Connect]-> Host -[Execute]-> Process'. Returns path count and whether results were truncated. After running, use get_hunt_results to retrieve paths with scores (structural scores always; anomaly and GNN threat when scoring is enabled).", {
     hypothesis_dsl: z
         .string()
         .describe("Hypothesis in DSL form, e.g. 'IP -[Connect]-> Host -[Auth]-> User -[Execute]-> Process'"),
@@ -315,6 +319,32 @@ server.tool("run_hunt", "Run a threat-hunting hypothesis. Pass a DSL chain like 
     catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         log("tool", "run_hunt error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+        return textContent(msg);
+    }
+});
+// get_hunt_results – one page of last run_hunt results with scores
+server.tool("get_hunt_results", "Get one page of the last run_hunt results. When anomaly scoring is enabled, paths include anomaly_score and anomaly_breakdown (including gnn_threat) and are sorted by anomaly (highest first). When scoring is not enabled, paths still include max_score and total_score (structural scores) and are sorted by those; anomaly_score and anomaly_breakdown will be null/absent. Use total_paths and filtered_paths in the response to decide whether to fetch more pages (higher page or larger page_size). Call run_hunt first.", {
+    page: z.number().optional().default(0).describe("Page index (0-based)."),
+    page_size: z.number().optional().default(20).describe("Number of paths per page."),
+    min_score: z.number().optional().describe("Filter paths by max node score (0–100)."),
+}, async ({ page, page_size, min_score }) => {
+    const start = Date.now();
+    log("tool", "get_hunt_results", { page, page_size, min_score: min_score ?? "-" });
+    try {
+        const params = {
+            page: String(page),
+            page_size: String(page_size),
+        };
+        if (min_score != null && !Number.isNaN(min_score))
+            params.min_score = String(min_score);
+        const v = await apiGet("/hunt_results", params);
+        const summaryStr = summarizeResult("get_hunt_results", v);
+        log("tool", "get_hunt_results done", { duration_ms: Date.now() - start, result: summaryStr });
+        return textContent(JSON.stringify(v, null, 2));
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log("tool", "get_hunt_results error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
         return textContent(msg);
     }
 });
