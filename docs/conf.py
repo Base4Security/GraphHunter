@@ -26,12 +26,12 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 html_theme = "sphinx_rtd_theme"
 html_theme_options = {
-    "logo_only": False,
+    "logo_only": True,
     "navigation_depth": 4,
     "style_nav_header_background": "#2b2b2b",
 }
-# Optional: add docs/images/logo.png and set html_logo = "images/logo.png"
-# html_logo = "images/logo.png"
+# Logo in header (same asset as README: docs/images/GraphHunterLogoBlack.png)
+html_logo = "images/GraphHunterLogoBlack.png"
 html_static_path = ["_static"] if os.path.exists("_static") else []
 html_show_sourcelink = True
 html_show_copyright = True
