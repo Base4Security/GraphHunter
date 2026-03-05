@@ -1,6 +1,6 @@
 <p align="center">
 	<a href="https://graphhunter.readthedocs.io/en/latest/" rel="noopener">
-	 	<img src="https://github.com/Base4Security/GraphHunter/blob/master/docs/images/GraphHunterLogoBlack.png?raw=true" alt="Graph Hunter" width="200">
+	 	<img src="https://github.com/Base4Security/GraphHunter/blob/main/docs/images/GraphHunterLogoBlack.png?raw=true" alt="Graph Hunter" width="200">
 	</a>
 </p>
 
@@ -41,7 +41,6 @@
 - [Privacy & Data](#privacy--data)
 - [Screenshots](#screenshots)
 - [Core Engine Details](#core-engine-details)
-- [Documentation](docs/index.rst)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 - [License](#license)
@@ -54,7 +53,7 @@ Graph Hunter is a **graph-based threat hunting engine** that turns heterogeneous
 
 The engine includes an **endogenous anomaly scoring system** with five components — Entity Rarity, Edge Rarity, Neighborhood Concentration, Temporal Novelty, and **GNN Threat** — that automatically prioritizes the most suspicious paths. The GNN component integrates ONNX models (e.g., exported from GraphOS-APT) that classify k-hop subgraphs into threat categories (Benign, Exfiltration, C2 Beacon, Lateral Movement, Privilege Escalation), with optional **NPU/GPU acceleration** via DirectML.
 
-**Authors:** From BASE4 Security, Lucas Sotomayor & Diego Staino.
+## Screenshot placeholder
 
 ---
 
@@ -71,8 +70,7 @@ Traditional SIEM-style queries are rigid and schema-bound. Attack chains span mu
 ## How It Works
 
 ```
-Security Logs ──► Auto-Detect ──► Parser ──► Knowledge Graph ──► Hypothesis Search ──► Attack Paths
- (JSON/CSV/NDJSON)                              (Entities + Relations)    (Temporal DFS)
+Security Logs ──► Parser ──► Knowledge Graph ──► Hypothesis Search ──► Hunt Attack Paths
 ```
 
 1. **Ingest** — Load logs in any supported format. The engine auto-detects the format or you can specify it. Parsers extract entities (IP, Host, User, Process, File, Domain, Registry, URL, Service) and relations (Auth, Connect, Execute, Read, Write, DNS, Modify, Spawn, Delete) with timestamps.
@@ -90,55 +88,21 @@ Security Logs ──► Auto-Detect ──► Parser ──► Knowledge Graph �
 
 | Area | Features |
 |------|----------|
-| **Engine** | Temporal pattern matching (DFS + causal monotonicity), time-window filtering, 5-component endogenous anomaly scoring (ER, EdgeR, NC, TN, GNN Threat), parallel parsing (Rayon), entity/relation deduplication |
+| **Engine** | Temporal pattern matching (DFS + causal monotonicity), 5-component endogenous anomaly scoring (ER, EdgeR, NC, TN, GNN Threat), parallel parsing (Rayon), entity/relation deduplication |
 | **GNN Scoring** | ONNX model inference for k-hop subgraph classification (5 threat classes), DirectML NPU/GPU acceleration, batch scoring, configurable k-hop depth, feature-gated (`ml-scoring`) |
-| **Formats** | Sysmon, Microsoft Sentinel, generic JSON (80+ field variants), CSV; auto-detect or manual selection |
+| **Formats** | Sysmon, EVTX, Microsoft Sentinel, generic JSON (80+ field variants), CSV; |
 | **Hypotheses** | Visual step builder or **DSL** (`User -[Auth]-> Host -[Execute]-> Process`); wildcards (`*`) for any type; **ATT&CK hypothesis catalog** with one-click load |
 | **UI** | **Sessions** (multiple graphs, persisted); **Hunt** vs **Explorer** modes; **Events**, **Heatmap**, **Timeline** views; **Path Nodes** (pinned nodes); **Notes** (standalone or node-linked); **GNN Threat Model** panel; paginated hunt results for large path sets |
 | **Data** | Configurable generic parser (field → entity type mapping); preview before ingest; dataset list per session (remove/rename) |
+| **SIEM integrations** | **Azure Sentinel** (Log Analytics): KQL queries, workspace + tenant/client/secret (env or UI). **Elasticsearch**: index + query JSON, API key or user/password (env or UI). Query-based ingest via gateway or CLI; results loaded into the graph. |
 
 ---
 
 ## Supported Log Formats
 
-### Auto-Detect (Recommended)
+Graph Hunter supports **Sysmon**, **Microsoft Sentinel**, **generic JSON** (80+ field variants), and **CSV**. Use **Auto-detect** to let the engine choose the parser from content heuristics, or select a format manually.
 
-The engine identifies the log format from content heuristics:
-
-- JSON with `EventID` + `UtcTime` → Sysmon parser  
-- JSON with Sentinel `Type` field → Sentinel parser  
-- Other JSON → Generic parser (field normalization)  
-- Non-JSON content → CSV parser  
-
-### Sysmon (Windows Event Log)
-
-| Event ID | Description | Triples |
-|----------|-------------|---------|
-| 1 | Process Create | `User →[Execute]→ Process`, `Parent →[Spawn]→ Child` |
-| 3 | Network Connection | `Host →[Connect]→ IP` |
-| 11 | File Create | `Process →[Write]→ File` |
-| 22 | DNS Query | `Process →[DNS]→ Domain` |
-
-### Microsoft Sentinel (Azure)
-
-| Table / Source | Triples |
-|----------------|---------|
-| SecurityEvent (4624/4625) | `User →[Auth]→ Host` |
-| SecurityEvent (4688) | `User →[Execute]→ Process`, `Parent →[Spawn]→ Child` |
-| SecurityEvent (4663) | `Process →[Read]→ File` |
-| SigninLogs | `User →[Auth]→ IP` |
-| DeviceProcessEvents | `User →[Execute]→ Process`, `Parent →[Spawn]→ Child` |
-| DeviceNetworkEvents | `Host →[Connect]→ IP` |
-| DeviceFileEvents | `Process →[Write/Read]→ File` |
-| CommonSecurityLog | `IP →[Connect]→ IP` |
-
-### Generic JSON
-
-Format-agnostic parser: normalizes 80+ field name variants to canonical names (case-insensitive), then infers relations from normalized fields (e.g., `source_user` + `source_process` → `User →[Execute]→ Process`). Supports **configurable field mapping** and preview before ingest.
-
-### CSV
-
-Parses CSV with headers; each row is converted to a JSON object and processed by the Generic parser. Handles quoted fields and embedded commas.
+**Full details** (event IDs, Sentinel tables, triples, generic field mapping, CSV): [Supported log formats](https://graphhunter.readthedocs.io/en/latest/user-guide/log-formats.html) in the documentation.
 
 ---
 
@@ -171,112 +135,17 @@ Process -[DNS]-> Domain -[Connect]-> IP
 
 ## GNN Threat Scoring
 
-Graph Hunter integrates GNN-based threat classification through ONNX models, bridging hypothesis-driven investigation with ML-based detection in a closed loop on the same graph.
+Graph Hunter can use **GNN-based threat classification** via ONNX models (e.g. from GraphOS-APT): the engine extracts k-hop subgraphs, runs inference (DirectML/GPU or CPU), and injects a 5-class threat score (Benign, Exfiltration, C2 Beacon, Lateral Movement, Privilege Escalation) into the anomaly scorer as weight **W5**. Hunt results are then ranked by the composite score so high-threat paths appear first. GNN scoring is optional and off by default; load a model and click **Compute Scores** in the GNN Threat Model panel to enable it.
 
-### How it works
-
-```
-Ingestion → Anomaly Observer (entity/edge frequency, timestamps)
-                → Finalize (compute rarity, concentration, novelty)
-                    → GNN Bridge extracts k-hop subgraph features per entity
-                        → NPU Scorer runs ONNX inference → 5-class threat logits
-                            → Scores injected into anomaly scorer as W5
-                                → Hunt results ranked by composite score (W1–W5)
-```
-
-The **GNN Bridge** (`gnn_bridge.rs`) translates Graph Hunter's temporal graph into fixed-size tensors compatible with trained GNN models. Each entity's k-hop neighborhood (capped at 32 nodes) is encoded as a 16-dimensional feature vector per node (one-hot entity type + degree + anomaly features) plus an adjacency matrix, flattened into a 1536-dim input tensor.
-
-The **NPU Scorer** (`npu_scorer.rs`) loads ONNX models and runs inference with DirectML (NPU/GPU) or CPU fallback. Output is 5 logits mapped to threat classes:
-
-| Logit | Threat Class | ATT&CK Alignment |
-|-------|-------------|-------------------|
-| 0 | Benign | Normal activity |
-| 1 | Exfiltration | TA0010 — Data exfiltration |
-| 2 | C2 Beacon | TA0011 — Command & Control |
-| 3 | Lateral Movement | TA0008 — Lateral Movement |
-| 4 | Privilege Escalation | TA0004 — Privilege Escalation |
-
-The threat score is `1 - P(Benign)` after softmax. Scores feed into the anomaly scorer's W5 weight, creating a **bidirectional feedback loop**: anomaly features (rarity, novelty, concentration) are inputs to the GNN, and GNN outputs feed back into the composite anomaly score used for path ranking and DFS pruning.
-
-### How GNN scoring is used in the hunt
-
-- **Path ranking** — Node and links are ordered by the composite anomaly score (W1–W5). Paths with higher GNN threat (and other anomaly signals) appear first, so analysts triage the most suspicious chains before digging into noise.
-- **Where you see it** — The path-level score breakdown (e.g. in the hunt results table and node tooltips) includes a **GNN Threat** component when a model is loaded and scores have been computed. You can tune the **W5** weight in the left panel to emphasize or downweight ML vs the other four heuristics (entity/edge rarity, neighborhood concentration, temporal novelty).
-- **Optional** — GNN scoring is off by default (W5 = 0). You enable it by loading an ONNX model and running **Compute Scores**; until then, the engine behaves as before with the other four components only.
-
-### Value to threat hunting
-
-- **Prioritization** — Reduces manual sifting: high-threat paths (e.g. C2, lateral movement, privilege escalation) rise to the top instead of being buried in long result lists.
-- **ATT&CK-aligned context** — The 5-class output (Benign, Exfiltration, C2 Beacon, Lateral Movement, Privilege Escalation) maps to MITRE ATT&CK tactics, helping categorize and report findings.
-- **Hybrid approach** — Combines hypothesis-driven pattern matching (your chains) with ML-based subgraph classification on the same graph, so you get both rule coverage and learned threat signals in one workflow.
-
-### UI workflow
-
-1. Load an ONNX model (file dialog in the GNN Threat Model panel)
-2. Enable anomaly scoring with desired weights (W1–W5)
-3. Set k-hop depth (1–5, default 2)
-4. Click "Compute Scores" — batch inference runs on all entities
-5. Hunt results are now ranked with GNN-enhanced scores
+**Full details** (pipeline, threat classes, UI workflow, training): [GNN Threat Scoring](https://graphhunter.readthedocs.io/en/latest/user-guide/gnn-threat-scoring.html) in the documentation.
 
 ---
 
 ## Architecture
 
-```
-GraphHunter/
-├── graph_hunter_core/           # Rust core library
-│   └── src/
-│       ├── graph.rs             # GraphHunter engine (add, search, ingest)
-│       ├── sysmon.rs            # Sysmon log parser
-│       ├── sentinel.rs          # Microsoft Sentinel parser
-│       ├── generic.rs           # Generic field-normalizing JSON parser
-│       ├── csv_parser.rs        # CSV → generic pipeline
-│       ├── parser.rs            # LogParser trait
-│       ├── analytics.rs         # Neighborhood, search, scoring, summaries
-│       ├── anomaly.rs           # Endogenous anomaly scorer (5 components incl. GNN)
-│       ├── gnn_bridge.rs        # Subgraph feature extraction for GNN models
-│       ├── npu_scorer.rs        # ONNX inference (DirectML/CPU), threat classification
-│       ├── hypothesis.rs       # Hypothesis + steps, k-simplicity
-│       ├── dsl.rs               # Hypothesis DSL parse/format
-│       ├── catalog.rs           # ATT&CK hypothesis catalog
-│       ├── field_preview.rs     # Configurable parser, field mapping
-│       ├── preview.rs           # Format-specific preview (Sysmon/Sentinel/Generic)
-│       ├── benchmark.rs         # Synthetic graphs, instrumented DFS
-│       ├── entity.rs            # Entity struct
-│       ├── relation.rs          # Relation struct
-│       ├── types.rs             # EntityType, RelationType enums
-│       └── errors.rs            # Error types
-├── app/
-│   ├── src/                     # React + TypeScript frontend
-│   │   ├── components/
-│   │   │   ├── IngestPanel.tsx       # Data load, format selector, sessions
-│   │   │   ├── HypothesisBuilder.tsx # Hunt mode, DSL + catalog
-│   │   │   ├── GraphCanvas.tsx       # Cytoscape graph visualization
-│   │   │   ├── ExplorerPanel.tsx     # IOC search, neighborhood expansion
-│   │   │   ├── NodeDetailPanel.tsx   # Node detail sidebar
-│   │   │   ├── HuntResultsTable.tsx  # Paginated hunt paths
-│   │   │   ├── EventsViewPanel.tsx   # Event list view
-│   │   │   ├── HeatmapView.tsx      # Entity/relation heatmap
-│   │   │   ├── TimelineView.tsx      # Temporal view
-│   │   │   ├── PathNodesPanel.tsx   # Pinned path nodes
-│   │   │   ├── NotesPanel.tsx       # Notes (standalone/node-linked)
-│   │   │   ├── SessionSelector.tsx  # Session switch/create
-│   │   │   ├── GraphMetricsLeftPanel.tsx # Anomaly scoring & GNN controls
-│   │   │   ├── FieldSelector.tsx    # Generic parser field config
-│   │   │   └── NodeContextMenu.tsx  # Expand, center, copy, path nodes
-│   │   └── App.tsx
-│   └── src-tauri/               # Tauri backend (commands, session persistence)
-│       ├── src/lib.rs
-│       └── src/http_api.rs      # HTTP REST API for external tools
-├── graph-hunter-mcp/            # MCP server for AI assistants
-│   └── (see graph-hunter-mcp/README.md)
-├── demo_data/
-│   ├── apt_attack_simulation.json       # Sysmon APT kill chain
-│   ├── sentinel_attack_simulation.json  # Sentinel cloud-to-on-prem
-│   ├── generic_csv_logs.csv             # CSV firewall/proxy logs
-│   └── DOWNLOAD_REAL_DATA.md            # OTRF/Mordor, Splunk attack_data
-└── README.md
-```
+Graph Hunter is split into a **Rust core** (domain logic, parsing, graph, search), a **Tauri + React** desktop app (UI and persistence), and optional **graph-hunter-mcp** for AI assistants. The core holds all business logic; the app exposes commands, session state, and an HTTP API.
+
+**Full details** (directory layout, core modules, app structure, data flow): [Architecture](https://graphhunter.readthedocs.io/en/latest/reference/architecture.html) in the documentation.
 
 ---
 
@@ -385,16 +254,9 @@ All processing is **local**. Logs are read from files you select; no data is sen
 
 ## Core Engine Details
 
-- **Temporal pattern matching** — DFS with causal monotonicity (events in chronological order along the path).
-- **Time window filtering** — Restrict hunts to a configurable time range.
-- **Endogenous anomaly scoring** — 5-component path scoring: Entity Rarity, Edge Rarity, Neighborhood Concentration, Temporal Novelty, and GNN Threat. Each component in [0,1], combined with configurable weights.
-- **GNN threat classification** — ONNX model inference on k-hop subgraphs. 5 threat classes (Benign, Exfiltration, C2 Beacon, Lateral Movement, Privilege Escalation). DirectML NPU/GPU acceleration with CPU fallback. Feature-gated (`ml-scoring`).
-- **k-simplicity** — Limit how many times a vertex can appear in a path (default 1 = simple path).
-- **Parallel parsing** — Rayon-based ingestion for large log files.
-- **Deduplication** — Entities by ID; metadata from first occurrence preserved.
-- **Multi-format** — JSON arrays, NDJSON, CSV; auto-detection.
-- **Entity types** — IP, Host, User, Process, File, Domain, Registry, URL, Service (+ wildcard).
-- **Relation types** — Auth, Connect, Execute, Read, Write, DNS, Modify, Spawn, Delete (+ wildcard).
+The engine provides temporal pattern matching (DFS with causal monotonicity), time-window filtering, 5-component endogenous anomaly scoring (optional GNN), k-simplicity for path constraints, parallel parsing (Rayon), and entity/relation deduplication. Entity and relation types, and full module descriptions, are in the documentation.
+
+**Full details:** [Architecture](https://graphhunter.readthedocs.io/en/latest/reference/architecture.html) (core modules and data flow); [Hypothesis & catalog](https://graphhunter.readthedocs.io/en/latest/user-guide/hypothesis-and-catalog.html) (DSL, k-simplicity); [Log formats](https://graphhunter.readthedocs.io/en/latest/user-guide/log-formats.html) (entity and relation types).
 
 ---
 
@@ -411,36 +273,6 @@ The **graph-hunter-mcp** package is an **MCP (Model Context Protocol) server** t
 | MCP config | Add the `graph-hunter-mcp` server to your MCP client pointing at the app’s API URL. |
 
 **Quick setup:** See **[graph-hunter-mcp/README.md](graph-hunter-mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required).
-
----
-
-## Documentation
-
-Full documentation is built with **Sphinx** (RST) and hosted on **Read the Docs**. It lives in the **[docs/](docs/)** folder with this structure:
-
-```
-docs/
-├── conf.py              # Sphinx config
-├── index.rst            # Home
-├── .readthedocs.yaml    # Read the Docs build config
-├── requirements.txt     # Sphinx + sphinx-rtd-theme
-├── getting-started/     # Installation, Usage, Demo data
-├── user-guide/          # Log formats, Hypothesis DSL & catalog
-├── reference/           # Architecture, Privacy
-├── _static/
-└── images/
-```
-
-**Build locally:**
-
-```bash
-pip install -r docs/requirements.txt
-cd docs && make html
-```
-
-Then open `docs/_build/html/index.html`. Or from the repo root: `sphinx-build -b html docs docs/_build/html`.
-
-**Read the Docs:** Connect the repository to readthedocs.org; it will use `docs/conf.py` and `docs/.readthedocs.yaml` to build automatically.
 
 ---
 
