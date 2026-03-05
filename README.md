@@ -274,6 +274,12 @@ The **graph-hunter-mcp** package is an **MCP (Model Context Protocol) server** t
 | API token | Copy `GRAPHHUNTER_API_TOKEN` from the app startup log into your MCP config `env` so the MCP can authenticate. |
 | MCP config | Add the `graph-hunter-mcp` server to your MCP client pointing at the app’s API URL. |
 
+**Usage sample** — Once the MCP is connected, you can ask the AI assistant in natural language to run hunts and explore the graph. For example:
+
+- *"Use Graph Hunter to find any user who logged into a Host and then ran a suspicious process that wrote to the System32 folder."*
+
+The assistant will translate your request into different searchs, the appropriate hypothesis (e.g. `User -[Auth]-> Host -[Execute]-> Process -[Write]-> File` with filters) and run the hunt.
+
 **Quick setup:** See **[graph-hunter-mcp/README.md](graph-hunter-mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required).
 
 ---
