@@ -53,7 +53,7 @@ Graph Hunter is a **graph-based threat hunting engine** that turns heterogeneous
 
 The engine includes an **endogenous anomaly scoring system** with five components — Entity Rarity, Edge Rarity, Neighborhood Concentration, Temporal Novelty, and **GNN Threat** — that automatically prioritizes the most suspicious paths. The GNN component integrates ONNX models (e.g., exported from GraphOS-APT) that classify k-hop subgraphs into threat categories (Benign, Exfiltration, C2 Beacon, Lateral Movement, Privilege Escalation), with optional **NPU/GPU acceleration** via DirectML.
 
-![Exploring nodes on map](docs/images/screenshot-exploringnodes.png)
+<img src="docs/images/screenshot-exploringnodes.png" alt="Exploring nodes on map" width="50%">
 
 *Screenshot: Exploring nodes on map*
 
@@ -80,7 +80,7 @@ Security Logs ──► Parser ──► Knowledge Graph ──► Hypothesis Se
 3. **Hunt** — Define a hypothesis as a chain of typed steps (e.g., `User →[Auth]→ Host →[Execute]→ Process`). The engine finds all paths matching the pattern with **causal monotonicity** (each step at or after the previous one). Optional **k-simplicity** allows a vertex to repeat up to *k* times per path.
 4. **Explore** — Search for IOCs, expand node neighborhoods, inspect metadata and anomaly scores, pivot via Events view, Heatmap, and Timeline.
 
-![Ingesting data](docs/images/screenshot-ingestingdata.png)
+<img src="docs/images/screenshot-ingestingdata.png" alt="Ingesting data" width="50%">
 
 *Screenshot: Ingesting data*
 
