@@ -80,9 +80,9 @@ Security Logs ──► Parser ──► Knowledge Graph ──► Hypothesis Se
 3. **Hunt** — Define a hypothesis as a chain of typed steps (e.g., `User →[Auth]→ Host →[Execute]→ Process`). The engine finds all paths matching the pattern with **causal monotonicity** (each step at or after the previous one). Optional **k-simplicity** allows a vertex to repeat up to *k* times per path.
 4. **Explore** — Search for IOCs, expand node neighborhoods, inspect metadata and anomaly scores, pivot via Events view, Heatmap, and Timeline.
 
-![High-level workflow: ingest → graph → hunt → explore](docs/images/screenshot-workflow.png)
+![Ingesting data](docs/images/screenshot-ingestingdata.png)
 
-*Screenshot: end-to-end workflow (add `docs/images/screenshot-workflow.png`).*
+*Screenshot: Ingesting data*
 
 ---
 
