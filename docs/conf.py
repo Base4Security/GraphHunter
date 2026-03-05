@@ -30,6 +30,14 @@ html_theme_options = {
     "navigation_depth": 4,
     "style_nav_header_background": "#2b2b2b",
 }
+# Top-right GitHub button: show "Open Github"
+html_context = {
+    "display_github": True,
+    "github_user": "Base4Security",
+    "github_repo": "GraphHunter",
+    "github_version": "main",
+    "conf_py_path": "/docs/",
+}
 # Logo in header (same asset as README: docs/images/GraphHunterLogoBlack.png)
 html_logo = "images/GraphHunterLogoBlack.png"
 html_static_path = ["_static"] if os.path.exists("_static") else []
