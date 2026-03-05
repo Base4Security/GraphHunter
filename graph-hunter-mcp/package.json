@@ -1,0 +1,26 @@
+{
+  "name": "graph-hunter-mcp",
+  "version": "1.0.0",
+  "description": "MCP server that exposes GraphHunter graph operations as tools for AI assistants",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "graph-hunter-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,6 @@
+# Sphinx and theme for building documentation
+# pip install -r docs/requirements.txt
+# Build: sphinx-build -b html docs docs/_build/html  (from repo root)
+
+Sphinx>=5.0
+sphinx-rtd-theme>=1.2.0

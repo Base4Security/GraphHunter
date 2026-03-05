@@ -1,0 +1,35 @@
+# Environment
+.venv/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Gateway uploaded files
+gateway/uploads/
+
+# Large real-world datasets (download separately, see demo_data/DOWNLOAD_REAL_DATA.md)
+demo_data/mordor_combined_attacks.json
+demo_data/mega_attack_dataset.json
+demo_data/mega_dataset_1gb.json
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+
+# Other artifacts
+**/target/
+**/node_modules/
+app/dist/
+docs/_build/
+.claude/*
+.vscode/*
+dev-*
