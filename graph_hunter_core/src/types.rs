@@ -110,6 +110,37 @@ impl FromStr for RelationType {
     }
 }
 
+impl RelationType {
+    pub fn to_u8(&self) -> u8 {
+        match self {
+            RelationType::Auth => 0,
+            RelationType::Connect => 1,
+            RelationType::Execute => 2,
+            RelationType::Read => 3,
+            RelationType::Write => 4,
+            RelationType::DNS => 5,
+            RelationType::Modify => 6,
+            RelationType::Spawn => 7,
+            RelationType::Delete => 8,
+            RelationType::Any => 255,
+        }
+    }
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => RelationType::Auth,
+            1 => RelationType::Connect,
+            2 => RelationType::Execute,
+            3 => RelationType::Read,
+            4 => RelationType::Write,
+            5 => RelationType::DNS,
+            6 => RelationType::Modify,
+            7 => RelationType::Spawn,
+            8 => RelationType::Delete,
+            _ => RelationType::Any,
+        }
+    }
+}
+
 /// Helper: checks if two entity types match, treating `Any` as a wildcard.
 pub fn entity_type_matches(pattern: &EntityType, actual: &EntityType) -> bool {
     *pattern == EntityType::Any || *pattern == *actual

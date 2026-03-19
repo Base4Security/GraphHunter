@@ -252,12 +252,28 @@ export default function GraphCanvas({
     return 30 + (score / 100) * 30;
   }, []);
 
+  // ── Large-graph caps ──
+  const MAX_RENDERED_NODES = 2000;
+  const MAX_RENDERED_EDGES = 5000;
+
+  // Track whether the last build was truncated (for optional UI notice)
+  const [truncationInfo, setTruncationInfo] = useState<{ nodes: number; edges: number; shownNodes: number; shownEdges: number } | null>(null);
+
   // ── Build Cytoscape elements from subgraph ──
   const buildElements = useCallback(
     (sg: { nodes: Array<{ id: string; entity_type: string; score: number }>; edges: Array<{ source: string; target: string; rel_type: string; timestamp: number }> }): ElementDefinition[] => {
       const elements: ElementDefinition[] = [];
 
-      for (const node of sg.nodes) {
+      // Cap nodes: if over limit, take top N by score
+      let renderedNodes = sg.nodes;
+      if (renderedNodes.length > MAX_RENDERED_NODES) {
+        renderedNodes = [...renderedNodes]
+          .sort((a, b) => b.score - a.score)
+          .slice(0, MAX_RENDERED_NODES);
+      }
+      const renderedNodeIds = new Set(renderedNodes.map((n) => n.id));
+
+      for (const node of renderedNodes) {
         const entityType = node.entity_type as EntityType;
         const shortLabel =
           node.id.length > 30
@@ -279,9 +295,11 @@ export default function GraphCanvas({
       }
 
       // Edge bundling: group edges by (source, target, rel_type) to avoid
-      // rendering hundreds of parallel edges between the same nodes
+      // rendering hundreds of parallel edges between the same nodes.
+      // Only include edges whose both endpoints are in the rendered node set.
       const edgeGroups = new Map<string, { source: string; target: string; rel_type: string; count: number }>();
       for (const edge of sg.edges) {
+        if (!renderedNodeIds.has(edge.source) || !renderedNodeIds.has(edge.target)) continue;
         const key = `${edge.source}|${edge.target}|${edge.rel_type}`;
         const existing = edgeGroups.get(key);
         if (existing) {
@@ -291,7 +309,14 @@ export default function GraphCanvas({
         }
       }
 
-      for (const [key, bundle] of edgeGroups) {
+      // Cap bundled edges: if still over limit, keep only the highest-count bundles
+      let bundledEdges = Array.from(edgeGroups.entries());
+      if (bundledEdges.length > MAX_RENDERED_EDGES) {
+        bundledEdges.sort((a, b) => b[1].count - a[1].count);
+        bundledEdges = bundledEdges.slice(0, MAX_RENDERED_EDGES);
+      }
+
+      for (const [key, bundle] of bundledEdges) {
         const label = bundle.count > 1
           ? `${bundle.rel_type} ×${bundle.count}`
           : bundle.rel_type;
@@ -307,6 +332,20 @@ export default function GraphCanvas({
           },
         });
       }
+
+      // Update truncation info for UI notice
+      const wasTruncated =
+        sg.nodes.length > MAX_RENDERED_NODES || bundledEdges.length < edgeGroups.size;
+      setTruncationInfo(
+        wasTruncated
+          ? {
+              nodes: sg.nodes.length,
+              edges: sg.edges.length,
+              shownNodes: renderedNodes.length,
+              shownEdges: bundledEdges.length,
+            }
+          : null
+      );
 
       return elements;
     },
@@ -329,17 +368,32 @@ export default function GraphCanvas({
     cy.elements().remove();
     cy.add(elements);
 
-    cy.layout({
-      name: "dagre",
-      rankDir: "LR",
-      nodeSep: 60,
-      rankSep: 100,
-      animate: true,
-      animationDuration: 600,
-      animationEasing: "ease-out-cubic" as unknown as cytoscape.Css.TransitionTimingFunction,
-      fit: true,
-      padding: 50,
-    } as cytoscape.LayoutOptions).run();
+    // Use faster layout for large graphs (>1000 nodes rendered)
+    const renderedNodeCount = elements.filter((el) => el.group === "nodes").length;
+    const layoutOptions: cytoscape.LayoutOptions =
+      renderedNodeCount > 1000
+        ? {
+            name: "cose",
+            animate: false,
+            fit: true,
+            padding: 50,
+            nodeRepulsion: () => 8000,
+            idealEdgeLength: () => 80,
+            numIter: 200,
+          } as cytoscape.LayoutOptions
+        : {
+            name: "dagre",
+            rankDir: "LR",
+            nodeSep: 60,
+            rankSep: 100,
+            animate: true,
+            animationDuration: 600,
+            animationEasing: "ease-out-cubic" as unknown as cytoscape.Css.TransitionTimingFunction,
+            fit: true,
+            padding: 50,
+          } as cytoscape.LayoutOptions;
+
+    cy.layout(layoutOptions).run();
   }, [subgraph, buildElements, explorerMode]);
 
   // ── Update graph in Explorer mode ──
@@ -354,17 +408,32 @@ export default function GraphCanvas({
     cy.elements().remove();
     cy.add(elements);
 
-    cy.layout({
-      name: "dagre",
-      rankDir: "LR",
-      nodeSep: 60,
-      rankSep: 100,
-      animate: true,
-      animationDuration: 600,
-      animationEasing: "ease-out-cubic" as unknown as cytoscape.Css.TransitionTimingFunction,
-      fit: true,
-      padding: 50,
-    } as cytoscape.LayoutOptions).run();
+    // Use faster layout for large graphs (>1000 nodes rendered)
+    const renderedNodeCount = elements.filter((el) => el.group === "nodes").length;
+    const layoutOptions: cytoscape.LayoutOptions =
+      renderedNodeCount > 1000
+        ? {
+            name: "cose",
+            animate: false,
+            fit: true,
+            padding: 50,
+            nodeRepulsion: () => 8000,
+            idealEdgeLength: () => 80,
+            numIter: 200,
+          } as cytoscape.LayoutOptions
+        : {
+            name: "dagre",
+            rankDir: "LR",
+            nodeSep: 60,
+            rankSep: 100,
+            animate: true,
+            animationDuration: 600,
+            animationEasing: "ease-out-cubic" as unknown as cytoscape.Css.TransitionTimingFunction,
+            fit: true,
+            padding: 50,
+          } as cytoscape.LayoutOptions;
+
+    cy.layout(layoutOptions).run();
   }, [neighborhood, buildElements, explorerMode]);
 
   // ── Highlight attack paths (Hunt mode) ──
@@ -456,6 +525,26 @@ export default function GraphCanvas({
       />
       {isEmpty && (
         <div className="watermark">GRAPH HUNTER</div>
+      )}
+      {truncationInfo && (
+        <div
+          style={{
+            position: "absolute",
+            top: 8,
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "rgba(30, 30, 40, 0.9)",
+            color: "#f59e0b",
+            fontSize: 11,
+            padding: "4px 12px",
+            borderRadius: 4,
+            border: "1px solid rgba(245, 158, 11, 0.3)",
+            zIndex: 10,
+            pointerEvents: "none",
+          }}
+        >
+          Large graph truncated: showing {truncationInfo.shownNodes.toLocaleString()}/{truncationInfo.nodes.toLocaleString()} nodes, {truncationInfo.shownEdges.toLocaleString()} edge groups
+        </div>
       )}
       {contextMenu && onNodeContextCopy && (
         <NodeContextMenu

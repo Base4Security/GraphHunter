@@ -20,3 +20,5 @@ ahash = "0.8"
 ordered-float = "4"
 ort = { version = "2.0.0-rc.11", optional = true }
 ndarray = { version = "0.17", optional = true }
+tempfile = "3"
+memmap2 = "0.9"

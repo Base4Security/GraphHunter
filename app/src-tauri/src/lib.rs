@@ -11,9 +11,9 @@ use std::sync::{Arc, RwLock};
 use graph_hunter_core::{
     CatalogEntry, CompactionStats, ConfigurableParser, CsvParser,
     Entity, EntityType, FieldConfig, FieldInfo, GenericParser,
-    GraphHunter, Hypothesis, LogParser, NeighborEdge, NeighborNode, Neighborhood, NeighborhoodFilter,
+    GraphHunter, Hypothesis, IisW3cParser, LogParser, NeighborEdge, NeighborNode, Neighborhood, NeighborhoodFilter,
     Relation, ScoredPath, ScoringWeights, SentinelJsonParser, SysmonJsonParser,
-    preview_fields, get_catalog, parse_dsl,
+    looks_like_iis_w3c, extract_fields_header, preview_fields, get_catalog, parse_dsl,
 };
 use graph_hunter_core::{preview_generic_from_keys, preview_sentinel, preview_sysmon};
 use std::collections::HashSet;
@@ -557,8 +557,10 @@ fn cmd_save_session(state: State<Arc<AppState>>, session_id: Option<String>) -> 
         notes,
         datasets,
     };
-    let json = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
-    fs::write(&path, json).map_err(|e| format!("Failed to write session file: {}", e))?;
+    // Stream JSON directly to file instead of building a giant String in RAM
+    let f = fs::File::create(&path).map_err(|e| format!("Failed to create session file: {}", e))?;
+    let writer = std::io::BufWriter::with_capacity(8 * 1024 * 1024, f); // 8MB buffer
+    serde_json::to_writer(writer, &file).map_err(|e| format!("Failed to write session: {}", e))?;
     Ok(())
 }
 
@@ -696,10 +698,10 @@ fn cmd_get_node_ids_by_relation_type(
             .ok_or_else(|| format!("Unknown relation type: {}", relation_type))?;
         let mut node_ids = HashSet::new();
         for (&source_sid, relations) in &graph.adjacency_list {
-            for rel in relations {
-                if rel.rel_type == rt {
+            for compact in relations {
+                if compact.rel_type() == rt {
                     node_ids.insert(graph.interner.resolve(source_sid).to_string());
-                    node_ids.insert(rel.dest_id.clone());
+                    node_ids.insert(graph.interner.resolve(compact.dest_sid).to_string());
                 }
             }
         }
@@ -902,17 +904,33 @@ fn run_full_scoring(graph: &mut GraphHunter) {
 
 /// Adaptive scoring: skips expensive betweenness for large graphs.
 fn run_scoring_adaptive(graph: &mut GraphHunter) {
-    graph.compute_scores();
-    graph.compute_temporal_pagerank(None, None, None, None, None);
+    // Sort edges once so searches can use &self (read lock) instead of &mut self
+    graph.sort_edges_by_timestamp();
+
     let n = graph.entity_count();
-    if n <= 5_000 {
-        graph.compute_betweenness(None);          // Full: default sample
-    } else if n <= 10_000 {
-        graph.compute_betweenness(Some(100));     // Reduced sample
+    let m = graph.relation_count();
+    eprintln!("SCORING: {} entities, {} relations", n, m);
+
+    // Degree centrality is always fast (O(n))
+    graph.compute_scores();
+
+    // PageRank: skip for very large graphs (>500K relations)
+    if m <= 500_000 {
+        graph.compute_temporal_pagerank(None, None, Some(10), None, None);
+    } else {
+        eprintln!("SCORING: skipping PageRank ({}M relations)", m / 1_000_000);
     }
-    // Skip betweenness entirely for >10K entities
+
+    // Betweenness: very expensive O(n*m), only for small graphs
+    if n <= 2_000 {
+        graph.compute_betweenness(Some(200));
+    } else {
+        eprintln!("SCORING: skipping betweenness ({} entities)", n);
+    }
+
     graph.compute_composite_score(1.0, 1.0, 1.0);
     graph.finalize_anomaly_scorer();
+    eprintln!("SCORING: complete");
 }
 
 /// Resolves "auto" format from file contents (same heuristic as cmd_load_data).
@@ -942,6 +960,10 @@ fn resolve_format(contents: &str, format_param: &str) -> String {
             return "sentinel".to_string();
         }
         return "generic".to_string();
+    }
+    // IIS / W3C Extended Log Format detection (before CSV fallback)
+    if looks_like_iis_w3c(trimmed) {
+        return "iis".to_string();
     }
     "csv".to_string()
 }
@@ -1001,6 +1023,109 @@ fn evtx_to_sysmon_ndjson(path: &str) -> Result<String, String> {
         let ev = &serialized.data;
         let normalized = evtx_record_to_sysmon_like(ev);
         if let Some(obj) = normalized {
+            if let Ok(s) = serde_json::to_string(&obj) {
+                lines.push(s);
+            }
+        }
+    }
+    Ok(lines.join("\n"))
+}
+
+/// Streams EVTX records in batches, parsing and inserting triples directly into the graph.
+/// Never holds more than one batch (~50K records) in memory.
+fn evtx_ingest_streaming(
+    path: &str,
+    parser: &dyn graph_hunter_core::LogParser,
+    session: &std::sync::Arc<SessionState>,
+    dataset_id: &str,
+    app: &tauri::AppHandle,
+    _job_id: &str,
+) -> Result<(usize, usize), String> {
+    use evtx::EvtxParser;
+
+    const BATCH_SIZE: usize = 50_000;
+
+    let mut evtx_parser = EvtxParser::from_path(path)
+        .map_err(|e| format!("Failed to open EVTX file: {}", e))?;
+
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+    let mut total_new_entities = 0usize;
+    let mut total_new_relations = 0usize;
+    let mut batch_lines: Vec<String> = Vec::with_capacity(BATCH_SIZE);
+    let mut records_processed = 0u64;
+
+    for record in evtx_parser.records_json_value() {
+        let serialized = match record {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let ev = &serialized.data;
+        let normalized = evtx_record_to_sysmon_like(ev);
+        if let Some(obj) = normalized {
+            if let Ok(s) = serde_json::to_string(&obj) {
+                batch_lines.push(s);
+            }
+        }
+        records_processed += 1;
+
+        if batch_lines.len() >= BATCH_SIZE {
+            // Parse batch and insert into graph
+            let batch_str = batch_lines.join("\n");
+            let triples = parser.parse(&batch_str);
+            let (ne, nr) = match session.graph.write() {
+                Ok(mut graph) => graph.insert_triples(triples, Some(dataset_id)),
+                Err(_) => return Err("Graph lock poisoned".to_string()),
+            };
+            total_new_entities += ne;
+            total_new_relations += nr;
+
+            // Emit progress
+            let _ = app.emit("ingest-progress", serde_json::json!({
+                "phase": "parsing",
+                "bytes_read": records_processed, // use record count as proxy
+                "bytes_total": file_size,
+                "entities": total_new_entities,
+                "relations": total_new_relations,
+            }));
+
+            batch_lines.clear();
+        }
+    }
+
+    // Process remaining records
+    if !batch_lines.is_empty() {
+        let batch_str = batch_lines.join("\n");
+        let triples = parser.parse(&batch_str);
+        let (ne, nr) = match session.graph.write() {
+            Ok(mut graph) => graph.insert_triples(triples, Some(dataset_id)),
+            Err(_) => return Err("Graph lock poisoned".to_string()),
+        };
+        total_new_entities += ne;
+        total_new_relations += nr;
+    }
+
+    Ok((total_new_entities, total_new_relations))
+}
+
+/// Reads a sample of EVTX records for preview (first N records).
+fn evtx_preview_sample(path: &str, max_records: usize) -> Result<String, String> {
+    use evtx::EvtxParser;
+
+    let mut parser = EvtxParser::from_path(path)
+        .map_err(|e| format!("Failed to open EVTX file: {}", e))?;
+
+    let mut lines: Vec<String> = Vec::new();
+    for record in parser.records_json_value() {
+        if lines.len() >= max_records {
+            break;
+        }
+        let serialized = match record {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let ev = &serialized.data;
+        if let Some(obj) = evtx_record_to_sysmon_like(ev) {
             if let Ok(s) = serde_json::to_string(&obj) {
                 lines.push(s);
             }
@@ -1185,11 +1310,23 @@ fn cmd_preview_ingest(path: String, format: String) -> Result<PreviewIngestResul
         || path_is_evtx(&path)
         || (format.to_lowercase() == "auto" && file_looks_like_evtx(&path));
     let (contents, resolved) = if use_evtx {
-        let contents = evtx_to_sysmon_ndjson(&path)?;
+        let contents = evtx_preview_sample(&path, 1000)?;
         (contents, "sysmon".to_string())
     } else {
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+        // For large files, only read a preview sample (first 64KB) for format detection
+        let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let contents = if file_size > 10 * 1024 * 1024 {
+            // Large file: read only first 64KB for preview
+            let mut file = std::fs::File::open(&path)
+                .map_err(|e| format!("Failed to open file '{}': {}", path, e))?;
+            let mut buf = vec![0u8; 64 * 1024];
+            let n = std::io::Read::read(&mut file, &mut buf)
+                .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        } else {
+            std::fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read file '{}': {}", path, e))?
+        };
         let resolved = resolve_format(&contents, &format);
         (contents, resolved)
     };
@@ -1228,6 +1365,18 @@ fn cmd_preview_ingest(path: String, format: String) -> Result<PreviewIngestResul
                     suggested_entity_type: b,
                 })
                 .collect()
+        }
+        "iis" | "iis_w3c" | "w3c" => {
+            vec![
+                DetectedField { field_name: "c-ip".to_string(), suggested_entity_type: "IP (Client)".to_string() },
+                DetectedField { field_name: "s-ip".to_string(), suggested_entity_type: "Host (Server)".to_string() },
+                DetectedField { field_name: "cs-uri-stem".to_string(), suggested_entity_type: "URL".to_string() },
+                DetectedField { field_name: "cs-username".to_string(), suggested_entity_type: "User".to_string() },
+                DetectedField { field_name: "cs-method".to_string(), suggested_entity_type: "metadata".to_string() },
+                DetectedField { field_name: "sc-status".to_string(), suggested_entity_type: "metadata".to_string() },
+                DetectedField { field_name: "cs(User-Agent)".to_string(), suggested_entity_type: "metadata".to_string() },
+                DetectedField { field_name: "time-taken".to_string(), suggested_entity_type: "metadata".to_string() },
+            ]
         }
         _ => vec![],
     };
@@ -1312,6 +1461,7 @@ fn cmd_load_data(
             }
             "generic" => graph.ingest_logs(&contents, &GenericParser, Some(dataset_id.clone())),
             "csv" => graph.ingest_logs(&contents, &CsvParser, Some(dataset_id.clone())),
+            "iis" | "iis_w3c" | "w3c" => graph.ingest_logs(&contents, &IisW3cParser, Some(dataset_id.clone())),
             "auto" => {
                 let trimmed = contents.trim();
                 if trimmed.starts_with('[') || trimmed.starts_with('{') {
@@ -1334,13 +1484,15 @@ fn cmd_load_data(
                     } else {
                         graph.ingest_logs(&contents, &GenericParser, Some(dataset_id.clone()))
                     }
+                } else if looks_like_iis_w3c(trimmed) {
+                    graph.ingest_logs(&contents, &IisW3cParser, Some(dataset_id.clone()))
                 } else {
                     graph.ingest_logs(&contents, &CsvParser, Some(dataset_id.clone()))
                 }
             }
             other => {
                 return Err(format!(
-                    "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'generic', or 'csv'.",
+                    "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'generic', 'csv', or 'iis'.",
                     other
                 ));
             }
@@ -1565,7 +1717,7 @@ fn cmd_run_hunt(
     let hypothesis: Hypothesis = serde_json::from_str(&hypothesis_json)
         .map_err(|e| format!("Invalid hypothesis JSON: {}", e))?;
 
-    let (paths, truncated) = with_current_graph_mut(state.as_ref(), |graph| {
+    let (paths, truncated) = with_current_graph(state.as_ref(), |graph| {
         // Use smart anomaly-guided search when scorer is finalized, otherwise classic search
         let scorer_ready = graph
             .anomaly_scorer
@@ -1638,32 +1790,35 @@ fn cmd_get_hunt_page(
 #[tauri::command]
 fn cmd_get_events_for_node(state: State<Arc<AppState>>, node_id: String) -> Result<Vec<SubgraphEdge>, String> {
     with_current_graph(state.as_ref(), |graph| {
+        const MAX_EVENTS: usize = 500;
         let mut edges: Vec<SubgraphEdge> = Vec::new();
 
-        // Outgoing relations
-        for rel in graph.get_relations(&node_id) {
+        // Outgoing relations (use compact to avoid materializing all)
+        for compact in graph.get_compact_relations(&node_id) {
+            if edges.len() >= MAX_EVENTS { break; }
             edges.push(SubgraphEdge {
-                source: rel.source_id.clone(),
-                target: rel.dest_id.clone(),
-                rel_type: format!("{}", rel.rel_type),
-                timestamp: rel.timestamp,
-                metadata: rel.metadata.clone(),
-                dataset_id: rel.dataset_id.as_deref().map(|s| s.to_string()),
+                source: graph.interner.resolve(compact.source_sid).to_string(),
+                target: graph.interner.resolve(compact.dest_sid).to_string(),
+                rel_type: format!("{}", compact.rel_type()),
+                timestamp: compact.timestamp,
+                metadata: graph.meta_store.get(compact.metadata_offset),
+                dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
             });
         }
 
-        // Incoming relations (node is target)
-        for &source_sid in graph.get_reverse_source_sids(&node_id) {
-            let source_str = graph.interner.resolve(source_sid);
-            for rel in graph.get_relations(source_str) {
-                if rel.dest_id == node_id {
+        // Incoming relations (cap to prevent OOM on super-connected nodes)
+        let target_sid = graph.interner.get(&node_id);
+        for &source_sid in graph.get_reverse_source_sids(&node_id).iter().take(MAX_EVENTS) {
+            if edges.len() >= MAX_EVENTS { break; }
+            for compact in graph.get_relations_by_sid(source_sid) {
+                if Some(compact.dest_sid) == target_sid {
                     edges.push(SubgraphEdge {
-                        source: rel.source_id.clone(),
-                        target: rel.dest_id.clone(),
-                        rel_type: format!("{}", rel.rel_type),
-                        timestamp: rel.timestamp,
-                        metadata: rel.metadata.clone(),
-                        dataset_id: rel.dataset_id.as_deref().map(|s| s.to_string()),
+                        source: graph.interner.resolve(compact.source_sid).to_string(),
+                        target: graph.interner.resolve(compact.dest_sid).to_string(),
+                        rel_type: format!("{}", compact.rel_type()),
+                        timestamp: compact.timestamp,
+                        metadata: graph.meta_store.get(compact.metadata_offset),
+                        dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
                     });
                     break;
                 }
@@ -1693,17 +1848,20 @@ fn cmd_get_subgraph(state: State<Arc<AppState>>, node_ids: Vec<String>) -> Resul
             })
             .collect();
 
+        const MAX_SUBGRAPH_EDGES: usize = 5000;
         let mut edges: Vec<SubgraphEdge> = Vec::new();
-        for source_id in &node_ids {
-            for rel in graph.get_relations(source_id) {
-                if id_set.contains(rel.dest_id.as_str()) {
+        'outer: for source_id in &node_ids {
+            for compact in graph.get_compact_relations(source_id) {
+                if edges.len() >= MAX_SUBGRAPH_EDGES { break 'outer; }
+                let dest_str = graph.interner.resolve(compact.dest_sid);
+                if id_set.contains(dest_str) {
                     edges.push(SubgraphEdge {
-                        source: rel.source_id.clone(),
-                        target: rel.dest_id.clone(),
-                        rel_type: format!("{}", rel.rel_type),
-                        timestamp: rel.timestamp,
-                        metadata: rel.metadata.clone(),
-                        dataset_id: rel.dataset_id.as_deref().map(|s| s.to_string()),
+                        source: graph.interner.resolve(compact.source_sid).to_string(),
+                        target: dest_str.to_string(),
+                        rel_type: format!("{}", compact.rel_type()),
+                        timestamp: compact.timestamp,
+                        metadata: graph.meta_store.get(compact.metadata_offset),
+                        dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
                     });
                 }
             }
@@ -1771,31 +1929,33 @@ fn cmd_expand_node(
             in_hood.insert(path_id.clone());
 
             // Edges from path node to nodes already in hood (neighborhood or other path nodes)
-            for rel in graph.get_relations(&path_id) {
-                if in_hood.contains(&rel.dest_id) {
+            for compact in graph.get_compact_relations(&path_id) {
+                let dest_str = graph.interner.resolve(compact.dest_sid);
+                if in_hood.contains(dest_str) {
                     hood.edges.push(NeighborEdge {
-                        source: rel.source_id.clone(),
-                        target: rel.dest_id.clone(),
-                        rel_type: format!("{}", rel.rel_type),
-                        timestamp: rel.timestamp,
-                        metadata: rel.metadata.clone(),
+                        source: graph.interner.resolve(compact.source_sid).to_string(),
+                        target: dest_str.to_string(),
+                        rel_type: format!("{}", compact.rel_type()),
+                        timestamp: compact.timestamp,
+                        metadata: graph.meta_store.get(compact.metadata_offset),
                     });
                 }
             }
             // Incoming edges from nodes already in hood to this path node
+            let target_sid = graph.interner.get(&path_id);
             for &source_sid in graph.get_reverse_source_sids(&path_id) {
                 let source_str = graph.interner.resolve(source_sid);
                 if !in_hood.contains(source_str) {
                     continue;
                 }
-                for rel in graph.get_relations(source_str) {
-                    if rel.dest_id == path_id {
+                for compact in graph.get_relations_by_sid(source_sid) {
+                    if Some(compact.dest_sid) == target_sid {
                         hood.edges.push(NeighborEdge {
-                            source: rel.source_id.clone(),
-                            target: rel.dest_id.clone(),
-                            rel_type: format!("{}", rel.rel_type),
-                            timestamp: rel.timestamp,
-                            metadata: rel.metadata.clone(),
+                            source: graph.interner.resolve(compact.source_sid).to_string(),
+                            target: graph.interner.resolve(compact.dest_sid).to_string(),
+                            rel_type: format!("{}", compact.rel_type()),
+                            timestamp: compact.timestamp,
+                            metadata: graph.meta_store.get(compact.metadata_offset),
                         });
                         break;
                     }
@@ -2605,9 +2765,9 @@ async fn cmd_load_data_streaming(
 
     // Validate format before spawning (fail fast for bad format)
     let pre_check = format.to_lowercase();
-    if !["auto", "evtx", "sysmon", "sentinel", "generic", "csv"].contains(&pre_check.as_str()) {
+    if !["auto", "evtx", "sysmon", "sentinel", "generic", "csv", "iis", "iis_w3c", "w3c"].contains(&pre_check.as_str()) {
         return Err(format!(
-            "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'generic', or 'csv'.",
+            "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'generic', 'csv', or 'iis'.",
             format
         ));
     }
@@ -2634,6 +2794,10 @@ async fn cmd_load_data_streaming(
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         const BATCH_LINES: usize = 50_000;
         const BUF_CAPACITY: usize = 8 * 1024 * 1024; // 8 MB
+        // No hard line limit — instead we monitor available memory and stop
+        // gracefully if we're about to OOM. This lets small files ingest fully
+        // while protecting against crashes on 29GB+ files.
+        const MAX_INGEST_LINES: usize = usize::MAX;
 
         // 1. Open file and check for EVTX (binary) before any UTF-8 read
         let use_evtx = path_is_evtx(&bg_path)
@@ -2641,118 +2805,77 @@ async fn cmd_load_data_streaming(
             || (bg_format.to_lowercase() == "auto" && file_looks_like_evtx(&bg_path));
 
         if use_evtx {
-            // EVTX path: convert to Sysmon NDJSON, then parse in memory (no mmap/UTF-8 on binary)
-            let contents = match evtx_to_sysmon_ndjson(&bg_path) {
-                Ok(s) => s,
+            // EVTX streaming path: parse records in batches of 50K directly from the EVTX file
+            // without ever holding the full converted NDJSON string in memory.
+            let parser: Box<dyn LogParser + Send> = if let Some(cfg) = &bg_config {
+                Box::new(ConfigurableParser::new(cfg.clone()))
+            } else {
+                Box::new(GenericParser)
+            };
+
+            let result = evtx_ingest_streaming(
+                &bg_path,
+                parser.as_ref(),
+                &bg_session,
+                &bg_dataset_id,
+                &bg_app,
+                &bg_job_id,
+            );
+
+            match result {
+                Ok((total_new_entities, total_new_relations)) => {
+                    // Scoring phase
+                    let _ = bg_app.emit("ingest-progress", serde_json::json!({
+                        "phase": "scoring",
+                        "bytes_read": 0u64,
+                        "bytes_total": 0u64,
+                        "entities": total_new_entities,
+                        "relations": total_new_relations,
+                    }));
+
+                    if let Ok(mut graph) = bg_session.graph.write() {
+                        graph.compute_composite_score(1.0, 1.0, 1.0);
+                        graph.finalize_anomaly_scorer();
+                    }
+
+                    {
+                        let mut datasets = match bg_session.datasets.write() {
+                            Ok(d) => d,
+                            Err(_) => return,
+                        };
+                        if let Some(last) = datasets.last_mut() {
+                            last.entity_count = total_new_entities;
+                            last.relation_count = total_new_relations;
+                        }
+                    }
+
+                    let (total_entities, total_relations) = {
+                        let graph = match bg_session.graph.read() {
+                            Ok(g) => g,
+                            Err(_) => return,
+                        };
+                        (graph.entity_count(), graph.relation_count())
+                    };
+
+                    let _ = bg_app.emit("ingest-complete", IngestComplete {
+                        job_id: bg_job_id,
+                        dataset_id: bg_dataset_id,
+                        result: LoadResult {
+                            new_entities: total_new_entities,
+                            new_relations: total_new_relations,
+                            total_entities,
+                            total_relations,
+                        },
+                    });
+                }
                 Err(e) => {
                     let _ = bg_app.emit("ingest-error", IngestError {
                         job_id: bg_job_id,
                         dataset_id: bg_dataset_id,
                         error: e,
                     });
-                    return;
-                }
-            };
-            let bytes_total = contents.len() as u64;
-            // When user provided a field mapping (e.g. custom node types), use ConfigurableParser so mapping is applied.
-            // Otherwise use GenericParser so any EVTX event produces entities.
-            let parser: Box<dyn LogParser + Send> = if let Some(cfg) = &bg_config {
-                Box::new(ConfigurableParser::new(cfg.clone()))
-            } else {
-                Box::new(GenericParser)
-            };
-            let mut total_new_entities = 0usize;
-            let mut total_new_relations = 0usize;
-            let mut lines_in_batch = 0usize;
-            let mut batch_start = 0usize;
-            let data = contents.as_str();
-
-            for (pos, _) in data.char_indices().filter(|&(_, c)| c == '\n') {
-                lines_in_batch += 1;
-                let bytes_read = (pos + 1) as u64;
-
-                if lines_in_batch >= BATCH_LINES {
-                    let batch_slice = &data[batch_start..pos + 1];
-                    let triples = parser.parse(batch_slice);
-                    let (ne, nr) = {
-                        let mut graph = match bg_session.graph.write() {
-                            Ok(g) => g,
-                            Err(_) => break,
-                        };
-                        graph.insert_triples(triples, Some(&bg_dataset_id))
-                    };
-                    total_new_entities += ne;
-                    total_new_relations += nr;
-
-                    let _ = bg_app.emit("ingest-progress", serde_json::json!({
-                        "phase": "parsing",
-                        "bytes_read": bytes_read,
-                        "bytes_total": bytes_total,
-                        "entities": total_new_entities,
-                        "relations": total_new_relations,
-                    }));
-
-                    batch_start = pos + 1;
-                    lines_in_batch = 0;
                 }
             }
-
-            if batch_start < data.len() {
-                let batch_slice = &data[batch_start..];
-                if !batch_slice.trim().is_empty() {
-                    let triples = parser.parse(batch_slice);
-                    let (ne, nr) = match bg_session.graph.write() {
-                        Ok(mut graph) => graph.insert_triples(triples, Some(&bg_dataset_id)),
-                        Err(_) => (0, 0),
-                    };
-                    total_new_entities += ne;
-                    total_new_relations += nr;
-                }
-            }
-
-            // Run scoring and emit complete (same as normal path below)
-            let _ = bg_app.emit("ingest-progress", serde_json::json!({
-                "phase": "scoring",
-                "bytes_read": bytes_total,
-                "bytes_total": bytes_total,
-                "entities": total_new_entities,
-                "relations": total_new_relations,
-            }));
-
-            if let Ok(mut graph) = bg_session.graph.write() {
-                graph.compute_composite_score(1.0, 1.0, 1.0);
-                graph.finalize_anomaly_scorer();
-            }
-
-            {
-                let mut datasets = match bg_session.datasets.write() {
-                    Ok(d) => d,
-                    Err(_) => return,
-                };
-                if let Some(last) = datasets.last_mut() {
-                    last.entity_count = total_new_entities;
-                    last.relation_count = total_new_relations;
-                }
-            }
-
-            let (total_entities, total_relations) = {
-                let graph = match bg_session.graph.read() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                (graph.entity_count(), graph.relation_count())
-            };
-
-            let _ = bg_app.emit("ingest-complete", IngestComplete {
-                job_id: bg_job_id,
-                dataset_id: bg_dataset_id,
-                result: LoadResult {
-                    new_entities: total_new_entities,
-                    new_relations: total_new_relations,
-                    total_entities,
-                    total_relations,
-                },
-            });
             return;
         }
 
@@ -2779,9 +2902,17 @@ async fn cmd_load_data_streaming(
         };
         let resolved = resolve_format(&peek_buf, &bg_format);
 
-        // Determine if the file is NDJSON (lines starting with '{') vs JSON array (starts with '[')
+        // Determine if the file is line-based (NDJSON, IIS, CSV) vs JSON array (starts with '[')
         let trimmed_peek = peek_buf.trim_start();
-        let is_ndjson = trimmed_peek.starts_with('{');
+        let is_line_based = trimmed_peek.starts_with('{') || matches!(resolved.as_str(), "iis" | "iis_w3c" | "w3c");
+
+        // For IIS W3C files, extract the #Fields: header from the peek buffer
+        // so we can prepend it to each batch (batches may not contain the header).
+        let iis_fields_header = if matches!(resolved.as_str(), "iis" | "iis_w3c" | "w3c") {
+            extract_fields_header(&peek_buf)
+        } else {
+            None
+        };
 
         // Helper: select parser as trait object
         let parser: Box<dyn LogParser + Send + Sync> = match resolved.as_str() {
@@ -2789,12 +2920,13 @@ async fn cmd_load_data_streaming(
             "sentinel" => Box::new(SentinelJsonParser),
             "generic" => Box::new(GenericParser),
             "csv" => Box::new(CsvParser),
+            "iis" | "iis_w3c" | "w3c" => Box::new(IisW3cParser),
             other => {
                 let _ = bg_app.emit("ingest-error", IngestError {
                     job_id: bg_job_id,
                     dataset_id: bg_dataset_id,
                     error: format!(
-                        "Unsupported format: '{}'. Use 'auto', 'sysmon', 'sentinel', 'generic', or 'csv'.",
+                        "Unsupported format: '{}'. Use 'auto', 'sysmon', 'sentinel', 'generic', 'csv', or 'iis'.",
                         other
                     ),
                 });
@@ -2811,9 +2943,10 @@ async fn cmd_load_data_streaming(
             }
         }
 
+        eprintln!("INGEST: format={}, is_line_based={}, file_size={}", resolved, is_line_based, bytes_total);
         let ingest_result: Result<(usize, usize), String> = (|| -> Result<(usize, usize), String> {
-            if is_ndjson {
-                // ── NDJSON streaming path: mmap + line-batch parsing ──
+            if is_line_based {
+                // ── Line-based streaming path (NDJSON / IIS / CSV): mmap + line-batch parsing ──
                 let _ = bg_app.emit("ingest-progress", serde_json::json!({
                     "phase": "reading",
                     "bytes_read": 0u64,
@@ -2825,24 +2958,96 @@ async fn cmd_load_data_streaming(
                 let file2 = std::fs::File::open(&bg_path)
                     .map_err(|e| format!("Failed to re-open file '{}': {}", bg_path, e))?;
                 let mmap = unsafe { memmap2::Mmap::map(&file2) }
-                    .map_err(|e| format!("Failed to mmap file '{}': {}", bg_path, e))?;
-                let data = std::str::from_utf8(&mmap)
-                    .map_err(|e| format!("File is not valid UTF-8: {}", e))?;
+                    .map_err(|e| {
+                        eprintln!("INGEST ERROR: Failed to mmap: {}", e);
+                        format!("Failed to mmap file '{}': {}", bg_path, e)
+                    })?;
+                eprintln!("INGEST: mmap OK, {} bytes", mmap.len());
+
+                // Work directly on bytes — never convert the full mmap to String.
+                // Only convert each batch (max ~25MB) via lossy UTF-8.
+                let raw = &mmap[..];
 
                 let mut total_new_entities = 0usize;
                 let mut total_new_relations = 0usize;
-                let mut bytes_read: u64;
                 let mut lines_in_batch = 0usize;
                 let mut batch_start = 0usize;
+                let mut stopped_early = false;
 
-                // Iterate lines by scanning for newlines in the mmap
-                for (pos, _) in data.char_indices().filter(|&(_, c)| c == '\n') {
+                // For IIS: track the last-seen #Fields: header so we can
+                // prepend it to batches that don't contain one.
+                let mut last_fields_header: Option<String> = iis_fields_header.clone();
+
+                // SIMD-accelerated newline scanning via memchr (~20x faster than byte-by-byte)
+                let mut total_lines = 0usize;
+                let mut search_offset = 0usize;
+                while let Some(rel_pos) = memchr::memchr(b'\n', &raw[search_offset..]) {
+                    let pos = search_offset + rel_pos;
+                    search_offset = pos + 1;
+
+                    total_lines += 1;
+                    if total_lines > MAX_INGEST_LINES {
+                        eprintln!("INGEST: reached max ingest limit of {} lines, stopping", MAX_INGEST_LINES);
+                        stopped_early = true;
+                        break;
+                    }
+
+                    // Track #Fields: headers for IIS mid-file rotation
+                    if last_fields_header.is_some() || iis_fields_header.is_some() {
+                        let line_start = if pos > 0 {
+                            let search_from = batch_start.max(pos.saturating_sub(512));
+                            memchr::memrchr(b'\n', &raw[search_from..pos])
+                                .map(|p| search_from + p + 1)
+                                .unwrap_or(batch_start)
+                        } else { 0 };
+                        if pos > line_start + 8 && &raw[line_start..line_start.min(raw.len()).max(line_start + 8)] == b"#Fields:" {
+                            let line_bytes = &raw[line_start..pos];
+                            let line_str = String::from_utf8_lossy(line_bytes);
+                            last_fields_header = Some(line_str.trim().to_string());
+                        }
+                    }
+
                     lines_in_batch += 1;
-                    bytes_read = (pos + 1) as u64;
 
                     if lines_in_batch >= BATCH_LINES {
-                        let batch_slice = &data[batch_start..pos + 1];
-                        let triples = parser.parse(batch_slice);
+                        let batch_bytes = &raw[batch_start..pos + 1];
+                        let batch_str = String::from_utf8_lossy(batch_bytes);
+
+                        // For IIS: prepend #Fields: header if batch doesn't contain one
+                        let parse_input: String = if let Some(ref hdr) = last_fields_header {
+                            if memchr::memmem::find(batch_bytes, b"#Fields:").is_none() {
+                                format!("{}\n{}", hdr, batch_str)
+                            } else {
+                                batch_str.into_owned()
+                            }
+                        } else {
+                            batch_str.into_owned()
+                        };
+
+                        // Parallel parsing: split the batch into N sub-chunks,
+                        // parse each on a rayon thread, then flatten results.
+                        let sub_chunks: Vec<&str> = {
+                            let num_chunks = rayon::current_num_threads().max(1);
+                            let lines: Vec<&str> = parse_input.lines().collect();
+                            let chunk_size = (lines.len() / num_chunks).max(1);
+                            lines.chunks(chunk_size)
+                                .map(|chunk| {
+                                    let first = chunk[0].as_ptr() as usize - parse_input.as_ptr() as usize;
+                                    let last = chunk.last().unwrap();
+                                    let end = last.as_ptr() as usize + last.len() - parse_input.as_ptr() as usize;
+                                    &parse_input[first..end]
+                                })
+                                .collect()
+                        };
+
+                        let triples: Vec<_> = if sub_chunks.len() > 1 {
+                            use rayon::prelude::*;
+                            sub_chunks.par_iter()
+                                .flat_map_iter(|chunk| parser.parse(chunk))
+                                .collect()
+                        } else {
+                            parser.parse(&parse_input)
+                        };
 
                         let (ne, nr) = {
                             let mut graph = bg_session
@@ -2854,6 +3059,7 @@ async fn cmd_load_data_streaming(
                         total_new_entities += ne;
                         total_new_relations += nr;
 
+                        let bytes_read = (pos + 1) as u64;
                         let _ = bg_app.emit("ingest-progress", serde_json::json!({
                             "phase": "parsing",
                             "bytes_read": bytes_read,
@@ -2862,16 +3068,65 @@ async fn cmd_load_data_streaming(
                             "relations": total_new_relations,
                         }));
 
+                        // Check available memory every 10 batches (~500K lines)
+                        // If less than 1GB free, stop gracefully instead of OOM crash.
+                        if total_new_relations % (BATCH_LINES * 10) < BATCH_LINES {
+                            #[cfg(target_os = "windows")]
+                            {
+                                use std::mem::MaybeUninit;
+                                #[repr(C)]
+                                struct MEMORYSTATUSEX {
+                                    dw_length: u32,
+                                    dw_memory_load: u32,
+                                    ull_total_phys: u64,
+                                    ull_avail_phys: u64,
+                                    ull_total_page_file: u64,
+                                    ull_avail_page_file: u64,
+                                    ull_total_virtual: u64,
+                                    ull_avail_virtual: u64,
+                                    ull_avail_extended_virtual: u64,
+                                }
+                                extern "system" {
+                                    fn GlobalMemoryStatusEx(lp_buffer: *mut MEMORYSTATUSEX) -> i32;
+                                }
+                                let mut mem_info = MaybeUninit::<MEMORYSTATUSEX>::zeroed();
+                                unsafe {
+                                    let p = mem_info.as_mut_ptr();
+                                    (*p).dw_length = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+                                    if GlobalMemoryStatusEx(p) != 0 {
+                                        let avail_mb = (*p).ull_avail_phys / (1024 * 1024);
+                                        if avail_mb < 1024 {
+                                            eprintln!("INGEST: Low memory ({} MB free), stopping ingestion gracefully", avail_mb);
+                                            stopped_early = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         batch_start = pos + 1;
                         lines_in_batch = 0;
                     }
                 }
 
                 // Final batch (remaining lines after last newline)
-                if batch_start < data.len() {
-                    let batch_slice = &data[batch_start..];
-                    if !batch_slice.trim().is_empty() {
-                        let triples = parser.parse(batch_slice);
+                // Skip if we stopped early due to memory pressure — the remaining
+                // data could be gigabytes and would OOM.
+                if !stopped_early && batch_start < raw.len() {
+                    let batch_bytes = &raw[batch_start..];
+                    let batch_str = String::from_utf8_lossy(batch_bytes);
+                    if !batch_str.trim().is_empty() {
+                        let triples = if let Some(ref hdr) = last_fields_header {
+                            if !batch_str.contains("#Fields:") {
+                                let with_header = format!("{}\n{}", hdr, batch_str);
+                                parser.parse(&with_header)
+                            } else {
+                                parser.parse(&batch_str)
+                            }
+                        } else {
+                            parser.parse(&batch_str)
+                        };
                         let (ne, nr) = {
                             let mut graph = bg_session
                                 .graph
@@ -2937,7 +3192,6 @@ async fn cmd_load_data_streaming(
                             return;
                         }
                     };
-                    graph.rebuild_rel_index();
                     run_scoring_adaptive(&mut graph);
                 }
 

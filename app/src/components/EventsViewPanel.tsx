@@ -139,6 +139,20 @@ export default function EventsViewPanel({ selectedNodeId }: EventsViewPanelProps
           </tbody>
         </table>
       </div>
+      {events.length >= 500 && (
+        <div
+          style={{
+            padding: "6px 12px",
+            fontSize: 11,
+            color: "var(--text-muted)",
+            background: "var(--bg-tertiary)",
+            borderTop: "1px solid var(--border)",
+            textAlign: "center",
+          }}
+        >
+          Showing first 500 events. Additional events are not displayed.
+        </div>
+      )}
     </div>
   );
 }

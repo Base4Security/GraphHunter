@@ -338,14 +338,14 @@ fn dfs_instrumented<'a>(
 
     let step = &steps[step_idx];
 
-    // Use secondary index when concrete relation type
-    let edges: &[Relation] = if step.relation_type != RelationType::Any {
+    // Get materialized edges (this is the instrumented path, not hot path)
+    let edges = if step.relation_type != RelationType::Any {
         graph.get_relations_by_type(current_node, &step.relation_type)
     } else {
         graph.get_relations(current_node)
     };
 
-    for edge in edges {
+    for edge in &edges {
         stats.edges_examined += 1;
 
         // Prune 1: relation type
@@ -460,7 +460,7 @@ pub fn graph_params(g: &GraphHunter) -> (usize, usize, usize, f64, usize, usize)
         let mut rt_set = std::collections::HashSet::new();
         for edges in g.adjacency_list.values() {
             for e in edges {
-                rt_set.insert(std::mem::discriminant(&e.rel_type));
+                rt_set.insert(e.rel_type_tag);
             }
         }
         rt_set.len()
