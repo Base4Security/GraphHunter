@@ -11,6 +11,12 @@ impl StrId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// Creates a StrId from a raw u32 value. For testing only.
+    #[cfg(test)]
+    pub fn from_raw(n: u32) -> Self {
+        StrId(n)
+    }
 }
 
 /// Bidirectional string interner: O(1) amortized intern, O(1) resolve.

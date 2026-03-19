@@ -89,8 +89,10 @@ export default function HeatmapView({ statsKey, onShowRelationOnMap, onLog }: He
   }
   const sortedBuckets = Array.from(allBuckets).sort((a, b) => a - b);
 
-  // Downsample if too many columns (max 48 visible)
-  const MAX_COLS = 48;
+  // Guard: if the grid would be enormous (>100 buckets x 20 types), aggregate
+  // to wider time buckets to keep DOM size reasonable
+  const gridCells = sortedBuckets.length * rows.length;
+  const MAX_COLS = gridCells > 2000 ? Math.max(24, Math.floor(2000 / rows.length)) : 48;
   const step = Math.max(1, Math.ceil(sortedBuckets.length / MAX_COLS));
   const displayBuckets = sortedBuckets.filter((_, i) => i % step === 0);
 
@@ -199,6 +201,7 @@ export default function HeatmapView({ statsKey, onShowRelationOnMap, onLog }: He
       </div>
       <div style={{ marginTop: 8, fontSize: 10, color: "var(--text-muted)" }}>
         Color intensity: higher = more events in that time bin. {sortedBuckets.length} total bins, showing {displayBuckets.length}.
+        {step > 1 && ` (aggregated ${step} bins each to fit display)`}
       </div>
     </div>
   );

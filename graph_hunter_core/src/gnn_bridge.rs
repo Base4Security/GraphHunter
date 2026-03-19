@@ -100,16 +100,15 @@ pub fn extract_subgraph_features(
         }
 
         // Outgoing neighbors
-        if let Some(rels) = graph.adjacency_list.get(&current) {
-            for rel in rels {
+        if let Some(compacts) = graph.adjacency_list.get(&current) {
+            for compact in compacts {
                 if ordered_nodes.len() >= K_MAX {
                     break;
                 }
-                if let Some(dest_sid) = graph.interner.get(&rel.dest_id) {
-                    if visited.insert(dest_sid) {
-                        ordered_nodes.push(dest_sid);
-                        queue.push_back((dest_sid, depth + 1));
-                    }
+                let dest_sid = compact.dest_sid;
+                if visited.insert(dest_sid) {
+                    ordered_nodes.push(dest_sid);
+                    queue.push_back((dest_sid, depth + 1));
                 }
             }
         }
@@ -197,12 +196,10 @@ pub fn extract_subgraph_features(
 
     for &src_sid in &ordered_nodes {
         if let Some(&src_idx) = sid_to_idx.get(&src_sid) {
-            if let Some(rels) = graph.adjacency_list.get(&src_sid) {
-                for rel in rels {
-                    if let Some(dest_sid) = graph.interner.get(&rel.dest_id) {
-                        if let Some(&dst_idx) = sid_to_idx.get(&dest_sid) {
-                            adjacency[src_idx * K_MAX + dst_idx] = 1.0;
-                        }
+            if let Some(compacts) = graph.adjacency_list.get(&src_sid) {
+                for compact in compacts {
+                    if let Some(&dst_idx) = sid_to_idx.get(&compact.dest_sid) {
+                        adjacency[src_idx * K_MAX + dst_idx] = 1.0;
                     }
                 }
             }

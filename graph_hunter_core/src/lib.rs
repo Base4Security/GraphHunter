@@ -10,14 +10,17 @@ pub mod errors;
 pub mod field_preview;
 pub mod generic;
 pub mod gnn_bridge;
+pub mod iis_w3c;
 pub mod graph;
 pub mod npu_scorer;
 pub mod hypothesis;
 pub mod interner;
+pub mod metadata_store;
 pub mod parser;
 pub mod preview;
 pub mod relation;
 pub mod sentinel;
+pub mod spill;
 pub mod sysmon;
 
 // Re-export core types at crate root for ergonomic imports.
@@ -35,12 +38,15 @@ pub use field_preview::{
 };
 pub use errors::GraphError;
 pub use generic::GenericParser;
+pub use iis_w3c::{IisW3cParser, looks_like_iis_w3c, extract_fields_header};
 pub use graph::{CompactionStats, GraphHunter};
 pub use interner::{StrId, StringInterner};
 pub use hypothesis::{Hypothesis, HypothesisStep};
 pub use parser::{LogParser, ParsedTriple};
 pub use preview::{preview_generic_from_keys, preview_sentinel, preview_sysmon};
-pub use relation::Relation;
+pub use metadata_store::MetadataStore;
+pub use relation::{CompactRelation, Relation};
+pub use spill::SpillableEdgeStore;
 pub use sentinel::SentinelJsonParser;
 pub use sysmon::SysmonJsonParser;
 pub use catalog::{CatalogEntry, get_catalog};
@@ -3261,7 +3267,7 @@ mod tests {
             let mut rel_types_seen = std::collections::HashSet::new();
             for edges in g.adjacency_list.values() {
                 for e in edges {
-                    rel_types_seen.insert(format!("{}", e.rel_type));
+                    rel_types_seen.insert(format!("{}", e.rel_type()));
                 }
             }
             let num_rel_types = rel_types_seen.len();
@@ -3284,10 +3290,11 @@ mod tests {
                 sorted_edges.sort_by_key(|e| e.timestamp);
                 for i in 0..sorted_edges.len() {
                     let e = sorted_edges[i];
-                    let dest_type = g.get_entity(&e.dest_id)
+                    let dest_id = g.interner.resolve(e.dest_sid);
+                    let dest_type = g.get_entity(dest_id)
                         .map(|ent| format!("{}", ent.entity_type))
                         .unwrap_or_default();
-                    *edge_type_pairs.entry((format!("{}", e.rel_type), dest_type)).or_default() += 1;
+                    *edge_type_pairs.entry((format!("{}", e.rel_type()), dest_type)).or_default() += 1;
                     if i > 0 {
                         temporal_total += 1;
                         if sorted_edges[i].timestamp >= sorted_edges[i-1].timestamp {
@@ -3807,14 +3814,16 @@ mod tests {
         graph.add_relation(Relation::new("u1", "h2", RelationType::Auth, 200)).unwrap();
         graph.add_relation(Relation::new("u1", "h1", RelationType::Connect, 300)).unwrap();
 
-        let auth_edges = graph.get_relations_by_type("u1", &RelationType::Auth);
-        assert_eq!(auth_edges.len(), 2);
+        // get_relations_by_type returns all outgoing edges (rel_index was removed);
+        // callers filter by type in their loops.
+        let all_edges = graph.get_relations_by_type("u1", &RelationType::Auth);
+        assert_eq!(all_edges.len(), 3);
 
-        let conn_edges = graph.get_relations_by_type("u1", &RelationType::Connect);
-        assert_eq!(conn_edges.len(), 1);
+        let auth_count = all_edges.iter().filter(|e| e.rel_type == RelationType::Auth).count();
+        assert_eq!(auth_count, 2);
 
-        let dns_edges = graph.get_relations_by_type("u1", &RelationType::DNS);
-        assert_eq!(dns_edges.len(), 0);
+        let conn_count = all_edges.iter().filter(|e| e.rel_type == RelationType::Connect).count();
+        assert_eq!(conn_count, 1);
     }
 
     #[test]
@@ -4498,11 +4507,13 @@ mod tests {
 
         graph.compact_before(1000);
 
-        // Verify rel_index is consistent
-        let connect_edges = graph.get_relations_by_type("A", &RelationType::Connect);
-        assert_eq!(connect_edges.len(), 1, "Should have 1 compacted Connect edge");
-        let auth_edges = graph.get_relations_by_type("A", &RelationType::Auth);
-        assert_eq!(auth_edges.len(), 1, "Should have 1 Auth edge");
+        // After compaction: 2 Connect edges compacted to 1, plus 1 Auth = 2 total
+        let all_edges = graph.get_relations("A");
+        assert_eq!(all_edges.len(), 2, "Should have 2 edges total (1 compacted Connect + 1 Auth)");
+        let connect_count = all_edges.iter().filter(|e| e.rel_type == RelationType::Connect).count();
+        assert_eq!(connect_count, 1, "Should have 1 compacted Connect edge");
+        let auth_count = all_edges.iter().filter(|e| e.rel_type == RelationType::Auth).count();
+        assert_eq!(auth_count, 1, "Should have 1 Auth edge");
 
         // Verify reverse_adj
         let sid_a = graph.interner.get("A").unwrap();
@@ -4598,20 +4609,21 @@ mod tests {
 
     #[test]
     fn benchmark_pruning_ratios() {
-        // On a typed graph, most edges should be pruned by type checks
+        // On a typed graph, most edges should be pruned by type checks.
+        // Without rel_index, relation type rejection is the first filter and rejects ~88%
+        // of edges. Entity type rejection then catches most of the remaining ~12%.
         let g = generate_erdos_renyi(200, 0.05, 1_000_000, 2_000_000, 777);
         let h = build_lateral_movement_hypothesis(4);
 
         let (_, stats) = search_instrumented(&g, &h, None).unwrap();
         let (rr_rel, rr_ent, _, _, _) = stats.rejection_rates();
 
-        // With 9 types uniformly distributed, ~88% should be rejected by each type check
-        // But since we use rel_index, rel_type rejection should be near 0 (pre-filtered)
-        // Entity type rejection should be high
+        // Combined relation + entity type rejection should prune most edges
         if stats.edges_examined > 10 {
-            assert!(rr_ent > 0.5,
-                "Entity type pruning should reject >50% of surviving edges, got {:.1}%",
-                rr_ent * 100.0);
+            let combined = rr_rel + rr_ent;
+            assert!(combined > 0.5,
+                "Combined type pruning should reject >50% of edges, got {:.1}% (rel: {:.1}%, ent: {:.1}%)",
+                combined * 100.0, rr_rel * 100.0, rr_ent * 100.0);
         }
     }
 

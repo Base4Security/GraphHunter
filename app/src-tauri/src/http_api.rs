@@ -71,6 +71,7 @@ fn neighborhood_to_subgraph(hood: &Neighborhood) -> Subgraph {
 
 /// Build subgraph for the given node IDs and emit to frontend map (used after search, events, run_hunt).
 fn build_subgraph_for_ids(state: &AppState, node_ids: &[String]) -> Result<Subgraph, String> {
+    const MAX_SUBGRAPH_EDGES: usize = 5000;
     let id_set: HashSet<&str> = node_ids.iter().map(|s| s.as_str()).collect();
     with_current_graph(state, |graph| {
         let nodes: Vec<SubgraphNode> = node_ids
@@ -84,16 +85,18 @@ fn build_subgraph_for_ids(state: &AppState, node_ids: &[String]) -> Result<Subgr
             })
             .collect();
         let mut edges: Vec<SubgraphEdge> = Vec::new();
-        for source_id in node_ids {
-            for rel in graph.get_relations(source_id) {
-                if id_set.contains(rel.dest_id.as_str()) {
+        'outer: for source_id in node_ids {
+            for compact in graph.get_compact_relations(source_id) {
+                if edges.len() >= MAX_SUBGRAPH_EDGES { break 'outer; }
+                let dest_str = graph.interner.resolve(compact.dest_sid);
+                if id_set.contains(dest_str) {
                     edges.push(SubgraphEdge {
-                        source: rel.source_id.clone(),
-                        target: rel.dest_id.clone(),
-                        rel_type: format!("{}", rel.rel_type),
-                        timestamp: rel.timestamp,
-                        metadata: rel.metadata.clone(),
-                        dataset_id: rel.dataset_id.as_deref().map(|s| s.to_string()),
+                        source: graph.interner.resolve(compact.source_sid).to_string(),
+                        target: dest_str.to_string(),
+                        rel_type: format!("{}", compact.rel_type()),
+                        timestamp: compact.timestamp,
+                        metadata: graph.meta_store.get(compact.metadata_offset),
+                        dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
                     });
                 }
             }
@@ -368,14 +371,15 @@ async fn handler_expand(
                 score: entity.score,
                 metadata: entity.metadata.clone(),
             });
-            for rel in graph.get_relations(&path_id) {
-                if hood.nodes.iter().any(|n| n.id == rel.dest_id) {
+            for compact in graph.get_compact_relations(&path_id) {
+                let dest_str = graph.interner.resolve(compact.dest_sid);
+                if hood.nodes.iter().any(|n| n.id == dest_str) {
                     hood.edges.push(graph_hunter_core::NeighborEdge {
-                        source: rel.source_id.clone(),
-                        target: rel.dest_id.clone(),
-                        rel_type: format!("{}", rel.rel_type),
-                        timestamp: rel.timestamp,
-                        metadata: rel.metadata.clone(),
+                        source: graph.interner.resolve(compact.source_sid).to_string(),
+                        target: dest_str.to_string(),
+                        rel_type: format!("{}", compact.rel_type()),
+                        timestamp: compact.timestamp,
+                        metadata: graph.meta_store.get(compact.metadata_offset),
                     });
                 }
             }
@@ -419,6 +423,7 @@ async fn handler_subgraph(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SubgraphBody>,
 ) -> Response {
+    const MAX_SUBGRAPH_EDGES: usize = 5000;
     let node_ids = body.node_ids;
     let id_set: HashSet<&str> = node_ids.iter().map(|s| s.as_str()).collect();
     match with_current_graph(state.as_ref(), |graph| {
@@ -433,16 +438,18 @@ async fn handler_subgraph(
             })
             .collect();
         let mut edges: Vec<SubgraphEdge> = Vec::new();
-        for source_id in &node_ids {
-            for rel in graph.get_relations(source_id) {
-                if id_set.contains(rel.dest_id.as_str()) {
+        'outer: for source_id in &node_ids {
+            for compact in graph.get_compact_relations(source_id) {
+                if edges.len() >= MAX_SUBGRAPH_EDGES { break 'outer; }
+                let dest_str = graph.interner.resolve(compact.dest_sid);
+                if id_set.contains(dest_str) {
                     edges.push(SubgraphEdge {
-                        source: rel.source_id.clone(),
-                        target: rel.dest_id.clone(),
-                        rel_type: format!("{}", rel.rel_type),
-                        timestamp: rel.timestamp,
-                        metadata: rel.metadata.clone(),
-                        dataset_id: rel.dataset_id.as_deref().map(|s| s.to_string()),
+                        source: graph.interner.resolve(compact.source_sid).to_string(),
+                        target: dest_str.to_string(),
+                        rel_type: format!("{}", compact.rel_type()),
+                        timestamp: compact.timestamp,
+                        metadata: graph.meta_store.get(compact.metadata_offset),
+                        dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
                     });
                 }
             }
@@ -467,28 +474,31 @@ async fn handler_events_for_node(
     Query(q): Query<EventsQuery>,
 ) -> Response {
     match with_current_graph(state.as_ref(), |graph| {
+        const MAX_EVENTS: usize = 500;
         let mut edges: Vec<SubgraphEdge> = Vec::new();
-        for rel in graph.get_relations(&q.node_id) {
+        for compact in graph.get_compact_relations(&q.node_id) {
+            if edges.len() >= MAX_EVENTS { break; }
             edges.push(SubgraphEdge {
-                source: rel.source_id.clone(),
-                target: rel.dest_id.clone(),
-                rel_type: format!("{}", rel.rel_type),
-                timestamp: rel.timestamp,
-                metadata: rel.metadata.clone(),
-                dataset_id: rel.dataset_id.as_deref().map(|s| s.to_string()),
+                source: graph.interner.resolve(compact.source_sid).to_string(),
+                target: graph.interner.resolve(compact.dest_sid).to_string(),
+                rel_type: format!("{}", compact.rel_type()),
+                timestamp: compact.timestamp,
+                metadata: graph.meta_store.get(compact.metadata_offset),
+                dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
             });
         }
-        for &source_sid in graph.get_reverse_source_sids(&q.node_id) {
+        for &source_sid in graph.get_reverse_source_sids(&q.node_id).iter().take(MAX_EVENTS) {
+            if edges.len() >= MAX_EVENTS { break; }
             let source_str = graph.interner.resolve(source_sid);
-            for rel in graph.get_relations(source_str) {
-                if rel.dest_id == q.node_id {
+            for compact in graph.get_compact_relations(source_str) {
+                if compact.dest_sid == graph.interner.get(&q.node_id).unwrap_or(compact.dest_sid) {
                     edges.push(SubgraphEdge {
-                        source: rel.source_id.clone(),
-                        target: rel.dest_id.clone(),
-                        rel_type: format!("{}", rel.rel_type),
-                        timestamp: rel.timestamp,
-                        metadata: rel.metadata.clone(),
-                        dataset_id: rel.dataset_id.as_deref().map(|s| s.to_string()),
+                        source: graph.interner.resolve(compact.source_sid).to_string(),
+                        target: graph.interner.resolve(compact.dest_sid).to_string(),
+                        rel_type: format!("{}", compact.rel_type()),
+                        timestamp: compact.timestamp,
+                        metadata: graph.meta_store.get(compact.metadata_offset),
+                        dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
                     });
                     break;
                 }
@@ -608,7 +618,7 @@ async fn handler_run_hunt(
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::task::spawn_blocking(move || {
-            with_current_graph_mut(state_clone.as_ref(), |graph| {
+            with_current_graph(state_clone.as_ref(), |graph| {
                 let scorer_ready = graph
                     .anomaly_scorer
                     .as_ref()

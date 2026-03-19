@@ -196,19 +196,39 @@ impl GraphHunter {
             }
 
             // Outgoing edges
-            if let Some(rels) = self.adjacency_list.get(&current_sid) {
-                for rel in rels {
+            if let Some(compacts) = self.adjacency_list.get(&current_sid) {
+                for compact in compacts {
                     if edges.len() >= max_edges {
                         truncated = true;
                         break;
                     }
-                    if !self.passes_filter(rel, &rel.dest_id, filter) {
-                        continue;
+                    // Filter using compact fields to avoid materializing every edge
+                    let dest_sid = compact.dest_sid;
+                    let dest_id_str = self.interner.resolve(dest_sid);
+
+                    if let Some(f) = filter {
+                        if let Some(ref rel_types) = f.relation_types {
+                            if !rel_types.iter().any(|rt| rt.to_u8() == compact.rel_type_tag) {
+                                continue;
+                            }
+                        }
+                        if let Some(start) = f.time_start {
+                            if compact.timestamp < start { continue; }
+                        }
+                        if let Some(end) = f.time_end {
+                            if compact.timestamp > end { continue; }
+                        }
+                        if let Some(ref entity_types) = f.entity_types {
+                            if let Some(entity) = self.entities.get(&dest_sid) {
+                                if !entity_types.contains(&entity.entity_type) { continue; }
+                            }
+                        }
+                        if let Some(min_score) = f.min_score {
+                            if let Some(entity) = self.entities.get(&dest_sid) {
+                                if entity.score < min_score { continue; }
+                            }
+                        }
                     }
-                    let dest_sid = match self.interner.get(&rel.dest_id) {
-                        Some(s) => s,
-                        None => continue,
-                    };
 
                     if !visited.contains(&dest_sid) {
                         if node_sids.len() >= max_nodes {
@@ -222,11 +242,11 @@ impl GraphHunter {
 
                     if visited.contains(&dest_sid) {
                         edges.push(NeighborEdge {
-                            source: rel.source_id.clone(),
-                            target: rel.dest_id.clone(),
-                            rel_type: format!("{}", rel.rel_type),
-                            timestamp: rel.timestamp,
-                            metadata: rel.metadata.clone(),
+                            source: self.interner.resolve(compact.source_sid).to_string(),
+                            target: dest_id_str.to_string(),
+                            rel_type: format!("{}", compact.rel_type()),
+                            timestamp: compact.timestamp,
+                            metadata: self.meta_store.get(compact.metadata_offset),
                         });
                     }
                 }
@@ -236,23 +256,18 @@ impl GraphHunter {
             if edges.len() >= max_edges {
                 truncated = true;
             } else if let Some(sources) = self.reverse_adj.get(&current_sid) {
-                let current_id = self.interner.resolve(current_sid);
                 for &source_sid in sources {
                     if edges.len() >= max_edges {
                         truncated = true;
                         break;
                     }
-                    if let Some(rels) = self.adjacency_list.get(&source_sid) {
-                        let source_id_str = self.interner.resolve(source_sid);
-                        for rel in rels {
+                    if let Some(compacts) = self.adjacency_list.get(&source_sid) {
+                        for compact in compacts {
                             if edges.len() >= max_edges {
                                 truncated = true;
                                 break;
                             }
-                            if rel.dest_id != current_id {
-                                continue;
-                            }
-                            if !self.passes_filter(rel, source_id_str, filter) {
+                            if compact.dest_sid != current_sid {
                                 continue;
                             }
 
@@ -268,11 +283,11 @@ impl GraphHunter {
 
                             if visited.contains(&source_sid) {
                                 edges.push(NeighborEdge {
-                                    source: rel.source_id.clone(),
-                                    target: rel.dest_id.clone(),
-                                    rel_type: format!("{}", rel.rel_type),
-                                    timestamp: rel.timestamp,
-                                    metadata: rel.metadata.clone(),
+                                    source: self.interner.resolve(compact.source_sid).to_string(),
+                                    target: self.interner.resolve(compact.dest_sid).to_string(),
+                                    rel_type: format!("{}", compact.rel_type()),
+                                    timestamp: compact.timestamp,
+                                    metadata: self.meta_store.get(compact.metadata_offset),
                                 });
                             }
                         }
@@ -424,18 +439,16 @@ impl GraphHunter {
                 let v_sid = sids[v];
 
                 // Outgoing edges
-                if let Some(rels) = self.adjacency_list.get(&v_sid) {
-                    for rel in rels {
-                        if let Some(dest_sid) = self.interner.get(&rel.dest_id) {
-                            if let Some(&w) = sid_to_idx.get(&dest_sid) {
-                                if dist[w] < 0 {
-                                    dist[w] = dist[v] + 1;
-                                    queue.push_back(w);
-                                }
-                                if dist[w] == dist[v] + 1 {
-                                    sigma[w] += sigma[v];
-                                    predecessors[w].push(v);
-                                }
+                if let Some(compacts) = self.adjacency_list.get(&v_sid) {
+                    for compact in compacts {
+                        if let Some(&w) = sid_to_idx.get(&compact.dest_sid) {
+                            if dist[w] < 0 {
+                                dist[w] = dist[v] + 1;
+                                queue.push_back(w);
+                            }
+                            if dist[w] == dist[v] + 1 {
+                                sigma[w] += sigma[v];
+                                predecessors[w].push(v);
                             }
                         }
                     }
@@ -520,9 +533,9 @@ impl GraphHunter {
         let t_ref = reference_time.unwrap_or_else(|| {
             let mut max_t = 0i64;
             for edges in self.adjacency_list.values() {
-                for rel in edges {
-                    if rel.timestamp > max_t {
-                        max_t = rel.timestamp;
+                for compact in edges {
+                    if compact.timestamp > max_t {
+                        max_t = compact.timestamp;
                     }
                 }
             }
@@ -536,19 +549,15 @@ impl GraphHunter {
         let mut weighted_edges: Vec<(usize, usize, f64)> = Vec::new();
 
         for edges in self.adjacency_list.values() {
-            for rel in edges {
-                if let Some(src_sid) = self.interner.get(&rel.source_id) {
-                    if let Some(dst_sid) = self.interner.get(&rel.dest_id) {
-                        if let (Some(&src_idx), Some(&dst_idx)) = (
-                            sid_to_idx.get(&src_sid),
-                            sid_to_idx.get(&dst_sid),
-                        ) {
-                            let dt = (t_ref - rel.timestamp).max(0) as f64;
-                            let w = (-lambda * dt).exp();
-                            w_out[src_idx] += w;
-                            weighted_edges.push((src_idx, dst_idx, w));
-                        }
-                    }
+            for compact in edges {
+                if let (Some(&src_idx), Some(&dst_idx)) = (
+                    sid_to_idx.get(&compact.source_sid),
+                    sid_to_idx.get(&compact.dest_sid),
+                ) {
+                    let dt = (t_ref - compact.timestamp).max(0) as f64;
+                    let w = (-lambda * dt).exp();
+                    w_out[src_idx] += w;
+                    weighted_edges.push((src_idx, dst_idx, w));
                 }
             }
         }
@@ -642,27 +651,33 @@ impl GraphHunter {
             .map(|v| v.len())
             .unwrap_or(0);
 
+        // Cap iterations to prevent OOM/hangs on super-connected nodes (e.g. 1.5M edges)
+        const MAX_SCAN_EDGES: usize = 50_000;
+        const MAX_NEIGHBORS_RETURNED: usize = 200;
+
         let mut min_ts = i64::MAX;
         let mut max_ts = i64::MIN;
         let mut has_timestamps = false;
 
-        if let Some(rels) = self.adjacency_list.get(&sid) {
-            for rel in rels {
-                if rel.timestamp != 0 {
-                    min_ts = min_ts.min(rel.timestamp);
-                    max_ts = max_ts.max(rel.timestamp);
+        if let Some(compacts) = self.adjacency_list.get(&sid) {
+            for compact in compacts.iter().take(MAX_SCAN_EDGES) {
+                if compact.timestamp != 0 {
+                    min_ts = min_ts.min(compact.timestamp);
+                    max_ts = max_ts.max(compact.timestamp);
                     has_timestamps = true;
                 }
             }
         }
+        // For incoming edges, sample reverse_adj instead of scanning all
         if let Some(sources) = self.reverse_adj.get(&sid) {
-            for &source_sid in sources {
-                if let Some(rels) = self.adjacency_list.get(&source_sid) {
-                    for rel in rels {
-                        if rel.dest_id == node_id && rel.timestamp != 0 {
-                            min_ts = min_ts.min(rel.timestamp);
-                            max_ts = max_ts.max(rel.timestamp);
+            for &source_sid in sources.iter().take(MAX_SCAN_EDGES) {
+                if let Some(compacts) = self.adjacency_list.get(&source_sid) {
+                    for compact in compacts {
+                        if compact.dest_sid == sid && compact.timestamp != 0 {
+                            min_ts = min_ts.min(compact.timestamp);
+                            max_ts = max_ts.max(compact.timestamp);
                             has_timestamps = true;
+                            break; // one match per source is enough for time range
                         }
                     }
                 }
@@ -673,19 +688,17 @@ impl GraphHunter {
         let mut seen: HashSet<StrId> = HashSet::new();
         let mut neighbors: Vec<NeighborSummary> = Vec::new();
 
-        if let Some(rels) = self.adjacency_list.get(&sid) {
-            for rel in rels {
-                if let Some(dest_sid) = self.interner.get(&rel.dest_id) {
-                    if let Some(dest) = self.entities.get(&dest_sid) {
-                        *neighbor_types
-                            .entry(format!("{}", dest.entity_type))
-                            .or_default() += 1;
-                        if seen.insert(dest_sid) {
-                            neighbors.push(NeighborSummary {
-                                id: dest.id.clone(),
-                                entity_type: format!("{}", dest.entity_type),
-                            });
-                        }
+        if let Some(compacts) = self.adjacency_list.get(&sid) {
+            for compact in compacts {
+                if let Some(dest) = self.entities.get(&compact.dest_sid) {
+                    *neighbor_types
+                        .entry(format!("{}", dest.entity_type))
+                        .or_default() += 1;
+                    if seen.insert(compact.dest_sid) && neighbors.len() < MAX_NEIGHBORS_RETURNED {
+                        neighbors.push(NeighborSummary {
+                            id: dest.id.clone(),
+                            entity_type: format!("{}", dest.entity_type),
+                        });
                     }
                 }
             }
@@ -696,7 +709,7 @@ impl GraphHunter {
                     *neighbor_types
                         .entry(format!("{}", src.entity_type))
                         .or_default() += 1;
-                    if seen.insert(source_sid) {
+                    if seen.insert(source_sid) && neighbors.len() < MAX_NEIGHBORS_RETURNED {
                         neighbors.push(NeighborSummary {
                             id: src.id.clone(),
                             entity_type: format!("{}", src.entity_type),
@@ -742,14 +755,19 @@ impl GraphHunter {
         let mut max_ts = i64::MIN;
         let mut has_timestamps = false;
 
-        for rels in self.adjacency_list.values() {
-            for rel in rels {
-                if rel.timestamp != 0 {
-                    min_ts = min_ts.min(rel.timestamp);
-                    max_ts = max_ts.max(rel.timestamp);
+        // Sample edges for time range instead of scanning all millions
+        let mut edges_scanned = 0usize;
+        for compacts in self.adjacency_list.values() {
+            for compact in compacts {
+                if compact.timestamp != 0 {
+                    min_ts = min_ts.min(compact.timestamp);
+                    max_ts = max_ts.max(compact.timestamp);
                     has_timestamps = true;
                 }
+                edges_scanned += 1;
+                if edges_scanned >= 100_000 { break; }
             }
+            if edges_scanned >= 100_000 { break; }
         }
 
         let mut entities_by_score: Vec<_> = self.entities.values().collect();
@@ -870,14 +888,15 @@ impl GraphHunter {
                     }
 
                     for i in 0..path.len().saturating_sub(1) {
-                        let rels = self.get_relations(&path[i]);
-                        for rel in rels {
-                            if rel.dest_id == path[i + 1] && rel.timestamp != 0 {
-                                if rel.timestamp < time_start {
-                                    time_start = rel.timestamp;
+                        // Use compact relations to avoid materializing full Relation objects
+                        let dest_sid = self.interner.get(&path[i + 1]);
+                        for compact in self.get_compact_relations(&path[i]) {
+                            if Some(compact.dest_sid) == dest_sid && compact.timestamp != 0 {
+                                if compact.timestamp < time_start {
+                                    time_start = compact.timestamp;
                                 }
-                                if rel.timestamp > time_end {
-                                    time_end = rel.timestamp;
+                                if compact.timestamp > time_end {
+                                    time_end = compact.timestamp;
                                 }
                             }
                         }

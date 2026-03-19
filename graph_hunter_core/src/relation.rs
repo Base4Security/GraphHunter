@@ -2,6 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::interner::StrId;
 use crate::types::RelationType;
 
 fn deserialize_arc_str<'de, D>(deserializer: D) -> Result<Option<Arc<str>>, D::Error>
@@ -61,5 +62,39 @@ impl Relation {
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
+    }
+}
+
+/// Memory-efficient edge representation for the adjacency list.
+/// 27 bytes vs ~200 bytes per Relation. Metadata is stored externally
+/// in MetadataStore, referenced by offset.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct CompactRelation {
+    pub source_sid: StrId,      // 4 bytes
+    pub dest_sid: StrId,        // 4 bytes
+    pub rel_type_tag: u8,       // 1 byte
+    pub timestamp: i64,         // 8 bytes
+    pub metadata_offset: u64,   // 8 bytes (0 = no metadata)
+    pub dataset_tag: u16,       // 2 bytes (index into dataset_tags vec, 0 = none)
+}
+
+impl CompactRelation {
+    /// Creates a new CompactRelation with no metadata.
+    pub fn new(source_sid: StrId, dest_sid: StrId, rel_type: &RelationType, timestamp: i64) -> Self {
+        Self {
+            source_sid,
+            dest_sid,
+            rel_type_tag: rel_type.to_u8(),
+            timestamp,
+            metadata_offset: 0,
+            dataset_tag: 0,
+        }
+    }
+
+    /// Returns the relation type.
+    #[inline]
+    pub fn rel_type(&self) -> RelationType {
+        RelationType::from_u8(self.rel_type_tag)
     }
 }

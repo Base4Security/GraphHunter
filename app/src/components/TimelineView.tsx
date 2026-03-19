@@ -77,6 +77,24 @@ export default function TimelineView({ statsKey, onShowTypeOnMap, onFilterByType
   const SVG_HEIGHT = 30;
   const MIN_BAR_HEIGHT = 2;
 
+  // Guard: if total bins across all rows would create too many SVG rects,
+  // aggregate each row's bins to wider time windows (max ~200 rects per row)
+  const MAX_BINS_PER_ROW = 200;
+
+  function aggregateBins(bins: Array<[number, number]>): Array<[number, number]> {
+    if (bins.length <= MAX_BINS_PER_ROW) return bins;
+    const sorted = [...bins].sort((a, b) => a[0] - b[0]);
+    const groupSize = Math.ceil(sorted.length / MAX_BINS_PER_ROW);
+    const result: Array<[number, number]> = [];
+    for (let i = 0; i < sorted.length; i += groupSize) {
+      const group = sorted.slice(i, i + groupSize);
+      const ts = group[0][0]; // use first timestamp as representative
+      const total = group.reduce((sum, [, c]) => sum + c, 0);
+      result.push([ts, total]);
+    }
+    return result;
+  }
+
   return (
     <div style={{ padding: "8px 12px" }}>
       <h3 style={{ margin: "0 0 8px", fontSize: 13, color: "var(--text-secondary)" }}>
@@ -87,7 +105,8 @@ export default function TimelineView({ statsKey, onShowTypeOnMap, onFilterByType
       </div>
       {rows.map((row) => {
         const color = ENTITY_COLORS[row.entity_type as EntityType] || "#888";
-        const maxCount = Math.max(...row.bins.map(([, c]) => c), 1);
+        const displayBins = aggregateBins(row.bins);
+        const maxCount = Math.max(...displayBins.map(([, c]) => c), 1);
 
         return (
           <div
@@ -121,7 +140,7 @@ export default function TimelineView({ statsKey, onShowTypeOnMap, onFilterByType
               viewBox={`0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`}
               style={{ flexShrink: 0, background: "rgba(255,255,255,0.03)", borderRadius: 3 }}
             >
-              {row.bins
+              {displayBins
                 .filter(([, count]) => count > 0)
                 .map(([ts, count]) => {
                   const barWidth = Math.max(2, (3600 / globalRange) * SVG_WIDTH);

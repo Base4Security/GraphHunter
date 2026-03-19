@@ -1478,7 +1478,10 @@ export default function IngestPanel({
                               <div className="legend-entities-loading">Loading…</div>
                             ) : (
                               <ul className="legend-entities-ul">
-                                {entitiesForType.map((id) => (
+                                {(entitiesForType.length > 100
+                                  ? entitiesForType.slice(0, 100)
+                                  : entitiesForType
+                                ).map((id) => (
                                   <li key={id} className="legend-entity-row">
                                     <span
                                       className="legend-entity-id"
@@ -1497,6 +1500,14 @@ export default function IngestPanel({
                                     </button>
                                   </li>
                                 ))}
+                                {entitiesForType.length > 100 && (
+                                  <li
+                                    className="legend-entity-row"
+                                    style={{ color: "var(--text-muted)", fontSize: 10, padding: "4px 0" }}
+                                  >
+                                    … and {(entitiesForType.length - 100).toLocaleString()} more
+                                  </li>
+                                )}
                               </ul>
                             )}
                           </div>
