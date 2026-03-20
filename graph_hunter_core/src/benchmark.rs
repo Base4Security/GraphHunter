@@ -448,20 +448,16 @@ pub struct BenchmarkResult {
 pub fn graph_params(g: &GraphHunter) -> (usize, usize, usize, f64, usize, usize) {
     let n = g.entity_count();
     let m = g.relation_count();
-    let d_max = g
-        .adjacency_list
-        .values()
-        .map(|edges| edges.len())
+    let d_max = g.entities.keys()
+        .map(|&sid| g.edge_store.get_edges(sid).len())
         .max()
         .unwrap_or(0);
     let d_avg = if n > 0 { m as f64 / n as f64 } else { 0.0 };
     let n_etypes = g.type_index.keys().count();
     let n_rtypes: usize = {
         let mut rt_set = std::collections::HashSet::new();
-        for edges in g.adjacency_list.values() {
-            for e in edges {
-                rt_set.insert(e.rel_type_tag);
-            }
+        for e in g.edge_store.iter_all() {
+            rt_set.insert(e.rel_type_tag);
         }
         rt_set.len()
     };

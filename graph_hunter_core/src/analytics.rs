@@ -143,11 +143,7 @@ impl GraphHunter {
             let id_str = self.interner.resolve(sid);
             if id_str.to_lowercase().contains(&query_lower) {
                 if let Some(entity) = self.entities.get(&sid) {
-                    let out_degree = self
-                        .adjacency_list
-                        .get(&sid)
-                        .map(|v| v.len())
-                        .unwrap_or(0);
+                    let out_degree = self.edge_store.get_edges(sid).len();
                     let in_degree = self
                         .reverse_adj
                         .get(&sid)
@@ -196,7 +192,8 @@ impl GraphHunter {
             }
 
             // Outgoing edges
-            if let Some(compacts) = self.adjacency_list.get(&current_sid) {
+            {
+                let compacts = self.edge_store.get_edges(current_sid);
                 for compact in compacts {
                     if edges.len() >= max_edges {
                         truncated = true;
@@ -261,7 +258,8 @@ impl GraphHunter {
                         truncated = true;
                         break;
                     }
-                    if let Some(compacts) = self.adjacency_list.get(&source_sid) {
+                    {
+                        let compacts = self.edge_store.get_edges(source_sid);
                         for compact in compacts {
                             if edges.len() >= max_edges {
                                 truncated = true;
@@ -378,8 +376,8 @@ impl GraphHunter {
         let mut degrees: HashMap<StrId, usize> = HashMap::new();
         let mut max_degree: usize = 0;
 
-        for (&sid, rels) in &self.adjacency_list {
-            let out_deg = rels.len();
+        for &sid in self.entities.keys() {
+            let out_deg = self.edge_store.get_edges(sid).len();
             *degrees.entry(sid).or_default() += out_deg;
         }
         for (&sid, sources) in &self.reverse_adj {
@@ -439,17 +437,15 @@ impl GraphHunter {
                 let v_sid = sids[v];
 
                 // Outgoing edges
-                if let Some(compacts) = self.adjacency_list.get(&v_sid) {
-                    for compact in compacts {
-                        if let Some(&w) = sid_to_idx.get(&compact.dest_sid) {
-                            if dist[w] < 0 {
-                                dist[w] = dist[v] + 1;
-                                queue.push_back(w);
-                            }
-                            if dist[w] == dist[v] + 1 {
-                                sigma[w] += sigma[v];
-                                predecessors[w].push(v);
-                            }
+                for compact in self.edge_store.get_edges(v_sid) {
+                    if let Some(&w) = sid_to_idx.get(&compact.dest_sid) {
+                        if dist[w] < 0 {
+                            dist[w] = dist[v] + 1;
+                            queue.push_back(w);
+                        }
+                        if dist[w] == dist[v] + 1 {
+                            sigma[w] += sigma[v];
+                            predecessors[w].push(v);
                         }
                     }
                 }
@@ -532,11 +528,9 @@ impl GraphHunter {
 
         let t_ref = reference_time.unwrap_or_else(|| {
             let mut max_t = 0i64;
-            for edges in self.adjacency_list.values() {
-                for compact in edges {
-                    if compact.timestamp > max_t {
-                        max_t = compact.timestamp;
-                    }
+            for compact in self.edge_store.iter_all() {
+                if compact.timestamp > max_t {
+                    max_t = compact.timestamp;
                 }
             }
             max_t
@@ -548,17 +542,15 @@ impl GraphHunter {
         let mut w_out = vec![0.0f64; n];
         let mut weighted_edges: Vec<(usize, usize, f64)> = Vec::new();
 
-        for edges in self.adjacency_list.values() {
-            for compact in edges {
-                if let (Some(&src_idx), Some(&dst_idx)) = (
-                    sid_to_idx.get(&compact.source_sid),
-                    sid_to_idx.get(&compact.dest_sid),
-                ) {
-                    let dt = (t_ref - compact.timestamp).max(0) as f64;
-                    let w = (-lambda * dt).exp();
-                    w_out[src_idx] += w;
-                    weighted_edges.push((src_idx, dst_idx, w));
-                }
+        for compact in self.edge_store.iter_all() {
+            if let (Some(&src_idx), Some(&dst_idx)) = (
+                sid_to_idx.get(&compact.source_sid),
+                sid_to_idx.get(&compact.dest_sid),
+            ) {
+                let dt = (t_ref - compact.timestamp).max(0) as f64;
+                let w = (-lambda * dt).exp();
+                w_out[src_idx] += w;
+                weighted_edges.push((src_idx, dst_idx, w));
             }
         }
 
@@ -640,11 +632,8 @@ impl GraphHunter {
         let sid = self.interner.get(node_id)?;
         let entity = self.entities.get(&sid)?;
 
-        let out_degree = self
-            .adjacency_list
-            .get(&sid)
-            .map(|v| v.len())
-            .unwrap_or(0);
+        let out_edges = self.edge_store.get_edges(sid);
+        let out_degree = out_edges.len();
         let in_degree = self
             .reverse_adj
             .get(&sid)
@@ -659,26 +648,22 @@ impl GraphHunter {
         let mut max_ts = i64::MIN;
         let mut has_timestamps = false;
 
-        if let Some(compacts) = self.adjacency_list.get(&sid) {
-            for compact in compacts.iter().take(MAX_SCAN_EDGES) {
-                if compact.timestamp != 0 {
-                    min_ts = min_ts.min(compact.timestamp);
-                    max_ts = max_ts.max(compact.timestamp);
-                    has_timestamps = true;
-                }
+        for compact in out_edges.iter().take(MAX_SCAN_EDGES) {
+            if compact.timestamp != 0 {
+                min_ts = min_ts.min(compact.timestamp);
+                max_ts = max_ts.max(compact.timestamp);
+                has_timestamps = true;
             }
         }
         // For incoming edges, sample reverse_adj instead of scanning all
         if let Some(sources) = self.reverse_adj.get(&sid) {
             for &source_sid in sources.iter().take(MAX_SCAN_EDGES) {
-                if let Some(compacts) = self.adjacency_list.get(&source_sid) {
-                    for compact in compacts {
-                        if compact.dest_sid == sid && compact.timestamp != 0 {
-                            min_ts = min_ts.min(compact.timestamp);
-                            max_ts = max_ts.max(compact.timestamp);
-                            has_timestamps = true;
-                            break; // one match per source is enough for time range
-                        }
+                for compact in self.edge_store.get_edges(source_sid) {
+                    if compact.dest_sid == sid && compact.timestamp != 0 {
+                        min_ts = min_ts.min(compact.timestamp);
+                        max_ts = max_ts.max(compact.timestamp);
+                        has_timestamps = true;
+                        break; // one match per source is enough for time range
                     }
                 }
             }
@@ -688,18 +673,16 @@ impl GraphHunter {
         let mut seen: HashSet<StrId> = HashSet::new();
         let mut neighbors: Vec<NeighborSummary> = Vec::new();
 
-        if let Some(compacts) = self.adjacency_list.get(&sid) {
-            for compact in compacts {
-                if let Some(dest) = self.entities.get(&compact.dest_sid) {
-                    *neighbor_types
-                        .entry(format!("{}", dest.entity_type))
-                        .or_default() += 1;
-                    if seen.insert(compact.dest_sid) && neighbors.len() < MAX_NEIGHBORS_RETURNED {
-                        neighbors.push(NeighborSummary {
-                            id: dest.id.clone(),
-                            entity_type: format!("{}", dest.entity_type),
-                        });
-                    }
+        for compact in out_edges {
+            if let Some(dest) = self.entities.get(&compact.dest_sid) {
+                *neighbor_types
+                    .entry(format!("{}", dest.entity_type))
+                    .or_default() += 1;
+                if seen.insert(compact.dest_sid) && neighbors.len() < MAX_NEIGHBORS_RETURNED {
+                    neighbors.push(NeighborSummary {
+                        id: dest.id.clone(),
+                        entity_type: format!("{}", dest.entity_type),
+                    });
                 }
             }
         }
@@ -757,16 +740,13 @@ impl GraphHunter {
 
         // Sample edges for time range instead of scanning all millions
         let mut edges_scanned = 0usize;
-        for compacts in self.adjacency_list.values() {
-            for compact in compacts {
-                if compact.timestamp != 0 {
-                    min_ts = min_ts.min(compact.timestamp);
-                    max_ts = max_ts.max(compact.timestamp);
-                    has_timestamps = true;
-                }
-                edges_scanned += 1;
-                if edges_scanned >= 100_000 { break; }
+        for compact in self.edge_store.iter_all() {
+            if compact.timestamp != 0 {
+                min_ts = min_ts.min(compact.timestamp);
+                max_ts = max_ts.max(compact.timestamp);
+                has_timestamps = true;
             }
+            edges_scanned += 1;
             if edges_scanned >= 100_000 { break; }
         }
 

@@ -83,6 +83,8 @@ export default function IngestPanel({
   const [filePath, setFilePath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [format, setFormat] = useState<"auto" | "evtx" | "sysmon" | "sentinel" | "generic" | "csv">("auto");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [ingestSource, setIngestSource] = useState<"file" | "sentinel" | "elastic">("file");
   const [azureTenantId, setAzureTenantId] = useState("");
   const [azureClientId, setAzureClientId] = useState("");
@@ -397,6 +399,8 @@ export default function IngestPanel({
           path: filePath,
           format,
           config,
+          dateFrom: dateFrom || null,
+          dateTo: dateTo || null,
         });
 
         // Command returned immediately; UI stays responsive while background work runs
@@ -738,6 +742,46 @@ export default function IngestPanel({
               <option value="generic">Generic JSON</option>
               <option value="csv">CSV</option>
             </select>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <div style={{ flex: 1 }}>
+              <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>
+                Date From (optional)
+              </label>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                style={{
+                  width: "100%",
+                  padding: "6px 8px",
+                  background: "var(--bg-tertiary)",
+                  color: "var(--text-primary)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 4,
+                  fontSize: 12,
+                }}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4 }}>
+                Date To (optional)
+              </label>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                style={{
+                  width: "100%",
+                  padding: "6px 8px",
+                  background: "var(--bg-tertiary)",
+                  color: "var(--text-primary)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 4,
+                  fontSize: 12,
+                }}
+              />
+            </div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <input

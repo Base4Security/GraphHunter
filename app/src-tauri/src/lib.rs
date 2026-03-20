@@ -452,12 +452,30 @@ fn cmd_load_session(state: State<Arc<AppState>>, session_id: String) -> Result<S
         .map_err(|e| format!("Lock poisoned: {}", e))?;
 
     if !sessions.contains_key(&session_id) && path.exists() {
-        let contents = fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read session file: {}", e))?;
-        let file: SessionFile = serde_json::from_str(&contents)
+        // Stream-parse the session file to avoid loading the entire JSON into RAM.
+        // For large sessions (millions of relations), the JSON can be several GB.
+        let file_handle = fs::File::open(&path)
+            .map_err(|e| format!("Failed to open session file: {}", e))?;
+        let reader = std::io::BufReader::with_capacity(8 * 1024 * 1024, file_handle);
+        let file: SessionFile = serde_json::from_reader(reader)
             .map_err(|e| format!("Invalid session file: {}", e))?;
-        let graph = GraphHunter::load_snapshot(file.entities, file.relations)
-            .map_err(|e| format!("Failed to load graph: {}", e))?;
+
+        // Build graph incrementally: add entities first, then relations in batches
+        let mut graph = GraphHunter::new();
+        let entity_count = file.entities.len();
+        let relation_count = file.relations.len();
+        graph.reserve(entity_count, relation_count);
+
+        for entity in file.entities {
+            let _ = graph.add_entity(entity);
+        }
+        for relation in file.relations {
+            let _ = graph.add_relation(relation);
+        }
+        graph.sort_edges_by_timestamp();
+
+        eprintln!("SESSION LOAD: {} entities, {} relations loaded", entity_count, relation_count);
+
         let session = Arc::new(SessionState {
             id: file.id.clone(),
             name: file.name.clone(),
@@ -509,58 +527,72 @@ fn cmd_save_session(state: State<Arc<AppState>>, session_id: Option<String>) -> 
         })
         .ok_or("No session to save")?;
 
-    let (name, created_at, entities, relations, path_node_ids, notes, datasets) = {
-        let sessions = state
-            .sessions
-            .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-        let session = sessions.get(&id).ok_or("Session not found")?;
-        let graph = session
-            .graph
-            .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-        let (entities, relations) = graph.to_snapshot();
-        let path_node_ids = session
-            .path_node_ids
-            .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?
-            .clone();
-        let notes = session
-            .notes
-            .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?
-            .clone();
-        let datasets = session
-            .datasets
-            .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?
-            .clone();
-        (
-            session.name.clone(),
-            session.created_at,
-            entities,
-            relations,
-            path_node_ids,
-            notes,
-            datasets,
-        )
-    };
-
     let path = session_file_path(&id)?;
-    let file = SessionFile {
-        id: id.clone(),
-        name,
-        created_at,
-        entities,
-        relations,
-        path_node_ids,
-        notes,
-        datasets,
-    };
-    // Stream JSON directly to file instead of building a giant String in RAM
+
+    let sessions = state
+        .sessions
+        .read()
+        .map_err(|e| format!("Lock poisoned: {}", e))?;
+    let session = sessions.get(&id).ok_or("Session not found")?;
+
+    let graph = session
+        .graph
+        .read()
+        .map_err(|e| format!("Lock poisoned: {}", e))?;
+    let path_node_ids = session
+        .path_node_ids
+        .read()
+        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .clone();
+    let notes = session
+        .notes
+        .read()
+        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .clone();
+    let datasets = session
+        .datasets
+        .read()
+        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .clone();
+
+    // Stream JSON directly to file — write relations one by one to avoid
+    // materializing millions of Relation objects in RAM at once.
     let f = fs::File::create(&path).map_err(|e| format!("Failed to create session file: {}", e))?;
-    let writer = std::io::BufWriter::with_capacity(8 * 1024 * 1024, f); // 8MB buffer
-    serde_json::to_writer(writer, &file).map_err(|e| format!("Failed to write session: {}", e))?;
+    let mut w = std::io::BufWriter::with_capacity(8 * 1024 * 1024, f);
+
+    use std::io::Write;
+    // Write opening JSON manually to stream relations without collecting
+    write!(w, "{{\"id\":{},\"name\":{},\"created_at\":{},\"entities\":",
+        serde_json::to_string(&id).unwrap(),
+        serde_json::to_string(&session.name).unwrap(),
+        session.created_at,
+    ).map_err(|e| e.to_string())?;
+
+    // Entities: collect (they're small — just metadata)
+    let entities: Vec<_> = graph.entities.values().cloned().collect();
+    serde_json::to_writer(&mut w, &entities).map_err(|e| e.to_string())?;
+
+    // Relations: stream one by one from edge_store
+    write!(w, ",\"relations\":[").map_err(|e| e.to_string())?;
+    let mut first = true;
+    for compact in graph.edge_store.iter_all() {
+        if !first { write!(w, ",").map_err(|e| e.to_string())?; }
+        first = false;
+        let rel = graph.materialize_relation(compact);
+        serde_json::to_writer(&mut w, &rel).map_err(|e| e.to_string())?;
+    }
+    write!(w, "]").map_err(|e| e.to_string())?;
+
+    // Rest of fields
+    write!(w, ",\"path_node_ids\":").map_err(|e| e.to_string())?;
+    serde_json::to_writer(&mut w, &path_node_ids).map_err(|e| e.to_string())?;
+    write!(w, ",\"notes\":").map_err(|e| e.to_string())?;
+    serde_json::to_writer(&mut w, &notes).map_err(|e| e.to_string())?;
+    write!(w, ",\"datasets\":").map_err(|e| e.to_string())?;
+    serde_json::to_writer(&mut w, &datasets).map_err(|e| e.to_string())?;
+    write!(w, "}}").map_err(|e| e.to_string())?;
+
+    w.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -697,12 +729,10 @@ fn cmd_get_node_ids_by_relation_type(
         let rt = parse_relation_type(&relation_type)
             .ok_or_else(|| format!("Unknown relation type: {}", relation_type))?;
         let mut node_ids = HashSet::new();
-        for (&source_sid, relations) in &graph.adjacency_list {
-            for compact in relations {
-                if compact.rel_type() == rt {
-                    node_ids.insert(graph.interner.resolve(source_sid).to_string());
-                    node_ids.insert(graph.interner.resolve(compact.dest_sid).to_string());
-                }
+        for compact in graph.edge_store.iter_all() {
+            if compact.rel_type() == rt {
+                node_ids.insert(graph.interner.resolve(compact.source_sid).to_string());
+                node_ids.insert(graph.interner.resolve(compact.dest_sid).to_string());
             }
         }
         Ok(node_ids.into_iter().collect())
@@ -2717,6 +2747,8 @@ async fn cmd_load_data_streaming(
     path: String,
     format: String,
     config: Option<FieldConfig>,
+    date_from: Option<String>,
+    date_to: Option<String>,
 ) -> Result<IngestJobStarted, String> {
     let job_id = Uuid::new_v4().to_string();
 
@@ -2785,6 +2817,8 @@ async fn cmd_load_data_streaming(
     let bg_app = app.clone();
     let bg_session = Arc::clone(&session);
     let bg_config = config.clone();
+    let bg_date_from = date_from.clone();
+    let bg_date_to = date_to.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
         let panic_app = bg_app.clone();
@@ -2794,10 +2828,15 @@ async fn cmd_load_data_streaming(
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         const BATCH_LINES: usize = 50_000;
         const BUF_CAPACITY: usize = 8 * 1024 * 1024; // 8 MB
-        // No hard line limit — instead we monitor available memory and stop
-        // gracefully if we're about to OOM. This lets small files ingest fully
-        // while protecting against crashes on 29GB+ files.
         const MAX_INGEST_LINES: usize = usize::MAX;
+
+        // Date range filter: for line-based formats (IIS, CSV), lines starting with
+        // a date outside [date_from, date_to] are skipped before parsing.
+        // Dates are compared as byte strings (e.g. "2026-01-15") which works because
+        // ISO date format sorts lexicographically.
+        let date_from_bytes: Option<Vec<u8>> = bg_date_from.as_ref().map(|s| s.as_bytes().to_vec());
+        let date_to_bytes: Option<Vec<u8>> = bg_date_to.as_ref().map(|s| s.as_bytes().to_vec());
+        eprintln!("INGEST: date_from={:?}, date_to={:?}", bg_date_from, bg_date_to);
 
         // 1. Open file and check for EVTX (binary) before any UTF-8 read
         let use_evtx = path_is_evtx(&bg_path)
@@ -2992,6 +3031,27 @@ async fn cmd_load_data_streaming(
                         break;
                     }
 
+                    // Date range filter: skip lines outside [date_from, date_to].
+                    // IIS/CSV lines start with "YYYY-MM-DD" (10 bytes). Comment lines start with '#'.
+                    if date_from_bytes.is_some() || date_to_bytes.is_some() {
+                        let line_start = if pos > 0 && batch_start < pos {
+                            raw[batch_start..pos].iter().rposition(|&b| b == b'\n')
+                                .map(|p| batch_start + p + 1)
+                                .unwrap_or(batch_start)
+                        } else { batch_start };
+                        // Only check data lines (not comments/headers)
+                        let first_byte = raw.get(line_start).copied().unwrap_or(b'#');
+                        if first_byte.is_ascii_digit() && pos >= line_start + 10 {
+                            let line_date = &raw[line_start..line_start + 10];
+                            if let Some(ref from) = date_from_bytes {
+                                if line_date < from.as_slice() { continue; }
+                            }
+                            if let Some(ref to) = date_to_bytes {
+                                if line_date > to.as_slice() { continue; }
+                            }
+                        }
+                    }
+
                     // Track #Fields: headers for IIS mid-file rotation
                     if last_fields_header.is_some() || iis_fields_header.is_some() {
                         let line_start = if pos > 0 {
@@ -3068,9 +3128,9 @@ async fn cmd_load_data_streaming(
                             "relations": total_new_relations,
                         }));
 
-                        // Check available memory every 10 batches (~500K lines)
-                        // If less than 1GB free, stop gracefully instead of OOM crash.
-                        if total_new_relations % (BATCH_LINES * 10) < BATCH_LINES {
+                        // Last-resort OOM guard: edges spill to disk via SpillableEdgeStore,
+                        // but entities/interner/metadata stay in RAM. Stop only if critically low.
+                        if total_new_relations % (BATCH_LINES * 20) < BATCH_LINES {
                             #[cfg(target_os = "windows")]
                             {
                                 use std::mem::MaybeUninit;
@@ -3095,8 +3155,8 @@ async fn cmd_load_data_streaming(
                                     (*p).dw_length = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
                                     if GlobalMemoryStatusEx(p) != 0 {
                                         let avail_mb = (*p).ull_avail_phys / (1024 * 1024);
-                                        if avail_mb < 1024 {
-                                            eprintln!("INGEST: Low memory ({} MB free), stopping ingestion gracefully", avail_mb);
+                                        if avail_mb < 256 {
+                                            eprintln!("INGEST: Critically low memory ({} MB free), stopping to prevent crash", avail_mb);
                                             stopped_early = true;
                                             break;
                                         }

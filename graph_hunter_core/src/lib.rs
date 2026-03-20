@@ -315,6 +315,7 @@ mod tests {
         g.add_relation(Relation::new("admin-user", "cmd.exe", RelationType::Execute, 300)).unwrap();
         g.add_relation(Relation::new("cmd.exe", "payload.dll", RelationType::Write, 400)).unwrap();
 
+        g.sort_edges_by_timestamp();
         g
     }
 
@@ -3260,15 +3261,16 @@ mod tests {
             let type_dist = g.entity_type_counts();
 
             // dmax: max out-degree
-            let dmax = g.adjacency_list.values().map(|v| v.len()).max().unwrap_or(0);
+            let dmax = g.entities.keys()
+                .map(|&sid| g.edge_store.get_edges(sid).len())
+                .max()
+                .unwrap_or(0);
 
             // Count distinct relation types and entity types in graph
             let num_ent_types = g.type_index.len();
             let mut rel_types_seen = std::collections::HashSet::new();
-            for edges in g.adjacency_list.values() {
-                for e in edges {
-                    rel_types_seen.insert(format!("{}", e.rel_type()));
-                }
+            for e in g.edge_store.iter_all() {
+                rel_types_seen.insert(format!("{}", e.rel_type()));
             }
             let num_rel_types = rel_types_seen.len();
 
@@ -3285,11 +3287,16 @@ mod tests {
             let mut edge_type_pairs: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
             let mut temporal_ordered = 0usize;
             let mut temporal_total = 0usize;
-            for edges in g.adjacency_list.values() {
-                let mut sorted_edges: Vec<_> = edges.iter().collect();
-                sorted_edges.sort_by_key(|e| e.timestamp);
-                for i in 0..sorted_edges.len() {
-                    let e = sorted_edges[i];
+            // Collect all edges, group by source, and analyze
+            let all_edges: Vec<_> = g.edge_store.iter_all().collect();
+            let mut by_source: std::collections::HashMap<usize, Vec<&relation::CompactRelation>> = std::collections::HashMap::new();
+            for e in &all_edges {
+                by_source.entry(e.source_sid.index()).or_default().push(e);
+            }
+            for (_sid, edges) in &mut by_source {
+                edges.sort_by_key(|e| e.timestamp);
+                for i in 0..edges.len() {
+                    let e = edges[i];
                     let dest_id = g.interner.resolve(e.dest_sid);
                     let dest_type = g.get_entity(dest_id)
                         .map(|ent| format!("{}", ent.entity_type))
@@ -3297,7 +3304,7 @@ mod tests {
                     *edge_type_pairs.entry((format!("{}", e.rel_type()), dest_type)).or_default() += 1;
                     if i > 0 {
                         temporal_total += 1;
-                        if sorted_edges[i].timestamp >= sorted_edges[i-1].timestamp {
+                        if edges[i].timestamp >= edges[i-1].timestamp {
                             temporal_ordered += 1;
                         }
                     }
@@ -4828,6 +4835,7 @@ mod tests {
         g.add_entity(Entity::new("C", EntityType::Process)).unwrap();
         g.add_relation(Relation::new("A", "B", RelationType::Connect, 1000)).unwrap();
         g.add_relation(Relation::new("B", "C", RelationType::Execute, 2000)).unwrap();
+        g.sort_edges_by_timestamp();
         g.finalize_anomaly_scorer();
         g
     }
