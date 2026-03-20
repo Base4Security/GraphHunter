@@ -100,16 +100,14 @@ pub fn extract_subgraph_features(
         }
 
         // Outgoing neighbors
-        if let Some(compacts) = graph.adjacency_list.get(&current) {
-            for compact in compacts {
-                if ordered_nodes.len() >= K_MAX {
-                    break;
-                }
-                let dest_sid = compact.dest_sid;
-                if visited.insert(dest_sid) {
-                    ordered_nodes.push(dest_sid);
-                    queue.push_back((dest_sid, depth + 1));
-                }
+        for compact in graph.edge_store.get_edges(current) {
+            if ordered_nodes.len() >= K_MAX {
+                break;
+            }
+            let dest_sid = compact.dest_sid;
+            if visited.insert(dest_sid) {
+                ordered_nodes.push(dest_sid);
+                queue.push_back((dest_sid, depth + 1));
             }
         }
 
@@ -153,11 +151,7 @@ pub fn extract_subgraph_features(
         }
 
         // Normalized out-degree (dim 9)
-        let out_degree = graph
-            .adjacency_list
-            .get(&sid)
-            .map(|r| r.len())
-            .unwrap_or(0);
+        let out_degree = graph.edge_store.get_edges(sid).len();
         node_features[base + 9] = (out_degree as f32 / K_MAX as f32).min(1.0);
 
         // Normalized in-degree (dim 10)
@@ -196,11 +190,9 @@ pub fn extract_subgraph_features(
 
     for &src_sid in &ordered_nodes {
         if let Some(&src_idx) = sid_to_idx.get(&src_sid) {
-            if let Some(compacts) = graph.adjacency_list.get(&src_sid) {
-                for compact in compacts {
-                    if let Some(&dst_idx) = sid_to_idx.get(&compact.dest_sid) {
-                        adjacency[src_idx * K_MAX + dst_idx] = 1.0;
-                    }
+            for compact in graph.edge_store.get_edges(src_sid) {
+                if let Some(&dst_idx) = sid_to_idx.get(&compact.dest_sid) {
+                    adjacency[src_idx * K_MAX + dst_idx] = 1.0;
                 }
             }
         }

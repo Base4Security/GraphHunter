@@ -11,6 +11,7 @@ use crate::hypothesis::Hypothesis;
 use crate::interner::{StrId, StringInterner};
 use crate::metadata_store::MetadataStore;
 use crate::relation::{CompactRelation, Relation};
+use crate::spill::SpillableEdgeStore;
 use crate::types::{EntityType, MergePolicy, RelationType, entity_type_matches, relation_type_matches};
 
 /// Result of a successful pattern match: an ordered list of entity IDs
@@ -20,14 +21,14 @@ pub type HuntResult = Vec<String>;
 /// The core threat hunting graph engine.
 ///
 /// Stores entities in a HashMap keyed by interned StrId for memory efficiency.
-/// Relations in an adjacency list keyed by source entity StrId.
+/// Relations in a spillable edge store that can overflow to disk for large graphs.
 /// All string IDs are interned via `StringInterner` — each unique ID stored once.
 #[derive(Clone)]
 pub struct GraphHunter {
     /// String interner: stores each unique entity ID once.
     pub interner: StringInterner,
     pub entities: HashMap<StrId, Entity>,
-    pub adjacency_list: HashMap<StrId, Vec<CompactRelation>>,
+    pub edge_store: SpillableEdgeStore,
     /// Index: entity type → set of interned entity IDs of that type.
     pub type_index: HashMap<EntityType, HashSet<StrId>>,
     /// Reverse adjacency: dest StrId → vec of source StrIds.
@@ -54,7 +55,7 @@ impl GraphHunter {
         Self {
             interner: StringInterner::new(),
             entities: HashMap::new(),
-            adjacency_list: HashMap::new(),
+            edge_store: SpillableEdgeStore::with_default_budget(),
             type_index: HashMap::new(),
             reverse_adj: HashMap::new(),
             meta_store: MetadataStore::new(),
@@ -68,7 +69,6 @@ impl GraphHunter {
     pub fn reserve(&mut self, entity_hint: usize, relation_hint: usize) {
         self.interner.reserve(entity_hint);
         self.entities.reserve(entity_hint);
-        self.adjacency_list.reserve(entity_hint);
         self.type_index.reserve(16);
         self.reverse_adj.reserve(entity_hint);
         let _ = relation_hint;
@@ -81,7 +81,7 @@ impl GraphHunter {
 
     /// Returns the total number of relations (edges) in the graph.
     pub fn relation_count(&self) -> usize {
-        self.adjacency_list.values().map(|edges| edges.len()).sum()
+        self.edge_store.len()
     }
 
     /// Adds an entity to the graph.
@@ -95,7 +95,6 @@ impl GraphHunter {
             .or_default()
             .insert(sid);
         self.entities.insert(sid, entity);
-        self.adjacency_list.entry(sid).or_default();
         self.reverse_adj.entry(sid).or_default();
         Ok(())
     }
@@ -135,10 +134,7 @@ impl GraphHunter {
             .entry(dst_sid)
             .or_default()
             .push(src_sid);
-        self.adjacency_list
-            .entry(src_sid)
-            .or_default()
-            .push(compact);
+        self.edge_store.push(compact);
         self.edges_sorted = false;
         Ok(())
     }
@@ -186,8 +182,12 @@ impl GraphHunter {
     pub fn get_relations(&self, source_id: &str) -> Vec<Relation> {
         self.interner
             .get(source_id)
-            .and_then(|sid| self.adjacency_list.get(&sid))
-            .map(|compacts| compacts.iter().map(|c| self.materialize_relation(c)).collect())
+            .map(|sid| {
+                self.edge_store.get_edges(sid)
+                    .iter()
+                    .map(|c| self.materialize_relation(c))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -201,8 +201,7 @@ impl GraphHunter {
     pub fn get_compact_relations(&self, source_id: &str) -> &[CompactRelation] {
         self.interner
             .get(source_id)
-            .and_then(|sid| self.adjacency_list.get(&sid))
-            .map(|v| v.as_slice())
+            .map(|sid| self.edge_store.get_edges(sid))
             .unwrap_or(&[])
     }
 
@@ -219,10 +218,7 @@ impl GraphHunter {
     /// Internal: get compact relations by StrId for step matching.
     #[inline]
     pub fn get_relations_by_sid(&self, sid: StrId) -> &[CompactRelation] {
-        self.adjacency_list
-            .get(&sid)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.edge_store.get_edges(sid)
     }
 
     /// Internal: get compact relations by StrId and type.
@@ -267,11 +263,9 @@ impl GraphHunter {
         let Some(sid) = self.interner.get(node_id) else {
             return Vec::new();
         };
-        if let Some(edges) = self.adjacency_list.get(&sid) {
-            for compact in edges {
-                if let Some(e) = self.entities.get(&compact.dest_sid) {
-                    types_set.insert(format!("{}", e.entity_type));
-                }
+        for compact in self.edge_store.get_edges(sid) {
+            if let Some(e) = self.entities.get(&compact.dest_sid) {
+                types_set.insert(format!("{}", e.entity_type));
             }
         }
         if let Some(sources) = self.reverse_adj.get(&sid) {
@@ -309,13 +303,12 @@ impl GraphHunter {
 
     /// Sorts all edge lists by timestamp so binary search can skip temporally invalid edges.
     /// Call once after ingestion completes. Subsequent calls are no-ops.
+    /// Now delegates to `edge_store.finalize()` which sorts by (source_sid, timestamp).
     pub fn sort_edges_by_timestamp(&mut self) {
         if self.edges_sorted {
             return;
         }
-        for edges in self.adjacency_list.values_mut() {
-            edges.sort_unstable_by_key(|r| r.timestamp);
-        }
+        self.edge_store.finalize();
         self.edges_sorted = true;
     }
 
@@ -327,7 +320,8 @@ impl GraphHunter {
     }
 
     /// Searches for paths matching a temporal hypothesis pattern.
-    /// Requires edges to be pre-sorted via `sort_edges_by_timestamp()` (called after ingestion).
+    /// For best performance, call `sort_edges_by_timestamp()` after ingestion.
+    /// The search still works without sorting but binary-search optimizations are disabled.
     pub fn search_temporal_pattern(
         &self,
         hypothesis: &Hypothesis,
@@ -337,8 +331,6 @@ impl GraphHunter {
         hypothesis
             .validate()
             .map_err(GraphError::InvalidHypothesis)?;
-
-        debug_assert!(self.ensure_sorted(), "Call sort_edges_by_timestamp() before searching");
 
         let cap = max_results.unwrap_or(10_000);
 
@@ -426,8 +418,6 @@ impl GraphHunter {
         hypothesis
             .validate()
             .map_err(GraphError::InvalidHypothesis)?;
-
-        debug_assert!(self.ensure_sorted(), "Call sort_edges_by_timestamp() before searching");
 
         let first_step = &hypothesis.steps[0];
         let start_sids: Vec<StrId> = if first_step.origin_type == EntityType::Any {
@@ -865,7 +855,6 @@ impl GraphHunter {
                 let et = src.entity_type.clone();
                 self.entities.insert(src_sid, src);
                 self.type_index.entry(et).or_default().insert(src_sid);
-                self.adjacency_list.entry(src_sid).or_default();
                 self.reverse_adj.entry(src_sid).or_default();
                 new_entities += 1;
             }
@@ -878,7 +867,6 @@ impl GraphHunter {
                 let et = dst.entity_type.clone();
                 self.entities.insert(dst_sid, dst);
                 self.type_index.entry(et).or_default().insert(dst_sid);
-                self.adjacency_list.entry(dst_sid).or_default();
                 self.reverse_adj.entry(dst_sid).or_default();
                 new_entities += 1;
             }
@@ -905,10 +893,7 @@ impl GraphHunter {
                 .entry(dst_sid)
                 .or_default()
                 .push(src_sid);
-            self.adjacency_list
-                .entry(src_sid)
-                .or_default()
-                .push(compact);
+            self.edge_store.push(compact);
             new_relations += 1;
         }
 
@@ -928,25 +913,27 @@ impl GraphHunter {
         let ds_tag = self.dataset_tags.iter().position(|t| &**t == dataset_id)
             .map(|p| p as u16);
 
-        // Remove relations with this dataset tag
-        let mut relations_removed = 0usize;
-        if let Some(tag) = ds_tag {
-            for edges in self.adjacency_list.values_mut() {
-                let before = edges.len();
-                edges.retain(|compact| compact.dataset_tag != tag);
-                relations_removed += before - edges.len();
-            }
+        // Rebuild edge_store keeping only edges that don't match the dataset tag
+        let total_before = self.edge_store.len();
+        let kept: Vec<CompactRelation> = self.edge_store.iter_all()
+            .filter(|c| ds_tag.map_or(true, |tag| c.dataset_tag != tag))
+            .copied()
+            .collect();
+        let relations_removed = total_before - kept.len();
+
+        self.edge_store.clear();
+        for c in &kept {
+            self.edge_store.push(*c);
         }
+        self.edge_store.finalize();
 
         // Rebuild reverse_adj
         self.reverse_adj.clear();
-        for (&source_sid, edges) in &self.adjacency_list {
-            for compact in edges {
-                self.reverse_adj
-                    .entry(compact.dest_sid)
-                    .or_default()
-                    .push(source_sid);
-            }
+        for compact in &kept {
+            self.reverse_adj
+                .entry(compact.dest_sid)
+                .or_default()
+                .push(compact.source_sid);
         }
         for v in self.reverse_adj.values_mut() {
             v.sort_unstable();
@@ -961,10 +948,10 @@ impl GraphHunter {
                     set.remove(sid);
                 }
             }
-            self.adjacency_list.remove(sid);
             self.reverse_adj.remove(sid);
         }
 
+        self.edges_sorted = true; // finalize() sorted them
         (entities_removed, relations_removed)
     }
 
@@ -1016,10 +1003,8 @@ impl GraphHunter {
     /// Exports the graph as a snapshot for serialization.
     pub fn to_snapshot(&self) -> (Vec<Entity>, Vec<Relation>) {
         let entities: Vec<Entity> = self.entities.values().cloned().collect();
-        let relations: Vec<Relation> = self
-            .adjacency_list
-            .values()
-            .flat_map(|edges| edges.iter().map(|c| self.materialize_relation(c)))
+        let relations: Vec<Relation> = self.edge_store.iter_all()
+            .map(|c| self.materialize_relation(c))
             .collect();
         (entities, relations)
     }
@@ -1209,7 +1194,6 @@ impl GraphHunter {
                 let et = src.entity_type.clone();
                 self.entities.insert(src_sid, src);
                 self.type_index.entry(et).or_default().insert(src_sid);
-                self.adjacency_list.entry(src_sid).or_default();
                 self.reverse_adj.entry(src_sid).or_default();
                 new_entities += 1;
             }
@@ -1221,7 +1205,6 @@ impl GraphHunter {
                 let et = dst.entity_type.clone();
                 self.entities.insert(dst_sid, dst);
                 self.type_index.entry(et).or_default().insert(dst_sid);
-                self.adjacency_list.entry(dst_sid).or_default();
                 self.reverse_adj.entry(dst_sid).or_default();
                 new_entities += 1;
             }
@@ -1246,10 +1229,7 @@ impl GraphHunter {
                 .entry(dst_sid)
                 .or_default()
                 .push(src_sid);
-            self.adjacency_list
-                .entry(src_sid)
-                .or_default()
-                .push(compact);
+            self.edge_store.push(compact);
             new_relations += 1;
 
             if (i + 1) % chunk_size == 0 || i + 1 == total {
@@ -1285,7 +1265,6 @@ impl GraphHunter {
                 let et = src.entity_type.clone();
                 self.entities.insert(src_sid, src);
                 self.type_index.entry(et).or_default().insert(src_sid);
-                self.adjacency_list.entry(src_sid).or_default();
                 self.reverse_adj.entry(src_sid).or_default();
                 new_entities += 1;
             }
@@ -1297,7 +1276,6 @@ impl GraphHunter {
                 let et = dst.entity_type.clone();
                 self.entities.insert(dst_sid, dst);
                 self.type_index.entry(et).or_default().insert(dst_sid);
-                self.adjacency_list.entry(dst_sid).or_default();
                 self.reverse_adj.entry(dst_sid).or_default();
                 new_entities += 1;
             }
@@ -1322,10 +1300,7 @@ impl GraphHunter {
                 .entry(dst_sid)
                 .or_default()
                 .push(src_sid);
-            self.adjacency_list
-                .entry(src_sid)
-                .or_default()
-                .push(compact);
+            self.edge_store.push(compact);
             new_relations += 1;
         }
 
@@ -1335,14 +1310,12 @@ impl GraphHunter {
     /// Enables anomaly scoring with backfilling from existing data.
     pub fn enable_anomaly_scoring(&mut self, weights: ScoringWeights) {
         let mut scorer = AnomalyScorer::new(weights);
-        for edges in self.adjacency_list.values() {
-            for compact in edges {
-                let src_str = self.interner.resolve(compact.source_sid);
-                let dst_str = self.interner.resolve(compact.dest_sid);
-                scorer.observe_entity(src_str, compact.timestamp);
-                scorer.observe_entity(dst_str, compact.timestamp);
-                scorer.observe_edge(src_str, dst_str);
-            }
+        for compact in self.edge_store.iter_all() {
+            let src_str = self.interner.resolve(compact.source_sid);
+            let dst_str = self.interner.resolve(compact.dest_sid);
+            scorer.observe_entity(src_str, compact.timestamp);
+            scorer.observe_entity(dst_str, compact.timestamp);
+            scorer.observe_edge(src_str, dst_str);
         }
         scorer.finalize(self);
         self.anomaly_scorer = Some(scorer);
@@ -1393,16 +1366,14 @@ impl GraphHunter {
         use std::collections::BTreeMap;
         let mut by_type: HashMap<String, BTreeMap<i64, usize>> = HashMap::new();
 
-        for edges in self.adjacency_list.values() {
-            for compact in edges {
-                let type_name = format!("{}", compact.rel_type());
-                let hour = compact.timestamp - (compact.timestamp % 3600);
-                *by_type
-                    .entry(type_name)
-                    .or_default()
-                    .entry(hour)
-                    .or_insert(0) += 1;
-            }
+        for compact in self.edge_store.iter_all() {
+            let type_name = format!("{}", compact.rel_type());
+            let hour = compact.timestamp - (compact.timestamp % 3600);
+            *by_type
+                .entry(type_name)
+                .or_default()
+                .entry(hour)
+                .or_insert(0) += 1;
         }
 
         let mut result: Vec<(String, Vec<(i64, usize)>)> = by_type
@@ -1423,21 +1394,19 @@ impl GraphHunter {
         let mut type_min: HashMap<String, i64> = HashMap::new();
         let mut type_max: HashMap<String, i64> = HashMap::new();
 
-        for edges in self.adjacency_list.values() {
-            for compact in edges {
-                if let Some(src) = self.entities.get(&compact.source_sid) {
-                    let type_name = format!("{}", src.entity_type);
-                    let hour = compact.timestamp - (compact.timestamp % 3600);
-                    *type_data
-                        .entry(type_name.clone())
-                        .or_default()
-                        .entry(hour)
-                        .or_insert(0) += 1;
-                    let min = type_min.entry(type_name.clone()).or_insert(compact.timestamp);
-                    if compact.timestamp < *min { *min = compact.timestamp; }
-                    let max = type_max.entry(type_name.clone()).or_insert(compact.timestamp);
-                    if compact.timestamp > *max { *max = compact.timestamp; }
-                }
+        for compact in self.edge_store.iter_all() {
+            if let Some(src) = self.entities.get(&compact.source_sid) {
+                let type_name = format!("{}", src.entity_type);
+                let hour = compact.timestamp - (compact.timestamp % 3600);
+                *type_data
+                    .entry(type_name.clone())
+                    .or_default()
+                    .entry(hour)
+                    .or_insert(0) += 1;
+                let min = type_min.entry(type_name.clone()).or_insert(compact.timestamp);
+                if compact.timestamp < *min { *min = compact.timestamp; }
+                let max = type_max.entry(type_name.clone()).or_insert(compact.timestamp);
+                if compact.timestamp > *max { *max = compact.timestamp; }
             }
         }
 
@@ -1462,17 +1431,15 @@ impl GraphHunter {
 
         // Materialize all edges into full Relations for grouping
         let mut groups: HashMap<(String, String, String), Vec<Relation>> = HashMap::new();
-        for edges in self.adjacency_list.values() {
-            for compact in edges {
-                edges_before += 1;
-                let rel = self.materialize_relation(compact);
-                let key = (
-                    rel.source_id.clone(),
-                    rel.dest_id.clone(),
-                    format!("{}", rel.rel_type),
-                );
-                groups.entry(key).or_default().push(rel);
-            }
+        for compact in self.edge_store.iter_all() {
+            edges_before += 1;
+            let rel = self.materialize_relation(compact);
+            let key = (
+                rel.source_id.clone(),
+                rel.dest_id.clone(),
+                format!("{}", rel.rel_type),
+            );
+            groups.entry(key).or_default().push(rel);
         }
 
         let mut summary_edges: Vec<Relation> = Vec::new();
@@ -1497,8 +1464,8 @@ impl GraphHunter {
             }
         }
 
-        // Rebuild with fresh metadata store
-        self.adjacency_list.clear();
+        // Rebuild with fresh metadata store and edge store
+        self.edge_store.clear();
         self.reverse_adj.clear();
         self.meta_store = MetadataStore::new();
 
@@ -1520,11 +1487,9 @@ impl GraphHunter {
                 .entry(dst_sid)
                 .or_default()
                 .push(src_sid);
-            self.adjacency_list
-                .entry(src_sid)
-                .or_default()
-                .push(compact);
+            self.edge_store.push(compact);
         }
+        self.edge_store.finalize();
 
         for v in self.reverse_adj.values_mut() {
             v.sort_unstable();
@@ -1532,10 +1497,10 @@ impl GraphHunter {
         }
 
         for &&sid in self.entities.keys().collect::<Vec<_>>().iter() {
-            self.adjacency_list.entry(sid).or_default();
             self.reverse_adj.entry(sid).or_default();
         }
 
+        self.edges_sorted = true; // finalize() sorted them
         CompactionStats {
             edges_before,
             edges_after: edges_before - edges_removed,

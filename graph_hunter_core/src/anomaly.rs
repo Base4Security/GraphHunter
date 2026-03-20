@@ -193,14 +193,12 @@ impl AnomalyScorer {
         let mut type_counts: HashMap<String, usize> = HashMap::new();
         let mut total_neighbors = 0usize;
 
-        if let Some(compacts) = graph.adjacency_list.get(&sid) {
-            for compact in compacts {
-                if let Some(dest) = graph.entities.get(&compact.dest_sid) {
-                    *type_counts
-                        .entry(format!("{}", dest.entity_type))
-                        .or_default() += 1;
-                    total_neighbors += 1;
-                }
+        for compact in graph.edge_store.get_edges(sid) {
+            if let Some(dest) = graph.entities.get(&compact.dest_sid) {
+                *type_counts
+                    .entry(format!("{}", dest.entity_type))
+                    .or_default() += 1;
+                total_neighbors += 1;
             }
         }
         if let Some(sources) = graph.reverse_adj.get(&sid) {

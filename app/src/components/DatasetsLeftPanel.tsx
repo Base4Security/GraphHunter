@@ -404,6 +404,8 @@ export default function DatasetsLeftPanel({
           path: filePath,
           format,
           config,
+          dateFrom: null,
+          dateTo: null,
         });
       } catch (e) {
         onLog({ time: now(), message: `${e}`, level: "error" });

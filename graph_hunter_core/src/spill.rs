@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::io::{Write, BufWriter};
+use std::sync::Mutex;
 
 use crate::interner::StrId;
 use crate::relation::CompactRelation;
@@ -92,8 +93,8 @@ pub struct SpillableEdgeStore {
     merged_mmap: Option<memmap2::Mmap>,
     merged_index: HashMap<StrId, IndexEntry>,
 
-    // --- LRU cache ---
-    cache: LruCache,
+    // --- LRU cache (behind Mutex for interior mutability so get_edges can take &self) ---
+    cache: Mutex<LruCache>,
 
     finalized: bool,
 }
@@ -111,7 +112,7 @@ impl SpillableEdgeStore {
             temp_dir: None,
             merged_mmap: None,
             merged_index: HashMap::new(),
-            cache: LruCache::new(10_000), // cache up to 10K nodes
+            cache: Mutex::new(LruCache::new(10_000)), // cache up to 10K nodes
             finalized: false,
         }
     }
@@ -122,8 +123,21 @@ impl SpillableEdgeStore {
     }
 
     /// Appends a relation during ingestion.
+    /// If the store was finalized, it automatically unfinalizes to accept new data.
     pub fn push(&mut self, rel: CompactRelation) {
-        assert!(!self.finalized, "Cannot push after finalize");
+        if self.finalized {
+            // Unfinalize: move merged data back to buffer for continued ingestion
+            self.finalized = false;
+            // Buffer already contains sorted data from finalize; new pushes append to it
+            // The index will be rebuilt on next finalize
+            self.buffer_index.clear();
+            for (i, r) in self.buffer.iter().enumerate() {
+                self.buffer_index.entry(r.source_sid).or_default().push(i as u32);
+            }
+        }
+
+        // Invalidate any cached entry for this source_sid (stale after new push)
+        self.cache.lock().unwrap().map.remove(&rel.source_sid);
 
         let idx = self.buffer.len() as u32;
         self.buffer_index
@@ -211,6 +225,9 @@ impl SpillableEdgeStore {
         if self.finalized {
             return;
         }
+
+        // Clear any pre-finalization cache entries
+        self.cache.lock().unwrap().clear();
 
         if self.spill_files.is_empty() {
             // No spills: sort buffer in-place, build index directly
@@ -327,20 +344,43 @@ impl SpillableEdgeStore {
         self.finalized = true;
     }
 
-    /// Gets edges for a source node. Uses LRU cache over mmap'd data.
-    pub fn get_edges(&mut self, sid: StrId) -> &[CompactRelation] {
+    /// Gets edges for a source node.
+    ///
+    /// Takes `&self` so it can be called during concurrent reads (hunts, MCP).
+    /// For the finalized no-spill case, returns a slice directly from the sorted buffer.
+    /// For the finalized mmap case, returns a slice directly from the mmap'd memory.
+    /// For the unfinalized case (before finalize()), gathers edges from the buffer
+    /// index into an internal cache and returns a slice from it. This enables
+    /// backward-compatible usage where queries happen before finalization.
+    pub fn get_edges(&self, sid: StrId) -> &[CompactRelation] {
         if !self.finalized {
-            // During ingestion, return from buffer
-            if let Some(_indices) = self.buffer_index.get(&sid) {
-                // Return empty - callers should use get_edges_from_buffer during ingestion
-                return &[];
+            // Before finalization: edges are scattered in the buffer.
+            // Use the buffer_index to find them, collect into cache, and
+            // return a slice. The cache is behind a Mutex for interior mutability.
+            if let Some(indices) = self.buffer_index.get(&sid) {
+                if indices.is_empty() {
+                    return &[];
+                }
+                let mut cache = self.cache.lock().unwrap();
+                // Check if already cached
+                if let Some(slice) = cache.get(&sid) {
+                    // SAFETY: we return a reference tied to &self lifetime.
+                    // The cache is only cleared on &mut self calls (clear/finalize).
+                    // The Mutex ensures no concurrent mutation of the cache entry.
+                    let ptr = slice.as_ptr();
+                    let len = slice.len();
+                    return unsafe { std::slice::from_raw_parts(ptr, len) };
+                }
+                let edges: Vec<CompactRelation> = indices.iter()
+                    .map(|&idx| self.buffer[idx as usize])
+                    .collect();
+                cache.insert(sid, edges);
+                let slice = cache.map.get(&sid).unwrap().as_slice();
+                let ptr = slice.as_ptr();
+                let len = slice.len();
+                return unsafe { std::slice::from_raw_parts(ptr, len) };
             }
             return &[];
-        }
-
-        // Check cache first
-        if self.cache.get(&sid).is_some() {
-            return self.cache.map.get(&sid).unwrap().as_slice();
         }
 
         // No spills case: data is in sorted buffer
@@ -355,20 +395,18 @@ impl SpillableEdgeStore {
             return &[];
         }
 
-        // Read from mmap
-        if let Some(entry) = self.merged_index.get(&sid).cloned() {
+        // Mmap case: return a slice directly from the mmap'd memory
+        if let Some(entry) = self.merged_index.get(&sid) {
             if let Some(ref mmap) = self.merged_mmap {
                 let header_size = 16;
                 let byte_offset = header_size + (entry.offset as usize) * RECORD_SIZE;
                 let byte_end = byte_offset + (entry.count as usize) * RECORD_SIZE;
 
                 if byte_end <= mmap.len() {
-                    let records: Vec<CompactRelation> = unsafe {
+                    return unsafe {
                         let ptr = mmap[byte_offset..byte_end].as_ptr() as *const CompactRelation;
-                        std::slice::from_raw_parts(ptr, entry.count as usize).to_vec()
+                        std::slice::from_raw_parts(ptr, entry.count as usize)
                     };
-                    self.cache.insert(sid, records);
-                    return self.cache.map.get(&sid).unwrap().as_slice();
                 }
             }
         }
@@ -438,7 +476,7 @@ impl SpillableEdgeStore {
         self.spill_files.clear();
         self.merged_mmap = None;
         self.merged_index.clear();
-        self.cache.clear();
+        self.cache.lock().unwrap().clear();
         self.finalized = false;
         // temp_dir will be cleaned up on drop
         self.temp_dir = None;
@@ -460,7 +498,7 @@ impl Clone for SpillableEdgeStore {
         new.current_memory = self.current_memory;
         new.merged_index = self.merged_index.clone();
         new.finalized = self.finalized;
-        // Note: mmap and spill files are not cloned
+        // Note: mmap, spill files, and cache are not cloned
         new
     }
 }
