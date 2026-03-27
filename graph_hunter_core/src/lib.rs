@@ -2,6 +2,7 @@ pub mod analytics;
 pub mod anomaly;
 pub mod benchmark;
 pub mod catalog;
+pub mod cognito;
 pub mod csv_parser;
 pub mod dsl;
 pub mod types;
@@ -31,6 +32,7 @@ pub use analytics::{
 pub use anomaly::{AnomalyScorer, ScoreBreakdown, ScoringWeights, ThreatClass};
 pub use gnn_bridge::{SubgraphFeatures, extract_subgraph_features, extract_batch_features, K_MAX, D_NODE, GNN_INPUT_DIM};
 pub use npu_scorer::scorer::{NpuScorer, NpuError};
+pub use cognito::{CognitoParser, looks_like_cognito};
 pub use csv_parser::CsvParser;
 pub use entity::Entity;
 pub use field_preview::{
