@@ -17,21 +17,53 @@ use crate::types::{ConnectorStatusResponse, SentinelConnectedEvent};
 
 #[derive(Deserialize)]
 pub struct SentinelConnectParams {
+    #[serde(default)]
     pub workspace_id: String,
+    #[serde(default)]
     pub azure_tenant_id: String,
+    #[serde(default)]
     pub azure_client_id: String,
+    #[serde(default)]
     pub azure_client_secret: String,
-    #[serde(default = "default_poll_interval")]
+    #[serde(default)]
     pub poll_interval_secs: u64,
-    #[serde(default = "default_sentinel_tables")]
+    #[serde(default)]
     pub tables: Vec<String>,
-    #[serde(default = "default_batch_size")]
+    #[serde(default)]
     pub batch_size: u32,
 }
 
-fn default_poll_interval() -> u64 { 30 }
-fn default_sentinel_tables() -> Vec<String> { default_tables() }
-fn default_batch_size() -> u32 { 10000 }
+/// Resolves a param value: uses the explicit value if non-empty, otherwise falls back to env var.
+fn env_or(explicit: &str, env_key: &str) -> Result<String, String> {
+    if !explicit.is_empty() {
+        return Ok(explicit.to_string());
+    }
+    std::env::var(env_key).map_err(|_| format!("Missing '{}': not provided and {} not set in .env", env_key, env_key))
+}
+
+fn resolve_poll_interval(explicit: u64) -> u64 {
+    if explicit > 0 { return explicit; }
+    std::env::var("SENTINEL_POLL_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30)
+}
+
+fn resolve_batch_size(explicit: u32) -> u32 {
+    if explicit > 0 { return explicit; }
+    std::env::var("SENTINEL_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10000)
+}
+
+fn resolve_tables(explicit: &[String]) -> Vec<String> {
+    if !explicit.is_empty() { return explicit.to_vec(); }
+    std::env::var("SENTINEL_TABLES")
+        .ok()
+        .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
+        .unwrap_or_else(default_tables)
+}
 
 /// Start real-time Sentinel streaming. Returns immediately with connector info.
 #[tauri::command]
@@ -90,20 +122,25 @@ pub async fn cmd_sentinel_connect(
         });
     }
 
+    // Resolve params: explicit values override .env fallbacks
+    let workspace_id = env_or(&params.workspace_id, "AZURE_WORKSPACE_ID")?;
+    let tenant_id = env_or(&params.azure_tenant_id, "AZURE_TENANT_ID")?;
+    let client_id = env_or(&params.azure_client_id, "AZURE_CLIENT_ID")?;
+    let client_secret = env_or(&params.azure_client_secret, "AZURE_CLIENT_SECRET")?;
+    let poll_interval = resolve_poll_interval(params.poll_interval_secs).max(5);
+    let tables = resolve_tables(&params.tables);
+    let batch_size = resolve_batch_size(params.batch_size).max(100);
+
     let config = SentinelPollingConfig {
-        workspace_id: params.workspace_id,
+        workspace_id,
         auth: SentinelAuth {
-            tenant_id: params.azure_tenant_id,
-            client_id: params.azure_client_id,
-            client_secret: params.azure_client_secret,
+            tenant_id,
+            client_id,
+            client_secret,
         },
-        poll_interval_secs: params.poll_interval_secs.max(5),
-        tables: if params.tables.is_empty() {
-            default_tables()
-        } else {
-            params.tables.clone()
-        },
-        batch_size: params.batch_size.max(100),
+        poll_interval_secs: poll_interval,
+        tables,
+        batch_size,
     };
 
     let transport = Arc::new(HttpSentinelTransport::new());
@@ -221,4 +258,29 @@ pub fn cmd_sentinel_status(
             status: None,
         }),
     }
+}
+
+/// Check which Sentinel env vars are configured (for UI setup panel).
+#[tauri::command]
+pub fn cmd_sentinel_check_env() -> SentinelEnvStatus {
+    SentinelEnvStatus {
+        azure_client_id: std::env::var("AZURE_CLIENT_ID").is_ok(),
+        azure_client_secret: std::env::var("AZURE_CLIENT_SECRET").is_ok(),
+        azure_tenant_id: std::env::var("AZURE_TENANT_ID").is_ok(),
+        azure_subscription_id: std::env::var("AZURE_SUBSCRIPTION_ID").is_ok(),
+        azure_resource_group: std::env::var("AZURE_RESOURCE_GROUP").is_ok(),
+        azure_workspace_id: std::env::var("AZURE_WORKSPACE_ID").is_ok(),
+        azure_workspace_name: std::env::var("AZURE_WORKSPACE_NAME").ok(),
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct SentinelEnvStatus {
+    pub azure_client_id: bool,
+    pub azure_client_secret: bool,
+    pub azure_tenant_id: bool,
+    pub azure_subscription_id: bool,
+    pub azure_resource_group: bool,
+    pub azure_workspace_id: bool,
+    pub azure_workspace_name: Option<String>,
 }
