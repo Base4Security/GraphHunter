@@ -16,7 +16,7 @@ use std::time::Duration;
 use crate::{
     create_note_impl,
     PaginatedHuntResults, Subgraph, SubgraphEdge, SubgraphNode,
-    with_current_graph, with_current_session_and_graph, with_current_graph_mut,
+    with_current_graph, with_current_session_and_graph,
     AppState,
 };
 use graph_hunter_core::{Hypothesis, Neighborhood};
