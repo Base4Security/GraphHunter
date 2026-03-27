@@ -24,6 +24,9 @@ use uuid::Uuid;
 /// Entry point for the Tauri application.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Load .env file (silently ignore if not found)
+    let _ = dotenvy::dotenv();
+
     let api_token = std::env::var("GRAPHHUNTER_API_TOKEN")
         .unwrap_or_else(|_| Uuid::new_v4().to_string());
     eprintln!("GRAPHHUNTER_API_TOKEN={}", api_token);
@@ -143,6 +146,7 @@ pub fn run() {
             commands::sentinel::cmd_sentinel_connect,
             commands::sentinel::cmd_sentinel_disconnect,
             commands::sentinel::cmd_sentinel_status,
+            commands::sentinel::cmd_sentinel_check_env,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Graph Hunter");
