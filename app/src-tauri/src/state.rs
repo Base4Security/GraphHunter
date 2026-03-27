@@ -75,6 +75,8 @@ pub struct AppState {
     pub api_token: String,
     /// GNN model scorer (loaded on demand via cmd_load_gnn_model).
     pub npu_scorer: RwLock<Option<graph_hunter_core::NpuScorer>>,
+    /// Real-time Sentinel connector handle. None = not connected.
+    pub sentinel_connector: RwLock<Option<crate::sentinel_connector::SentinelConnectorHandle>>,
 }
 
 pub fn session_data_dir() -> Result<PathBuf, String> {

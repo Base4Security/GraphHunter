@@ -158,3 +158,33 @@ pub struct ApiTestResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
 }
+
+// ── Sentinel real-time connector events ──
+
+#[derive(Clone, Serialize)]
+pub struct SentinelConnectedEvent {
+    pub connector_id: String,
+    pub tables: Vec<String>,
+    pub poll_interval_secs: u64,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SentinelDataEvent {
+    pub new_entities: usize,
+    pub new_relations: usize,
+    pub timestamp: i64,
+}
+
+#[derive(Clone, Serialize)]
+pub struct SentinelErrorEvent {
+    pub error: String,
+    pub consecutive_errors: u32,
+    pub will_retry: bool,
+}
+
+#[derive(Clone, Serialize)]
+pub struct ConnectorStatusResponse {
+    pub connected: bool,
+    pub connector_id: Option<String>,
+    pub status: Option<crate::sentinel_connector::ConnectorStatus>,
+}

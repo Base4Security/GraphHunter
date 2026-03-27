@@ -21,7 +21,8 @@ memmap2 = "0.9"
 graph_hunter_core = { path = "../../graph_hunter_core", features = ["ml-scoring"] }
 graph_hunter_cli = { path = "../../graph_hunter_cli" }
 reqwest = { version = "0.12", features = ["json", "blocking"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 axum = { version = "0.7", features = ["json"] }
 tower-http = { version = "0.5", features = ["cors"] }
 evtx = { version = "0.11", default-features = false }

@@ -5,6 +5,7 @@ pub mod format_registry;
 pub mod helpers;
 mod http_api;
 pub mod scoring;
+pub mod sentinel_connector;
 pub mod state;
 pub mod types;
 
@@ -37,6 +38,7 @@ pub fn run() {
         ai_conversation: RwLock::new(ai::AiConversation::new()),
         api_token,
         npu_scorer: RwLock::new(None),
+        sentinel_connector: RwLock::new(None),
     });
     let http_port = std::env::var("GRAPHHUNTER_API_PORT")
         .ok()
@@ -137,6 +139,10 @@ pub fn run() {
             commands::analytics::cmd_load_gnn_model,
             commands::analytics::cmd_compute_gnn_scores,
             commands::analytics::cmd_gnn_model_status,
+            // Sentinel real-time connector commands
+            commands::sentinel::cmd_sentinel_connect,
+            commands::sentinel::cmd_sentinel_disconnect,
+            commands::sentinel::cmd_sentinel_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Graph Hunter");
