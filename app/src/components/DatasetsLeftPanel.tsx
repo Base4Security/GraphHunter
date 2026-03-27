@@ -35,6 +35,11 @@ import type {
   IngestJobStarted,
   IngestCompleteEvent,
   IngestErrorEvent,
+  SentinelConnectedEvent,
+  SentinelDataEvent,
+  SentinelErrorEvent,
+  ConnectorStatusResponse,
+  SentinelEnvStatus,
 } from "../types";
 import { ENTITY_TYPES } from "../types";
 import FieldSelector from "./FieldSelector";
@@ -79,6 +84,18 @@ export default function DatasetsLeftPanel({
   const [elasticApiKey, setElasticApiKey] = useState("");
   const [elasticUser, setElasticUser] = useState("");
   const [elasticPassword, setElasticPassword] = useState("");
+
+  const [azureSubscriptionId, setAzureSubscriptionId] = useState("");
+  const [azureResourceGroup, setAzureResourceGroup] = useState("");
+  const [azureWorkspaceName, setAzureWorkspaceName] = useState("");
+
+  // Sentinel real-time state
+  const [sentinelStreaming, setSentinelStreaming] = useState(false);
+  const [, setSentinelConnectorId] = useState<string | null>(null);
+  const [sentinelStatus, setSentinelStatus] = useState<string>("disconnected");
+  const [sentinelLiveStats, setSentinelLiveStats] = useState<{ entities: number; relations: number }>({ entities: 0, relations: 0 });
+  const [sentinelPollInterval, setSentinelPollInterval] = useState(30);
+  const sentinelUnlistenRef = useRef<(() => void) | null>(null);
 
   const [ingestProgress, setIngestProgress] = useState<{
     processed: number;
@@ -236,6 +253,121 @@ export default function DatasetsLeftPanel({
       cancelled = true;
     };
   }, [currentSessionId, showDatasets, stats.entity_count, stats.relation_count]);
+
+  // Auto-load Sentinel credentials from .env on mount
+  useEffect(() => {
+    if (!isTauri()) return;
+    invoke<SentinelEnvStatus>("cmd_sentinel_check_env").then((env) => {
+      if (env.azure_workspace_name) setAzureWorkspaceName(env.azure_workspace_name);
+      // Fields are loaded from .env server-side; show placeholder hints
+    }).catch(() => {});
+    // Check if connector is already running
+    invoke<ConnectorStatusResponse>("cmd_sentinel_status").then((st) => {
+      if (st.connected) {
+        setSentinelStreaming(true);
+        setSentinelConnectorId(st.connector_id);
+        setSentinelStatus(st.status?.state ?? "connected");
+      }
+    }).catch(() => {});
+  }, []);
+
+  // Sentinel real-time event listeners
+  useEffect(() => {
+    if (!sentinelStreaming || !isTauri()) return;
+    let unData: (() => void) | null = null;
+    let unError: (() => void) | null = null;
+    let unDisconnected: (() => void) | null = null;
+
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      unData = await listen<SentinelDataEvent>("sentinel-data", (event) => {
+        const d = event.payload;
+        setSentinelLiveStats((prev) => ({
+          entities: prev.entities + d.new_entities,
+          relations: prev.relations + d.new_relations,
+        }));
+        setSentinelStatus("connected");
+        onStatsUpdate({
+          entity_count: stats.entity_count + d.new_entities,
+          relation_count: stats.relation_count + d.new_relations,
+        });
+      });
+
+      unError = await listen<SentinelErrorEvent>("sentinel-error", (event) => {
+        const e = event.payload;
+        setSentinelStatus("error");
+        onLog({ time: now(), message: `Sentinel: ${e.error}`, level: "error" });
+        if (!e.will_retry) {
+          setSentinelStreaming(false);
+          setSentinelConnectorId(null);
+        }
+      });
+
+      unDisconnected = await listen("sentinel-disconnected", () => {
+        setSentinelStreaming(false);
+        setSentinelConnectorId(null);
+        setSentinelStatus("disconnected");
+        setSentinelLiveStats({ entities: 0, relations: 0 });
+        onLog({ time: now(), message: "Sentinel: Disconnected", level: "info" });
+      });
+
+      sentinelUnlistenRef.current = () => {
+        unData?.();
+        unError?.();
+        unDisconnected?.();
+      };
+    })();
+
+    return () => {
+      sentinelUnlistenRef.current?.();
+      sentinelUnlistenRef.current = null;
+    };
+  }, [sentinelStreaming]);
+
+  async function startSentinelStream() {
+    try {
+      setLoading(true);
+      const result = await invoke<SentinelConnectedEvent>("cmd_sentinel_connect", {
+        params: {
+          workspace_id: siemWorkspaceId.trim(),
+          azure_tenant_id: azureTenantId.trim(),
+          azure_client_id: azureClientId.trim(),
+          azure_client_secret: azureClientSecret.trim(),
+          poll_interval_secs: sentinelPollInterval,
+          tables: [],
+          batch_size: 0,
+        },
+      });
+      setSentinelStreaming(true);
+      setSentinelConnectorId(result.connector_id);
+      setSentinelStatus("connected");
+      setSentinelLiveStats({ entities: 0, relations: 0 });
+      onLog({
+        time: now(),
+        message: `Sentinel: Connected (polling every ${result.poll_interval_secs}s, ${result.tables.length} tables)`,
+        level: "info",
+      });
+    } catch (e: any) {
+      onLog({ time: now(), message: `Sentinel connect failed: ${e}`, level: "error" });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function stopSentinelStream() {
+    try {
+      setLoading(true);
+      await invoke("cmd_sentinel_disconnect");
+      setSentinelStreaming(false);
+      setSentinelConnectorId(null);
+      setSentinelStatus("disconnected");
+      onLog({ time: now(), message: "Sentinel: Disconnected, full scoring completed", level: "info" });
+    } catch (e: any) {
+      onLog({ time: now(), message: `Sentinel disconnect failed: ${e}`, level: "error" });
+    } finally {
+      setLoading(false);
+    }
+  }
 
   async function pickFile() {
     if (isTauri()) {
@@ -996,42 +1128,128 @@ export default function DatasetsLeftPanel({
             )}
             {ingestSource === "sentinel" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Azure Tenant ID (GUID)</label>
+                <div style={{ fontSize: 10, color: "var(--text-muted)", fontStyle: "italic" }}>
+                  Leave fields empty to use .env file values
+                </div>
+                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Azure Tenant ID</label>
                 <input
                   type="text"
                   value={azureTenantId}
                   onChange={(e) => setAzureTenantId(e.target.value)}
-                  placeholder="AZURE_TENANT_ID"
+                  placeholder="AZURE_TENANT_ID (from .env)"
                   style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
                 />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Azure Client ID (App registration)</label>
+                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Client ID (App Registration)</label>
                 <input
                   type="text"
                   value={azureClientId}
                   onChange={(e) => setAzureClientId(e.target.value)}
-                  placeholder="AZURE_CLIENT_ID"
+                  placeholder="AZURE_CLIENT_ID (from .env)"
                   style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
                 />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Azure Client Secret</label>
+                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Client Secret</label>
                 <input
                   type="password"
                   value={azureClientSecret}
                   onChange={(e) => setAzureClientSecret(e.target.value)}
-                  placeholder="AZURE_CLIENT_SECRET"
+                  placeholder="AZURE_CLIENT_SECRET (from .env)"
                   style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
                 />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Workspace ID (Log Analytics)</label>
+                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Subscription ID</label>
+                <input
+                  type="text"
+                  value={azureSubscriptionId}
+                  onChange={(e) => setAzureSubscriptionId(e.target.value)}
+                  placeholder="AZURE_SUBSCRIPTION_ID (from .env)"
+                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
+                />
+                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Resource Group</label>
+                <input
+                  type="text"
+                  value={azureResourceGroup}
+                  onChange={(e) => setAzureResourceGroup(e.target.value)}
+                  placeholder="AZURE_RESOURCE_GROUP (from .env)"
+                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
+                />
+                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Workspace ID (Log Analytics GUID)</label>
                 <input
                   type="text"
                   value={siemWorkspaceId}
                   onChange={(e) => setSiemWorkspaceId(e.target.value)}
-                  placeholder="Log Analytics workspace GUID"
+                  placeholder="AZURE_WORKSPACE_ID (from .env)"
                   style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
                 />
-                <button className="btn btn-primary" onClick={loadDataSIEM} disabled={loading}>
+                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Workspace Name</label>
+                <input
+                  type="text"
+                  value={azureWorkspaceName}
+                  onChange={(e) => setAzureWorkspaceName(e.target.value)}
+                  placeholder="AZURE_WORKSPACE_NAME (from .env)"
+                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
+                />
+
+                {/* One-shot ingest */}
+                <button className="btn btn-primary" onClick={loadDataSIEM} disabled={loading || sentinelStreaming}>
                   <Upload size={14} />
-                  {loading ? "Connecting…" : "Connect and ingest"}
+                  {loading ? "Connecting..." : "One-shot query"}
                 </button>
+
+                {/* Real-time streaming */}
+                <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, marginTop: 4 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-primary)", marginBottom: 6 }}>
+                    Real-Time Streaming
+                  </div>
+                  <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Poll interval (seconds)</label>
+                  <input
+                    type="number"
+                    value={sentinelPollInterval}
+                    onChange={(e) => setSentinelPollInterval(Math.max(5, parseInt(e.target.value, 10) || 30))}
+                    min={5}
+                    max={300}
+                    disabled={sentinelStreaming}
+                    style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4, marginBottom: 6 }}
+                  />
+                  {!sentinelStreaming ? (
+                    <button
+                      className="btn btn-primary"
+                      onClick={startSentinelStream}
+                      disabled={loading}
+                      style={{ width: "100%", background: "#22c55e", borderColor: "#16a34a" }}
+                    >
+                      <Database size={14} />
+                      {loading ? "Connecting..." : "Start Real-Time Stream"}
+                    </button>
+                  ) : (
+                    <button
+                      className="btn btn-primary"
+                      onClick={stopSentinelStream}
+                      disabled={loading}
+                      style={{ width: "100%", background: "#ef4444", borderColor: "#dc2626" }}
+                    >
+                      <X size={14} />
+                      {loading ? "Stopping..." : "Stop Stream"}
+                    </button>
+                  )}
+                  {sentinelStreaming && (
+                    <div style={{ marginTop: 8, padding: "8px 10px", background: "var(--bg-tertiary)", borderRadius: 6, fontSize: 11 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                        <span style={{
+                          width: 8, height: 8, borderRadius: "50%",
+                          background: sentinelStatus === "connected" || sentinelStatus === "Polling" ? "#22c55e"
+                            : sentinelStatus === "error" ? "#ef4444" : "#eab308",
+                          display: "inline-block",
+                          animation: sentinelStatus === "Polling" ? "pulse 1s infinite" : undefined,
+                        }} />
+                        <span style={{ color: "var(--text-primary)", fontWeight: 500 }}>
+                          {sentinelStatus === "Polling" ? "Polling..." : sentinelStatus === "Connected" || sentinelStatus === "connected" ? "Connected" : sentinelStatus}
+                        </span>
+                      </div>
+                      <div style={{ color: "var(--text-muted)" }}>
+                        +{sentinelLiveStats.entities.toLocaleString()} entities, +{sentinelLiveStats.relations.toLocaleString()} relations
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
             {ingestSource === "elastic" && (

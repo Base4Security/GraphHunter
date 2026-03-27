@@ -347,6 +347,49 @@ export interface CompactionStats {
   groups_compacted: number;
 }
 
+// ── Sentinel Real-Time Connector ──
+
+export interface SentinelConnectedEvent {
+  connector_id: string;
+  tables: string[];
+  poll_interval_secs: number;
+}
+
+export interface SentinelDataEvent {
+  new_entities: number;
+  new_relations: number;
+  timestamp: number;
+}
+
+export interface SentinelErrorEvent {
+  error: string;
+  consecutive_errors: number;
+  will_retry: boolean;
+}
+
+export interface ConnectorStatusResponse {
+  connected: boolean;
+  connector_id: string | null;
+  status: {
+    state: string;
+    last_data_at?: string;
+    total_entities?: number;
+    total_relations?: number;
+    message?: string;
+    consecutive?: number;
+  } | null;
+}
+
+export interface SentinelEnvStatus {
+  azure_client_id: boolean;
+  azure_client_secret: boolean;
+  azure_tenant_id: boolean;
+  azure_subscription_id: boolean;
+  azure_resource_group: boolean;
+  azure_workspace_id: boolean;
+  azure_workspace_name: string | null;
+}
+
 // ── Temporal heatmap ──
 
 export interface HeatmapRow {
