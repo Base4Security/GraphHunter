@@ -15,6 +15,7 @@ pub struct SentinelQueryResult {
 }
 
 /// Optional Azure AD credentials. When provided, used instead of env vars.
+#[derive(Clone)]
 pub struct SentinelAuth {
     pub tenant_id: String,
     pub client_id: String,

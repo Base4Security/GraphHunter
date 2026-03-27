@@ -40,3 +40,11 @@ pub fn run_scoring_adaptive(graph: &mut GraphHunter) {
     graph.finalize_anomaly_scorer();
     eprintln!("SCORING: complete");
 }
+
+/// Lightweight scoring for real-time incremental updates.
+/// Only recomputes degree centrality (O(n), always fast) and composite score.
+/// Full PageRank/betweenness are deferred until explicit request or disconnect.
+pub fn run_scoring_incremental(graph: &mut GraphHunter) {
+    graph.compute_scores();
+    graph.compute_composite_score(1.0, 1.0, 1.0);
+}
