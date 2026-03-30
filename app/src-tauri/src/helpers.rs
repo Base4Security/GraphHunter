@@ -1,6 +1,7 @@
 use graph_hunter_core::{EntityType, GraphHunter, NeighborhoodFilter};
 use uuid::Uuid;
 
+use crate::error::CommandError;
 use crate::state::{AppState, Note, SessionState};
 use crate::types::ExpandFilter;
 
@@ -141,57 +142,76 @@ pub fn to_core_filter(f: &ExpandFilter) -> NeighborhoodFilter {
     }
 }
 
-/// Helper: run a closure with the current session and its graph (both read).
-pub fn with_current_session_and_graph<T, F>(state: &AppState, f: F) -> Result<T, String>
+/// Helper: run a closure with the current session (no graph lock).
+pub fn with_current_session<T, F>(state: &AppState, f: F) -> Result<T, CommandError>
 where
-    F: FnOnce(&SessionState, &GraphHunter) -> Result<T, String>,
+    F: FnOnce(&SessionState) -> Result<T, CommandError>,
 {
     let current_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone();
-    let id = current_id.as_ref().ok_or("No session selected")?;
+    let id = current_id.as_ref().ok_or_else(|| CommandError::SessionNotFound("No session selected".into()))?;
     let sessions = state
         .sessions
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
-    let session = sessions.get(id).ok_or("Session not found")?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+    let session = sessions.get(id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?;
+    f(session)
+}
+
+/// Helper: run a closure with the current session and its graph (both read).
+pub fn with_current_session_and_graph<T, F>(state: &AppState, f: F) -> Result<T, CommandError>
+where
+    F: FnOnce(&SessionState, &GraphHunter) -> Result<T, CommandError>,
+{
+    let current_id = state
+        .current_session_id
+        .read()
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
+        .clone();
+    let id = current_id.as_ref().ok_or_else(|| CommandError::SessionNotFound("No session selected".into()))?;
+    let sessions = state
+        .sessions
+        .read()
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+    let session = sessions.get(id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?;
     let graph = session
         .graph
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
     f(session, &graph)
 }
 
 /// Helper: run a closure with a read guard on the current session's graph.
-pub fn with_current_graph<T, F>(state: &AppState, f: F) -> Result<T, String>
+pub fn with_current_graph<T, F>(state: &AppState, f: F) -> Result<T, CommandError>
 where
-    F: FnOnce(&GraphHunter) -> Result<T, String>,
+    F: FnOnce(&GraphHunter) -> Result<T, CommandError>,
 {
     with_current_session_and_graph(state, |_, graph| f(graph))
 }
 
 /// Helper: run a closure with a write guard on the current session's graph.
-pub fn with_current_graph_mut<T, F>(state: &AppState, f: F) -> Result<T, String>
+pub fn with_current_graph_mut<T, F>(state: &AppState, f: F) -> Result<T, CommandError>
 where
-    F: FnOnce(&mut GraphHunter) -> Result<T, String>,
+    F: FnOnce(&mut GraphHunter) -> Result<T, CommandError>,
 {
     let current_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone();
-    let id = current_id.as_ref().ok_or("No session selected")?;
+    let id = current_id.as_ref().ok_or_else(|| CommandError::SessionNotFound("No session selected".into()))?;
     let sessions = state
         .sessions
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
-    let session = sessions.get(id).ok_or("Session not found")?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+    let session = sessions.get(id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?;
     let mut graph = session
         .graph
         .write()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
     f(&mut graph)
 }
 
@@ -200,21 +220,21 @@ pub fn create_note_impl(
     state: &AppState,
     content: String,
     node_id: Option<String>,
-) -> Result<Note, String> {
+) -> Result<Note, CommandError> {
     let current_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone();
-    let id = current_id.as_ref().ok_or("No session selected")?;
+    let id = current_id.as_ref().ok_or_else(|| CommandError::SessionNotFound("No session selected".into()))?;
     let sessions = state
         .sessions
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
-    let session = sessions.get(id).ok_or("Session not found")?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+    let session = sessions.get(id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?;
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| CommandError::Internal(e.to_string()))?
         .as_secs() as i64;
     let note = Note {
         id: Uuid::new_v4().to_string(),
@@ -225,7 +245,7 @@ pub fn create_note_impl(
     let mut notes = session
         .notes
         .write()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
     notes.push(note.clone());
     Ok(note)
 }
