@@ -350,9 +350,11 @@ pub fn cmd_load_data_with_config(
     with_current_graph_mut(state.as_ref(), |graph| {
         let (new_entities, new_relations) = if use_evtx {
             graph.ingest_logs(&contents, &GenericParser, None)
+                .map_err(|e| e.to_string())?
         } else {
             let parser = ConfigurableParser::new(config);
             graph.ingest_logs(&contents, &parser, None)
+                .map_err(|e| e.to_string())?
         };
         run_full_scoring(graph);
 

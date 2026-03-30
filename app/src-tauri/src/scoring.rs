@@ -11,9 +11,9 @@ pub fn run_full_scoring(graph: &mut GraphHunter) {
 }
 
 /// Adaptive scoring: skips expensive betweenness for large graphs.
-pub fn run_scoring_adaptive(graph: &mut GraphHunter) {
+pub fn run_scoring_adaptive(graph: &mut GraphHunter) -> Result<(), String> {
     // Sort edges once so searches can use &self (read lock) instead of &mut self
-    graph.sort_edges_by_timestamp();
+    graph.sort_edges_by_timestamp().map_err(|e| e.to_string())?;
 
     let n = graph.entity_count();
     let m = graph.relation_count();
@@ -39,6 +39,7 @@ pub fn run_scoring_adaptive(graph: &mut GraphHunter) {
     graph.compute_composite_score(1.0, 1.0, 1.0);
     graph.finalize_anomaly_scorer();
     eprintln!("SCORING: complete");
+    Ok(())
 }
 
 /// Lightweight scoring for real-time incremental updates.

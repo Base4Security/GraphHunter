@@ -134,7 +134,7 @@ impl GraphHunter {
             .entry(dst_sid)
             .or_default()
             .push(src_sid);
-        self.edge_store.push(compact);
+        self.edge_store.push(compact)?;
         self.edges_sorted = false;
         Ok(())
     }
@@ -304,12 +304,13 @@ impl GraphHunter {
     /// Sorts all edge lists by timestamp so binary search can skip temporally invalid edges.
     /// Call once after ingestion completes. Subsequent calls are no-ops.
     /// Now delegates to `edge_store.finalize()` which sorts by (source_sid, timestamp).
-    pub fn sort_edges_by_timestamp(&mut self) {
+    pub fn sort_edges_by_timestamp(&mut self) -> Result<(), GraphError> {
         if self.edges_sorted {
-            return;
+            return Ok(());
         }
-        self.edge_store.finalize();
+        self.edge_store.finalize()?;
         self.edges_sorted = true;
+        Ok(())
     }
 
     /// Ensures edges are sorted. Called internally before searches.
@@ -823,7 +824,7 @@ impl GraphHunter {
         logs: &str,
         parser: &P,
         dataset_id: Option<String>,
-    ) -> (usize, usize) {
+    ) -> Result<(usize, usize), GraphError> {
         self.ingest_logs_with_policy(logs, parser, dataset_id, &MergePolicy::default())
     }
 
@@ -834,7 +835,7 @@ impl GraphHunter {
         parser: &P,
         dataset_id: Option<String>,
         merge_policy: &MergePolicy,
-    ) -> (usize, usize) {
+    ) -> Result<(usize, usize), GraphError> {
         let triples = parser.parse(logs);
         let mut new_entities = 0usize;
         let mut new_relations = 0usize;
@@ -893,15 +894,15 @@ impl GraphHunter {
                 .entry(dst_sid)
                 .or_default()
                 .push(src_sid);
-            self.edge_store.push(compact);
+            self.edge_store.push(compact)?;
             new_relations += 1;
         }
 
-        (new_entities, new_relations)
+        Ok((new_entities, new_relations))
     }
 
     /// Removes all entities and relations that belong to the given dataset.
-    pub fn remove_entities_and_relations_by_dataset(&mut self, dataset_id: &str) -> (usize, usize) {
+    pub fn remove_entities_and_relations_by_dataset(&mut self, dataset_id: &str) -> Result<(usize, usize), GraphError> {
         let to_remove: Vec<StrId> = self
             .entities
             .iter()
@@ -923,9 +924,9 @@ impl GraphHunter {
 
         self.edge_store.clear();
         for c in &kept {
-            self.edge_store.push(*c);
+            self.edge_store.push(*c)?;
         }
-        self.edge_store.finalize();
+        self.edge_store.finalize()?;
 
         // Rebuild reverse_adj
         self.reverse_adj.clear();
@@ -952,7 +953,7 @@ impl GraphHunter {
         }
 
         self.edges_sorted = true; // finalize() sorted them
-        (entities_removed, relations_removed)
+        Ok((entities_removed, relations_removed))
     }
 
     /// Renames entity types in a dataset.
@@ -1168,7 +1169,7 @@ impl GraphHunter {
         dataset_id: Option<String>,
         chunk_size: usize,
         mut on_progress: F,
-    ) -> (usize, usize)
+    ) -> Result<(usize, usize), GraphError>
     where
         P: crate::parser::LogParser,
         F: FnMut(usize, usize, usize, usize),
@@ -1229,7 +1230,7 @@ impl GraphHunter {
                 .entry(dst_sid)
                 .or_default()
                 .push(src_sid);
-            self.edge_store.push(compact);
+            self.edge_store.push(compact)?;
             new_relations += 1;
 
             if (i + 1) % chunk_size == 0 || i + 1 == total {
@@ -1237,7 +1238,7 @@ impl GraphHunter {
             }
         }
 
-        (new_entities, new_relations)
+        Ok((new_entities, new_relations))
     }
 
     /// Inserts pre-parsed triples directly (streaming ingestion).
@@ -1245,7 +1246,7 @@ impl GraphHunter {
         &mut self,
         triples: Vec<crate::parser::ParsedTriple>,
         dataset_id: Option<&str>,
-    ) -> (usize, usize) {
+    ) -> Result<(usize, usize), GraphError> {
         let merge_policy = MergePolicy::default();
         let mut new_entities = 0usize;
         let mut new_relations = 0usize;
@@ -1300,11 +1301,11 @@ impl GraphHunter {
                 .entry(dst_sid)
                 .or_default()
                 .push(src_sid);
-            self.edge_store.push(compact);
+            self.edge_store.push(compact)?;
             new_relations += 1;
         }
 
-        (new_entities, new_relations)
+        Ok((new_entities, new_relations))
     }
 
     /// Enables anomaly scoring with backfilling from existing data.
@@ -1424,7 +1425,7 @@ impl GraphHunter {
     }
 
     /// Compacts old edges before cutoff into summary edges.
-    pub fn compact_before(&mut self, cutoff: i64) -> CompactionStats {
+    pub fn compact_before(&mut self, cutoff: i64) -> Result<CompactionStats, GraphError> {
         let mut edges_before = 0usize;
         let mut edges_removed = 0usize;
         let mut groups_compacted = 0usize;
@@ -1487,9 +1488,9 @@ impl GraphHunter {
                 .entry(dst_sid)
                 .or_default()
                 .push(src_sid);
-            self.edge_store.push(compact);
+            self.edge_store.push(compact)?;
         }
-        self.edge_store.finalize();
+        self.edge_store.finalize()?;
 
         for v in self.reverse_adj.values_mut() {
             v.sort_unstable();
@@ -1501,12 +1502,12 @@ impl GraphHunter {
         }
 
         self.edges_sorted = true; // finalize() sorted them
-        CompactionStats {
+        Ok(CompactionStats {
             edges_before,
             edges_after: edges_before - edges_removed,
             edges_removed,
             groups_compacted,
-        }
+        })
     }
 }
 
