@@ -3,6 +3,7 @@ pub mod anomaly;
 pub mod benchmark;
 pub mod catalog;
 pub mod cognito;
+pub mod config;
 pub mod csv_parser;
 pub mod dsl;
 pub mod types;

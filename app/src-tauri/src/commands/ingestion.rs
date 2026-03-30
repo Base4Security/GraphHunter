@@ -21,6 +21,33 @@ use crate::types::{
     LoadResult, PreviewIngestResult,
 };
 
+/// File size (bytes) above which only a preview sample is read for format detection.
+const LARGE_FILE_THRESHOLD: u64 = 10 * 1024 * 1024;
+
+/// Number of bytes read from a large file for format-detection preview.
+const PREVIEW_READ_SIZE: usize = 64 * 1024;
+
+/// Number of EVTX records to convert for preview sampling.
+const EVTX_PREVIEW_SAMPLE_SIZE: usize = 1000;
+
+/// Number of lines per batch during streaming line-based ingestion.
+const BATCH_LINES: usize = 50_000;
+
+/// Read-buffer capacity for streaming ingestion (8 MB).
+const BUF_CAPACITY: usize = 8 * 1024 * 1024;
+
+/// Size of the peek buffer used for format detection at the start of a file.
+const PEEK_BUF_SIZE: usize = 8192;
+
+/// Maximum entities pre-allocated based on file size heuristics.
+const MAX_PREALLOC_ENTITIES: usize = 2_000_000;
+
+/// Maximum relations pre-allocated based on file size heuristics.
+const MAX_PREALLOC_RELATIONS: usize = 4_000_000;
+
+/// Available physical memory (MB) below which ingestion stops to prevent a crash.
+const CRITICAL_MEMORY_MB: u64 = 256;
+
 /// Preview ingestion: detect format and proposed field -> entity type mapping (no ingest).
 #[tauri::command]
 pub fn cmd_preview_ingest(path: String, format: String) -> Result<PreviewIngestResult, CommandError> {
@@ -28,16 +55,14 @@ pub fn cmd_preview_ingest(path: String, format: String) -> Result<PreviewIngestR
         || path_is_evtx(&path)
         || (format.to_lowercase() == "auto" && file_looks_like_evtx(&path));
     let (contents, resolved) = if use_evtx {
-        let contents = evtx_preview_sample(&path, 1000).map_err(|e| CommandError::IoError(e))?;
+        let contents = evtx_preview_sample(&path, EVTX_PREVIEW_SAMPLE_SIZE).map_err(|e| CommandError::IoError(e))?;
         (contents, "sysmon".to_string())
     } else {
-        // For large files, only read a preview sample (first 64KB) for format detection
         let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let contents = if file_size > 10 * 1024 * 1024 {
-            // Large file: read only first 64KB for preview
+        let contents = if file_size > LARGE_FILE_THRESHOLD {
             let mut file = std::fs::File::open(&path)
                 .map_err(|e| CommandError::IoError(format!("Failed to open file '{}': {}", path, e)))?;
-            let mut buf = vec![0u8; 64 * 1024];
+            let mut buf = vec![0u8; PREVIEW_READ_SIZE];
             let n = std::io::Read::read(&mut file, &mut buf)
                 .map_err(|e| CommandError::IoError(format!("Failed to read file '{}': {}", path, e)))?;
             String::from_utf8_lossy(&buf[..n]).to_string()
@@ -428,8 +453,6 @@ pub async fn cmd_load_data_streaming(
         let panic_dataset_id = bg_dataset_id.clone();
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        const BATCH_LINES: usize = 50_000;
-        const BUF_CAPACITY: usize = 8 * 1024 * 1024; // 8 MB
         const MAX_INGEST_LINES: usize = usize::MAX;
 
         // Date range filter: for line-based formats (IIS, CSV), lines starting with
@@ -537,7 +560,7 @@ pub async fn cmd_load_data_streaming(
         // 3. Read first 8KB for format detection
         let mut reader = BufReader::with_capacity(BUF_CAPACITY, file);
         let peek_buf = {
-            let mut peek_bytes = [0u8; 8192];
+            let mut peek_bytes = [0u8; PEEK_BUF_SIZE];
             let n = std::io::Read::read(&mut reader, &mut peek_bytes).unwrap_or(0);
             String::from_utf8_lossy(&peek_bytes[..n]).to_string()
         };
@@ -572,8 +595,8 @@ pub async fn cmd_load_data_streaming(
 
         // Pre-allocate graph capacity based on file size heuristics (capped to avoid OOM)
         {
-            let estimated_entities = ((bytes_total / 400) as usize).min(2_000_000);
-            let estimated_relations = ((bytes_total / 200) as usize).min(4_000_000);
+            let estimated_entities = ((bytes_total / 400) as usize).min(MAX_PREALLOC_ENTITIES);
+            let estimated_relations = ((bytes_total / 200) as usize).min(MAX_PREALLOC_RELATIONS);
             if let Ok(mut graph) = bg_session.graph.write() {
                 graph.reserve(estimated_entities, estimated_relations);
             }
@@ -753,7 +776,7 @@ pub async fn cmd_load_data_streaming(
                                     (*p).dw_length = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
                                     if GlobalMemoryStatusEx(p) != 0 {
                                         let avail_mb = (*p).ull_avail_phys / (1024 * 1024);
-                                        if avail_mb < 256 {
+                                        if avail_mb < CRITICAL_MEMORY_MB {
                                             tracing::warn!("INGEST: Critically low memory ({} MB free), stopping to prevent crash", avail_mb);
                                             stopped_early = true;
                                             break;
