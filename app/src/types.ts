@@ -206,6 +206,30 @@ export interface Neighborhood {
   truncated: boolean;
 }
 
+export interface GroupedNeighborEdge {
+  source: string;
+  target: string;
+  rel_type: string;
+  count: number;
+  first_ts: number;
+  last_ts: number;
+}
+
+export interface GroupedNeighborhood {
+  center: string;
+  nodes: NeighborNode[];
+  edges: GroupedNeighborEdge[];
+  truncated: boolean;
+  total_edge_count: number;
+}
+
+export interface PaginatedEvents {
+  events: SubgraphEdge[];
+  total_count: number;
+  page: number;
+  page_size: number;
+}
+
 export interface NeighborSummary {
   id: string;
   entity_type: string;

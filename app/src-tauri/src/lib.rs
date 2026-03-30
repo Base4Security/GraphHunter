@@ -139,6 +139,8 @@ pub fn run() {
             commands::graph_ops::cmd_get_graph_summary,
             commands::graph_ops::cmd_compute_scores,
             commands::graph_ops::cmd_get_events_for_node,
+            commands::graph_ops::cmd_get_events_paginated,
+            commands::graph_ops::cmd_expand_node_grouped,
             // DSL commands
             commands::dsl::cmd_parse_dsl,
             commands::dsl::cmd_get_catalog,
