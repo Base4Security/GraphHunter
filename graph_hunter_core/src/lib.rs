@@ -26,7 +26,8 @@ pub mod sysmon;
 
 // Re-export core types at crate root for ergonomic imports.
 pub use analytics::{
-    GraphSummary, Neighborhood, NeighborhoodFilter, NeighborNode, NeighborEdge,
+    GraphSummary, GroupedNeighborEdge, GroupedNeighborhood, Neighborhood,
+    NeighborhoodFilter, NeighborNode, NeighborEdge,
     NodeDetails, ScoredPath, SearchResult, TopAnomaly, TypeDistribution,
 };
 pub use anomaly::{AnomalyScorer, ScoreBreakdown, ScoringWeights, ThreatClass};

@@ -150,6 +150,70 @@ pub fn cmd_get_events_for_node(state: State<Arc<AppState>>, node_id: String) -> 
     })
 }
 
+/// Returns paginated events for a node, avoiding sending all events at once.
+#[tauri::command]
+pub fn cmd_get_events_paginated(
+    state: State<Arc<AppState>>,
+    node_id: String,
+    page: usize,
+    page_size: Option<usize>,
+    sort_by: Option<String>,
+) -> Result<crate::types::PaginatedEvents, String> {
+    with_current_graph(state.as_ref(), |graph| {
+        let page_size = page_size.unwrap_or(100);
+
+        // Collect all events for this node (outgoing + incoming)
+        let mut all_edges: Vec<SubgraphEdge> = Vec::new();
+
+        for compact in graph.get_compact_relations(&node_id) {
+            all_edges.push(SubgraphEdge {
+                source: graph.interner.resolve(compact.source_sid).to_string(),
+                target: graph.interner.resolve(compact.dest_sid).to_string(),
+                rel_type: format!("{}", compact.rel_type()),
+                timestamp: compact.timestamp,
+                metadata: graph.meta_store.get(compact.metadata_offset),
+                dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
+            });
+        }
+
+        let target_sid = graph.interner.get(&node_id);
+        for &source_sid in graph.get_reverse_source_sids(&node_id) {
+            for compact in graph.get_relations_by_sid(source_sid) {
+                if Some(compact.dest_sid) == target_sid {
+                    all_edges.push(SubgraphEdge {
+                        source: graph.interner.resolve(compact.source_sid).to_string(),
+                        target: graph.interner.resolve(compact.dest_sid).to_string(),
+                        rel_type: format!("{}", compact.rel_type()),
+                        timestamp: compact.timestamp,
+                        metadata: graph.meta_store.get(compact.metadata_offset),
+                        dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
+                    });
+                }
+            }
+        }
+
+        // Sort
+        match sort_by.as_deref() {
+            Some("rel_type") => all_edges.sort_by(|a, b| a.rel_type.cmp(&b.rel_type)),
+            Some("source") => all_edges.sort_by(|a, b| a.source.cmp(&b.source)),
+            Some("target") => all_edges.sort_by(|a, b| a.target.cmp(&b.target)),
+            _ => all_edges.sort_by_key(|e| e.timestamp),
+        }
+
+        let total_count = all_edges.len();
+        let start = (page * page_size).min(total_count);
+        let end = (start + page_size).min(total_count);
+        let events = all_edges[start..end].to_vec();
+
+        Ok(crate::types::PaginatedEvents {
+            events,
+            total_count,
+            page,
+            page_size,
+        })
+    })
+}
+
 /// Returns the complete subgraph (nodes + edges) for the given entity IDs.
 #[tauri::command]
 pub fn cmd_get_subgraph(state: State<Arc<AppState>>, node_ids: Vec<String>) -> Result<Subgraph, String> {
@@ -281,6 +345,29 @@ pub fn cmd_expand_node(
         }
 
         Ok(hood)
+    })
+}
+
+/// Expands a node's neighborhood with grouped edges (for high-degree nodes).
+/// Collapses parallel edges into summary entries with count and time range.
+#[tauri::command]
+pub fn cmd_expand_node_grouped(
+    state: State<Arc<AppState>>,
+    node_id: String,
+    max_hops: Option<usize>,
+    max_nodes: Option<usize>,
+    filter: Option<ExpandFilter>,
+) -> Result<graph_hunter_core::GroupedNeighborhood, String> {
+    with_current_graph(state.as_ref(), |graph| {
+        let core_filter = filter.as_ref().map(to_core_filter);
+        graph
+            .get_neighborhood_grouped(
+                &node_id,
+                max_hops.unwrap_or(1),
+                max_nodes.unwrap_or(50),
+                core_filter.as_ref(),
+            )
+            .ok_or_else(|| format!("Entity not found: {}", node_id))
     })
 }
 
