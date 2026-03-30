@@ -43,6 +43,28 @@ pub struct Neighborhood {
     pub truncated: bool,
 }
 
+/// A grouped edge that collapses N edges of the same (source, target, rel_type)
+/// into a single summary with count and time range.
+#[derive(Serialize, Clone, Debug)]
+pub struct GroupedNeighborEdge {
+    pub source: String,
+    pub target: String,
+    pub rel_type: String,
+    pub count: usize,
+    pub first_ts: i64,
+    pub last_ts: i64,
+}
+
+/// Neighborhood with grouped edges for high-degree nodes.
+#[derive(Serialize, Clone, Debug)]
+pub struct GroupedNeighborhood {
+    pub center: String,
+    pub nodes: Vec<NeighborNode>,
+    pub edges: Vec<GroupedNeighborEdge>,
+    pub truncated: bool,
+    pub total_edge_count: usize,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct SearchResult {
     pub id: String,
@@ -316,6 +338,53 @@ impl GraphHunter {
             nodes,
             edges,
             truncated,
+        })
+    }
+
+    /// BFS-based neighborhood with grouped edges.
+    /// Collapses N edges of the same (source, target, rel_type) into a single
+    /// summary edge with count and time range. Useful for high-degree nodes.
+    pub fn get_neighborhood_grouped(
+        &self,
+        center: &str,
+        max_hops: usize,
+        max_nodes: usize,
+        filter: Option<&NeighborhoodFilter>,
+    ) -> Option<GroupedNeighborhood> {
+        let neighborhood = self.get_neighborhood(center, max_hops, max_nodes, filter)?;
+
+        // Group edges by (source, target, rel_type)
+        let mut groups: HashMap<(String, String, String), (usize, i64, i64)> = HashMap::new();
+        let total_edge_count = neighborhood.edges.len();
+
+        for edge in &neighborhood.edges {
+            let key = (edge.source.clone(), edge.target.clone(), edge.rel_type.clone());
+            let entry = groups.entry(key).or_insert((0, i64::MAX, i64::MIN));
+            entry.0 += 1;
+            if edge.timestamp < entry.1 { entry.1 = edge.timestamp; }
+            if edge.timestamp > entry.2 { entry.2 = edge.timestamp; }
+        }
+
+        let grouped_edges: Vec<GroupedNeighborEdge> = groups
+            .into_iter()
+            .map(|((source, target, rel_type), (count, first_ts, last_ts))| {
+                GroupedNeighborEdge {
+                    source,
+                    target,
+                    rel_type,
+                    count,
+                    first_ts: if first_ts == i64::MAX { 0 } else { first_ts },
+                    last_ts: if last_ts == i64::MIN { 0 } else { last_ts },
+                }
+            })
+            .collect();
+
+        Some(GroupedNeighborhood {
+            center: neighborhood.center,
+            nodes: neighborhood.nodes,
+            edges: grouped_edges,
+            truncated: neighborhood.truncated,
+            total_edge_count,
         })
     }
 

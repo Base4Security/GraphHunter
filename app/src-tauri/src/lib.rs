@@ -1,5 +1,6 @@
 mod ai;
 pub mod commands;
+pub mod error;
 pub mod evtx;
 pub mod format_registry;
 pub mod helpers;
@@ -12,7 +13,7 @@ pub mod types;
 // Re-exports for backward compatibility (used by http_api.rs and external consumers).
 pub use helpers::{
     create_note_impl, parse_entity_type, with_current_graph, with_current_graph_mut,
-    with_current_session_and_graph,
+    with_current_session, with_current_session_and_graph,
 };
 pub use state::AppState;
 pub use types::{PaginatedHuntResults, Subgraph, SubgraphEdge, SubgraphNode};
@@ -24,6 +25,10 @@ use uuid::Uuid;
 /// Entry point for the Tauri application.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     // Load .env: walk up from CWD until we find one
     {
         let mut dir = std::env::current_dir().ok();
@@ -32,7 +37,7 @@ pub fn run() {
             let candidate = d.join(".env");
             if candidate.is_file() {
                 if dotenvy::from_path(&candidate).is_ok() {
-                    eprintln!(".env loaded from {}", candidate.display());
+                    tracing::info!(".env loaded from {}", candidate.display());
                     loaded = true;
                     break;
                 }
@@ -40,14 +45,18 @@ pub fn run() {
             dir = d.parent().map(|p| p.to_path_buf());
         }
         if !loaded {
-            eprintln!(".env not found in any parent directory");
+            tracing::warn!(".env not found in any parent directory");
         }
     }
 
     let api_token = std::env::var("GRAPHHUNTER_API_TOKEN")
         .unwrap_or_else(|_| Uuid::new_v4().to_string());
-    eprintln!("GRAPHHUNTER_API_TOKEN={}", api_token);
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    let masked = if api_token.len() > 4 {
+        format!("{}...{}", &api_token[..4], &api_token[api_token.len() - 4..])
+    } else {
+        "****".to_string()
+    };
+    tracing::debug!("GRAPHHUNTER_API_TOKEN={}", masked);
     let app_state = Arc::new(state::AppState {
         sessions: RwLock::new(HashMap::new()),
         current_session_id: RwLock::new(None),
@@ -75,13 +84,12 @@ pub fn run() {
                     *h = Some(app.handle().clone());
                 }
             }
-            eprintln!("GraphHunter HTTP API starting on Tauri async runtime (port {})", http_port);
-            let _ = std::io::Write::flush(&mut std::io::stderr());
+            tracing::info!("GraphHunter HTTP API starting on Tauri async runtime (port {})", http_port);
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = http_api::run_async(state_for_http, http_port).await {
-                    eprintln!("GraphHunter HTTP API error: {}", e);
+                    tracing::error!("GraphHunter HTTP API error: {}", e);
                 } else {
-                    eprintln!("GraphHunter HTTP API exited (serve returned)");
+                    tracing::info!("GraphHunter HTTP API exited (serve returned)");
                 }
             });
             Ok(())
@@ -131,6 +139,8 @@ pub fn run() {
             commands::graph_ops::cmd_get_graph_summary,
             commands::graph_ops::cmd_compute_scores,
             commands::graph_ops::cmd_get_events_for_node,
+            commands::graph_ops::cmd_get_events_paginated,
+            commands::graph_ops::cmd_expand_node_grouped,
             // DSL commands
             commands::dsl::cmd_parse_dsl,
             commands::dsl::cmd_get_catalog,
