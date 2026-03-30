@@ -432,7 +432,7 @@ pub async fn cmd_load_data_streaming(
         // ISO date format sorts lexicographically.
         let date_from_bytes: Option<Vec<u8>> = bg_date_from.as_ref().map(|s| s.as_bytes().to_vec());
         let date_to_bytes: Option<Vec<u8>> = bg_date_to.as_ref().map(|s| s.as_bytes().to_vec());
-        eprintln!("INGEST: date_from={:?}, date_to={:?}", bg_date_from, bg_date_to);
+        tracing::info!("INGEST: date_from={:?}, date_to={:?}", bg_date_from, bg_date_to);
 
         // 1. Open file and check for EVTX (binary) before any UTF-8 read
         let use_evtx = path_is_evtx(&bg_path)
@@ -573,7 +573,7 @@ pub async fn cmd_load_data_streaming(
             }
         }
 
-        eprintln!("INGEST: format={}, is_line_based={}, file_size={}", resolved, is_line_based, bytes_total);
+        tracing::info!("INGEST: format={}, is_line_based={}, file_size={}", resolved, is_line_based, bytes_total);
         let ingest_result: Result<(usize, usize), String> = (|| -> Result<(usize, usize), String> {
             if is_line_based {
                 // ── Line-based streaming path (NDJSON / IIS / CSV): mmap + line-batch parsing ──
@@ -589,10 +589,10 @@ pub async fn cmd_load_data_streaming(
                     .map_err(|e| format!("Failed to re-open file '{}': {}", bg_path, e))?;
                 let mmap = unsafe { memmap2::Mmap::map(&file2) }
                     .map_err(|e| {
-                        eprintln!("INGEST ERROR: Failed to mmap: {}", e);
+                        tracing::error!("INGEST: Failed to mmap: {}", e);
                         format!("Failed to mmap file '{}': {}", bg_path, e)
                     })?;
-                eprintln!("INGEST: mmap OK, {} bytes", mmap.len());
+                tracing::info!("INGEST: mmap OK, {} bytes", mmap.len());
 
                 // Work directly on bytes — never convert the full mmap to String.
                 // Only convert each batch (max ~25MB) via lossy UTF-8.
@@ -617,7 +617,7 @@ pub async fn cmd_load_data_streaming(
 
                     total_lines += 1;
                     if total_lines > MAX_INGEST_LINES {
-                        eprintln!("INGEST: reached max ingest limit of {} lines, stopping", MAX_INGEST_LINES);
+                        tracing::warn!("INGEST: reached max ingest limit of {} lines, stopping", MAX_INGEST_LINES);
                         stopped_early = true;
                         break;
                     }
@@ -748,7 +748,7 @@ pub async fn cmd_load_data_streaming(
                                     if GlobalMemoryStatusEx(p) != 0 {
                                         let avail_mb = (*p).ull_avail_phys / (1024 * 1024);
                                         if avail_mb < 256 {
-                                            eprintln!("INGEST: Critically low memory ({} MB free), stopping to prevent crash", avail_mb);
+                                            tracing::warn!("INGEST: Critically low memory ({} MB free), stopping to prevent crash", avail_mb);
                                             stopped_early = true;
                                             break;
                                         }
@@ -810,9 +810,9 @@ pub async fn cmd_load_data_streaming(
                     "relations": 0,
                 }));
 
-                eprintln!("INGEST: parsing {} bytes as {}", contents.len(), resolved);
+                tracing::info!("INGEST: parsing {} bytes as {}", contents.len(), resolved);
                 let triples = parser.parse(contents);
-                eprintln!("INGEST: parsed {} triples", triples.len());
+                tracing::info!("INGEST: parsed {} triples", triples.len());
 
                 let mut graph = bg_session
                     .graph
@@ -821,7 +821,7 @@ pub async fn cmd_load_data_streaming(
 
                 let result = graph.insert_triples(triples, Some(&bg_dataset_id))
                     .map_err(|e| e.to_string())?;
-                eprintln!("INGEST: inserted {:?}", result);
+                tracing::info!("INGEST: inserted {:?}", result);
                 Ok(result)
             }
         })();
