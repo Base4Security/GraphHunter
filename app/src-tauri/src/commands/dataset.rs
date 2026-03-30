@@ -2,46 +2,47 @@ use std::sync::Arc;
 
 use tauri::State;
 
+use crate::error::CommandError;
 use crate::helpers::parse_entity_type;
 use crate::state::{AppState, DatasetInfo};
 
 /// Returns list of ingested datasets for the current session.
 #[tauri::command]
-pub fn cmd_list_datasets(state: State<Arc<AppState>>) -> Result<Vec<DatasetInfo>, String> {
+pub fn cmd_list_datasets(state: State<Arc<AppState>>) -> Result<Vec<DatasetInfo>, CommandError> {
     let session_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone()
-        .ok_or("No current session")?;
+        .ok_or_else(|| CommandError::SessionNotFound("No current session".into()))?;
     let sessions = state
         .sessions
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
-    let session = sessions.get(&session_id).ok_or("Session not found")?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+    let session = sessions.get(&session_id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?;
     let datasets = session
         .datasets
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
     Ok(datasets.clone())
 }
 
 /// Removes a dataset from the current session.
 #[tauri::command]
-pub fn cmd_remove_dataset(state: State<Arc<AppState>>, dataset_id: String) -> Result<(usize, usize), String> {
+pub fn cmd_remove_dataset(state: State<Arc<AppState>>, dataset_id: String) -> Result<(usize, usize), CommandError> {
     let session_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone()
-        .ok_or("No current session")?;
+        .ok_or_else(|| CommandError::SessionNotFound("No current session".into()))?;
 
     let session = {
         let sessions = state
             .sessions
             .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-        Arc::clone(sessions.get(&session_id).ok_or("Session not found")?)
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+        Arc::clone(sessions.get(&session_id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?)
     };
 
     // Collect entity IDs that belong to this dataset (for path/notes cleanup).
@@ -49,7 +50,7 @@ pub fn cmd_remove_dataset(state: State<Arc<AppState>>, dataset_id: String) -> Re
         let graph = session
             .graph
             .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         graph
             .entities
             .iter()
@@ -65,7 +66,7 @@ pub fn cmd_remove_dataset(state: State<Arc<AppState>>, dataset_id: String) -> Re
         let mut graph = session
             .graph
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         graph.remove_entities_and_relations_by_dataset(&dataset_id)
     };
 
@@ -74,14 +75,14 @@ pub fn cmd_remove_dataset(state: State<Arc<AppState>>, dataset_id: String) -> Re
         let mut path_node_ids = session
             .path_node_ids
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         path_node_ids.retain(|id| !removed_set.contains(id.as_str()));
     }
     {
         let mut notes = session
             .notes
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         for note in notes.iter_mut() {
             if let Some(ref nid) = note.node_id {
                 if removed_set.contains(nid.as_str()) {
@@ -95,7 +96,7 @@ pub fn cmd_remove_dataset(state: State<Arc<AppState>>, dataset_id: String) -> Re
     session
         .datasets
         .write()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .retain(|d| d.id != dataset_id);
 
     Ok((entities_removed, relations_removed))
@@ -108,32 +109,32 @@ pub fn cmd_rename_type_in_dataset(
     dataset_id: String,
     from_type: String,
     to_type: String,
-) -> Result<usize, String> {
+) -> Result<usize, CommandError> {
     let from_et = parse_entity_type(&from_type)
-        .ok_or_else(|| format!("Invalid entity type: {}", from_type))?;
+        .ok_or_else(|| CommandError::InvalidInput(format!("Invalid entity type: {}", from_type)))?;
     let to_et = parse_entity_type(&to_type)
-        .ok_or_else(|| format!("Invalid entity type: {}", to_type))?;
+        .ok_or_else(|| CommandError::InvalidInput(format!("Invalid entity type: {}", to_type)))?;
 
     let session_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone()
-        .ok_or("No current session")?;
+        .ok_or_else(|| CommandError::SessionNotFound("No current session".into()))?;
 
     let session = {
         let sessions = state
             .sessions
             .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-        Arc::clone(sessions.get(&session_id).ok_or("Session not found")?)
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+        Arc::clone(sessions.get(&session_id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?)
     };
 
     let count = {
         let mut graph = session
             .graph
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         graph.rename_entity_type_in_dataset(&dataset_id, from_et, to_et)
     };
 
@@ -145,24 +146,24 @@ pub fn cmd_rename_type_in_dataset(
 pub fn cmd_dataset_entity_types(
     state: State<Arc<AppState>>,
     dataset_id: String,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, CommandError> {
     let session_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone()
-        .ok_or("No current session")?;
+        .ok_or_else(|| CommandError::SessionNotFound("No current session".into()))?;
 
     let sessions = state
         .sessions
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
-    let session = sessions.get(&session_id).ok_or("Session not found")?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+    let session = sessions.get(&session_id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?;
 
     let graph = session
         .graph
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
 
     Ok(graph.entity_types_in_dataset(&dataset_id))
 }

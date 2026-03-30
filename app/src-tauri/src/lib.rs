@@ -1,5 +1,6 @@
 mod ai;
 pub mod commands;
+pub mod error;
 pub mod evtx;
 pub mod format_registry;
 pub mod helpers;
@@ -12,7 +13,7 @@ pub mod types;
 // Re-exports for backward compatibility (used by http_api.rs and external consumers).
 pub use helpers::{
     create_note_impl, parse_entity_type, with_current_graph, with_current_graph_mut,
-    with_current_session_and_graph,
+    with_current_session, with_current_session_and_graph,
 };
 pub use state::AppState;
 pub use types::{PaginatedHuntResults, Subgraph, SubgraphEdge, SubgraphNode};

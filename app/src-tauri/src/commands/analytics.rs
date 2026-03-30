@@ -4,6 +4,7 @@ use std::sync::Arc;
 use graph_hunter_core::{CompactionStats, ScoringWeights};
 use tauri::State;
 
+use crate::error::CommandError;
 use crate::helpers::{with_current_graph, with_current_graph_mut};
 use crate::state::AppState;
 use crate::types::{ApiTestResult, HeatmapRow, TimelineRow};
@@ -12,7 +13,7 @@ use crate::types::{ApiTestResult, HeatmapRow, TimelineRow};
 
 /// Returns hourly-bucketed relation counts grouped by relation type.
 #[tauri::command]
-pub fn cmd_get_temporal_heatmap(state: State<Arc<AppState>>) -> Result<Vec<HeatmapRow>, String> {
+pub fn cmd_get_temporal_heatmap(state: State<Arc<AppState>>) -> Result<Vec<HeatmapRow>, CommandError> {
     with_current_graph(state.as_ref(), |graph| {
         Ok(graph.temporal_heatmap()
             .into_iter()
@@ -25,7 +26,7 @@ pub fn cmd_get_temporal_heatmap(state: State<Arc<AppState>>) -> Result<Vec<Heatm
 
 /// Returns timestamp distribution per entity type for sparkline visualization.
 #[tauri::command]
-pub fn cmd_get_timeline_data(state: State<Arc<AppState>>) -> Result<Vec<TimelineRow>, String> {
+pub fn cmd_get_timeline_data(state: State<Arc<AppState>>) -> Result<Vec<TimelineRow>, CommandError> {
     with_current_graph(state.as_ref(), |graph| {
         Ok(graph.timeline_data()
             .into_iter()
@@ -40,7 +41,7 @@ pub fn cmd_get_timeline_data(state: State<Arc<AppState>>) -> Result<Vec<Timeline
 
 /// Computes betweenness centrality (Brandes algorithm).
 #[tauri::command]
-pub fn cmd_compute_betweenness(state: State<Arc<AppState>>, sample_limit: Option<usize>) -> Result<(), String> {
+pub fn cmd_compute_betweenness(state: State<Arc<AppState>>, sample_limit: Option<usize>) -> Result<(), CommandError> {
     with_current_graph_mut(state.as_ref(), |graph| {
         graph.compute_betweenness(sample_limit);
         Ok(())
@@ -55,7 +56,7 @@ pub fn cmd_compute_pagerank(
     damping: Option<f64>,
     max_iter: Option<usize>,
     reference_time: Option<i64>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     with_current_graph_mut(state.as_ref(), |graph| {
         graph.compute_temporal_pagerank(lambda, damping, max_iter, None, reference_time);
         Ok(())
@@ -69,7 +70,7 @@ pub fn cmd_compute_composite_scores(
     degree_weight: f64,
     pagerank_weight: f64,
     betweenness_weight: f64,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     with_current_graph_mut(state.as_ref(), |graph| {
         graph.compute_composite_score(degree_weight, pagerank_weight, betweenness_weight);
         Ok(())
@@ -78,7 +79,7 @@ pub fn cmd_compute_composite_scores(
 
 /// Compacts old edges before a cutoff timestamp.
 #[tauri::command]
-pub fn cmd_compact(state: State<Arc<AppState>>, cutoff_timestamp: i64) -> Result<CompactionStats, String> {
+pub fn cmd_compact(state: State<Arc<AppState>>, cutoff_timestamp: i64) -> Result<CompactionStats, CommandError> {
     with_current_graph_mut(state.as_ref(), |graph| {
         Ok(graph.compact_before(cutoff_timestamp))
     })
@@ -98,7 +99,7 @@ fn reqwest_error_message(e: &reqwest::Error) -> String {
 /// Test the local HTTP API by GET /health. Runs in a thread so the UI does not block.
 /// First checks if the port is reachable (TCP), then tries HTTP with reqwest.
 #[tauri::command]
-pub fn cmd_test_http_api() -> Result<ApiTestResult, String> {
+pub fn cmd_test_http_api() -> Result<ApiTestResult, CommandError> {
     let port = std::env::var("GRAPHHUNTER_API_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
@@ -128,7 +129,7 @@ pub fn cmd_test_http_api() -> Result<ApiTestResult, String> {
                 .timeout(std::time::Duration::from_secs(3))
                 .no_proxy()
                 .build()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| CommandError::Internal(e.to_string()))?;
             match client.get(&url).send() {
                 Ok(resp) => {
                     let status = resp.status();
@@ -159,7 +160,7 @@ pub fn cmd_test_http_api() -> Result<ApiTestResult, String> {
             }
         })
         .join()
-        .map_err(|_| "Test thread panicked".to_string())?
+        .map_err(|_| CommandError::Internal("Test thread panicked".into()))?
     });
     result
 }
@@ -171,7 +172,7 @@ pub fn cmd_test_http_api() -> Result<ApiTestResult, String> {
 pub fn cmd_enable_anomaly_scoring(
     state: State<Arc<AppState>>,
     weights: Option<ScoringWeights>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     with_current_graph_mut(state.as_ref(), |graph| {
         let w = weights.unwrap_or_default();
         graph.enable_anomaly_scoring(w);
@@ -184,13 +185,13 @@ pub fn cmd_enable_anomaly_scoring(
 pub fn cmd_update_anomaly_weights(
     state: State<Arc<AppState>>,
     weights: ScoringWeights,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     with_current_graph_mut(state.as_ref(), |graph| {
         if let Some(ref mut scorer) = graph.anomaly_scorer {
             scorer.set_weights(weights);
             Ok(())
         } else {
-            Err("Anomaly scoring is not enabled".to_string())
+            Err(CommandError::InvalidInput("Anomaly scoring is not enabled".into()))
         }
     })
 }
@@ -199,7 +200,7 @@ pub fn cmd_update_anomaly_weights(
 #[tauri::command]
 pub fn cmd_get_anomaly_config(
     state: State<Arc<AppState>>,
-) -> Result<Option<ScoringWeights>, String> {
+) -> Result<Option<ScoringWeights>, CommandError> {
     with_current_graph(state.as_ref(), |graph| {
         Ok(graph.anomaly_scorer.as_ref().map(|s| s.weights().clone()))
     })
@@ -211,13 +212,13 @@ pub fn cmd_get_anomaly_config(
 pub fn cmd_load_gnn_model(
     state: State<Arc<AppState>>,
     model_path: String,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
     match graph_hunter_core::NpuScorer::load(&model_path) {
         Ok(scorer) => {
-            *state.npu_scorer.write().map_err(|e| e.to_string())? = Some(scorer);
+            *state.npu_scorer.write().map_err(|e| CommandError::GraphLocked(e.to_string()))? = Some(scorer);
             Ok("GNN model loaded successfully".to_string())
         }
-        Err(e) => Err(format!("Failed to load GNN model: {}", e)),
+        Err(e) => Err(CommandError::IoError(format!("Failed to load GNN model: {}", e))),
     }
 }
 
@@ -228,36 +229,36 @@ pub fn cmd_load_gnn_model(
 pub fn cmd_compute_gnn_scores(
     state: State<Arc<AppState>>,
     k_hops: Option<usize>,
-) -> Result<usize, String> {
+) -> Result<usize, CommandError> {
     let hops = k_hops.unwrap_or(2);
 
     // Get graph access and scorer access separately to avoid lock ordering issues
     let current_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone();
-    let id = current_id.as_ref().ok_or("No session selected")?.clone();
+    let id = current_id.as_ref().ok_or_else(|| CommandError::SessionNotFound("No session selected".into()))?.clone();
 
     let sessions = state
         .sessions
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
-    let session = sessions.get(&id).ok_or("Session not found")?.clone();
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+    let session = sessions.get(&id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?.clone();
 
     let mut graph = session
         .graph
         .write()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
 
     if graph.anomaly_scorer.is_none() {
-        return Err("Anomaly scoring must be enabled first".to_string());
+        return Err(CommandError::InvalidInput("Anomaly scoring must be enabled first".into()));
     }
 
-    let mut npu_guard = state.npu_scorer.write().map_err(|e| e.to_string())?;
+    let mut npu_guard = state.npu_scorer.write().map_err(|e| CommandError::GraphLocked(e.to_string()))?;
     let npu = npu_guard
         .as_mut()
-        .ok_or("GNN model not loaded. Call cmd_load_gnn_model first.")?;
+        .ok_or_else(|| CommandError::InvalidInput("GNN model not loaded. Call cmd_load_gnn_model first.".into()))?;
 
     Ok(graph.compute_gnn_scores(npu, hops))
 }
@@ -266,7 +267,7 @@ pub fn cmd_compute_gnn_scores(
 #[tauri::command]
 pub fn cmd_gnn_model_status(
     state: State<Arc<AppState>>,
-) -> Result<bool, String> {
-    let guard = state.npu_scorer.read().map_err(|e| e.to_string())?;
+) -> Result<bool, CommandError> {
+    let guard = state.npu_scorer.read().map_err(|e| CommandError::GraphLocked(e.to_string()))?;
     Ok(guard.is_some())
 }

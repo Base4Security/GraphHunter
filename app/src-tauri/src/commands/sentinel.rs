@@ -8,6 +8,7 @@ use graph_hunter_cli::siem::{
     HttpSentinelTransport, SentinelAuth, SentinelPollingConfig, SentinelTokenCache,
 };
 
+use crate::error::CommandError;
 use crate::scoring::run_scoring_adaptive;
 use crate::sentinel_connector::{
     self, ConnectorStatus, SentinelConnectorHandle, default_tables,
@@ -34,11 +35,11 @@ pub struct SentinelConnectParams {
 }
 
 /// Resolves a param value: uses the explicit value if non-empty, otherwise falls back to env var.
-fn env_or(explicit: &str, env_key: &str) -> Result<String, String> {
+fn env_or(explicit: &str, env_key: &str) -> Result<String, CommandError> {
     if !explicit.is_empty() {
         return Ok(explicit.to_string());
     }
-    std::env::var(env_key).map_err(|_| format!("Missing '{}': not provided and {} not set in .env", env_key, env_key))
+    std::env::var(env_key).map_err(|_| CommandError::SentinelError(format!("Missing '{}': not provided and {} not set in .env", env_key, env_key)))
 }
 
 fn resolve_poll_interval(explicit: u64) -> u64 {
@@ -71,15 +72,15 @@ pub async fn cmd_sentinel_connect(
     state: State<'_, Arc<AppState>>,
     app: tauri::AppHandle,
     params: SentinelConnectParams,
-) -> Result<SentinelConnectedEvent, String> {
+) -> Result<SentinelConnectedEvent, CommandError> {
     // Check no connector is already running
     {
         let guard = state
             .sentinel_connector
             .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         if guard.is_some() {
-            return Err("Sentinel connector is already running. Disconnect first.".into());
+            return Err(CommandError::SentinelError("Sentinel connector is already running. Disconnect first.".into()));
         }
     }
 
@@ -87,16 +88,16 @@ pub async fn cmd_sentinel_connect(
     let session_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone()
-        .ok_or("No current session. Create or load a session first.")?;
+        .ok_or_else(|| CommandError::SessionNotFound("No current session. Create or load a session first.".into()))?;
 
     let session = {
         let sessions = state
             .sessions
             .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-        Arc::clone(sessions.get(&session_id).ok_or("Session not found")?)
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+        Arc::clone(sessions.get(&session_id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?)
     };
 
     let connector_id = Uuid::new_v4().to_string();
@@ -106,12 +107,12 @@ pub async fn cmd_sentinel_connect(
     {
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| CommandError::Internal(e.to_string()))?
             .as_secs() as i64;
         let mut datasets = session
             .datasets
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         datasets.push(crate::state::DatasetInfo {
             id: dataset_id.clone(),
             name: format!("Sentinel Live ({})", &connector_id[..8]),
@@ -173,7 +174,7 @@ pub async fn cmd_sentinel_connect(
         let mut guard = state
             .sentinel_connector
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         *guard = Some(SentinelConnectorHandle {
             connector_id: connector_id.clone(),
             cancel_token: cancel,
@@ -190,16 +191,16 @@ pub async fn cmd_sentinel_connect(
 #[tauri::command]
 pub async fn cmd_sentinel_disconnect(
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let handle = {
         let mut guard = state
             .sentinel_connector
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         guard.take()
     };
 
-    let handle = handle.ok_or("No Sentinel connector is running.")?;
+    let handle = handle.ok_or_else(|| CommandError::SentinelError("No Sentinel connector is running.".into()))?;
 
     // Signal cancellation
     handle.cancel_token.cancel();
@@ -215,14 +216,14 @@ pub async fn cmd_sentinel_disconnect(
     let session_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone();
 
     if let Some(id) = session_id {
         let sessions = state
             .sessions
             .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         if let Some(session) = sessions.get(&id) {
             if let Ok(mut graph) = session.graph.write() {
                 run_scoring_adaptive(&mut graph);
@@ -237,11 +238,11 @@ pub async fn cmd_sentinel_disconnect(
 #[tauri::command]
 pub fn cmd_sentinel_status(
     state: State<Arc<AppState>>,
-) -> Result<ConnectorStatusResponse, String> {
+) -> Result<ConnectorStatusResponse, CommandError> {
     let guard = state
         .sentinel_connector
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?;
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
 
     match guard.as_ref() {
         Some(handle) => {
