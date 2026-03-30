@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::anomaly::ScoreBreakdown;
+use crate::config;
 use crate::graph::GraphHunter;
 use crate::interner::StrId;
 use crate::types::{EntityType, RelationType};
@@ -180,7 +181,7 @@ impl GraphHunter {
         let mut node_sids: Vec<StrId> = Vec::new();
         let mut edges: Vec<NeighborEdge> = Vec::new();
         let mut truncated = false;
-        let max_edges = max_nodes * 10; // cap edges to prevent OOM on dense graphs
+        let max_edges = max_nodes * config::NEIGHBORHOOD_EDGE_RATIO;
 
         visited.insert(center_sid);
         queue.push_back((center_sid, 0));
@@ -413,7 +414,7 @@ impl GraphHunter {
         let sid_to_idx: HashMap<StrId, usize> = sids.iter().enumerate().map(|(i, &sid)| (sid, i)).collect();
         let mut cb = vec![0.0f64; n];
 
-        let limit = sample_limit.unwrap_or(500);
+        let limit = sample_limit.unwrap_or(config::DEFAULT_BETWEENNESS_SAMPLE);
         let sources: Vec<usize> = if n <= limit {
             (0..n).collect()
         } else {
@@ -521,10 +522,10 @@ impl GraphHunter {
             return;
         }
 
-        let lambda = lambda.unwrap_or(0.001);
-        let d = damping.unwrap_or(0.85);
-        let max_iter = max_iter.unwrap_or(30);
-        let eps = epsilon.unwrap_or(1e-6);
+        let lambda = lambda.unwrap_or(config::DEFAULT_PAGERANK_LAMBDA);
+        let d = damping.unwrap_or(config::DEFAULT_PAGERANK_DAMPING);
+        let max_iter = max_iter.unwrap_or(config::DEFAULT_PAGERANK_MAX_ITER);
+        let eps = epsilon.unwrap_or(config::DEFAULT_PAGERANK_EPSILON);
 
         let t_ref = reference_time.unwrap_or_else(|| {
             let mut max_t = 0i64;
@@ -640,15 +641,11 @@ impl GraphHunter {
             .map(|v| v.len())
             .unwrap_or(0);
 
-        // Cap iterations to prevent OOM/hangs on super-connected nodes (e.g. 1.5M edges)
-        const MAX_SCAN_EDGES: usize = 50_000;
-        const MAX_NEIGHBORS_RETURNED: usize = 200;
-
         let mut min_ts = i64::MAX;
         let mut max_ts = i64::MIN;
         let mut has_timestamps = false;
 
-        for compact in out_edges.iter().take(MAX_SCAN_EDGES) {
+        for compact in out_edges.iter().take(config::MAX_SCAN_EDGES) {
             if compact.timestamp != 0 {
                 min_ts = min_ts.min(compact.timestamp);
                 max_ts = max_ts.max(compact.timestamp);
@@ -657,7 +654,7 @@ impl GraphHunter {
         }
         // For incoming edges, sample reverse_adj instead of scanning all
         if let Some(sources) = self.reverse_adj.get(&sid) {
-            for &source_sid in sources.iter().take(MAX_SCAN_EDGES) {
+            for &source_sid in sources.iter().take(config::MAX_SCAN_EDGES) {
                 for compact in self.edge_store.get_edges(source_sid) {
                     if compact.dest_sid == sid && compact.timestamp != 0 {
                         min_ts = min_ts.min(compact.timestamp);
@@ -678,7 +675,7 @@ impl GraphHunter {
                 *neighbor_types
                     .entry(format!("{}", dest.entity_type))
                     .or_default() += 1;
-                if seen.insert(compact.dest_sid) && neighbors.len() < MAX_NEIGHBORS_RETURNED {
+                if seen.insert(compact.dest_sid) && neighbors.len() < config::MAX_NEIGHBORS_RETURNED {
                     neighbors.push(NeighborSummary {
                         id: dest.id.clone(),
                         entity_type: format!("{}", dest.entity_type),
@@ -692,7 +689,7 @@ impl GraphHunter {
                     *neighbor_types
                         .entry(format!("{}", src.entity_type))
                         .or_default() += 1;
-                    if seen.insert(source_sid) && neighbors.len() < MAX_NEIGHBORS_RETURNED {
+                    if seen.insert(source_sid) && neighbors.len() < config::MAX_NEIGHBORS_RETURNED {
                         neighbors.push(NeighborSummary {
                             id: src.id.clone(),
                             entity_type: format!("{}", src.entity_type),
@@ -747,14 +744,14 @@ impl GraphHunter {
                 has_timestamps = true;
             }
             edges_scanned += 1;
-            if edges_scanned >= 100_000 { break; }
+            if edges_scanned >= config::MAX_SUMMARY_EDGE_SCAN { break; }
         }
 
         let mut entities_by_score: Vec<_> = self.entities.values().collect();
         entities_by_score.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         let top_anomalies: Vec<TopAnomaly> = entities_by_score
             .into_iter()
-            .take(10)
+            .take(config::TOP_ANOMALIES_COUNT)
             .filter(|e| e.score > 0.0)
             .map(|e| TopAnomaly {
                 id: e.id.clone(),

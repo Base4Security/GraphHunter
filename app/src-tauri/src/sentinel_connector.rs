@@ -21,6 +21,15 @@ use crate::scoring::run_scoring_incremental;
 use crate::state::SessionState;
 use crate::types::{SentinelDataEvent, SentinelErrorEvent};
 
+/// Maximum exponential back-off (seconds) between retries after poll failures.
+const MAX_BACKOFF_SECS: u64 = 300;
+
+/// Consecutive authentication failures before the connector gives up.
+const MAX_AUTH_FAILURES: u32 = 3;
+
+/// Brief delay (seconds) before the first poll so frontend listeners are ready.
+const FIRST_POLL_DELAY_SECS: u64 = 2;
+
 // ── Connector status ──
 
 /// Live status of the Sentinel connector, broadcast via watch channel.
@@ -72,8 +81,6 @@ pub async fn polling_loop<T: SentinelTransport>(
     let parser = SentinelJsonParser;
 
     let mut consecutive_errors: u32 = 0;
-    let max_backoff_secs: u64 = 300;
-    let max_auth_failures: u32 = 3;
     let mut first_poll = true;
 
     let _ = status_tx.send(ConnectorStatus::Connected {
@@ -87,7 +94,7 @@ pub async fn polling_loop<T: SentinelTransport>(
         // Subsequent polls: wait for the full interval.
         if first_poll {
             first_poll = false;
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_secs(FIRST_POLL_DELAY_SECS)).await;
         } else {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -115,7 +122,7 @@ pub async fn polling_loop<T: SentinelTransport>(
                 let is_auth = e.contains("401") || e.contains("403") || e.contains("token");
                 if is_auth {
                     token_cache.invalidate().await;
-                    if consecutive_errors >= max_auth_failures {
+                    if consecutive_errors >= MAX_AUTH_FAILURES {
                         let _ = app_handle.emit("sentinel-error", SentinelErrorEvent {
                             error: format!("Auth failed {} times, stopping: {}", consecutive_errors, e),
                             consecutive_errors,
@@ -135,7 +142,7 @@ pub async fn polling_loop<T: SentinelTransport>(
                     consecutive: consecutive_errors,
                 });
                 // Backoff
-                let backoff = (2u64.pow(consecutive_errors.min(8))).min(max_backoff_secs);
+                let backoff = (2u64.pow(consecutive_errors.min(8))).min(MAX_BACKOFF_SECS);
                 tokio::time::sleep(Duration::from_secs(backoff)).await;
                 continue;
             }
