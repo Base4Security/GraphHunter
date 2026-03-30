@@ -67,6 +67,7 @@ pub fn cmd_remove_dataset(state: State<Arc<AppState>>, dataset_id: String) -> Re
             .write()
             .map_err(|e| format!("Lock poisoned: {}", e))?;
         graph.remove_entities_and_relations_by_dataset(&dataset_id)
+            .map_err(|e| e.to_string())?
     };
 
     // 2. Clean path nodes and unlink notes that reference removed entities.

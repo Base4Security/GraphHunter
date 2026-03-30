@@ -132,7 +132,8 @@ pub fn cmd_load_data(
         let resolved_format = resolve_format(&contents, &format_for_parser);
         let parser = make_parser_for_format(&resolved_format)?;
         let triples = parser.parse(&contents);
-        let result = graph.insert_triples(triples, Some(dataset_id.as_str()));
+        let result = graph.insert_triples(triples, Some(dataset_id.as_str()))
+            .map_err(|e| e.to_string())?;
         run_full_scoring(&mut graph);
         result
     };
@@ -299,7 +300,8 @@ pub async fn cmd_ingest_siem(
             .map_err(|e| format!("Lock poisoned: {}", e))?;
         let parser = make_parser_for_format("sentinel")?;
         let triples = parser.parse(&data);
-        let (e, r) = graph.insert_triples(triples, Some(dataset_id.as_str()));
+        let (e, r) = graph.insert_triples(triples, Some(dataset_id.as_str()))
+            .map_err(|e| e.to_string())?;
         run_full_scoring(&mut graph);
         (e, r)
     };
@@ -704,6 +706,7 @@ pub async fn cmd_load_data_streaming(
                                 .write()
                                 .map_err(|e| format!("Lock poisoned: {}", e))?;
                             graph.insert_triples(triples, Some(&bg_dataset_id))
+                                .map_err(|e| e.to_string())?
                         };
                         total_new_entities += ne;
                         total_new_relations += nr;
@@ -782,6 +785,7 @@ pub async fn cmd_load_data_streaming(
                                 .write()
                                 .map_err(|e| format!("Lock poisoned: {}", e))?;
                             graph.insert_triples(triples, Some(&bg_dataset_id))
+                                .map_err(|e| e.to_string())?
                         };
                         total_new_entities += ne;
                         total_new_relations += nr;
@@ -815,7 +819,8 @@ pub async fn cmd_load_data_streaming(
                     .write()
                     .map_err(|e| format!("Lock poisoned: {}", e))?;
 
-                let result = graph.insert_triples(triples, Some(&bg_dataset_id));
+                let result = graph.insert_triples(triples, Some(&bg_dataset_id))
+                    .map_err(|e| e.to_string())?;
                 tracing::info!("INGEST: inserted {:?}", result);
                 Ok(result)
             }
@@ -844,7 +849,9 @@ pub async fn cmd_load_data_streaming(
                             return;
                         }
                     };
-                    run_scoring_adaptive(&mut graph);
+                    if let Err(e) = run_scoring_adaptive(&mut graph) {
+                        eprintln!("Scoring failed: {}", e);
+                    }
                 }
 
                 // Update dataset counts

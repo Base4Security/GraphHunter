@@ -143,7 +143,8 @@ pub fn cmd_load_session(state: State<Arc<AppState>>, session_id: String) -> Resu
         for relation in file.relations {
             let _ = graph.add_relation(relation);
         }
-        graph.sort_edges_by_timestamp();
+        graph.sort_edges_by_timestamp()
+            .map_err(|e| e.to_string())?;
 
         tracing::info!("SESSION LOAD: {} entities, {} relations loaded", entity_count, relation_count);
 

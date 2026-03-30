@@ -38,7 +38,7 @@ pub use entity::Entity;
 pub use field_preview::{
     preview_fields, ConfigurableParser, FieldConfig, FieldInfo, FieldMapping, FieldRole,
 };
-pub use errors::GraphError;
+pub use errors::{GraphError, SpillError};
 pub use generic::GenericParser;
 pub use iis_w3c::{IisW3cParser, looks_like_iis_w3c, extract_fields_header};
 pub use graph::{CompactionStats, GraphHunter};
@@ -317,7 +317,7 @@ mod tests {
         g.add_relation(Relation::new("admin-user", "cmd.exe", RelationType::Execute, 300)).unwrap();
         g.add_relation(Relation::new("cmd.exe", "payload.dll", RelationType::Write, 400)).unwrap();
 
-        g.sort_edges_by_timestamp();
+        g.sort_edges_by_timestamp().unwrap();
         g
     }
 
@@ -1125,7 +1125,7 @@ mod tests {
         ]"#;
 
         let mut g = GraphHunter::new();
-        let (entities, relations) = g.ingest_logs(json, &SysmonJsonParser, None);
+        let (entities, relations) = g.ingest_logs(json, &SysmonJsonParser, None).unwrap();
 
         assert_eq!(entities, 4); // WORKSTATION-01, 10.0.0.50, cmd.exe, evil.com
         assert_eq!(relations, 2);
@@ -1152,7 +1152,7 @@ mod tests {
         ]"#;
 
         let mut g = GraphHunter::new();
-        let (entities, relations) = g.ingest_logs(json, &SysmonJsonParser, None);
+        let (entities, relations) = g.ingest_logs(json, &SysmonJsonParser, None).unwrap();
 
         // cmd.exe appears once (deduplicated), 2 domains = 3 entities total
         assert_eq!(entities, 3);
@@ -1180,8 +1180,8 @@ mod tests {
         }]"#;
 
         let mut g = GraphHunter::new();
-        g.ingest_logs(batch1, &SysmonJsonParser, None);
-        g.ingest_logs(batch2, &SysmonJsonParser, None);
+        g.ingest_logs(batch1, &SysmonJsonParser, None).unwrap();
+        g.ingest_logs(batch2, &SysmonJsonParser, None).unwrap();
 
         // Same entities, 2 different relations (different timestamps)
         assert_eq!(g.entity_count(), 2);
@@ -1237,7 +1237,7 @@ mod tests {
         ]"#;
 
         let mut g = GraphHunter::new();
-        let (entities, relations) = g.ingest_logs(events, &SysmonJsonParser, None);
+        let (entities, relations) = g.ingest_logs(events, &SysmonJsonParser, None).unwrap();
 
         assert!(entities > 0);
         assert!(relations > 0);
@@ -1287,7 +1287,7 @@ mod tests {
         ]"#;
 
         let mut g = GraphHunter::new();
-        g.ingest_logs(events, &SysmonJsonParser, None);
+        g.ingest_logs(events, &SysmonJsonParser, None).unwrap();
 
         // Hunt: User -> Execute -> Process -> DNS -> Domain
         let hypothesis = Hypothesis::new("DNS Exfiltration")
@@ -1328,7 +1328,7 @@ mod tests {
         ]"#;
 
         let mut g = GraphHunter::new();
-        g.ingest_logs(events, &SysmonJsonParser, None);
+        g.ingest_logs(events, &SysmonJsonParser, None).unwrap();
 
         let hypothesis = Hypothesis::new("Windowed DNS")
             .add_step(HypothesisStep::new(
@@ -1769,7 +1769,7 @@ mod tests {
             .expect("Demo data file should exist at demo_data/apt_attack_simulation.json");
 
         let mut g = GraphHunter::new();
-        let (entities, relations) = g.ingest_logs(&demo_json, &SysmonJsonParser, None);
+        let (entities, relations) = g.ingest_logs(&demo_json, &SysmonJsonParser, None).unwrap();
 
         assert!(entities > 15, "Should ingest many entities, got {entities}");
         assert!(relations > 20, "Should ingest many relations, got {relations}");
@@ -1874,7 +1874,7 @@ mod tests {
         }]"#;
 
         let mut g = GraphHunter::new();
-        g.ingest_logs(json, &SysmonJsonParser, None);
+        g.ingest_logs(json, &SysmonJsonParser, None).unwrap();
 
         let process_ids = g.type_index.get(&EntityType::Process).unwrap();
         assert!(process_ids.contains(&g.interner.get("cmd.exe").unwrap()));
@@ -2503,7 +2503,7 @@ mod tests {
         ]"#;
 
         let mut g = GraphHunter::new();
-        let (entities, relations) = g.ingest_logs(json, &SentinelJsonParser, None);
+        let (entities, relations) = g.ingest_logs(json, &SentinelJsonParser, None).unwrap();
 
         assert_eq!(entities, 4); // admin, DC-01, WS-01, 198.51.100.1
         assert_eq!(relations, 2);
@@ -2520,7 +2520,7 @@ mod tests {
         ]"#;
 
         let mut g = GraphHunter::new();
-        let (entities, relations) = g.ingest_logs(json, &SentinelJsonParser, None);
+        let (entities, relations) = g.ingest_logs(json, &SentinelJsonParser, None).unwrap();
 
         assert_eq!(entities, 2); // admin, DC-01 (deduplicated)
         assert_eq!(relations, 2); // Two distinct relations (different timestamps)
@@ -2535,7 +2535,7 @@ mod tests {
         ]"#;
 
         let mut g = GraphHunter::new();
-        g.ingest_logs(events, &SentinelJsonParser, None);
+        g.ingest_logs(events, &SentinelJsonParser, None).unwrap();
 
         // Hunt: User -> Execute -> Process -> Write -> File
         let hypothesis = Hypothesis::new("Sentinel Kill Chain")
@@ -2559,7 +2559,7 @@ mod tests {
             .expect("Demo data file should exist at demo_data/sentinel_attack_simulation.json");
 
         let mut g = GraphHunter::new();
-        let (entities, relations) = g.ingest_logs(&demo_json, &SentinelJsonParser, None);
+        let (entities, relations) = g.ingest_logs(&demo_json, &SentinelJsonParser, None).unwrap();
 
         assert!(entities > 10, "Should ingest many entities, got {entities}");
         assert!(relations > 15, "Should ingest many relations, got {relations}");
@@ -2881,7 +2881,7 @@ mod tests {
         ]"#;
 
         let mut g = GraphHunter::new();
-        let (entities, relations) = g.ingest_logs(json, &GenericParser, None);
+        let (entities, relations) = g.ingest_logs(json, &GenericParser, None).unwrap();
 
         assert!(entities > 0, "Should ingest entities");
         assert!(relations > 0, "Should ingest relations");
@@ -3203,7 +3203,7 @@ mod tests {
 
         let parser = ConfigurableParser::new(config);
         let mut graph = GraphHunter::new();
-        let (entities, relations) = graph.ingest_logs(data, &parser, None);
+        let (entities, relations) = graph.ingest_logs(data, &parser, None).unwrap();
 
         assert!(entities > 0, "Should have ingested entities");
         assert!(relations > 0, "Should have ingested relations");
@@ -3253,7 +3253,7 @@ mod tests {
         fn measure_dataset<P: LogParser>(name: &'static str, data: &str, parser: &P) -> DatasetResult {
             // Ingest
             let mut g = GraphHunter::new();
-            let (_ne, _nr) = g.ingest_logs(data, parser, None);
+            let (_ne, _nr) = g.ingest_logs(data, parser, None).unwrap();
             g.compute_scores();
 
             let n = g.entity_count();
@@ -3539,7 +3539,7 @@ mod tests {
             "EventID": 1, "UtcTime": "2024-01-01 10:00:00",
             "ParentImage": "cmd.exe", "Image": "malware.exe"
         }]"#;
-        g.ingest_logs(data, &SysmonJsonParser, None);
+        g.ingest_logs(data, &SysmonJsonParser, None).unwrap();
 
         // Wildcard origin: * -[Spawn]-> Process should match (parent→child)
         let h = Hypothesis::new("wildcard test")
@@ -3555,7 +3555,7 @@ mod tests {
             "EventID": 1, "UtcTime": "2024-01-01 10:00:00",
             "ParentImage": "cmd.exe", "Image": "malware.exe"
         }]"#;
-        g.ingest_logs(data, &SysmonJsonParser, None);
+        g.ingest_logs(data, &SysmonJsonParser, None).unwrap();
 
         // Wildcard relation: Process -[*]-> Process
         let h = Hypothesis::new("wildcard rel test")
@@ -3607,7 +3607,7 @@ mod tests {
         let apt_data = std::fs::read_to_string("../demo_data/apt_attack_simulation.json")
             .expect("apt_attack_simulation.json should exist");
         let mut g = GraphHunter::new();
-        g.ingest_logs(&apt_data, &SysmonJsonParser, None);
+        g.ingest_logs(&apt_data, &SysmonJsonParser, None).unwrap();
         g.compute_scores();
 
         let n = g.entity_count();
@@ -3654,7 +3654,7 @@ mod tests {
         if std::path::Path::new(mordor_path).exists() {
             let mordor_data = std::fs::read_to_string(mordor_path).unwrap();
             let mut gm = GraphHunter::new();
-            gm.ingest_logs(&mordor_data, &GenericParser, None);
+            gm.ingest_logs(&mordor_data, &GenericParser, None).unwrap();
             gm.compute_scores();
 
             let h_mordor = Hypothesis::new("Mordor L=2")
@@ -3970,10 +3970,10 @@ mod tests {
         let mut graph = GraphHunter::new();
         // First ingest: entity with metadata "role" = "admin"
         let json1 = r#"[{"user":"alice","hostname":"srv1","timestamp":"2024-01-01T00:00:00Z"}]"#;
-        graph.ingest_logs_with_policy(json1, &GenericParser, None, &MergePolicy::FirstWriteWins);
+        graph.ingest_logs_with_policy(json1, &GenericParser, None, &MergePolicy::FirstWriteWins).unwrap();
         // Second ingest: same entity, different value — should be ignored
         let json2 = r#"[{"user":"alice","hostname":"srv2","timestamp":"2024-01-01T01:00:00Z"}]"#;
-        graph.ingest_logs_with_policy(json2, &GenericParser, None, &MergePolicy::FirstWriteWins);
+        graph.ingest_logs_with_policy(json2, &GenericParser, None, &MergePolicy::FirstWriteWins).unwrap();
         // alice entity should exist; its metadata shouldn't change
         let alice = graph.get_entity("alice").expect("alice should exist");
         assert!(alice.metadata.is_empty() || !alice.metadata.values().any(|v| v.contains("srv2")));
@@ -3987,7 +3987,7 @@ mod tests {
         graph.add_entity(e1).unwrap();
         // Now ingest something that touches host-1 with new metadata
         let json = r#"[{"hostname":"host-1","sourceip":"10.0.0.1","timestamp":"2024-01-01T01:00:00Z"}]"#;
-        graph.ingest_logs_with_policy(json, &GenericParser, None, &MergePolicy::LastWriteWins);
+        graph.ingest_logs_with_policy(json, &GenericParser, None, &MergePolicy::LastWriteWins).unwrap();
         let host = graph.get_entity("host-1").unwrap();
         // With LWW, any new keys from the second ingest overwrite
         // The key "role" was only in the original entity, not in the ingest, so it stays
@@ -3999,10 +3999,10 @@ mod tests {
         let mut graph = GraphHunter::new();
         // First ingest creates entity with "cmdline" metadata
         let json1 = r#"[{"user":"alice","process_name":"cmd.exe","commandline":"whoami","timestamp":"2024-01-01T00:00:00Z"}]"#;
-        graph.ingest_logs_with_policy(json1, &GenericParser, None, &MergePolicy::Append);
+        graph.ingest_logs_with_policy(json1, &GenericParser, None, &MergePolicy::Append).unwrap();
         // Second ingest: same process entity, different cmdline
         let json2 = r#"[{"user":"bob","process_name":"cmd.exe","commandline":"ipconfig","timestamp":"2024-01-01T01:00:00Z"}]"#;
-        graph.ingest_logs_with_policy(json2, &GenericParser, None, &MergePolicy::Append);
+        graph.ingest_logs_with_policy(json2, &GenericParser, None, &MergePolicy::Append).unwrap();
         let proc_entity = graph.get_entity("cmd.exe").expect("cmd.exe should exist");
         let cmdline = proc_entity.metadata.get("cmdline").expect("Should have cmdline metadata");
         assert!(cmdline.contains("whoami"), "Should contain first value");
@@ -4448,7 +4448,7 @@ mod tests {
         graph.add_relation(Relation::new("A", "B", RelationType::Connect, 200)).unwrap();
         graph.add_relation(Relation::new("A", "B", RelationType::Connect, 300)).unwrap();
 
-        let stats = graph.compact_before(1000);
+        let stats = graph.compact_before(1000).unwrap();
         assert_eq!(stats.edges_before, 3);
         assert_eq!(stats.edges_after, 1);
         assert_eq!(stats.edges_removed, 2);
@@ -4466,7 +4466,7 @@ mod tests {
         graph.add_relation(Relation::new("A", "B", RelationType::Connect, 200)).unwrap();
         graph.add_relation(Relation::new("A", "B", RelationType::Connect, 5000)).unwrap();
 
-        let stats = graph.compact_before(1000);
+        let stats = graph.compact_before(1000).unwrap();
         // Group has a mix of old and new → NOT compacted (not all < cutoff)
         assert_eq!(stats.groups_compacted, 0);
         assert_eq!(stats.edges_after, 3);
@@ -4481,7 +4481,7 @@ mod tests {
         graph.add_relation(Relation::new("A", "B", RelationType::Connect, 2000)).unwrap();
         graph.add_relation(Relation::new("A", "B", RelationType::Connect, 3000)).unwrap();
 
-        let stats = graph.compact_before(1000);
+        let stats = graph.compact_before(1000).unwrap();
         assert_eq!(stats.groups_compacted, 0);
         assert_eq!(stats.edges_after, 2);
     }
@@ -4494,7 +4494,7 @@ mod tests {
         graph.add_relation(Relation::new("A", "B", RelationType::Connect, 100)).unwrap();
         graph.add_relation(Relation::new("A", "B", RelationType::Connect, 500)).unwrap();
 
-        graph.compact_before(1000);
+        graph.compact_before(1000).unwrap();
 
         let edges = graph.get_relations("A");
         assert_eq!(edges.len(), 1);
@@ -4514,7 +4514,7 @@ mod tests {
         graph.add_relation(Relation::new("A", "B", RelationType::Connect, 200)).unwrap();
         graph.add_relation(Relation::new("A", "C", RelationType::Auth, 150)).unwrap();
 
-        graph.compact_before(1000);
+        graph.compact_before(1000).unwrap();
 
         // After compaction: 2 Connect edges compacted to 1, plus 1 Auth = 2 total
         let all_edges = graph.get_relations("A");
@@ -4777,7 +4777,7 @@ mod tests {
         // APT Simulation
         if let Ok(data) = std::fs::read_to_string("../demo_data/apt_attack_simulation.json") {
             let mut g = GraphHunter::new();
-            g.ingest_logs(&data, &SysmonJsonParser, None);
+            g.ingest_logs(&data, &SysmonJsonParser, None).unwrap();
             let (n, m, d_max, d_avg, n_et, n_rt) = graph_params(&g);
             println!("APT Simulation: n={}, m={}, d_max={}, d_avg={:.1}", n, m, d_max, d_avg);
 
@@ -4793,7 +4793,7 @@ mod tests {
         // Sentinel Simulation
         if let Ok(data) = std::fs::read_to_string("../demo_data/sentinel_attack_simulation.json") {
             let mut g = GraphHunter::new();
-            g.ingest_logs(&data, &SentinelJsonParser, None);
+            g.ingest_logs(&data, &SentinelJsonParser, None).unwrap();
             let (n, m, d_max, d_avg, n_et, n_rt) = graph_params(&g);
             println!("\nSentinel Simulation: n={}, m={}, d_max={}, d_avg={:.1}", n, m, d_max, d_avg);
 
@@ -4809,7 +4809,7 @@ mod tests {
         // Mordor Combined (if available)
         if let Ok(data) = std::fs::read_to_string("../demo_data/mordor_combined_attacks.json") {
             let mut g = GraphHunter::new();
-            g.ingest_logs(&data, &GenericParser, None);
+            g.ingest_logs(&data, &GenericParser, None).unwrap();
             let (n, m, d_max, d_avg, n_et, n_rt) = graph_params(&g);
             println!("\nMordor Combined: n={}, m={}, d_max={}, d_avg={:.1}", n, m, d_max, d_avg);
 
@@ -4837,7 +4837,7 @@ mod tests {
         g.add_entity(Entity::new("C", EntityType::Process)).unwrap();
         g.add_relation(Relation::new("A", "B", RelationType::Connect, 1000)).unwrap();
         g.add_relation(Relation::new("B", "C", RelationType::Execute, 2000)).unwrap();
-        g.sort_edges_by_timestamp();
+        g.sort_edges_by_timestamp().unwrap();
         g.finalize_anomaly_scorer();
         g
     }

@@ -225,7 +225,7 @@ pub async fn cmd_sentinel_disconnect(
             .map_err(|e| format!("Lock poisoned: {}", e))?;
         if let Some(session) = sessions.get(&id) {
             if let Ok(mut graph) = session.graph.write() {
-                run_scoring_adaptive(&mut graph);
+                let _ = run_scoring_adaptive(&mut graph);
             }
         }
     }

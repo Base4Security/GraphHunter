@@ -179,12 +179,22 @@ pub async fn polling_loop<T: SentinelTransport>(
                                 } else {
                                     match session.graph.write() {
                                         Ok(mut graph) => {
-                                            let (ne, nr) = graph.insert_triples(
+                                            match graph.insert_triples(
                                                 triples,
                                                 Some(&dataset_id),
-                                            );
-                                            total_new_entities += ne;
-                                            total_new_relations += nr;
+                                            ) {
+                                                Ok((ne, nr)) => {
+                                                    total_new_entities += ne;
+                                                    total_new_relations += nr;
+                                                }
+                                                Err(e) => {
+                                                    let _ = app_handle.emit("sentinel-error", SentinelErrorEvent {
+                                                        error: format!("Spill store error: {}", e),
+                                                        consecutive_errors: 0,
+                                                        will_retry: true,
+                                                    });
+                                                }
+                                            }
                                         }
                                         Err(e) => {
                                             let _ = app_handle.emit("sentinel-error", SentinelErrorEvent {
