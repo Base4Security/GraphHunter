@@ -91,11 +91,25 @@ impl SentinelJsonParser {
     }
 
     /// Extracts timestamp from either `TimeGenerated` or `Timestamp` fields.
-    fn extract_timestamp(event: &Value) -> i64 {
-        Self::extract_str(event, "TimeGenerated")
-            .or_else(|| Self::extract_str(event, "Timestamp"))
-            .and_then(Self::parse_timestamp)
-            .unwrap_or(0)
+    ///
+    /// Returns `None` when no valid timestamp is found, so callers can skip
+    /// events rather than silently producing edges with Unix-epoch-zero.
+    fn extract_timestamp(event: &Value) -> Option<i64> {
+        let raw = Self::extract_str(event, "TimeGenerated")
+            .or_else(|| Self::extract_str(event, "Timestamp"));
+        match raw {
+            Some(ts) => match Self::parse_timestamp(ts) {
+                Some(epoch) => Some(epoch),
+                None => {
+                    eprintln!("Warning: failed to parse Sentinel timestamp: {:?}", ts);
+                    None
+                }
+            },
+            None => {
+                eprintln!("Warning: Sentinel event has no TimeGenerated or Timestamp field");
+                None
+            }
+        }
     }
 
     /// Auto-detects the Sentinel table type for a record.
@@ -119,12 +133,14 @@ impl SentinelJsonParser {
 
         // Priority 2: Heuristic detection by field presence
         if event.get("EventID").is_some() && event.get("Computer").is_some() {
+            eprintln!("Warning: table type detected via heuristic (fields: EventID, Computer), not explicit Type field");
             return SentinelTable::SecurityEvent;
         }
         if event.get("UserPrincipalName").is_some()
             || event.get("AppDisplayName").is_some()
             || event.get("IPAddress").is_some() && event.get("ResultType").is_some()
         {
+            eprintln!("Warning: table type detected via heuristic (fields: UserPrincipalName/AppDisplayName/IPAddress+ResultType), not explicit Type field");
             return SentinelTable::SigninLogs;
         }
         if event.get("InitiatingProcessFileName").is_some()
@@ -134,15 +150,19 @@ impl SentinelJsonParser {
             // Check if it has ActionType that looks like file events
             if let Some(action) = Self::extract_str(event, "ActionType") {
                 if action.contains("File") {
+                    eprintln!("Warning: table type detected via heuristic (fields: InitiatingProcessFileName, FileName, FolderPath, ActionType={action}), not explicit Type field");
                     return SentinelTable::DeviceFileEvents;
                 }
             }
+            eprintln!("Warning: table type detected via heuristic (fields: InitiatingProcessFileName, FileName, FolderPath), not explicit Type field");
             return SentinelTable::DeviceProcessEvents;
         }
         if event.get("RemoteIP").is_some() || event.get("RemotePort").is_some() {
+            eprintln!("Warning: table type detected via heuristic (fields: RemoteIP/RemotePort), not explicit Type field");
             return SentinelTable::DeviceNetworkEvents;
         }
         if event.get("SourceIP").is_some() && event.get("DestinationIP").is_some() {
+            eprintln!("Warning: table type detected via heuristic (fields: SourceIP, DestinationIP), not explicit Type field");
             return SentinelTable::CommonSecurityLog;
         }
 
@@ -174,7 +194,10 @@ impl SentinelJsonParser {
             Some(id) => id,
             None => return Vec::new(),
         };
-        let timestamp = Self::extract_timestamp(event);
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
 
         match event_id {
             4624 | 4625 => Self::parse_security_event_auth(event, timestamp, event_id),
@@ -283,7 +306,10 @@ impl SentinelJsonParser {
     /// SigninLogs table (Azure AD sign-in logs).
     /// Produces: User -[Auth]-> IP
     fn parse_signin_logs(event: &Value) -> Vec<ParsedTriple> {
-        let timestamp = Self::extract_timestamp(event);
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
 
         let user = match Self::extract_str(event, "UserPrincipalName")
             .or_else(|| Self::extract_str(event, "UserDisplayName"))
@@ -328,7 +354,10 @@ impl SentinelJsonParser {
     /// DeviceProcessEvents table (MDE process events).
     /// Produces: User -[Execute]-> Process + Parent -[Execute]-> Child
     fn parse_device_process_events(event: &Value) -> Vec<ParsedTriple> {
-        let timestamp = Self::extract_timestamp(event);
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
         let mut triples = Vec::new();
 
         let file_name = match Self::extract_str(event, "FileName") {
@@ -374,7 +403,10 @@ impl SentinelJsonParser {
     /// DeviceNetworkEvents table (MDE network events).
     /// Produces: Host -[Connect]-> IP
     fn parse_device_network_events(event: &Value) -> Vec<ParsedTriple> {
-        let timestamp = Self::extract_timestamp(event);
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
 
         let device = match Self::extract_str(event, "DeviceName") {
             Some(v) => v,
@@ -417,7 +449,10 @@ impl SentinelJsonParser {
     /// Produces: Process -[Write]-> File (for FileCreated/FileModified)
     ///           Process -[Read]-> File  (for FileRead)
     fn parse_device_file_events(event: &Value) -> Vec<ParsedTriple> {
-        let timestamp = Self::extract_timestamp(event);
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
 
         let process = match Self::extract_str(event, "InitiatingProcessFileName") {
             Some(v) => v,
@@ -452,7 +487,10 @@ impl SentinelJsonParser {
     /// CommonSecurityLog table (CEF/syslog from firewalls, proxies, etc.).
     /// Produces: IP(src) -[Connect]-> IP(dst)
     fn parse_common_security_log(event: &Value) -> Vec<ParsedTriple> {
-        let timestamp = Self::extract_timestamp(event);
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
 
         let src_ip = match Self::extract_str(event, "SourceIP") {
             Some(v) => v,
