@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::io::{Write, BufWriter};
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
 use crate::errors::SpillError;
@@ -16,52 +17,8 @@ const SPILL_MAGIC: u32 = 0x47485350; // "GHSP"
 const SPILL_VERSION: u32 = 1;
 /// Size of a single CompactRelation record on disk (fixed layout).
 const RECORD_SIZE: usize = std::mem::size_of::<CompactRelation>();
-
-/// Simple LRU cache using a HashMap + VecDeque for eviction order.
-struct LruCache {
-    map: HashMap<StrId, Vec<CompactRelation>>,
-    order: std::collections::VecDeque<StrId>,
-    capacity: usize,
-}
-
-impl LruCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            map: HashMap::new(),
-            order: std::collections::VecDeque::new(),
-            capacity,
-        }
-    }
-
-    fn get(&mut self, key: &StrId) -> Option<&[CompactRelation]> {
-        if self.map.contains_key(key) {
-            // Move to back (most recently used)
-            self.order.retain(|k| k != key);
-            self.order.push_back(*key);
-            self.map.get(key).map(|v| v.as_slice())
-        } else {
-            None
-        }
-    }
-
-    fn insert(&mut self, key: StrId, value: Vec<CompactRelation>) {
-        if self.map.contains_key(&key) {
-            self.order.retain(|k| *k != key);
-        } else if self.map.len() >= self.capacity && !self.order.is_empty() {
-            // Evict least recently used
-            if let Some(evicted) = self.order.pop_front() {
-                self.map.remove(&evicted);
-            }
-        }
-        self.order.push_back(key);
-        self.map.insert(key, value);
-    }
-
-    fn clear(&mut self) {
-        self.map.clear();
-        self.order.clear();
-    }
-}
+/// Default number of source-node entries the LRU cache holds.
+const DEFAULT_LRU_CAPACITY: usize = 10_000;
 
 /// Index entry: points to a range of records in the merged file.
 #[derive(Clone, Debug)]
@@ -95,7 +52,7 @@ pub struct SpillableEdgeStore {
     merged_index: HashMap<StrId, IndexEntry>,
 
     // --- LRU cache (behind Mutex for interior mutability so get_edges can take &self) ---
-    cache: Mutex<LruCache>,
+    cache: Mutex<lru::LruCache<StrId, Vec<CompactRelation>>>,
 
     finalized: bool,
 }
@@ -113,7 +70,9 @@ impl SpillableEdgeStore {
             temp_dir: None,
             merged_mmap: None,
             merged_index: HashMap::new(),
-            cache: Mutex::new(LruCache::new(10_000)), // cache up to 10K nodes
+            cache: Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(DEFAULT_LRU_CAPACITY).unwrap(),
+            )),
             finalized: false,
         }
     }
@@ -138,7 +97,7 @@ impl SpillableEdgeStore {
         }
 
         // Invalidate any cached entry for this source_sid (stale after new push)
-        self.cache.lock().unwrap().map.remove(&rel.source_sid);
+        self.cache.lock().unwrap().pop(&rel.source_sid);
 
         let idx = self.buffer.len() as u32;
         self.buffer_index
@@ -367,21 +326,21 @@ impl SpillableEdgeStore {
                 }
                 let mut cache = self.cache.lock().unwrap();
                 // Check if already cached
-                if let Some(slice) = cache.get(&sid) {
+                if let Some(cached) = cache.get(&sid) {
                     // SAFETY: we return a reference tied to &self lifetime.
                     // The cache is only cleared on &mut self calls (clear/finalize).
                     // The Mutex ensures no concurrent mutation of the cache entry.
-                    let ptr = slice.as_ptr();
-                    let len = slice.len();
+                    let ptr = cached.as_ptr();
+                    let len = cached.len();
                     return unsafe { std::slice::from_raw_parts(ptr, len) };
                 }
                 let edges: Vec<CompactRelation> = indices.iter()
                     .map(|&idx| self.buffer[idx as usize])
                     .collect();
-                cache.insert(sid, edges);
-                let slice = cache.map.get(&sid).unwrap().as_slice();
-                let ptr = slice.as_ptr();
-                let len = slice.len();
+                cache.put(sid, edges);
+                let cached = cache.peek(&sid).unwrap();
+                let ptr = cached.as_ptr();
+                let len = cached.len();
                 return unsafe { std::slice::from_raw_parts(ptr, len) };
             }
             return &[];
