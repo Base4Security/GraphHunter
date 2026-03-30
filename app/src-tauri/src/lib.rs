@@ -169,6 +169,9 @@ pub fn run() {
             commands::analytics::cmd_load_gnn_model,
             commands::analytics::cmd_compute_gnn_scores,
             commands::analytics::cmd_gnn_model_status,
+            // Export commands
+            commands::export::cmd_export_subgraph,
+            commands::export::cmd_export_hunt_results,
             // Sentinel real-time connector commands
             commands::sentinel::cmd_sentinel_connect,
             commands::sentinel::cmd_sentinel_disconnect,
