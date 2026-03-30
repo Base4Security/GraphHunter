@@ -7,6 +7,7 @@ use graph_hunter_core::export::{
     export_subgraph_csv, export_subgraph_json,
 };
 
+use crate::error::CommandError;
 use crate::helpers::with_current_graph;
 use crate::state::AppState;
 
@@ -16,9 +17,9 @@ pub fn cmd_export_subgraph(
     state: State<Arc<AppState>>,
     format: String,
     nodes: Vec<String>,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
     with_current_graph(state.as_ref(), |graph| {
-        use ahash::HashSet;
+        use std::collections::HashSet;
         let id_set: HashSet<&str> = nodes.iter().map(|s| s.as_str()).collect();
 
         // Collect owned strings so export node/edge borrows have a stable owner.
@@ -84,12 +85,12 @@ pub fn cmd_export_subgraph(
         let mut buf = Vec::new();
         match format.as_str() {
             "csv" => export_subgraph_csv(&export_nodes, &export_edges, &mut buf)
-                .map_err(|e| e.to_string())?,
+                .map_err(|e| CommandError::IoError(e.to_string()))?,
             "json" => export_subgraph_json(&export_nodes, &export_edges, &mut buf)
-                .map_err(|e| e.to_string())?,
-            _ => return Err(format!("Unsupported format: {format}. Use 'csv' or 'json'.")),
+                .map_err(|e| CommandError::IoError(e.to_string()))?,
+            _ => return Err(CommandError::InvalidInput(format!("Unsupported format: {format}. Use 'csv' or 'json'."))),
         }
-        String::from_utf8(buf).map_err(|e| format!("UTF-8 encoding error: {e}"))
+        String::from_utf8(buf).map_err(|e| CommandError::Internal(format!("UTF-8 encoding error: {e}")))
     })
 }
 
@@ -98,15 +99,15 @@ pub fn cmd_export_subgraph(
 pub fn cmd_export_hunt_results(
     state: State<Arc<AppState>>,
     format: String,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
     // Clone the cache and drop the guard before acquiring the graph lock.
     let cache = {
         let guard = state
             .cached_hunt_paths
             .read()
-            .map_err(|e| format!("Lock poisoned: {e}"))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {e}")))?;
         if guard.is_empty() {
-            return Err("No hunt results to export. Run a hunt first.".to_string());
+            return Err(CommandError::InvalidInput("No hunt results to export. Run a hunt first.".to_string()));
         }
         guard.clone()
     };
@@ -118,9 +119,9 @@ pub fn cmd_export_hunt_results(
 
     let mut buf = Vec::new();
     match format.as_str() {
-        "csv" => export_hunt_results_csv(&scored, &mut buf).map_err(|e| e.to_string())?,
-        "json" => export_hunt_results_json(&scored, &mut buf).map_err(|e| e.to_string())?,
-        _ => return Err(format!("Unsupported format: {format}. Use 'csv' or 'json'.")),
+        "csv" => export_hunt_results_csv(&scored, &mut buf).map_err(|e| CommandError::IoError(e.to_string()))?,
+        "json" => export_hunt_results_json(&scored, &mut buf).map_err(|e| CommandError::IoError(e.to_string()))?,
+        _ => return Err(CommandError::InvalidInput(format!("Unsupported format: {format}. Use 'csv' or 'json'."))),
     }
-    String::from_utf8(buf).map_err(|e| format!("UTF-8 encoding error: {e}"))
+    String::from_utf8(buf).map_err(|e| CommandError::Internal(format!("UTF-8 encoding error: {e}")))
 }

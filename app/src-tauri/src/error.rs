@@ -35,16 +35,6 @@ impl std::fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
-/// Tauri v2 requires command error types to implement `Into<tauri::InvokeError>`.
-impl From<CommandError> for tauri::ipc::InvokeError {
-    fn from(err: CommandError) -> Self {
-        // Serialize the error to a JSON value so the frontend receives structured data.
-        let value = serde_json::to_value(&err)
-            .unwrap_or_else(|_| serde_json::Value::String(err.to_string()));
-        tauri::ipc::InvokeError::from(value)
-    }
-}
-
 /// Allow `?` on `String` errors (e.g. from `ai.rs` helpers) to convert into `CommandError::Internal`.
 impl From<String> for CommandError {
     fn from(s: String) -> Self {

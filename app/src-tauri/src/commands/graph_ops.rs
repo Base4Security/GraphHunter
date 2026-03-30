@@ -159,7 +159,7 @@ pub fn cmd_get_events_paginated(
     page: usize,
     page_size: Option<usize>,
     sort_by: Option<String>,
-) -> Result<crate::types::PaginatedEvents, String> {
+) -> Result<crate::types::PaginatedEvents, CommandError> {
     with_current_graph(state.as_ref(), |graph| {
         let page_size = page_size.unwrap_or(100);
 
@@ -358,7 +358,7 @@ pub fn cmd_expand_node_grouped(
     max_hops: Option<usize>,
     max_nodes: Option<usize>,
     filter: Option<ExpandFilter>,
-) -> Result<graph_hunter_core::GroupedNeighborhood, String> {
+) -> Result<graph_hunter_core::GroupedNeighborhood, CommandError> {
     with_current_graph(state.as_ref(), |graph| {
         let core_filter = filter.as_ref().map(to_core_filter);
         graph
@@ -368,7 +368,7 @@ pub fn cmd_expand_node_grouped(
                 max_nodes.unwrap_or(50),
                 core_filter.as_ref(),
             )
-            .ok_or_else(|| format!("Entity not found: {}", node_id))
+            .ok_or_else(|| CommandError::InvalidInput(format!("Entity not found: {}", node_id)))
     })
 }
 
