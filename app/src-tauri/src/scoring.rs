@@ -1,5 +1,17 @@
 use graph_hunter_core::GraphHunter;
 
+/// Maximum relation count before PageRank is skipped in adaptive scoring.
+const PAGERANK_RELATION_THRESHOLD: usize = 500_000;
+
+/// Reduced PageRank iteration count used in adaptive scoring.
+const ADAPTIVE_PAGERANK_ITERATIONS: usize = 10;
+
+/// Maximum entity count before betweenness centrality is skipped.
+const BETWEENNESS_ENTITY_THRESHOLD: usize = 2_000;
+
+/// Betweenness sample size used in adaptive scoring.
+const ADAPTIVE_BETWEENNESS_SAMPLE: usize = 200;
+
 /// Runs the full scoring pipeline: degree centrality, temporal PageRank,
 /// betweenness centrality, then composite score with equal weights.
 pub fn run_full_scoring(graph: &mut GraphHunter) {
@@ -22,16 +34,16 @@ pub fn run_scoring_adaptive(graph: &mut GraphHunter) -> Result<(), String> {
     // Degree centrality is always fast (O(n))
     graph.compute_scores();
 
-    // PageRank: skip for very large graphs (>500K relations)
-    if m <= 500_000 {
-        graph.compute_temporal_pagerank(None, None, Some(10), None, None);
+    // PageRank: skip for very large graphs
+    if m <= PAGERANK_RELATION_THRESHOLD {
+        graph.compute_temporal_pagerank(None, None, Some(ADAPTIVE_PAGERANK_ITERATIONS), None, None);
     } else {
         tracing::info!("SCORING: skipping PageRank ({}M relations)", m / 1_000_000);
     }
 
     // Betweenness: very expensive O(n*m), only for small graphs
-    if n <= 2_000 {
-        graph.compute_betweenness(Some(200));
+    if n <= BETWEENNESS_ENTITY_THRESHOLD {
+        graph.compute_betweenness(Some(ADAPTIVE_BETWEENNESS_SAMPLE));
     } else {
         tracing::info!("SCORING: skipping betweenness ({} entities)", n);
     }

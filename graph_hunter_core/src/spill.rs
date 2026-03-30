@@ -7,6 +7,7 @@ use std::io::{Write, BufWriter};
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
+use crate::config;
 use crate::errors::SpillError;
 use crate::interner::StrId;
 use crate::relation::CompactRelation;
@@ -71,7 +72,7 @@ impl SpillableEdgeStore {
             merged_mmap: None,
             merged_index: HashMap::new(),
             cache: Mutex::new(lru::LruCache::new(
-                NonZeroUsize::new(DEFAULT_LRU_CAPACITY).unwrap(),
+                NonZeroUsize::new(config::LRU_CACHE_CAPACITY).unwrap(),
             )),
             finalized: false,
         }
@@ -79,7 +80,7 @@ impl SpillableEdgeStore {
 
     /// Creates a store with default 2GB budget.
     pub fn with_default_budget() -> Self {
-        Self::new(2 * 1024 * 1024 * 1024) // 2GB
+        Self::new(config::DEFAULT_SPILL_BUDGET)
     }
 
     /// Appends a relation during ingestion.
