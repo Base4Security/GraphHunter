@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "../lib/tauri";
+import { invoke, errorMessage } from "../lib/tauri";
 import { isTauri } from "../lib/runtime";
 import {
   uploadFile,
@@ -334,8 +334,8 @@ export default function DatasetsLeftPanel({
         message: `Sentinel: Connected (polling every ${result.poll_interval_secs}s, ${result.tables.length} tables)`,
         level: "info",
       });
-    } catch (e: any) {
-      onLog({ time: now(), message: `Sentinel connect failed: ${e}`, level: "error" });
+    } catch (e) {
+      onLog({ time: now(), message: `Sentinel connect failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setLoading(false);
     }
@@ -349,8 +349,8 @@ export default function DatasetsLeftPanel({
       setSentinelConnectorId(null);
       setSentinelStatus("disconnected");
       onLog({ time: now(), message: "Sentinel: Disconnected, full scoring completed", level: "info" });
-    } catch (e: any) {
-      onLog({ time: now(), message: `Sentinel disconnect failed: ${e}`, level: "error" });
+    } catch (e) {
+      onLog({ time: now(), message: `Sentinel disconnect failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setLoading(false);
     }
@@ -376,7 +376,7 @@ export default function DatasetsLeftPanel({
           });
         }
       } catch (e) {
-        onLog({ time: now(), message: `File dialog error: ${e}`, level: "error" });
+        onLog({ time: now(), message: `File dialog error: ${errorMessage(e)}`, level: "error" });
       }
     }
   }
@@ -399,7 +399,7 @@ export default function DatasetsLeftPanel({
         level: "info",
       });
     } catch (e) {
-      onLog({ time: now(), message: `Preview failed: ${e}`, level: "error" });
+      onLog({ time: now(), message: `Preview failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setPreviewLoading(false);
     }
@@ -502,7 +502,7 @@ export default function DatasetsLeftPanel({
           dateTo: null,
         });
       } catch (e) {
-        onLog({ time: now(), message: `${e}`, level: "error" });
+        onLog({ time: now(), message: errorMessage(e), level: "error" });
         setLoading(false);
         setIngestProgress(null);
         if (unlistenRef.current) {
@@ -565,7 +565,7 @@ export default function DatasetsLeftPanel({
           });
         }
       } catch (e) {
-        onLog({ time: now(), message: `${e}`, level: "error" });
+        onLog({ time: now(), message: errorMessage(e), level: "error" });
       } finally {
         setLoading(false);
         setIngestProgress(null);
@@ -674,7 +674,7 @@ export default function DatasetsLeftPanel({
         }
       }
     } catch (e) {
-      onLog({ time: now(), message: `${e}`, level: "error" });
+      onLog({ time: now(), message: errorMessage(e), level: "error" });
     } finally {
       setLoading(false);
       setIngestProgress(null);
@@ -702,7 +702,7 @@ export default function DatasetsLeftPanel({
         level: "success",
       });
     } catch (e) {
-      onLog({ time: now(), message: `Preview failed: ${e}`, level: "error" });
+      onLog({ time: now(), message: `Preview failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setPreviewLoading(false);
     }
@@ -742,7 +742,7 @@ export default function DatasetsLeftPanel({
 
       setShowFieldSelector(false);
     } catch (e) {
-      onLog({ time: now(), message: `${e}`, level: "error" });
+      onLog({ time: now(), message: errorMessage(e), level: "error" });
     } finally {
       setConfigLoading(false);
     }

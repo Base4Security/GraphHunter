@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { invoke } from "../lib/tauri";
+import { invoke, errorMessage } from "../lib/tauri";
 import { Search, Filter, ChevronDown, ChevronRight } from "lucide-react";
 import { useNotifications } from "../hooks/useNotifications";
 import type {
@@ -50,10 +50,10 @@ export default function ExplorerPanel({
         level: "info",
       });
     } catch (e) {
-      addNotification({ message: `Search failed: ${e instanceof Error ? e.message : String(e)}`, type: "error" });
+      addNotification({ message: `Search failed: ${errorMessage(e)}`, type: "error" });
       onLog?.({
         time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-        message: `Search failed: ${e instanceof Error ? e.message : String(e)}`,
+        message: `Search failed: ${errorMessage(e)}`,
         level: "error",
       });
     } finally {

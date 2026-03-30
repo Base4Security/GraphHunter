@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { invoke } from "./lib/tauri";
+import { invoke, errorMessage } from "./lib/tauri";
 import DatasetsLeftPanel from "./components/DatasetsLeftPanel";
 import ActivityLogLeftPanel from "./components/ActivityLogLeftPanel";
 import GraphMetricsLeftPanel from "./components/GraphMetricsLeftPanel";
@@ -324,7 +324,7 @@ function AppInner() {
       } catch (e) {
         addLog({
           time: t,
-          message: `Subgraph error: ${e}`,
+          message: `Subgraph error: ${errorMessage(e)}`,
           level: "error",
         });
       }
@@ -347,7 +347,7 @@ function AppInner() {
       } catch (e) {
         addLog({
           time: t,
-          message: `Path view error: ${e}`,
+          message: `Path view error: ${errorMessage(e)}`,
           level: "error",
         });
       }
@@ -381,7 +381,7 @@ function AppInner() {
           level: "info",
         });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = errorMessage(e);
         addLog({
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
           message: `Show neighbours error: ${msg}`,
@@ -403,7 +403,7 @@ function AppInner() {
         });
         dispatch({ type: "SET_NODE_DETAILS", payload: details });
       } catch (e) {
-        addNotification({ message: `Failed to get node details: ${e instanceof Error ? e.message : String(e)}`, type: "error" });
+        addNotification({ message: `Failed to get node details: ${errorMessage(e)}`, type: "error" });
       }
     },
     [addLog, dispatch, addNotification]
@@ -467,7 +467,7 @@ function AppInner() {
       } catch (e) {
         addLog({
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-          message: `Failed to show on map: ${e}`,
+          message: `Failed to show on map: ${errorMessage(e)}`,
           level: "error",
         });
       }
@@ -503,7 +503,7 @@ function AppInner() {
     } catch (e) {
       addLog({
         time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-        message: `Failed to add path node: ${e}`,
+        message: `Failed to add path node: ${errorMessage(e)}`,
         level: "error",
       });
     }
@@ -518,7 +518,7 @@ function AppInner() {
     } catch (e) {
       addLog({
         time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-        message: `Failed to remove path node: ${e}`,
+        message: `Failed to remove path node: ${errorMessage(e)}`,
         level: "error",
       });
     }
@@ -600,7 +600,7 @@ function AppInner() {
       setAiLastSuggestions(response.suggestions || []);
       setTimeout(() => aiChatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
     } catch (e) {
-      setAnalyzeAiError(String(e));
+      setAnalyzeAiError(errorMessage(e));
     } finally {
       setAnalyzeAiLoading(false);
     }
@@ -633,7 +633,7 @@ function AppInner() {
       setAiSettingsOpen(false);
       addLog({ time: new Date().toLocaleTimeString(), message: `AI provider set to ${detected || aiProvider}`, level: "success" });
     } catch (e) {
-      setAnalyzeAiError(String(e));
+      setAnalyzeAiError(errorMessage(e));
     }
   }, [aiProvider, aiApiKey, aiModel, aiBaseUrl, addLog]);
 

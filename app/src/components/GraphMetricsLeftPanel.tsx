@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "../lib/tauri";
+import { invoke, errorMessage } from "../lib/tauri";
 import { BarChart3, X, SlidersHorizontal, Palette, Activity, ArrowRight, Shield, Brain } from "lucide-react";
 import type {
   GraphStats,
@@ -164,7 +164,7 @@ export default function GraphMetricsLeftPanel({
       const s = await invoke<GraphStats>("cmd_get_graph_stats");
       onStatsUpdate(s);
     } catch (e) {
-      onLog({ time: now(), message: `${e}`, level: "error" });
+      onLog({ time: now(), message: errorMessage(e), level: "error" });
     }
   }
 
@@ -187,7 +187,7 @@ export default function GraphMetricsLeftPanel({
       setAnomalyEnabled(true);
       onLog({ time: now(), message: "Anomaly scoring enabled", level: "success" });
     } catch (e) {
-      onLog({ time: now(), message: `Anomaly enable failed: ${e}`, level: "error" });
+      onLog({ time: now(), message: `Anomaly enable failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setAnomalyLoading(false);
     }
@@ -206,7 +206,7 @@ export default function GraphMetricsLeftPanel({
       await invoke("cmd_update_anomaly_weights", { weights });
       onLog({ time: now(), message: "Anomaly weights updated", level: "success" });
     } catch (e) {
-      onLog({ time: now(), message: `Weight update failed: ${e}`, level: "error" });
+      onLog({ time: now(), message: `Weight update failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setAnomalyLoading(false);
     }
@@ -232,7 +232,7 @@ export default function GraphMetricsLeftPanel({
       setGnnScoredCount(null);
       onLog({ time: now(), message: `GNN model loaded: ${fileName}`, level: "success" });
     } catch (e) {
-      onLog({ time: now(), message: `GNN load failed: ${e}`, level: "error" });
+      onLog({ time: now(), message: `GNN load failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setGnnLoading(false);
     }
@@ -245,7 +245,7 @@ export default function GraphMetricsLeftPanel({
       setGnnScoredCount(count);
       onLog({ time: now(), message: `GNN scores computed for ${count} entities`, level: "success" });
     } catch (e) {
-      onLog({ time: now(), message: `GNN scoring failed: ${e}`, level: "error" });
+      onLog({ time: now(), message: `GNN scoring failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setGnnLoading(false);
     }
@@ -364,7 +364,7 @@ export default function GraphMetricsLeftPanel({
                   });
                   onLog({ time: now(), message: "Scores recalculated", level: "success" });
                 } catch (e) {
-                  onLog({ time: now(), message: `Scoring failed: ${e}`, level: "error" });
+                  onLog({ time: now(), message: `Scoring failed: ${errorMessage(e)}`, level: "error" });
                 } finally {
                   setScoringLoading(false);
                 }
@@ -408,7 +408,7 @@ export default function GraphMetricsLeftPanel({
                     });
                     refreshStats();
                   } catch (e) {
-                    onLog({ time: now(), message: `Compaction failed: ${e}`, level: "error" });
+                    onLog({ time: now(), message: `Compaction failed: ${errorMessage(e)}`, level: "error" });
                   } finally {
                     setCompactLoading(false);
                   }

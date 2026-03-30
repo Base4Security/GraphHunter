@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { invoke } from "../lib/tauri";
+import { invoke, errorMessage } from "../lib/tauri";
 import { Plus, Save, Check, Trash2, X, FolderPlus } from "lucide-react";
 import type { SessionInfo, LogEntry } from "../types";
 
@@ -32,7 +32,7 @@ const SessionSelector: React.FC<SessionSelectorProps> = ({
       const list = await invoke<SessionInfo[]>("cmd_list_sessions");
       onSessionsListChange(list);
     } catch (e) {
-      onError(String(e));
+      onError(errorMessage(e));
     }
   }, [onSessionsListChange, onError]);
 
@@ -64,7 +64,7 @@ const SessionSelector: React.FC<SessionSelectorProps> = ({
       setNewSessionOpen(false);
       setNewSessionName("");
     } catch (e) {
-      onError(String(e));
+      onError(errorMessage(e));
     } finally {
       setCreating(false);
     }
@@ -84,7 +84,7 @@ const SessionSelector: React.FC<SessionSelectorProps> = ({
         });
         await refreshList();
       } catch (e) {
-        onError(String(e));
+        onError(errorMessage(e));
       }
     },
     [onSessionChange, onError, refreshList, onLog]
@@ -100,7 +100,7 @@ const SessionSelector: React.FC<SessionSelectorProps> = ({
       setSaveFlash(true);
       setTimeout(() => setSaveFlash(false), 2000);
     } catch (e) {
-      onError(String(e));
+      onError(errorMessage(e));
     }
   }, [currentSession, onError]);
 
@@ -124,7 +124,7 @@ const SessionSelector: React.FC<SessionSelectorProps> = ({
       await refreshList();
       setDeleteSessionToConfirm(null);
     } catch (e) {
-      onError(String(e));
+      onError(errorMessage(e));
     } finally {
       setDeleting(false);
     }

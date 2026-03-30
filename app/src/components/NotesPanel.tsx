@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { invoke } from "../lib/tauri";
+import { invoke, errorMessage } from "../lib/tauri";
 import { Plus, Trash2, Maximize2, X, MapPin } from "lucide-react";
 import { useNotifications } from "../hooks/useNotifications";
 import type { Note } from "../types";
@@ -68,7 +68,7 @@ export default function NotesPanel({
       await refresh();
       await onAutoSave?.();
     } catch (e) {
-      addNotification({ message: `Create note failed: ${e instanceof Error ? e.message : String(e)}`, type: "error" });
+      addNotification({ message: `Create note failed: ${errorMessage(e)}`, type: "error" });
     }
   };
 
@@ -79,7 +79,7 @@ export default function NotesPanel({
       setEditContent("");
       await refresh();
     } catch (e) {
-      addNotification({ message: `Update note failed: ${e instanceof Error ? e.message : String(e)}`, type: "error" });
+      addNotification({ message: `Update note failed: ${errorMessage(e)}`, type: "error" });
     }
   };
 
@@ -93,7 +93,7 @@ export default function NotesPanel({
       await refresh();
       await onAutoSave?.();
     } catch (e) {
-      addNotification({ message: `Delete note failed: ${e instanceof Error ? e.message : String(e)}`, type: "error" });
+      addNotification({ message: `Delete note failed: ${errorMessage(e)}`, type: "error" });
     }
   };
 

@@ -1,5 +1,5 @@
 import { Edit3, Trash2 } from "lucide-react";
-import { invoke } from "../../lib/tauri";
+import { invoke, errorMessage } from "../../lib/tauri";
 import type { DatasetInfo, GraphStats, LogEntry } from "../../types";
 import { now } from "../../lib/time";
 
@@ -68,7 +68,7 @@ export default function DatasetCard({
             } catch (e) {
               onLog({
                 time: now(),
-                message: `Remove failed: ${e}`,
+                message: `Remove failed: ${errorMessage(e)}`,
                 level: "error",
               });
             }

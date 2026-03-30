@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { invoke } from "../lib/tauri";
+import { invoke, errorMessage } from "../lib/tauri";
 import { Plus, Trash2, Crosshair, X, BookOpen, Code, Sparkles } from "lucide-react";
 import type {
   HypothesisStep,
@@ -123,7 +123,7 @@ export default function HypothesisBuilder({
       setDslError(null);
       onLog({ time: now(), message: "DSL parsed successfully", level: "info" });
     } catch (e) {
-      setDslError(String(e));
+      setDslError(errorMessage(e));
     }
   }
 
@@ -141,8 +141,8 @@ export default function HypothesisBuilder({
       setAiResult(result);
       onLog({ time: now(), message: "AI proposed hypothesis", level: "info" });
     } catch (e) {
-      setAiError(String(e));
-      onLog({ time: now(), message: `AI propose error: ${e}`, level: "error" });
+      setAiError(errorMessage(e));
+      onLog({ time: now(), message: `AI propose error: ${errorMessage(e)}`, level: "error" });
     } finally {
       setAiLoading(false);
     }
@@ -175,7 +175,7 @@ export default function HypothesisBuilder({
       setCatalogOpen(false);
       onLog({ time: now(), message: `Loaded ATT&CK: ${entry.mitre_id} — ${entry.name}`, level: "info" });
     } catch (e) {
-      onLog({ time: now(), message: `Catalog load error: ${e}`, level: "error" });
+      onLog({ time: now(), message: `Catalog load error: ${errorMessage(e)}`, level: "error" });
     }
   }
 
@@ -195,7 +195,7 @@ export default function HypothesisBuilder({
         setKSimplicity(result.hypothesis.k_simplicity ?? 1);
         setDslError(null);
       } catch (e) {
-        setDslError(String(e));
+        setDslError(errorMessage(e));
         setHunting(false);
         return;
       }
@@ -227,7 +227,7 @@ export default function HypothesisBuilder({
         onLog({ time: now(), message: "No matching paths found", level: "info" });
       }
     } catch (e) {
-      onLog({ time: now(), message: `Hunt error: ${e}`, level: "error" });
+      onLog({ time: now(), message: `Hunt error: ${errorMessage(e)}`, level: "error" });
     } finally {
       setHunting(false);
     }
@@ -375,7 +375,7 @@ export default function HypothesisBuilder({
                         setAiKeyInput("");
                         onLog({ time: now(), message: "AI API key saved", level: "success" });
                       } catch (e) {
-                        setAiError(`Failed to save key: ${e}`);
+                        setAiError(`Failed to save key: ${errorMessage(e)}`);
                       } finally {
                         setAiKeySaving(false);
                       }

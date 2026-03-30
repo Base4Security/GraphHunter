@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "../lib/tauri";
+import { invoke, errorMessage } from "../lib/tauri";
 import { isTauri } from "../lib/runtime";
 import {
   uploadFile,
@@ -247,7 +247,7 @@ export default function IngestPanel({
           });
         }
       } catch (e) {
-        onLog({ time: now(), message: `File dialog error: ${e}`, level: "error" });
+        onLog({ time: now(), message: `File dialog error: ${errorMessage(e)}`, level: "error" });
       }
     }
   }
@@ -266,7 +266,7 @@ export default function IngestPanel({
       setMappingRows(result.detected_fields.map((f) => ({ ...f })));
       onLog({ time: now(), message: `Preview: ${result.format}, ${result.detected_fields.length} fields`, level: "info" });
     } catch (e) {
-      onLog({ time: now(), message: `Preview failed: ${e}`, level: "error" });
+      onLog({ time: now(), message: `Preview failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setPreviewLoading(false);
     }
@@ -373,7 +373,7 @@ export default function IngestPanel({
 
         // Command returned immediately; UI stays responsive while background work runs
       } catch (e) {
-        onLog({ time: now(), message: `${e}`, level: "error" });
+        onLog({ time: now(), message: errorMessage(e), level: "error" });
         setLoading(false);
         setIngestProgress(null);
         if (unlistenRef.current) {
@@ -439,7 +439,7 @@ export default function IngestPanel({
           });
         }
       } catch (e) {
-        onLog({ time: now(), message: `${e}`, level: "error" });
+        onLog({ time: now(), message: errorMessage(e), level: "error" });
       } finally {
         setLoading(false);
         setIngestProgress(null);
@@ -536,7 +536,7 @@ export default function IngestPanel({
         }
       }
     } catch (e) {
-      onLog({ time: now(), message: `${e}`, level: "error" });
+      onLog({ time: now(), message: errorMessage(e), level: "error" });
     } finally {
       setLoading(false);
       setIngestProgress(null);
@@ -552,7 +552,7 @@ export default function IngestPanel({
       const s = await invoke<GraphStats>("cmd_get_graph_stats");
       onStatsUpdate(s);
     } catch (e) {
-      onLog({ time: now(), message: `${e}`, level: "error" });
+      onLog({ time: now(), message: errorMessage(e), level: "error" });
     }
   }
 
@@ -573,7 +573,7 @@ export default function IngestPanel({
         level: "success",
       });
     } catch (e) {
-      onLog({ time: now(), message: `Preview failed: ${e}`, level: "error" });
+      onLog({ time: now(), message: `Preview failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setPreviewLoading(false);
     }
@@ -613,7 +613,7 @@ export default function IngestPanel({
 
       setShowFieldSelector(false);
     } catch (e) {
-      onLog({ time: now(), message: `${e}`, level: "error" });
+      onLog({ time: now(), message: errorMessage(e), level: "error" });
     } finally {
       setConfigLoading(false);
     }
@@ -932,7 +932,7 @@ export default function IngestPanel({
                       });
                       onLog({ time: now(), message: "Scores recalculated", level: "success" });
                     } catch (e) {
-                      onLog({ time: now(), message: `Scoring failed: ${e}`, level: "error" });
+                      onLog({ time: now(), message: `Scoring failed: ${errorMessage(e)}`, level: "error" });
                     } finally {
                       setScoringLoading(false);
                     }
@@ -977,7 +977,7 @@ export default function IngestPanel({
                         });
                         refreshStats();
                       } catch (e) {
-                        onLog({ time: now(), message: `Compaction failed: ${e}`, level: "error" });
+                        onLog({ time: now(), message: `Compaction failed: ${errorMessage(e)}`, level: "error" });
                       } finally {
                         setCompactLoading(false);
                       }
