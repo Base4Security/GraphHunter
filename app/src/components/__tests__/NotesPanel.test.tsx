@@ -2,7 +2,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import NotesPanel from "../NotesPanel";
+import { NotificationProvider } from "../../hooks/useNotifications";
 import type { Note } from "../../types";
+
+function renderWithProviders(ui: React.ReactElement) {
+  return render(<NotificationProvider>{ui}</NotificationProvider>);
+}
 
 const mockNotes: Note[] = [
   {
@@ -27,7 +32,7 @@ describe("NotesPanel", () => {
   });
 
   it("renders without crash with empty notes", () => {
-    render(
+    renderWithProviders(
       <NotesPanel
         notes={[]}
         selectedNodeId={null}
@@ -41,7 +46,7 @@ describe("NotesPanel", () => {
   });
 
   it("displays notes when provided", () => {
-    render(
+    renderWithProviders(
       <NotesPanel
         notes={mockNotes}
         selectedNodeId={null}
@@ -58,7 +63,7 @@ describe("NotesPanel", () => {
   });
 
   it("shows the 'New note' button", () => {
-    render(
+    renderWithProviders(
       <NotesPanel
         notes={[]}
         selectedNodeId={null}
@@ -72,7 +77,7 @@ describe("NotesPanel", () => {
   it("opens the note creation editor when 'New note' is clicked", async () => {
     const user = userEvent.setup();
 
-    render(
+    renderWithProviders(
       <NotesPanel
         notes={[]}
         selectedNodeId={null}
@@ -88,7 +93,7 @@ describe("NotesPanel", () => {
   });
 
   it("shows delete buttons for each note", () => {
-    render(
+    renderWithProviders(
       <NotesPanel
         notes={mockNotes}
         selectedNodeId={null}
@@ -101,7 +106,7 @@ describe("NotesPanel", () => {
   });
 
   it("shows expand buttons for each note", () => {
-    render(
+    renderWithProviders(
       <NotesPanel
         notes={mockNotes}
         selectedNodeId={null}

@@ -2465,7 +2465,7 @@ mod tests {
     }
 
     #[test]
-    fn sentinel_missing_timestamp_defaults_to_zero() {
+    fn sentinel_missing_timestamp_skips_triple() {
         let json = r#"[{
             "Type": "SigninLogs",
             "UserPrincipalName": "user@contoso.com",
@@ -2475,8 +2475,8 @@ mod tests {
 
         let parser = SentinelJsonParser;
         let triples = parser.parse(json);
-        assert_eq!(triples.len(), 1);
-        assert_eq!(triples[0].1.timestamp, 0);
+        // Events with unparseable/missing timestamps are now skipped
+        assert!(triples.is_empty());
     }
 
     #[test]
