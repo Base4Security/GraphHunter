@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "./lib/tauri";
 import DatasetsLeftPanel from "./components/DatasetsLeftPanel";
@@ -18,6 +18,8 @@ import EventsViewPanel from "./components/EventsViewPanel";
 import HeatmapView from "./components/HeatmapView";
 import TimelineView from "./components/TimelineView";
 import { ChevronLeft, ChevronRight, Sparkles, Database, Activity, BarChart3, X, MapPin, FileText, HelpCircle } from "lucide-react";
+import { useAppState, useAppDispatch } from "./context/AppStateContext";
+import { useNotifications } from "./hooks/useNotifications";
 import type {
   GraphStats,
   HuntResults,
@@ -34,76 +36,49 @@ import type {
   AiSuggestion,
   ConversationMessage,
 } from "./types";
+import type { MapState, BottomTab } from "./context/AppStateContext";
 import "./App.css";
 
-type AppMode = "hunt" | "explore";
-type BottomTab = "hunt" | "explore" | "events" | "heatmap" | "timeline";
+import { useState } from "react";
 
-/** Snapshot of map view for back/forward navigation */
-interface MapState {
-  mode: AppMode;
-  bottomTab: BottomTab;
-  subgraph: Subgraph | null;
-  highlightPaths: string[][] | null;
-  neighborhood: Neighborhood | null;
-  selectedNodeId: string | null;
-  nodeDetails: NodeDetails | null;
-}
+function AppInner() {
+  const state = useAppState();
+  const dispatch = useAppDispatch();
+  const { addNotification } = useNotifications();
 
-function App() {
-  const [stats, setStats] = useState<GraphStats>({
-    entity_count: 0,
-    relation_count: 0,
-  });
-  const [log, setLog] = useState<LogEntry[]>([]);
-  const [mode, setMode] = useState<AppMode>("hunt");
+  const {
+    stats,
+    log,
+    mode,
+    bottomTab,
+    currentSession,
+    sessions,
+    sessionError,
+    subgraph,
+    highlightPaths,
+    huntPathCount,
+    showHuntTable,
+    selectedNodeId,
+    nodeDetails,
+    explorerNeighborhood,
+    pathNodeIds,
+    entityTypesInGraph,
+    rightMenuOpen,
+    leftMenuOpen,
+    notes,
+    centerNodeId,
+    bottomPanelHeight,
+    mapPast,
+    mapFuture,
+  } = state;
 
-  // Session state
-  const [currentSession, setCurrentSession] = useState<SessionInfo | null>(null);
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [sessionError, setSessionError] = useState<string>("");
-
-  // Hunt mode state
-  const [subgraph, setSubgraph] = useState<Subgraph | null>(null);
-  const [highlightPaths, setHighlightPaths] = useState<string[][] | null>(null);
-  const [huntPathCount, setHuntPathCount] = useState(0);
-  const [showHuntTable, setShowHuntTable] = useState(false);
-
-  // Explorer mode state
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [nodeDetails, setNodeDetails] = useState<NodeDetails | null>(null);
-  const [explorerNeighborhood, setExplorerNeighborhood] =
-    useState<Neighborhood | null>(null);
-
-  // Path nodes (pinned/fixed nodes) for the current session
-  const [pathNodeIds, setPathNodeIds] = useState<string[]>([]);
-  // Entity types present in the current graph (for Show neighbours By Type dropdown)
-  const [entityTypesInGraph, setEntityTypesInGraph] = useState<string[]>([]);
-  // Right menu: only one at a time (pathNodes | notes | none)
-  const [rightMenuOpen, setRightMenuOpen] = useState<"pathNodes" | "notes" | null>(null);
-  // Notes (standalone or linked to node)
-  const [notes, setNotes] = useState<Note[]>([]);
-  // When set, GraphCanvas centers on this node (Hunt mode); cleared after centering
-  const [centerNodeId, setCenterNodeId] = useState<string | null>(null);
-  // Bottom panel: which tab is active (hunt / explore / events)
-  const [bottomTab, setBottomTab] = useState<BottomTab>("explore");
-  // Bottom panel height (px) for resizable split; min 120, max 80vh
-  const [bottomPanelHeight, setBottomPanelHeight] = useState(300);
-  // Left menu: only one at a time (datasets | activity | metrics | none)
-  const [leftMenuOpen, setLeftMenuOpen] = useState<"datasets" | "activity" | "metrics" | null>("datasets");
-  // Map back/forward history (snapshots of map state)
-  const [mapPast, setMapPast] = useState<MapState[]>([]);
-  const [mapFuture, setMapFuture] = useState<MapState[]>([]);
-  const mapStateRef = useRef<MapState | null>(null);
-  // Analyze with AI panel (current graph)
+  // AI state stays local (not part of core app state to keep context focused)
   const [analyzeAiOpen, setAnalyzeAiOpen] = useState(false);
   const [analyzeAiLoading, setAnalyzeAiLoading] = useState(false);
   const [analyzeAiError, setAnalyzeAiError] = useState<string | null>(null);
   const [analyzeAiQuestion, setAnalyzeAiQuestion] = useState("");
-  // AI conversation history (displayed in panel)
   const [aiConversation, setAiConversation] = useState<ConversationMessage[]>([]);
   const [aiLastSuggestions, setAiLastSuggestions] = useState<AiSuggestion[]>([]);
-  // AI provider settings
   const [aiProvider, setAiProvider] = useState<AiProvider>("OpenAI");
   const [aiApiKey, setAiApiKey] = useState("");
   const [aiModel, setAiModel] = useState("");
@@ -111,9 +86,15 @@ function App() {
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
   const [helpPanelOpen, setHelpPanelOpen] = useState(false);
   const aiChatEndRef = useRef<HTMLDivElement>(null);
-  const addLog = useCallback((entry: LogEntry) => {
-    setLog((prev) => [entry, ...prev].slice(0, 100));
-  }, []);
+
+  const mapStateRef = useRef<MapState | null>(null);
+
+  const addLog = useCallback(
+    (entry: LogEntry) => {
+      dispatch({ type: "ADD_LOG", payload: entry });
+    },
+    [dispatch]
+  );
 
   // Auto-save session after notes or path nodes change (no-op if no session).
   const handleAutoSave = useCallback(async () => {
@@ -131,9 +112,9 @@ function App() {
     (async () => {
       try {
         const cur = await invoke<SessionInfo | null>("cmd_get_current_session");
-        if (!cancelled && cur) setCurrentSession(cur);
+        if (!cancelled && cur) dispatch({ type: "SET_CURRENT_SESSION", payload: cur });
         const list = await invoke<SessionInfo[]>("cmd_list_sessions");
-        if (!cancelled) setSessions(list);
+        if (!cancelled) dispatch({ type: "SET_SESSIONS", payload: list });
       } catch {
         // ignore
       }
@@ -141,57 +122,45 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [dispatch]);
 
   // ── When session changes: refetch stats, path nodes, and clear graph state ──
   useEffect(() => {
     if (!currentSession) {
-      setStats({ entity_count: 0, relation_count: 0 });
-      setSubgraph(null);
-      setHighlightPaths(null);
-      setExplorerNeighborhood(null);
-      setSelectedNodeId(null);
-      setNodeDetails(null);
-      setHuntPathCount(0);
-      setShowHuntTable(false);
-      setPathNodeIds([]);
-      setEntityTypesInGraph([]);
-      setNotes([]);
-      setMapPast([]);
-      setMapFuture([]);
+      dispatch({ type: "CLEAR_SESSION_STATE" });
       return;
     }
     let cancelled = false;
     invoke<GraphStats>("cmd_get_graph_stats")
       .then((s) => {
-        if (!cancelled) setStats(s);
+        if (!cancelled) dispatch({ type: "SET_STATS", payload: s });
       })
       .catch(() => {});
     invoke<string[]>("cmd_get_path_nodes")
       .then((ids) => {
-        if (!cancelled) setPathNodeIds(ids);
+        if (!cancelled) dispatch({ type: "SET_PATH_NODE_IDS", payload: ids });
       })
       .catch(() => {
-        if (!cancelled) setPathNodeIds([]);
+        if (!cancelled) dispatch({ type: "SET_PATH_NODE_IDS", payload: [] });
       });
     invoke<string[]>("cmd_get_entity_types_in_graph")
       .then((types) => {
-        if (!cancelled) setEntityTypesInGraph(types);
+        if (!cancelled) dispatch({ type: "SET_ENTITY_TYPES_IN_GRAPH", payload: types });
       })
       .catch(() => {
-        if (!cancelled) setEntityTypesInGraph([]);
+        if (!cancelled) dispatch({ type: "SET_ENTITY_TYPES_IN_GRAPH", payload: [] });
       });
     invoke<Note[]>("cmd_get_notes")
       .then((list) => {
-        if (!cancelled) setNotes(list);
+        if (!cancelled) dispatch({ type: "SET_NOTES", payload: list });
       })
       .catch(() => {
-        if (!cancelled) setNotes([]);
+        if (!cancelled) dispatch({ type: "SET_NOTES", payload: [] });
       });
     return () => {
       cancelled = true;
     };
-  }, [currentSession?.id]);
+  }, [currentSession?.id, dispatch]);
 
   // Refetch entity types when graph size changes (e.g. after ingest) so dropdown stays in sync
   useEffect(() => {
@@ -201,13 +170,13 @@ function App() {
     let cancelled = false;
     invoke<string[]>("cmd_get_entity_types_in_graph")
       .then((types) => {
-        if (!cancelled) setEntityTypesInGraph(types);
+        if (!cancelled) dispatch({ type: "SET_ENTITY_TYPES_IN_GRAPH", payload: types });
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [currentSession?.id, stats.entity_count, stats.relation_count]);
+  }, [currentSession?.id, stats.entity_count, stats.relation_count, dispatch]);
 
   // Keep ref in sync with current map state (for back/forward)
   useEffect(() => {
@@ -230,13 +199,13 @@ function App() {
         unlisten = await listen<Subgraph>("mcp-view-update", (event) => {
           const sg = event.payload;
           if (sg != null) {
-            setMode("hunt");
-            setSubgraph(sg);
-            setHighlightPaths(null);
-            setShowHuntTable(false);
-            setExplorerNeighborhood(null);
-            setSelectedNodeId(null);
-            setNodeDetails(null);
+            dispatch({ type: "SET_MODE", payload: "hunt" });
+            dispatch({ type: "SET_SUBGRAPH", payload: sg });
+            dispatch({ type: "SET_HIGHLIGHT_PATHS", payload: null });
+            dispatch({ type: "SET_SHOW_HUNT_TABLE", payload: false });
+            dispatch({ type: "SET_EXPLORER_NEIGHBORHOOD", payload: null });
+            dispatch({ type: "SET_SELECTED_NODE_ID", payload: null });
+            dispatch({ type: "SET_NODE_DETAILS", payload: null });
             addLog({
               time: new Date().toLocaleTimeString("en-US", { hour12: false }),
               message: `Map updated from MCP: ${sg.nodes?.length ?? 0} nodes, ${sg.edges?.length ?? 0} edges (audit: external)`,
@@ -251,7 +220,7 @@ function App() {
     return () => {
       unlisten?.();
     };
-  }, [addLog]);
+  }, [addLog, dispatch]);
 
   // When MCP create_note is called via HTTP API, backend emits notes-changed; refresh notes list
   useEffect(() => {
@@ -261,8 +230,8 @@ function App() {
         unlisten = await listen("notes-changed", () => {
           addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: "Notes updated from MCP (audit: external)", level: "info" });
           invoke<Note[]>("cmd_get_notes")
-            .then((list) => setNotes(list))
-            .catch(() => setNotes([]));
+            .then((list) => dispatch({ type: "SET_NOTES", payload: list }))
+            .catch(() => dispatch({ type: "SET_NOTES", payload: [] }));
         });
       } catch {
         // ignore if event API unavailable
@@ -271,72 +240,65 @@ function App() {
     return () => {
       unlisten?.();
     };
-  }, [addLog]);
+  }, [addLog, dispatch]);
 
   const pushMapState = useCallback(() => {
     const s = mapStateRef.current;
     if (s) {
-      setMapPast((prev) => [...prev, s]);
-      setMapFuture([]);
+      dispatch({ type: "PUSH_MAP_STATE", payload: s });
     }
-  }, []);
+  }, [dispatch]);
 
   const restoreMapState = useCallback((s: MapState) => {
-    setMode(s.mode);
-    setBottomTab(s.bottomTab);
-    setSubgraph(s.subgraph);
-    setHighlightPaths(s.highlightPaths);
-    setExplorerNeighborhood(s.neighborhood);
-    setSelectedNodeId(s.selectedNodeId);
-    setNodeDetails(s.nodeDetails);
-  }, []);
+    dispatch({ type: "RESTORE_MAP_STATE", payload: s });
+  }, [dispatch]);
 
   const handleMapBack = useCallback(() => {
     if (mapPast.length === 0) return;
     const prev = mapPast[mapPast.length - 1];
-    setMapPast((p) => p.slice(0, -1));
+    dispatch({ type: "SET_MAP_PAST", payload: mapPast.slice(0, -1) });
     const current = mapStateRef.current;
-    if (current) setMapFuture((f) => [...f, current]);
+    if (current) dispatch({ type: "SET_MAP_FUTURE", payload: [...mapFuture, current] });
     restoreMapState(prev);
     addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: "Navigation: Back", level: "info" });
-  }, [mapPast.length, restoreMapState, addLog]);
+  }, [mapPast, mapFuture, restoreMapState, addLog, dispatch]);
 
   const handleMapForward = useCallback(() => {
     if (mapFuture.length === 0) return;
     const next = mapFuture[mapFuture.length - 1];
-    setMapFuture((f) => f.slice(0, -1));
+    dispatch({ type: "SET_MAP_FUTURE", payload: mapFuture.slice(0, -1) });
     const current = mapStateRef.current;
-    if (current) setMapPast((p) => [...p, current]);
+    if (current) dispatch({ type: "SET_MAP_PAST", payload: [...mapPast, current] });
     restoreMapState(next);
     addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: "Navigation: Forward", level: "info" });
-  }, [mapFuture.length, restoreMapState, addLog]);
+  }, [mapFuture, mapPast, restoreMapState, addLog, dispatch]);
 
   // ── Hunt mode handler ──
   const handleHuntResults = useCallback(
     async (results: HuntResults) => {
       pushMapState();
-      setHuntPathCount(results.path_count);
+      dispatch({ type: "SET_HUNT_PATH_COUNT", payload: results.path_count });
       const t = new Date().toLocaleTimeString("en-US", { hour12: false });
 
       if (results.path_count === 0) {
-        setSubgraph(null);
-        setHighlightPaths(null);
-        setShowHuntTable(false);
+        dispatch({ type: "SET_SUBGRAPH", payload: null });
+        dispatch({ type: "SET_HIGHLIGHT_PATHS", payload: null });
+        dispatch({ type: "SET_SHOW_HUNT_TABLE", payload: false });
         addLog({ time: t, message: "Hunt: 0 paths", level: "info" });
         return;
       }
 
       // Large result sets: show table, let user pick paths to render
       if (results.path_count > 100) {
-        setShowHuntTable(true);
-        setSubgraph(null);
-        setHighlightPaths(null);
+        dispatch({ type: "SET_SHOW_HUNT_TABLE", payload: true });
+        dispatch({ type: "SET_SUBGRAPH", payload: null });
+        dispatch({ type: "SET_HIGHLIGHT_PATHS", payload: null });
         addLog({ time: t, message: `Hunt: ${results.path_count} paths (table view)`, level: "info" });
         return;
       }
 
       // Small result sets: fetch first page and render all in graph
-      setShowHuntTable(false);
+      dispatch({ type: "SET_SHOW_HUNT_TABLE", payload: false });
       try {
         const page = await invoke<PaginatedHuntResults>("cmd_get_hunt_page", {
           page: 0,
@@ -356,8 +318,8 @@ function App() {
         const sg = await invoke<Subgraph>("cmd_get_subgraph", {
           nodeIds: Array.from(allNodeIds),
         });
-        setSubgraph(sg);
-        setHighlightPaths(allPaths);
+        dispatch({ type: "SET_SUBGRAPH", payload: sg });
+        dispatch({ type: "SET_HIGHLIGHT_PATHS", payload: allPaths });
         addLog({ time: t, message: `Hunt: ${results.path_count} paths — graph updated`, level: "info" });
       } catch (e) {
         addLog({
@@ -367,7 +329,7 @@ function App() {
         });
       }
     },
-    [addLog, pushMapState]
+    [addLog, pushMapState, dispatch]
   );
 
   // ── Hunt mode: view a single path from the table ──
@@ -380,8 +342,8 @@ function App() {
         const sg = await invoke<Subgraph>("cmd_get_subgraph", {
           nodeIds: pathNodeIds,
         });
-        setSubgraph(sg);
-        setHighlightPaths([pathNodeIds]);
+        dispatch({ type: "SET_SUBGRAPH", payload: sg });
+        dispatch({ type: "SET_HIGHLIGHT_PATHS", payload: [pathNodeIds] });
       } catch (e) {
         addLog({
           time: t,
@@ -390,7 +352,7 @@ function App() {
         });
       }
     },
-    [addLog, pushMapState]
+    [addLog, pushMapState, dispatch]
   );
 
   // ── Explorer mode: expand a node (Show neighbours: All or By Type) ──
@@ -404,14 +366,14 @@ function App() {
           maxNodes: 50,
           filter: filter ?? null,
         });
-        setExplorerNeighborhood(hood);
-        setSelectedNodeId(nodeId);
+        dispatch({ type: "SET_EXPLORER_NEIGHBORHOOD", payload: hood });
+        dispatch({ type: "SET_SELECTED_NODE_ID", payload: nodeId });
 
         // Also fetch details
         const details = await invoke<NodeDetails>("cmd_get_node_details", {
           nodeId,
         });
-        setNodeDetails(details);
+        dispatch({ type: "SET_NODE_DETAILS", payload: details });
         const filterDesc = filter?.entity_types?.length ? ` (filter: ${filter.entity_types.join(", ")})` : "";
         addLog({
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
@@ -427,24 +389,24 @@ function App() {
         });
       }
     },
-    [addLog, pushMapState]
+    [addLog, pushMapState, dispatch]
   );
 
   // ── Click a node to show details in the lateral panel (works in both Hunt and Explorer) ──
   const handleNodeClick = useCallback(
     async (nodeId: string) => {
-      setSelectedNodeId(nodeId);
+      dispatch({ type: "SET_SELECTED_NODE_ID", payload: nodeId });
       addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: `Selected node: ${nodeId}`, level: "info" });
       try {
         const details = await invoke<NodeDetails>("cmd_get_node_details", {
           nodeId,
         });
-        setNodeDetails(details);
+        dispatch({ type: "SET_NODE_DETAILS", payload: details });
       } catch (e) {
-        console.error("Failed to get node details:", e);
+        addNotification({ message: `Failed to get node details: ${e instanceof Error ? e.message : String(e)}`, type: "error" });
       }
     },
-    [addLog]
+    [addLog, dispatch, addNotification]
   );
 
   // ── Explorer mode: double-click to expand ──
@@ -456,30 +418,33 @@ function App() {
     [mode, handleExploreNode]
   );
 
+  // Switch to explorer mode, clearing hunt-specific state
+  const switchToExploreMode = useCallback(() => {
+    dispatch({ type: "SET_BOTTOM_TAB", payload: "explore" });
+    dispatch({ type: "SET_MODE", payload: "explore" });
+    dispatch({ type: "SET_SUBGRAPH", payload: null });
+    dispatch({ type: "SET_HIGHLIGHT_PATHS", payload: null });
+  }, [dispatch]);
+
   // Context menu Expand/Center/Show neighbours: if in Hunt mode, switch to Explorer first so the graph updates
   const handleNodeContextExpandOrShow = useCallback(
     (nodeId: string, filter?: ExpandFilter) => {
-      if (mode !== "explore") {
-        setBottomTab("explore");
-        setMode("explore");
-        setSubgraph(null);
-        setHighlightPaths(null);
-      }
+      if (mode !== "explore") switchToExploreMode();
       handleExploreNode(nodeId, filter);
     },
-    [mode, handleExploreNode]
+    [mode, handleExploreNode, switchToExploreMode]
   );
 
   // ── Types Available: show type or single node on map ──
   const handleShowTypeOnMap = useCallback(
     async (nodeIds: string[]) => {
       pushMapState();
-      setBottomTab("hunt");
-      setMode("hunt");
-      setSelectedNodeId(null);
-      setNodeDetails(null);
-      setExplorerNeighborhood(null);
-      setHighlightPaths(null);
+      dispatch({ type: "SET_BOTTOM_TAB", payload: "hunt" });
+      dispatch({ type: "SET_MODE", payload: "hunt" });
+      dispatch({ type: "SET_SELECTED_NODE_ID", payload: null });
+      dispatch({ type: "SET_NODE_DETAILS", payload: null });
+      dispatch({ type: "SET_EXPLORER_NEIGHBORHOOD", payload: null });
+      dispatch({ type: "SET_HIGHLIGHT_PATHS", payload: null });
       if (nodeIds.length === 0) {
         addLog({
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
@@ -492,8 +457,8 @@ function App() {
         const sg = await invoke<Subgraph>("cmd_get_subgraph", {
           nodeIds,
         });
-        setSubgraph(sg);
-        setHighlightPaths([nodeIds]);
+        dispatch({ type: "SET_SUBGRAPH", payload: sg });
+        dispatch({ type: "SET_HIGHLIGHT_PATHS", payload: [nodeIds] });
         addLog({
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
           message: `Showing ${nodeIds.length} nodes with this relation on map`,
@@ -507,40 +472,32 @@ function App() {
         });
       }
     },
-    [addLog, pushMapState]
+    [addLog, pushMapState, dispatch]
   );
 
   const handleShowNodeOnMap = useCallback(
     (nodeId: string) => {
       addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: `Show on map: node ${nodeId}`, level: "info" });
-      setBottomTab("explore");
-      setMode("explore");
-      setSubgraph(null);
-      setHighlightPaths(null);
-      handleExploreNode(nodeId); // handleExploreNode pushes current state
+      switchToExploreMode();
+      handleExploreNode(nodeId);
     },
-    [handleExploreNode, addLog]
+    [handleExploreNode, addLog, switchToExploreMode]
   );
 
   /** Show on map the clicked node and only its neighbours of the given entity type (Explorer + type filter). */
   const handleShowNeighbourTypeOnMap = useCallback(
     (nodeId: string, entityType: string) => {
-      if (mode !== "explore") {
-        setBottomTab("explore");
-        setMode("explore");
-        setSubgraph(null);
-        setHighlightPaths(null);
-      }
+      if (mode !== "explore") switchToExploreMode();
       handleExploreNode(nodeId, { entity_types: [entityType] });
     },
-    [mode, handleExploreNode]
+    [mode, handleExploreNode, switchToExploreMode]
   );
 
   // ── Path nodes: add/remove pinned nodes (persisted with session) ──
   const handleAddToPathNodes = useCallback(async (nodeId: string) => {
     try {
       await invoke("cmd_add_path_node", { nodeId });
-      setPathNodeIds((prev) => (prev.includes(nodeId) ? prev : [...prev, nodeId]));
+      dispatch({ type: "ADD_PATH_NODE", payload: nodeId });
       await handleAutoSave();
       addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: `Path node added: ${nodeId}`, level: "info" });
     } catch (e) {
@@ -550,12 +507,12 @@ function App() {
         level: "error",
       });
     }
-  }, [addLog, handleAutoSave]);
+  }, [addLog, handleAutoSave, dispatch]);
 
   const handleRemoveFromPathNodes = useCallback(async (nodeId: string) => {
     try {
       await invoke("cmd_remove_path_node", { nodeId });
-      setPathNodeIds((prev) => prev.filter((id) => id !== nodeId));
+      dispatch({ type: "REMOVE_PATH_NODE", payload: nodeId });
       await handleAutoSave();
       addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: `Path node removed: ${nodeId}`, level: "info" });
     } catch (e) {
@@ -565,26 +522,26 @@ function App() {
         level: "error",
       });
     }
-  }, [addLog, handleAutoSave]);
+  }, [addLog, handleAutoSave, dispatch]);
 
   // ── Mode switch (Hunt / Explorer tabs; Events view doesn't change graph mode) ──
   const handleBottomTabChange = useCallback((tab: BottomTab) => {
-    setBottomTab(tab);
+    dispatch({ type: "SET_BOTTOM_TAB", payload: tab });
     if (tab === "hunt") {
-      setMode("hunt");
-      setSelectedNodeId(null);
-      setNodeDetails(null);
-      setShowHuntTable(false);
-      setHuntPathCount(0);
-      setExplorerNeighborhood(null);
+      dispatch({ type: "SET_MODE", payload: "hunt" });
+      dispatch({ type: "SET_SELECTED_NODE_ID", payload: null });
+      dispatch({ type: "SET_NODE_DETAILS", payload: null });
+      dispatch({ type: "SET_SHOW_HUNT_TABLE", payload: false });
+      dispatch({ type: "SET_HUNT_PATH_COUNT", payload: 0 });
+      dispatch({ type: "SET_EXPLORER_NEIGHBORHOOD", payload: null });
     } else if (tab === "explore") {
-      setMode("explore");
-      setSubgraph(null);
-      setHighlightPaths(null);
+      dispatch({ type: "SET_MODE", payload: "explore" });
+      dispatch({ type: "SET_SUBGRAPH", payload: null });
+      dispatch({ type: "SET_HIGHLIGHT_PATHS", payload: null });
     }
     const tabLabels: Record<BottomTab, string> = { hunt: "Hunt", explore: "Explorer", events: "Events", heatmap: "Heatmap", timeline: "Timeline" };
     addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: `Switched to ${tabLabels[tab]}`, level: "info" });
-  }, [addLog]);
+  }, [addLog, dispatch]);
 
   // Click path node in list: Explorer = load neighborhood; Hunt = pan/zoom to center node
   const handlePathNodeFocus = useCallback(
@@ -593,10 +550,10 @@ function App() {
         handleExploreNode(nodeId);
       } else {
         addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: `Centered on node: ${nodeId}`, level: "info" });
-        setCenterNodeId(nodeId);
+        dispatch({ type: "SET_CENTER_NODE_ID", payload: nodeId });
       }
     },
-    [mode, handleExploreNode, addLog]
+    [mode, handleExploreNode, addLog, dispatch]
   );
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
@@ -605,7 +562,7 @@ function App() {
     const startHeight = bottomPanelHeight;
     const onMove = (e2: MouseEvent) => {
       const delta = startY - e2.clientY;
-      setBottomPanelHeight((_) => Math.min(600, Math.max(120, startHeight + delta)));
+      dispatch({ type: "SET_BOTTOM_PANEL_HEIGHT", payload: Math.min(600, Math.max(120, startHeight + delta)) });
     };
     const onUp = () => {
       document.removeEventListener("mousemove", onMove);
@@ -617,7 +574,7 @@ function App() {
     document.body.style.userSelect = "none";
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
-  }, [bottomPanelHeight]);
+  }, [bottomPanelHeight, dispatch]);
 
   const sendAiMessage = useCallback(async (message: string) => {
     // Show user message immediately + thinking indicator
@@ -706,6 +663,28 @@ function App() {
   const leftPanelWidth = leftPanelCount * 280;
   const rightPanelCount = rightMenuOpen !== null ? 1 : 0;
   const rightPanelWidth = rightPanelCount * 280;
+
+  // Setter callbacks for child components that expect (value) => void
+  const setCurrentSession = useCallback(
+    (session: SessionInfo | null) => dispatch({ type: "SET_CURRENT_SESSION", payload: session }),
+    [dispatch]
+  );
+  const setSessions = useCallback(
+    (sessions: SessionInfo[]) => dispatch({ type: "SET_SESSIONS", payload: sessions }),
+    [dispatch]
+  );
+  const setSessionError = useCallback(
+    (error: string) => dispatch({ type: "SET_SESSION_ERROR", payload: error }),
+    [dispatch]
+  );
+  const setStats = useCallback(
+    (stats: GraphStats) => dispatch({ type: "SET_STATS", payload: stats }),
+    [dispatch]
+  );
+  const setNotes = useCallback(
+    (notes: Note[]) => dispatch({ type: "SET_NOTES", payload: notes }),
+    [dispatch]
+  );
 
   // When no session is selected, show the welcome page (session selector + lateral guide)
   if (!currentSession) {
@@ -796,7 +775,7 @@ function App() {
           <button
             type="button"
             className={`app-toolbar-btn ${leftMenuOpen === "datasets" ? "active" : ""}`}
-            onClick={() => setLeftMenuOpen((o) => (o === "datasets" ? null : "datasets"))}
+            onClick={() => dispatch({ type: "SET_LEFT_MENU", payload: leftMenuOpen === "datasets" ? null : "datasets" })}
             title={leftMenuOpen === "datasets" ? "Hide Datasets" : "Show Datasets"}
           >
             <Database size={14} style={{ marginRight: 4 }} />
@@ -805,7 +784,7 @@ function App() {
           <button
             type="button"
             className={`app-toolbar-btn ${leftMenuOpen === "activity" ? "active" : ""}`}
-            onClick={() => setLeftMenuOpen((o) => (o === "activity" ? null : "activity"))}
+            onClick={() => dispatch({ type: "SET_LEFT_MENU", payload: leftMenuOpen === "activity" ? null : "activity" })}
             title={leftMenuOpen === "activity" ? "Hide Activity Log" : "Show Activity Log"}
           >
             <Activity size={14} style={{ marginRight: 4 }} />
@@ -814,7 +793,7 @@ function App() {
           <button
             type="button"
             className={`app-toolbar-btn ${leftMenuOpen === "metrics" ? "active" : ""}`}
-            onClick={() => setLeftMenuOpen((o) => (o === "metrics" ? null : "metrics"))}
+            onClick={() => dispatch({ type: "SET_LEFT_MENU", payload: leftMenuOpen === "metrics" ? null : "metrics" })}
             title={leftMenuOpen === "metrics" ? "Hide Graph Metrics" : "Show Graph Metrics"}
           >
             <BarChart3 size={14} style={{ marginRight: 4 }} />
@@ -823,7 +802,7 @@ function App() {
           <button
             type="button"
             className={`app-toolbar-btn ${rightMenuOpen === "pathNodes" ? "active" : ""}`}
-            onClick={() => setRightMenuOpen((o) => (o === "pathNodes" ? null : "pathNodes"))}
+            onClick={() => dispatch({ type: "SET_RIGHT_MENU", payload: rightMenuOpen === "pathNodes" ? null : "pathNodes" })}
             title={rightMenuOpen === "pathNodes" ? "Close Path Nodes" : "Open Path Nodes"}
           >
             Path Nodes
@@ -834,7 +813,7 @@ function App() {
           <button
             type="button"
             className={`app-toolbar-btn ${rightMenuOpen === "notes" ? "active" : ""}`}
-            onClick={() => setRightMenuOpen((o) => (o === "notes" ? null : "notes"))}
+            onClick={() => dispatch({ type: "SET_RIGHT_MENU", payload: rightMenuOpen === "notes" ? null : "notes" })}
             title={rightMenuOpen === "notes" ? "Close Notes" : "Open Notes"}
           >
             Notes
@@ -877,19 +856,19 @@ function App() {
           <DatasetsLeftPanel
             currentSessionId={currentSession?.id ?? null}
             onSessionCreated={(session) => {
-              setCurrentSession(session);
-              setSessions((prev) => (prev.some((s) => s.id === session.id) ? prev : [...prev, session]));
+              dispatch({ type: "SET_CURRENT_SESSION", payload: session });
+              dispatch({ type: "ADD_SESSION", payload: session });
             }}
             stats={stats}
             onStatsUpdate={setStats}
             onLog={addLog}
-            onClose={() => setLeftMenuOpen(null)}
+            onClose={() => dispatch({ type: "SET_LEFT_MENU", payload: null })}
             onShowTypeOnMap={handleShowTypeOnMap}
             onShowNodeOnMap={handleShowNodeOnMap}
           />
         )}
         {leftMenuOpen === "activity" && (
-          <ActivityLogLeftPanel log={log} onClose={() => setLeftMenuOpen(null)} />
+          <ActivityLogLeftPanel log={log} onClose={() => dispatch({ type: "SET_LEFT_MENU", payload: null })} />
         )}
         {leftMenuOpen === "metrics" && (
           <GraphMetricsLeftPanel
@@ -897,7 +876,7 @@ function App() {
             stats={stats}
             onStatsUpdate={setStats}
             onLog={addLog}
-            onClose={() => setLeftMenuOpen(null)}
+            onClose={() => dispatch({ type: "SET_LEFT_MENU", payload: null })}
             onShowTypeOnMap={handleShowTypeOnMap}
             onShowNodeOnMap={handleShowNodeOnMap}
           />
@@ -911,7 +890,7 @@ function App() {
         selectedNodeId={selectedNodeId}
         pathNodeIds={pathNodeIds}
         centerNodeId={centerNodeId}
-        onCenterDone={() => setCenterNodeId(null)}
+        onCenterDone={() => dispatch({ type: "SET_CENTER_NODE_ID", payload: null })}
         onNodeClick={handleNodeClick}
         onNodeDoubleClick={handleNodeDoubleClick}
         onNodeContextExpand={handleNodeContextExpandOrShow}
@@ -1016,7 +995,7 @@ function App() {
               <button
                 type="button"
                 className="left-menu-panel-close"
-                onClick={() => setRightMenuOpen(null)}
+                onClick={() => dispatch({ type: "SET_RIGHT_MENU", payload: null })}
                 title="Hide Path Nodes"
                 aria-label="Hide Path Nodes menu"
               >
@@ -1039,7 +1018,7 @@ function App() {
               <button
                 type="button"
                 className="left-menu-panel-close"
-                onClick={() => setRightMenuOpen(null)}
+                onClick={() => dispatch({ type: "SET_RIGHT_MENU", payload: null })}
                 title="Hide Notes"
                 aria-label="Hide Notes menu"
               >
@@ -1065,8 +1044,8 @@ function App() {
           details={nodeDetails}
           onClose={() => {
             addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: "Cleared selection", level: "info" });
-            setNodeDetails(null);
-            setSelectedNodeId(null);
+            dispatch({ type: "SET_NODE_DETAILS", payload: null });
+            dispatch({ type: "SET_SELECTED_NODE_ID", payload: null });
           }}
           onExpand={handleExploreNode}
           onSetCenter={handleExploreNode}
@@ -1296,6 +1275,21 @@ function App() {
         </div>
       )}
     </div>
+  );
+}
+
+// ── Root App component wrapping with providers ──
+
+import { AppStateProvider } from "./context/AppStateContext";
+import { NotificationProvider } from "./hooks/useNotifications";
+
+function App() {
+  return (
+    <AppStateProvider>
+      <NotificationProvider>
+        <AppInner />
+      </NotificationProvider>
+    </AppStateProvider>
   );
 }
 
