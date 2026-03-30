@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState, type ReactNode } from "react";
+import { Download } from "lucide-react";
 import { invoke } from "../lib/tauri";
 import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
 // @ts-expect-error no types for cytoscape-dagre
@@ -75,6 +76,46 @@ export default function GraphCanvas({
     y: number;
   } | null>(null);
   const [entityTypesForContextNode, setEntityTypesForContextNode] = useState<string[]>([]);
+  const [exportOpen, setExportOpen] = useState(false);
+  const exportBtnRef = useRef<HTMLDivElement>(null);
+
+  // Close export dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (exportBtnRef.current && !exportBtnRef.current.contains(e.target as Node)) {
+        setExportOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const handleExportGraph = useCallback(
+    async (format: "csv" | "json") => {
+      setExportOpen(false);
+      const source = explorerMode ? neighborhood : subgraph;
+      if (!source || source.nodes.length === 0) return;
+      const nodeIds = source.nodes.map((n) => n.id);
+      try {
+        const data = await invoke<string>("cmd_export_subgraph", {
+          format,
+          nodes: nodeIds,
+        });
+        const blob = new Blob([data], {
+          type: format === "csv" ? "text/csv" : "application/json",
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `graph_export.${format}`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        console.error("Graph export failed:", e);
+      }
+    },
+    [subgraph, neighborhood, explorerMode]
+  );
 
   // When context menu opens for a node, fetch entity types of that node's neighbours (for "By type" dropdown)
   useEffect(() => {
@@ -544,6 +585,64 @@ export default function GraphCanvas({
           }}
         >
           Large graph truncated: showing {truncationInfo.shownNodes.toLocaleString()}/{truncationInfo.nodes.toLocaleString()} nodes, {truncationInfo.shownEdges.toLocaleString()} edge groups
+        </div>
+      )}
+      {!isEmpty && (
+        <div
+          ref={exportBtnRef}
+          style={{
+            position: "absolute",
+            top: 8,
+            right: 8,
+            zIndex: 10,
+          }}
+        >
+          <button
+            className="btn btn-sm"
+            onClick={() => setExportOpen((v) => !v)}
+            title="Export graph data"
+            style={{
+              background: "rgba(30, 30, 40, 0.85)",
+              border: "1px solid var(--border)",
+              color: "var(--text-secondary)",
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+          >
+            <Download size={14} />
+            Export
+          </button>
+          {exportOpen && (
+            <div
+              style={{
+                position: "absolute",
+                top: "100%",
+                right: 0,
+                marginTop: 2,
+                background: "var(--bg-secondary)",
+                border: "1px solid var(--border)",
+                borderRadius: 4,
+                minWidth: 100,
+                boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+              }}
+            >
+              <button
+                className="btn btn-sm"
+                style={{ display: "block", width: "100%", textAlign: "left" }}
+                onClick={() => handleExportGraph("csv")}
+              >
+                CSV
+              </button>
+              <button
+                className="btn btn-sm"
+                style={{ display: "block", width: "100%", textAlign: "left" }}
+                onClick={() => handleExportGraph("json")}
+              >
+                JSON
+              </button>
+            </div>
+          )}
         </div>
       )}
       {contextMenu && onNodeContextCopy && (
