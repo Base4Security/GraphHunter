@@ -8,6 +8,7 @@ use graph_hunter_core::{
 use tauri::{Emitter, State};
 use uuid::Uuid;
 
+use crate::error::CommandError;
 use crate::evtx::{
     evtx_ingest_streaming, evtx_preview_sample, evtx_to_sysmon_ndjson,
     file_looks_like_evtx, path_is_evtx,
@@ -22,12 +23,12 @@ use crate::types::{
 
 /// Preview ingestion: detect format and proposed field -> entity type mapping (no ingest).
 #[tauri::command]
-pub fn cmd_preview_ingest(path: String, format: String) -> Result<PreviewIngestResult, String> {
+pub fn cmd_preview_ingest(path: String, format: String) -> Result<PreviewIngestResult, CommandError> {
     let use_evtx = format.to_lowercase() == "evtx"
         || path_is_evtx(&path)
         || (format.to_lowercase() == "auto" && file_looks_like_evtx(&path));
     let (contents, resolved) = if use_evtx {
-        let contents = evtx_preview_sample(&path, 1000)?;
+        let contents = evtx_preview_sample(&path, 1000).map_err(|e| CommandError::IoError(e))?;
         (contents, "sysmon".to_string())
     } else {
         // For large files, only read a preview sample (first 64KB) for format detection
@@ -35,14 +36,14 @@ pub fn cmd_preview_ingest(path: String, format: String) -> Result<PreviewIngestR
         let contents = if file_size > 10 * 1024 * 1024 {
             // Large file: read only first 64KB for preview
             let mut file = std::fs::File::open(&path)
-                .map_err(|e| format!("Failed to open file '{}': {}", path, e))?;
+                .map_err(|e| CommandError::IoError(format!("Failed to open file '{}': {}", path, e)))?;
             let mut buf = vec![0u8; 64 * 1024];
             let n = std::io::Read::read(&mut file, &mut buf)
-                .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+                .map_err(|e| CommandError::IoError(format!("Failed to read file '{}': {}", path, e)))?;
             String::from_utf8_lossy(&buf[..n]).to_string()
         } else {
             std::fs::read_to_string(&path)
-                .map_err(|e| format!("Failed to read file '{}': {}", path, e))?
+                .map_err(|e| CommandError::IoError(format!("Failed to read file '{}': {}", path, e)))?
         };
         let resolved = resolve_format(&contents, &format);
         (contents, resolved)
@@ -70,32 +71,32 @@ pub fn cmd_load_data(
     state: State<Arc<AppState>>,
     path: String,
     format: String,
-) -> Result<LoadResult, String> {
+) -> Result<LoadResult, CommandError> {
     let use_evtx = format.to_lowercase() == "evtx"
         || path_is_evtx(&path)
         || (format.to_lowercase() == "auto" && file_looks_like_evtx(&path));
     let (contents, format_for_parser) = if use_evtx {
-        let contents = evtx_to_sysmon_ndjson(&path)?;
+        let contents = evtx_to_sysmon_ndjson(&path).map_err(|e| CommandError::IoError(e))?;
         (contents, "generic".to_string()) // Use generic parser so any EVTX event produces entities (Host, User, etc.)
     } else {
         let contents = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read file '{}': {}", path, e))?;
+            .map_err(|e| CommandError::IoError(format!("Failed to read file '{}': {}", path, e)))?;
         (contents, format)
     };
 
     let session_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone()
-        .ok_or("No current session")?;
+        .ok_or_else(|| CommandError::SessionNotFound("No current session".into()))?;
 
     let session = {
         let sessions = state
             .sessions
             .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-        Arc::clone(sessions.get(&session_id).ok_or("Session not found")?)
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+        Arc::clone(sessions.get(&session_id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?)
     };
 
     let dataset_id = Uuid::new_v4().to_string();
@@ -106,14 +107,14 @@ pub fn cmd_load_data(
         .to_string();
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| CommandError::Internal(e.to_string()))?
         .as_secs() as i64;
 
     {
         let mut datasets = session
             .datasets
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         datasets.push(DatasetInfo {
             id: dataset_id.clone(),
             name: name.clone(),
@@ -128,11 +129,12 @@ pub fn cmd_load_data(
         let mut graph = session
             .graph
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         let resolved_format = resolve_format(&contents, &format_for_parser);
-        let parser = make_parser_for_format(&resolved_format)?;
+        let parser = make_parser_for_format(&resolved_format).map_err(|e| CommandError::ParseError(e))?;
         let triples = parser.parse(&contents);
-        let result = graph.insert_triples(triples, Some(dataset_id.as_str()));
+        let result = graph.insert_triples(triples, Some(dataset_id.as_str()))
+            .map_err(|e| e.to_string())?;
         run_full_scoring(&mut graph);
         result
     };
@@ -141,7 +143,7 @@ pub fn cmd_load_data(
         let mut datasets = session
             .datasets
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         if let Some(last) = datasets.last_mut() {
             last.entity_count = new_entities;
             last.relation_count = new_relations;
@@ -152,7 +154,7 @@ pub fn cmd_load_data(
         let graph = session
             .graph
             .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         (graph.entity_count(), graph.relation_count())
     };
 
@@ -170,18 +172,18 @@ pub fn cmd_load_data(
 pub async fn cmd_ingest_siem(
     state: State<'_, Arc<AppState>>,
     params: serde_json::Value,
-) -> Result<LoadResult, String> {
+) -> Result<LoadResult, CommandError> {
     let source = params
         .get("source")
         .and_then(|v| v.as_str())
-        .ok_or("missing param: source (sentinel | elastic)")?;
+        .ok_or_else(|| CommandError::InvalidInput("missing param: source (sentinel | elastic)".into()))?;
 
     let data = match source {
         "sentinel" => {
             let workspace_id = params
                 .get("workspace_id")
                 .and_then(|v| v.as_str())
-                .ok_or("missing param: workspace_id")?
+                .ok_or_else(|| CommandError::InvalidInput("missing param: workspace_id".into()))?
                 .to_string();
             let query = params
                 .get("query")
@@ -204,14 +206,15 @@ pub async fn cmd_ingest_siem(
                 graph_hunter_cli::siem::run_sentinel_query(&workspace_id, &query, auth)
             })
             .await
-            .map_err(|e| format!("task join error: {}", e))??;
+            .map_err(|e| CommandError::Internal(format!("task join error: {}", e)))?
+            .map_err(|e| CommandError::SentinelError(e.to_string()))?;
             res.data
         }
         "elastic" => {
             let url = params
                 .get("url")
                 .and_then(|v| v.as_str())
-                .ok_or("missing param: url")?
+                .ok_or_else(|| CommandError::InvalidInput("missing param: url".into()))?
                 .to_string();
             let index = params
                 .get("index")
@@ -245,25 +248,26 @@ pub async fn cmd_ingest_siem(
                 graph_hunter_cli::siem::run_elastic_query(&url, &index, &query, size, None, auth)
             })
             .await
-            .map_err(|e| format!("task join error: {}", e))??;
+            .map_err(|e| CommandError::Internal(format!("task join error: {}", e)))?
+            .map_err(|e| CommandError::Internal(e.to_string()))?;
             res.data
         }
-        _ => return Err(format!("unsupported source: '{}'. Use 'sentinel' or 'elastic'.", source)),
+        _ => return Err(CommandError::InvalidInput(format!("unsupported source: '{}'. Use 'sentinel' or 'elastic'.", source))),
     };
 
     let session_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone()
-        .ok_or("No current session")?;
+        .ok_or_else(|| CommandError::SessionNotFound("No current session".into()))?;
 
     let session = {
         let sessions = state
             .sessions
             .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-        Arc::clone(sessions.get(&session_id).ok_or("Session not found")?)
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+        Arc::clone(sessions.get(&session_id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?)
     };
 
     let dataset_id = Uuid::new_v4().to_string();
@@ -274,14 +278,14 @@ pub async fn cmd_ingest_siem(
     .to_string();
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| CommandError::Internal(e.to_string()))?
         .as_secs() as i64;
 
     {
         let mut datasets = session
             .datasets
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         datasets.push(DatasetInfo {
             id: dataset_id.clone(),
             name: name.clone(),
@@ -296,10 +300,11 @@ pub async fn cmd_ingest_siem(
         let mut graph = session
             .graph
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-        let parser = make_parser_for_format("sentinel")?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+        let parser = make_parser_for_format("sentinel").map_err(|e| CommandError::ParseError(e))?;
         let triples = parser.parse(&data);
-        let (e, r) = graph.insert_triples(triples, Some(dataset_id.as_str()));
+        let (e, r) = graph.insert_triples(triples, Some(dataset_id.as_str()))
+            .map_err(|e| e.to_string())?;
         run_full_scoring(&mut graph);
         (e, r)
     };
@@ -308,7 +313,7 @@ pub async fn cmd_ingest_siem(
         let mut datasets = session
             .datasets
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         if let Some(last) = datasets.last_mut() {
             last.entity_count = new_entities;
             last.relation_count = new_relations;
@@ -319,7 +324,7 @@ pub async fn cmd_ingest_siem(
         let graph = session
             .graph
             .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         (graph.entity_count(), graph.relation_count())
     };
 
@@ -343,23 +348,23 @@ pub async fn cmd_load_data_streaming(
     config: Option<FieldConfig>,
     date_from: Option<String>,
     date_to: Option<String>,
-) -> Result<IngestJobStarted, String> {
+) -> Result<IngestJobStarted, CommandError> {
     let job_id = Uuid::new_v4().to_string();
 
     let session_id = state
         .current_session_id
         .read()
-        .map_err(|e| format!("Lock poisoned: {}", e))?
+        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
         .clone()
-        .ok_or("No current session")?;
+        .ok_or_else(|| CommandError::SessionNotFound("No current session".into()))?;
 
     // Clone the Arc<SessionState> under a brief read lock, then release
     let session = {
         let sessions = state
             .sessions
             .read()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
-        Arc::clone(sessions.get(&session_id).ok_or("Session not found")?)
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
+        Arc::clone(sessions.get(&session_id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?)
     };
 
     let dataset_id = Uuid::new_v4().to_string();
@@ -370,7 +375,7 @@ pub async fn cmd_load_data_streaming(
         .to_string();
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| CommandError::Internal(e.to_string()))?
         .as_secs() as i64;
 
     // Create dataset entry under brief lock
@@ -378,7 +383,7 @@ pub async fn cmd_load_data_streaming(
         let mut datasets = session
             .datasets
             .write()
-            .map_err(|e| format!("Lock poisoned: {}", e))?;
+            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
         datasets.push(DatasetInfo {
             id: dataset_id.clone(),
             name: file_name.clone(),
@@ -392,10 +397,10 @@ pub async fn cmd_load_data_streaming(
     // Validate format before spawning (fail fast for bad format)
     let pre_check = format.to_lowercase();
     if !["auto", "evtx", "sysmon", "sentinel", "cognito", "generic", "csv", "iis", "iis_w3c", "w3c"].contains(&pre_check.as_str()) {
-        return Err(format!(
+        return Err(CommandError::InvalidInput(format!(
             "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', or 'iis'.",
             format
-        ));
+        )));
     }
 
     let result_to_return = IngestJobStarted {
@@ -403,7 +408,10 @@ pub async fn cmd_load_data_streaming(
         dataset_id: dataset_id.clone(),
     };
 
-    // Spawn the heavy work in a background thread
+    // Spawn the heavy work in a background thread.
+    // NOTE: The background thread uses Result<T, String> internally for event emission
+    // (IngestError events carry String messages). This is intentional -- those are not
+    // Tauri command returns, so they don't need CommandError.
     let bg_job_id = job_id.clone();
     let bg_dataset_id = dataset_id.clone();
     let bg_path = path.clone();
@@ -430,7 +438,7 @@ pub async fn cmd_load_data_streaming(
         // ISO date format sorts lexicographically.
         let date_from_bytes: Option<Vec<u8>> = bg_date_from.as_ref().map(|s| s.as_bytes().to_vec());
         let date_to_bytes: Option<Vec<u8>> = bg_date_to.as_ref().map(|s| s.as_bytes().to_vec());
-        eprintln!("INGEST: date_from={:?}, date_to={:?}", bg_date_from, bg_date_to);
+        tracing::info!("INGEST: date_from={:?}, date_to={:?}", bg_date_from, bg_date_to);
 
         // 1. Open file and check for EVTX (binary) before any UTF-8 read
         let use_evtx = path_is_evtx(&bg_path)
@@ -571,7 +579,7 @@ pub async fn cmd_load_data_streaming(
             }
         }
 
-        eprintln!("INGEST: format={}, is_line_based={}, file_size={}", resolved, is_line_based, bytes_total);
+        tracing::info!("INGEST: format={}, is_line_based={}, file_size={}", resolved, is_line_based, bytes_total);
         let ingest_result: Result<(usize, usize), String> = (|| -> Result<(usize, usize), String> {
             if is_line_based {
                 // ── Line-based streaming path (NDJSON / IIS / CSV): mmap + line-batch parsing ──
@@ -587,10 +595,10 @@ pub async fn cmd_load_data_streaming(
                     .map_err(|e| format!("Failed to re-open file '{}': {}", bg_path, e))?;
                 let mmap = unsafe { memmap2::Mmap::map(&file2) }
                     .map_err(|e| {
-                        eprintln!("INGEST ERROR: Failed to mmap: {}", e);
+                        tracing::error!("INGEST: Failed to mmap: {}", e);
                         format!("Failed to mmap file '{}': {}", bg_path, e)
                     })?;
-                eprintln!("INGEST: mmap OK, {} bytes", mmap.len());
+                tracing::info!("INGEST: mmap OK, {} bytes", mmap.len());
 
                 // Work directly on bytes — never convert the full mmap to String.
                 // Only convert each batch (max ~25MB) via lossy UTF-8.
@@ -615,7 +623,7 @@ pub async fn cmd_load_data_streaming(
 
                     total_lines += 1;
                     if total_lines > MAX_INGEST_LINES {
-                        eprintln!("INGEST: reached max ingest limit of {} lines, stopping", MAX_INGEST_LINES);
+                        tracing::warn!("INGEST: reached max ingest limit of {} lines, stopping", MAX_INGEST_LINES);
                         stopped_early = true;
                         break;
                     }
@@ -704,6 +712,7 @@ pub async fn cmd_load_data_streaming(
                                 .write()
                                 .map_err(|e| format!("Lock poisoned: {}", e))?;
                             graph.insert_triples(triples, Some(&bg_dataset_id))
+                                .map_err(|e| e.to_string())?
                         };
                         total_new_entities += ne;
                         total_new_relations += nr;
@@ -745,7 +754,7 @@ pub async fn cmd_load_data_streaming(
                                     if GlobalMemoryStatusEx(p) != 0 {
                                         let avail_mb = (*p).ull_avail_phys / (1024 * 1024);
                                         if avail_mb < 256 {
-                                            eprintln!("INGEST: Critically low memory ({} MB free), stopping to prevent crash", avail_mb);
+                                            tracing::warn!("INGEST: Critically low memory ({} MB free), stopping to prevent crash", avail_mb);
                                             stopped_early = true;
                                             break;
                                         }
@@ -782,6 +791,7 @@ pub async fn cmd_load_data_streaming(
                                 .write()
                                 .map_err(|e| format!("Lock poisoned: {}", e))?;
                             graph.insert_triples(triples, Some(&bg_dataset_id))
+                                .map_err(|e| e.to_string())?
                         };
                         total_new_entities += ne;
                         total_new_relations += nr;
@@ -806,17 +816,18 @@ pub async fn cmd_load_data_streaming(
                     "relations": 0,
                 }));
 
-                eprintln!("INGEST: parsing {} bytes as {}", contents.len(), resolved);
+                tracing::info!("INGEST: parsing {} bytes as {}", contents.len(), resolved);
                 let triples = parser.parse(contents);
-                eprintln!("INGEST: parsed {} triples", triples.len());
+                tracing::info!("INGEST: parsed {} triples", triples.len());
 
                 let mut graph = bg_session
                     .graph
                     .write()
                     .map_err(|e| format!("Lock poisoned: {}", e))?;
 
-                let result = graph.insert_triples(triples, Some(&bg_dataset_id));
-                eprintln!("INGEST: inserted {:?}", result);
+                let result = graph.insert_triples(triples, Some(&bg_dataset_id))
+                    .map_err(|e| e.to_string())?;
+                tracing::info!("INGEST: inserted {:?}", result);
                 Ok(result)
             }
         })();
@@ -844,7 +855,9 @@ pub async fn cmd_load_data_streaming(
                             return;
                         }
                     };
-                    run_scoring_adaptive(&mut graph);
+                    if let Err(e) = run_scoring_adaptive(&mut graph) {
+                        eprintln!("Scoring failed: {}", e);
+                    }
                 }
 
                 // Update dataset counts

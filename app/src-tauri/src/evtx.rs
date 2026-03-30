@@ -90,7 +90,7 @@ pub fn evtx_ingest_streaming(
             let batch_str = batch_lines.join("\n");
             let triples = parser.parse(&batch_str);
             let (ne, nr) = match session.graph.write() {
-                Ok(mut graph) => graph.insert_triples(triples, Some(dataset_id)),
+                Ok(mut graph) => graph.insert_triples(triples, Some(dataset_id)).map_err(|e| e.to_string())?,
                 Err(_) => return Err("Graph lock poisoned".to_string()),
             };
             total_new_entities += ne;
@@ -114,7 +114,7 @@ pub fn evtx_ingest_streaming(
         let batch_str = batch_lines.join("\n");
         let triples = parser.parse(&batch_str);
         let (ne, nr) = match session.graph.write() {
-            Ok(mut graph) => graph.insert_triples(triples, Some(dataset_id)),
+            Ok(mut graph) => graph.insert_triples(triples, Some(dataset_id)).map_err(|e| e.to_string())?,
             Err(_) => return Err("Graph lock poisoned".to_string()),
         };
         total_new_entities += ne;

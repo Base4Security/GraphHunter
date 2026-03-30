@@ -75,6 +75,15 @@ pub struct Subgraph {
     pub edges: Vec<SubgraphEdge>,
 }
 
+/// Paginated events response for the Event View panel.
+#[derive(Serialize)]
+pub struct PaginatedEvents {
+    pub events: Vec<SubgraphEdge>,
+    pub total_count: usize,
+    pub page: usize,
+    pub page_size: usize,
+}
+
 /// Filter struct received from the frontend for neighborhood expansion.
 #[derive(Deserialize, Default)]
 pub struct ExpandFilter {
