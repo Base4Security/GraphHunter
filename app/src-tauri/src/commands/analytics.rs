@@ -81,7 +81,7 @@ pub fn cmd_compute_composite_scores(
 #[tauri::command]
 pub fn cmd_compact(state: State<Arc<AppState>>, cutoff_timestamp: i64) -> Result<CompactionStats, CommandError> {
     with_current_graph_mut(state.as_ref(), |graph| {
-        graph.compact_before(cutoff_timestamp).map_err(|e| e.to_string())
+        graph.compact_before(cutoff_timestamp).map_err(|e| CommandError::Internal(e.to_string()))
     })
 }
 
