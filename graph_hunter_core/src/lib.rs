@@ -8,6 +8,7 @@ pub mod dsl;
 pub mod types;
 pub mod entity;
 pub mod errors;
+pub mod export;
 pub mod field_preview;
 pub mod generic;
 pub mod gnn_bridge;
