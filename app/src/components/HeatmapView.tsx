@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "../lib/tauri";
+import { invoke, errorMessage } from "../lib/tauri";
 import { useNotifications } from "../hooks/useNotifications";
 import type { HeatmapRow, LogEntry } from "../types";
 
@@ -45,7 +45,7 @@ export default function HeatmapView({ statsKey, onShowRelationOnMap, onLog }: He
       });
       onShowRelationOnMap(nodeIds);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = errorMessage(e);
       addNotification({ message: `Heatmap: failed to load nodes for "${relationType}": ${msg}`, type: "error" });
       onLog?.({
         time: new Date().toLocaleTimeString("en-US", { hour12: false }),
@@ -68,7 +68,7 @@ export default function HeatmapView({ statsKey, onShowRelationOnMap, onLog }: He
         }
       })
       .catch((e) => {
-        if (!cancelled) setError(String(e));
+        if (!cancelled) setError(errorMessage(e));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);

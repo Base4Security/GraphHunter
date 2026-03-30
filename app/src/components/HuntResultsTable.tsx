@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Download } from "lucide-react";
-import { invoke } from "../lib/tauri";
+import { invoke, errorMessage } from "../lib/tauri";
 import type { PaginatedHuntResults, ScoredPath, LogEntry, ScoreBreakdown } from "../types";
 
 interface HuntResultsTableProps {
@@ -69,7 +69,7 @@ export default function HuntResultsTable({
       } catch (e) {
         onLog({
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-          message: `Page fetch error: ${e}`,
+          message: `Page fetch error: ${errorMessage(e)}`,
           level: "error",
         });
       } finally {
@@ -140,7 +140,7 @@ export default function HuntResultsTable({
       } catch (e) {
         onLog({
           time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-          message: `Export failed: ${e}`,
+          message: `Export failed: ${errorMessage(e)}`,
           level: "error",
         });
       }

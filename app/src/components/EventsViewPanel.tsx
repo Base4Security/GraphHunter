@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { invoke } from "../lib/tauri";
+import { invoke, errorMessage } from "../lib/tauri";
 import { Database, ChevronLeft, ChevronRight } from "lucide-react";
 import type { PaginatedEvents, DatasetInfo } from "../types";
 
@@ -37,7 +37,7 @@ export default function EventsViewPanel({ selectedNodeId }: EventsViewPanelProps
           if (!onCancel || !onCancel()) setEvents(result);
         })
         .catch((e) => {
-          if (!onCancel || !onCancel()) setError(String(e));
+          if (!onCancel || !onCancel()) setError(errorMessage(e));
         })
         .finally(() => {
           if (!onCancel || !onCancel()) setLoading(false);
