@@ -4,9 +4,11 @@
 
 use std::collections::HashMap;
 use std::io::{Write, BufWriter};
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
 use crate::config;
+use crate::errors::SpillError;
 use crate::interner::StrId;
 use crate::relation::CompactRelation;
 
@@ -16,52 +18,8 @@ const SPILL_MAGIC: u32 = 0x47485350; // "GHSP"
 const SPILL_VERSION: u32 = 1;
 /// Size of a single CompactRelation record on disk (fixed layout).
 const RECORD_SIZE: usize = std::mem::size_of::<CompactRelation>();
-
-/// Simple LRU cache using a HashMap + VecDeque for eviction order.
-struct LruCache {
-    map: HashMap<StrId, Vec<CompactRelation>>,
-    order: std::collections::VecDeque<StrId>,
-    capacity: usize,
-}
-
-impl LruCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            map: HashMap::new(),
-            order: std::collections::VecDeque::new(),
-            capacity,
-        }
-    }
-
-    fn get(&mut self, key: &StrId) -> Option<&[CompactRelation]> {
-        if self.map.contains_key(key) {
-            // Move to back (most recently used)
-            self.order.retain(|k| k != key);
-            self.order.push_back(*key);
-            self.map.get(key).map(|v| v.as_slice())
-        } else {
-            None
-        }
-    }
-
-    fn insert(&mut self, key: StrId, value: Vec<CompactRelation>) {
-        if self.map.contains_key(&key) {
-            self.order.retain(|k| *k != key);
-        } else if self.map.len() >= self.capacity && !self.order.is_empty() {
-            // Evict least recently used
-            if let Some(evicted) = self.order.pop_front() {
-                self.map.remove(&evicted);
-            }
-        }
-        self.order.push_back(key);
-        self.map.insert(key, value);
-    }
-
-    fn clear(&mut self) {
-        self.map.clear();
-        self.order.clear();
-    }
-}
+/// Default number of source-node entries the LRU cache holds.
+const DEFAULT_LRU_CAPACITY: usize = 10_000;
 
 /// Index entry: points to a range of records in the merged file.
 #[derive(Clone, Debug)]
@@ -95,7 +53,7 @@ pub struct SpillableEdgeStore {
     merged_index: HashMap<StrId, IndexEntry>,
 
     // --- LRU cache (behind Mutex for interior mutability so get_edges can take &self) ---
-    cache: Mutex<LruCache>,
+    cache: Mutex<lru::LruCache<StrId, Vec<CompactRelation>>>,
 
     finalized: bool,
 }
@@ -113,7 +71,9 @@ impl SpillableEdgeStore {
             temp_dir: None,
             merged_mmap: None,
             merged_index: HashMap::new(),
-            cache: Mutex::new(LruCache::new(config::LRU_CACHE_CAPACITY)),
+            cache: Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(config::LRU_CACHE_CAPACITY).unwrap(),
+            )),
             finalized: false,
         }
     }
@@ -125,7 +85,7 @@ impl SpillableEdgeStore {
 
     /// Appends a relation during ingestion.
     /// If the store was finalized, it automatically unfinalizes to accept new data.
-    pub fn push(&mut self, rel: CompactRelation) {
+    pub fn push(&mut self, rel: CompactRelation) -> Result<(), SpillError> {
         if self.finalized {
             // Unfinalize: move merged data back to buffer for continued ingestion
             self.finalized = false;
@@ -138,7 +98,7 @@ impl SpillableEdgeStore {
         }
 
         // Invalidate any cached entry for this source_sid (stale after new push)
-        self.cache.lock().unwrap().map.remove(&rel.source_sid);
+        self.cache.lock().unwrap().pop(&rel.source_sid);
 
         let idx = self.buffer.len() as u32;
         self.buffer_index
@@ -149,8 +109,9 @@ impl SpillableEdgeStore {
         self.current_memory += RECORD_SIZE;
 
         if self.current_memory >= self.memory_budget {
-            self.spill();
+            self.spill()?;
         }
+        Ok(())
     }
 
     /// Returns the number of edges currently in the buffer (before finalize).
@@ -164,9 +125,9 @@ impl SpillableEdgeStore {
     }
 
     /// Spills the current buffer to a sorted temp file.
-    fn spill(&mut self) {
+    fn spill(&mut self) -> Result<(), SpillError> {
         if self.buffer.is_empty() {
-            return;
+            return Ok(());
         }
 
         // Sort by (source_sid, timestamp)
@@ -177,19 +138,19 @@ impl SpillableEdgeStore {
 
         // Ensure temp dir exists
         if self.temp_dir.is_none() {
-            self.temp_dir = Some(tempfile::tempdir().expect("Failed to create temp dir"));
+            self.temp_dir = Some(tempfile::tempdir().map_err(SpillError::TempDir)?);
         }
         let dir = self.temp_dir.as_ref().unwrap().path();
         let spill_path = dir.join(format!("spill_{}.bin", self.spill_files.len()));
 
         // Write header + records
-        let file = std::fs::File::create(&spill_path).expect("Failed to create spill file");
+        let file = std::fs::File::create(&spill_path).map_err(SpillError::Io)?;
         let mut writer = BufWriter::new(file);
 
-        writer.write_all(&SPILL_MAGIC.to_le_bytes()).unwrap();
-        writer.write_all(&SPILL_VERSION.to_le_bytes()).unwrap();
+        writer.write_all(&SPILL_MAGIC.to_le_bytes()).map_err(SpillError::Io)?;
+        writer.write_all(&SPILL_VERSION.to_le_bytes()).map_err(SpillError::Io)?;
         let count = self.buffer.len() as u64;
-        writer.write_all(&count.to_le_bytes()).unwrap();
+        writer.write_all(&count.to_le_bytes()).map_err(SpillError::Io)?;
 
         // Write records as raw bytes
         for rel in &self.buffer {
@@ -199,14 +160,14 @@ impl SpillableEdgeStore {
                     RECORD_SIZE,
                 )
             };
-            writer.write_all(bytes).unwrap();
+            writer.write_all(bytes).map_err(SpillError::Io)?;
         }
-        writer.flush().unwrap();
+        writer.flush().map_err(SpillError::Io)?;
         drop(writer);
 
         // Mmap the spill file
-        let file = std::fs::File::open(&spill_path).expect("Failed to open spill file");
-        let mmap = unsafe { memmap2::Mmap::map(&file).expect("Failed to mmap spill file") };
+        let file = std::fs::File::open(&spill_path).map_err(SpillError::Io)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file).map_err(SpillError::Mmap)? };
 
         self.spill_files.push(SpillFile {
             _path: spill_path,
@@ -218,13 +179,14 @@ impl SpillableEdgeStore {
         self.buffer.clear();
         self.buffer_index.clear();
         self.current_memory = 0;
+        Ok(())
     }
 
     /// Finalizes the store: merge-sorts all spill files + buffer into one
     /// indexed mmap file. For small datasets (no spills), just sorts in-place.
-    pub fn finalize(&mut self) {
+    pub fn finalize(&mut self) -> Result<(), SpillError> {
         if self.finalized {
-            return;
+            return Ok(());
         }
 
         // Clear any pre-finalization cache entries
@@ -253,17 +215,17 @@ impl SpillableEdgeStore {
             }
 
             self.finalized = true;
-            return;
+            return Ok(());
         }
 
         // Spill remaining buffer
-        self.spill();
+        self.spill()?;
 
         // Merge-sort all spill files into one merged file
         let dir = self.temp_dir.as_ref().unwrap().path();
         let merged_path = dir.join("merged.bin");
 
-        let file = std::fs::File::create(&merged_path).expect("Failed to create merged file");
+        let file = std::fs::File::create(&merged_path).map_err(SpillError::Io)?;
         let mut writer = BufWriter::new(file);
 
         // Read all records from all spill files (they're already sorted)
@@ -287,10 +249,10 @@ impl SpillableEdgeStore {
         });
 
         // Write header
-        writer.write_all(&SPILL_MAGIC.to_le_bytes()).unwrap();
-        writer.write_all(&SPILL_VERSION.to_le_bytes()).unwrap();
+        writer.write_all(&SPILL_MAGIC.to_le_bytes()).map_err(SpillError::Io)?;
+        writer.write_all(&SPILL_VERSION.to_le_bytes()).map_err(SpillError::Io)?;
         let total_count = all_records.len() as u64;
-        writer.write_all(&total_count.to_le_bytes()).unwrap();
+        writer.write_all(&total_count.to_le_bytes()).map_err(SpillError::Io)?;
 
         // Write sorted records
         for rel in &all_records {
@@ -300,7 +262,7 @@ impl SpillableEdgeStore {
                     RECORD_SIZE,
                 )
             };
-            writer.write_all(bytes).unwrap();
+            writer.write_all(bytes).map_err(SpillError::Io)?;
         }
 
         // Write index
@@ -316,19 +278,19 @@ impl SpillableEdgeStore {
         }
 
         let entry_count = index_entries.len() as u64;
-        writer.write_all(&entry_count.to_le_bytes()).unwrap();
+        writer.write_all(&entry_count.to_le_bytes()).map_err(SpillError::Io)?;
         for (sid, offset, count) in &index_entries {
-            writer.write_all(&(sid.index() as u32).to_le_bytes()).unwrap();
-            writer.write_all(&offset.to_le_bytes()).unwrap();
-            writer.write_all(&count.to_le_bytes()).unwrap();
+            writer.write_all(&(sid.index() as u32).to_le_bytes()).map_err(SpillError::Io)?;
+            writer.write_all(&offset.to_le_bytes()).map_err(SpillError::Io)?;
+            writer.write_all(&count.to_le_bytes()).map_err(SpillError::Io)?;
         }
 
-        writer.flush().unwrap();
+        writer.flush().map_err(SpillError::Io)?;
         drop(writer);
 
         // Mmap merged file
-        let file = std::fs::File::open(&merged_path).expect("Failed to open merged file");
-        let mmap = unsafe { memmap2::Mmap::map(&file).expect("Failed to mmap merged file") };
+        let file = std::fs::File::open(&merged_path).map_err(SpillError::Io)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file).map_err(SpillError::Mmap)? };
 
         // Build in-memory index
         self.merged_index.clear();
@@ -343,6 +305,7 @@ impl SpillableEdgeStore {
         drop(all_records);
 
         self.finalized = true;
+        Ok(())
     }
 
     /// Gets edges for a source node.
@@ -364,21 +327,21 @@ impl SpillableEdgeStore {
                 }
                 let mut cache = self.cache.lock().unwrap();
                 // Check if already cached
-                if let Some(slice) = cache.get(&sid) {
+                if let Some(cached) = cache.get(&sid) {
                     // SAFETY: we return a reference tied to &self lifetime.
                     // The cache is only cleared on &mut self calls (clear/finalize).
                     // The Mutex ensures no concurrent mutation of the cache entry.
-                    let ptr = slice.as_ptr();
-                    let len = slice.len();
+                    let ptr = cached.as_ptr();
+                    let len = cached.len();
                     return unsafe { std::slice::from_raw_parts(ptr, len) };
                 }
                 let edges: Vec<CompactRelation> = indices.iter()
                     .map(|&idx| self.buffer[idx as usize])
                     .collect();
-                cache.insert(sid, edges);
-                let slice = cache.map.get(&sid).unwrap().as_slice();
-                let ptr = slice.as_ptr();
-                let len = slice.len();
+                cache.put(sid, edges);
+                let cached = cache.peek(&sid).unwrap();
+                let ptr = cached.as_ptr();
+                let len = cached.len();
                 return unsafe { std::slice::from_raw_parts(ptr, len) };
             }
             return &[];
@@ -520,16 +483,16 @@ mod tests {
         let rel = CompactRelation::new(
             make_sid(1), make_sid(2), &RelationType::Connect, 100
         );
-        store.push(rel);
+        store.push(rel).unwrap();
         store.push(CompactRelation::new(
             make_sid(1), make_sid(3), &RelationType::Auth, 200
-        ));
+        )).unwrap();
         store.push(CompactRelation::new(
             make_sid(2), make_sid(3), &RelationType::Execute, 300
-        ));
+        )).unwrap();
 
         assert_eq!(store.len(), 3);
-        store.finalize();
+        store.finalize().unwrap();
         assert!(store.is_finalized());
 
         let edges = store.get_edges(make_sid(1));
@@ -546,10 +509,10 @@ mod tests {
         for i in 0..10u32 {
             store.push(CompactRelation::new(
                 make_sid(i % 3), make_sid(i + 10), &RelationType::Connect, i as i64 * 100
-            ));
+            )).unwrap();
         }
 
-        store.finalize();
+        store.finalize().unwrap();
         assert!(store.is_finalized());
         assert_eq!(store.len(), 10);
 
@@ -565,7 +528,7 @@ mod tests {
     #[test]
     fn empty_store() {
         let mut store = SpillableEdgeStore::new(1024);
-        store.finalize();
+        store.finalize().unwrap();
         assert!(store.is_empty());
         assert_eq!(store.get_edges(make_sid(1)).len(), 0);
     }
@@ -575,8 +538,8 @@ mod tests {
         let mut store = SpillableEdgeStore::new(1024 * 1024);
         store.push(CompactRelation::new(
             make_sid(1), make_sid(2), &RelationType::Auth, 100
-        ));
-        store.finalize();
+        )).unwrap();
+        store.finalize().unwrap();
         assert_eq!(store.len(), 1);
 
         store.clear();

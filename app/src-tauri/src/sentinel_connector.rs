@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use graph_hunter_core::{LogParser, SentinelJsonParser};
+use rand::Rng;
 use tauri::Emitter;
 use tokio::sync::{watch, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -141,9 +142,10 @@ pub async fn polling_loop<T: SentinelTransport>(
                     message: e,
                     consecutive: consecutive_errors,
                 });
-                // Backoff
-                let backoff = (2u64.pow(consecutive_errors.min(8))).min(MAX_BACKOFF_SECS);
-                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                // Exponential backoff with jitter to avoid thundering herd
+                let base_backoff = (2u64.pow(consecutive_errors.min(8))).min(MAX_BACKOFF_SECS);
+                let jittered = base_backoff as f64 * (0.5 + rand::thread_rng().gen::<f64>() * 0.5);
+                tokio::time::sleep(Duration::from_secs_f64(jittered)).await;
                 continue;
             }
         };
@@ -163,7 +165,7 @@ pub async fn polling_loop<T: SentinelTransport>(
             };
             let kql = KqlQueryBuilder::build(table, watermark.as_deref(), config.batch_size);
 
-            eprintln!("SENTINEL: querying table {}", table);
+            tracing::info!("SENTINEL: querying table {}", table);
             match transport.execute_query(&config.workspace_id, &kql, &token).await {
                 Ok(raw) => {
                     match normalize_response(&raw) {
@@ -172,7 +174,7 @@ pub async fn polling_loop<T: SentinelTransport>(
                             if !result.data.is_empty() && result.data != "[]" {
                                 let row_count = result.data.matches('{').count();
                                 let triples = parser.parse(&result.data);
-                                eprintln!("SENTINEL: table {} -> {} rows, {} triples", table, row_count, triples.len());
+                                tracing::info!("SENTINEL: table {} -> {} rows, {} triples", table, row_count, triples.len());
                                 if triples.is_empty() {
                                     // Data received but parser produced no triples — tell the user
                                     let _ = app_handle.emit("sentinel-error", SentinelErrorEvent {
@@ -186,12 +188,22 @@ pub async fn polling_loop<T: SentinelTransport>(
                                 } else {
                                     match session.graph.write() {
                                         Ok(mut graph) => {
-                                            let (ne, nr) = graph.insert_triples(
+                                            match graph.insert_triples(
                                                 triples,
                                                 Some(&dataset_id),
-                                            );
-                                            total_new_entities += ne;
-                                            total_new_relations += nr;
+                                            ) {
+                                                Ok((ne, nr)) => {
+                                                    total_new_entities += ne;
+                                                    total_new_relations += nr;
+                                                }
+                                                Err(e) => {
+                                                    let _ = app_handle.emit("sentinel-error", SentinelErrorEvent {
+                                                        error: format!("Spill store error: {}", e),
+                                                        consecutive_errors: 0,
+                                                        will_retry: true,
+                                                    });
+                                                }
+                                            }
                                         }
                                         Err(e) => {
                                             let _ = app_handle.emit("sentinel-error", SentinelErrorEvent {
@@ -205,7 +217,7 @@ pub async fn polling_loop<T: SentinelTransport>(
                                     }
                                 }
                             } else {
-                                eprintln!("SENTINEL: table {} -> 0 rows (empty)", table);
+                                tracing::debug!("SENTINEL: table {} -> 0 rows (empty)", table);
                             }
                             // Advance watermark
                             if let Some(next) = result.next_query_start {
@@ -215,7 +227,7 @@ pub async fn polling_loop<T: SentinelTransport>(
                             consecutive_errors = 0;
                         }
                         Err(e) => {
-                            eprintln!("SENTINEL: table {} normalize error: {}", table, e);
+                            tracing::error!("SENTINEL: table {} normalize error: {}", table, e);
                             consecutive_errors += 1;
                             let _ = app_handle.emit("sentinel-error", SentinelErrorEvent {
                                 error: format!("Table {} normalize error: {}", table, e),
@@ -226,7 +238,7 @@ pub async fn polling_loop<T: SentinelTransport>(
                     }
                 }
                 Err(e) => {
-                    eprintln!("SENTINEL: table {} query error: {}", table, e);
+                    tracing::error!("SENTINEL: table {} query error: {}", table, e);
                     consecutive_errors += 1;
                     let _ = app_handle.emit("sentinel-error", SentinelErrorEvent {
                         error: format!("Table {} query error: {}", table, e),

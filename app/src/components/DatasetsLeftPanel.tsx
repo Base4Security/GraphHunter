@@ -10,16 +10,11 @@ import {
   type JobStatus,
 } from "../lib/webIngest";
 import {
-  Upload,
-  FolderOpen,
   Database,
   ChevronDown,
   ChevronRight,
   Layers,
-  Trash2,
-  Edit3,
   X,
-  SlidersHorizontal,
 } from "lucide-react";
 import type {
   GraphStats,
@@ -41,8 +36,9 @@ import type {
   ConnectorStatusResponse,
   SentinelEnvStatus,
 } from "../types";
-import { ENTITY_TYPES } from "../types";
 import FieldSelector from "./FieldSelector";
+import { FileUploadSection, SentinelConnectForm, ElasticConnectForm } from "./ingest";
+import { DatasetList } from "./datasets";
 
 interface DatasetsLeftPanelProps {
   currentSessionId: string | null;
@@ -108,7 +104,6 @@ export default function DatasetsLeftPanel({
   const unlistenRef = useRef<(() => void) | null>(null);
 
   const [webFile, setWebFile] = useState<File | null>(null);
-  const webFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [previewResult, setPreviewResult] = useState<PreviewIngestResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -119,16 +114,16 @@ export default function DatasetsLeftPanel({
   const [showDatasets, setShowDatasets] = useState(true);
   const [datasets, setDatasets] = useState<DatasetInfo[]>([]);
   const [datasetsLoading, setDatasetsLoading] = useState(false);
-  const [renameModal, setRenameModal] = useState<{ datasetId: string; datasetName: string } | null>(null);
-  const [renameFromType, setRenameFromType] = useState<string>("");
-  const [renameToType, setRenameToType] = useState<string>("");
-  const [renameToTypeCustom, setRenameToTypeCustom] = useState<string>("");
-  const [datasetTypes, setDatasetTypes] = useState<string[]>([]);
-  const [renameApplying, setRenameApplying] = useState(false);
-  const [renameError, setRenameError] = useState<string | null>(null);
 
-  const RENAME_TO_CUSTOM = "__custom__";
-  const effectiveToType = renameToType === RENAME_TO_CUSTOM ? renameToTypeCustom.trim() : renameToType;
+  const [fieldPreview, setFieldPreview] = useState<FieldInfo[] | null>(null);
+  const [showFieldSelector, setShowFieldSelector] = useState(false);
+  const [configLoading, setConfigLoading] = useState(false);
+
+  const SIEM_CONFIG_KEY = "graph_hunter_siem_config";
+
+  function getSiemConfigKey(sessionId: string | null): string | null {
+    return sessionId ? `${SIEM_CONFIG_KEY}_${sessionId}` : null;
+  }
 
   useEffect(() => {
     if (!currentSessionId || !previewResult) {
@@ -147,16 +142,6 @@ export default function DatasetsLeftPanel({
       cancelled = true;
     };
   }, [currentSessionId, previewResult]);
-
-  const [fieldPreview, setFieldPreview] = useState<FieldInfo[] | null>(null);
-  const [showFieldSelector, setShowFieldSelector] = useState(false);
-  const [configLoading, setConfigLoading] = useState(false);
-
-  const SIEM_CONFIG_KEY = "graph_hunter_siem_config";
-
-  function getSiemConfigKey(sessionId: string | null): string | null {
-    return sessionId ? `${SIEM_CONFIG_KEY}_${sessionId}` : null;
-  }
 
   useEffect(() => {
     const key = getSiemConfigKey(currentSessionId);
@@ -393,19 +378,6 @@ export default function DatasetsLeftPanel({
       } catch (e) {
         onLog({ time: now(), message: `File dialog error: ${e}`, level: "error" });
       }
-    } else {
-      webFileInputRef.current?.click();
-    }
-  }
-
-  function handleWebFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (file) {
-      setWebFile(file);
-      setFilePath(file.name);
-      setPreviewResult(null);
-      setMappingRows([]);
-      onLog({ time: now(), message: `Selected: ${file.name}`, level: "info" });
     }
   }
 
@@ -431,18 +403,6 @@ export default function DatasetsLeftPanel({
     } finally {
       setPreviewLoading(false);
     }
-  }
-
-  function updateMappingRow(index: number, suggested_entity_type: string) {
-    setMappingRows((prev) => {
-      const next = [...prev];
-      next[index] = { ...next[index], suggested_entity_type };
-      return next;
-    });
-  }
-
-  function removeMappingRow(index: number) {
-    setMappingRows((prev) => prev.filter((_, i) => i !== index));
   }
 
   async function loadData() {
@@ -850,484 +810,79 @@ export default function DatasetsLeftPanel({
             </div>
             {ingestSource === "file" && (
             <>
-            <div style={{ marginBottom: 8 }}>
-              <label
-                style={{
-                  fontSize: 11,
-                  color: "var(--text-muted)",
-                  display: "block",
-                  marginBottom: 4,
-                }}
-              >
-                Log Format
-              </label>
-              <select
-                className="select"
-                value={format}
-                onChange={(e) =>
-                  setFormat(e.target.value as "auto" | "sysmon" | "sentinel" | "generic" | "csv")
-                }
-                style={{
-                  width: "100%",
-                  padding: "6px 8px",
-                  background: "var(--bg-tertiary)",
-                  color: "var(--text-primary)",
-                  border: "1px solid var(--border)",
-                  borderRadius: 4,
-                  fontSize: 12,
-                }}
-              >
-                <option value="auto">Auto-detect (Recommended)</option>
-                <option value="evtx">Windows EVTX</option>
-                <option value="sysmon">Sysmon (Event Log)</option>
-                <option value="sentinel">Azure Sentinel</option>
-                <option value="generic">Generic JSON</option>
-                <option value="csv">CSV</option>
-              </select>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <input
-                ref={webFileInputRef}
-                type="file"
-                style={{ display: "none" }}
-                accept="*/*"
-                onChange={handleWebFileChange}
+              <FileUploadSection
+                filePath={filePath}
+                setFilePath={setFilePath}
+                webFile={webFile}
+                setWebFile={setWebFile}
+                format={format}
+                setFormat={setFormat}
+                loading={loading}
+                previewLoading={previewLoading}
+                previewResult={previewResult}
+                setPreviewResult={setPreviewResult}
+                mappingRows={mappingRows}
+                setMappingRows={setMappingRows}
+                graphEntityTypes={graphEntityTypes}
+                ingestProgress={ingestProgress}
+                onLog={onLog}
+                onPickFile={pickFile}
+                onRunPreview={runPreview}
+                onLoadData={loadData}
+                onPreviewFields={previewFields}
               />
-              <button className="btn" onClick={pickFile}>
-                <FolderOpen size={14} />
-                {format === "evtx"
-                  ? "Select EVTX File"
-                  : format === "sysmon"
-                    ? "Select Sysmon File"
-                    : format === "sentinel"
-                      ? "Select Sentinel File"
-                      : "Select Log File"}
-              </button>
-              {filePath && (
-                <div className="file-info">{filePath.split(/[/\\]/).pop()}</div>
-              )}
-              <button
-                className="btn"
-                onClick={runPreview}
-                disabled={!filePath || previewLoading}
-              >
-                {previewLoading ? "Previewing…" : "Preview"}
-              </button>
-              {previewResult && (
-                <div className="panel-left-section" style={{ marginTop: 8 }}>
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                      marginBottom: 6,
-                    }}
-                  >
-                    Format: <strong>{previewResult.format}</strong>
-                  </div>
-                  <div style={{ maxHeight: 200, overflow: "auto" }}>
-                    <table
-                      style={{
-                        width: "100%",
-                        fontSize: 11,
-                        borderCollapse: "collapse",
-                      }}
-                    >
-                      <thead>
-                        <tr>
-                          <th
-                            style={{
-                              textAlign: "left",
-                              padding: "4px 6px",
-                              borderBottom: "1px solid var(--border)",
-                            }}
-                          >
-                            Field
-                          </th>
-                          <th
-                            style={{
-                              textAlign: "left",
-                              padding: "4px 6px",
-                              borderBottom: "1px solid var(--border)",
-                            }}
-                          >
-                            Node type
-                          </th>
-                          {(format === "generic" || format === "csv") && (
-                            <th style={{ width: 28 }} />
-                          )}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {mappingRows.map((row, i) => (
-                          <tr key={`${row.field_name}-${i}`}>
-                            <td
-                              style={{
-                                padding: "4px 6px",
-                                borderBottom: "1px solid var(--border)",
-                              }}
-                              title={row.field_name}
-                            >
-                              {row.field_name.length > 18
-                                ? `${row.field_name.slice(0, 15)}…`
-                                : row.field_name}
-                            </td>
-                            <td
-                              style={{
-                                padding: "4px 6px",
-                                borderBottom: "1px solid var(--border)",
-                              }}
-                            >
-                              {row.suggested_entity_type === "Custom" ? (
-                                <input
-                                  type="text"
-                                  placeholder="Custom type name..."
-                                  defaultValue=""
-                                  onBlur={(e) => {
-                                    const v = e.target.value.trim();
-                                    if (v) updateMappingRow(i, v);
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
-                                      e.preventDefault();
-                                      const v = (e.target as HTMLInputElement).value.trim();
-                                      if (v) updateMappingRow(i, v);
-                                      (e.target as HTMLInputElement).blur();
-                                    }
-                                  }}
-                                  style={{
-                                    padding: "2px 4px",
-                                    fontSize: 11,
-                                    background: "var(--bg-tertiary)",
-                                    color: "var(--text-primary)",
-                                    border: "1px solid var(--border)",
-                                    borderRadius: 4,
-                                    width: "100%",
-                                  }}
-                                  aria-label="Custom node type name"
-                                />
-                              ) : (
-                                <select
-                                  value={row.suggested_entity_type}
-                                  onChange={(e) =>
-                                    updateMappingRow(i, e.target.value)
-                                  }
-                                  style={{
-                                    padding: "2px 4px",
-                                    fontSize: 11,
-                                    background: "var(--bg-tertiary)",
-                                    color: "var(--text-primary)",
-                                    border: "1px solid var(--border)",
-                                    borderRadius: 4,
-                                    width: "100%",
-                                  }}
-                                >
-                                  {(() => {
-                                    const standard = ["Skip", ...ENTITY_TYPES, "Custom"];
-                                    const custom = graphEntityTypes.filter((t) => !ENTITY_TYPES.includes(t) && t !== "Custom");
-                                    const fromRows = mappingRows.map((r) => r.suggested_entity_type).filter((t) => t && !standard.includes(t) && !custom.includes(t));
-                                    const seen = new Set<string>();
-                                    const options: string[] = [];
-                                    for (const t of [...standard, ...custom, ...fromRows]) {
-                                      if (!seen.has(t)) {
-                                        seen.add(t);
-                                        options.push(t);
-                                      }
-                                    }
-                                    return options.map((t) => (
-                                      <option key={t} value={t}>{t}</option>
-                                    ));
-                                  })()}
-                                </select>
-                              )}
-                            </td>
-                            {(format === "generic" || format === "csv") && (
-                              <td
-                                style={{
-                                  padding: "4px 2px",
-                                  borderBottom: "1px solid var(--border)",
-                                }}
-                              >
-                                <button
-                                  type="button"
-                                  className="btn btn-sm"
-                                  onClick={() => removeMappingRow(i)}
-                                  title="Remove field"
-                                  aria-label="Remove"
-                                >
-                                  <X size={12} />
-                                </button>
-                              </td>
-                            )}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-              <button
-                className="btn btn-primary"
-                onClick={loadData}
-                disabled={!filePath || loading}
-              >
-                <Upload size={14} />
-                {loading ? "Loading..." : "Ingest Logs"}
-              </button>
-              {loading && ingestProgress && (
-                <div style={{ marginTop: 6, width: "100%" }}>
-                  <div
-                    style={{
-                      height: 6,
-                      background: "var(--bg-secondary)",
-                      borderRadius: 3,
-                      overflow: "hidden",
-                    }}
-                  >
-                    <div
-                      style={{
-                        height: "100%",
-                        width: `${
-                          (ingestProgress.total ?? 0) > 0
-                            ? Math.round(
-                                ((ingestProgress.processed ?? 0) /
-                                  (ingestProgress.total ?? 1)) *
-                                  100
-                              )
-                            : 0
-                        }%`,
-                        background: "var(--accent)",
-                        borderRadius: 3,
-                        transition: "width 0.2s",
-                      }}
-                    />
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 10,
-                      color: "var(--text-muted)",
-                      marginTop: 2,
-                    }}
-                  >
-                    {(ingestProgress.processed ?? 0).toLocaleString()} /{" "}
-                    {(ingestProgress.total ?? 0).toLocaleString()}
-                    {(ingestProgress.total ?? 0) > 1000000 ? " bytes" : ""}
-                    {" — "}
-                    {(ingestProgress.entities ?? 0).toLocaleString()} entities,{" "}
-                    {(ingestProgress.relations ?? 0).toLocaleString()} relations
-                  </div>
-                </div>
-              )}
-              <button
-                className="btn"
-                onClick={previewFields}
-                disabled={!filePath || previewLoading}
-              >
-                <SlidersHorizontal size={14} />
-                {previewLoading ? "Previewing..." : "Preview Fields"}
-              </button>
-            </div>
             </>
             )}
             {ingestSource === "sentinel" && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ fontSize: 10, color: "var(--text-muted)", fontStyle: "italic" }}>
-                  Leave fields empty to use .env file values
-                </div>
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Azure Tenant ID</label>
-                <input
-                  type="text"
-                  value={azureTenantId}
-                  onChange={(e) => setAzureTenantId(e.target.value)}
-                  placeholder="AZURE_TENANT_ID (from .env)"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Client ID (App Registration)</label>
-                <input
-                  type="text"
-                  value={azureClientId}
-                  onChange={(e) => setAzureClientId(e.target.value)}
-                  placeholder="AZURE_CLIENT_ID (from .env)"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Client Secret</label>
-                <input
-                  type="password"
-                  value={azureClientSecret}
-                  onChange={(e) => setAzureClientSecret(e.target.value)}
-                  placeholder="AZURE_CLIENT_SECRET (from .env)"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Subscription ID</label>
-                <input
-                  type="text"
-                  value={azureSubscriptionId}
-                  onChange={(e) => setAzureSubscriptionId(e.target.value)}
-                  placeholder="AZURE_SUBSCRIPTION_ID (from .env)"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Resource Group</label>
-                <input
-                  type="text"
-                  value={azureResourceGroup}
-                  onChange={(e) => setAzureResourceGroup(e.target.value)}
-                  placeholder="AZURE_RESOURCE_GROUP (from .env)"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Workspace ID (Log Analytics GUID)</label>
-                <input
-                  type="text"
-                  value={siemWorkspaceId}
-                  onChange={(e) => setSiemWorkspaceId(e.target.value)}
-                  placeholder="AZURE_WORKSPACE_ID (from .env)"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Workspace Name</label>
-                <input
-                  type="text"
-                  value={azureWorkspaceName}
-                  onChange={(e) => setAzureWorkspaceName(e.target.value)}
-                  placeholder="AZURE_WORKSPACE_NAME (from .env)"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-
-                {/* One-shot ingest */}
-                <button className="btn btn-primary" onClick={loadDataSIEM} disabled={loading || sentinelStreaming}>
-                  <Upload size={14} />
-                  {loading ? "Connecting..." : "One-shot query"}
-                </button>
-
-                {/* Real-time streaming */}
-                <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, marginTop: 4 }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-primary)", marginBottom: 6 }}>
-                    Real-Time Streaming
-                  </div>
-                  <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Poll interval (seconds)</label>
-                  <input
-                    type="number"
-                    value={sentinelPollInterval}
-                    onChange={(e) => setSentinelPollInterval(Math.max(5, parseInt(e.target.value, 10) || 30))}
-                    min={5}
-                    max={300}
-                    disabled={sentinelStreaming}
-                    style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4, marginBottom: 6 }}
-                  />
-                  {!sentinelStreaming ? (
-                    <button
-                      className="btn btn-primary"
-                      onClick={startSentinelStream}
-                      disabled={loading}
-                      style={{ width: "100%", background: "#22c55e", borderColor: "#16a34a" }}
-                    >
-                      <Database size={14} />
-                      {loading ? "Connecting..." : "Start Real-Time Stream"}
-                    </button>
-                  ) : (
-                    <button
-                      className="btn btn-primary"
-                      onClick={stopSentinelStream}
-                      disabled={loading}
-                      style={{ width: "100%", background: "#ef4444", borderColor: "#dc2626" }}
-                    >
-                      <X size={14} />
-                      {loading ? "Stopping..." : "Stop Stream"}
-                    </button>
-                  )}
-                  {sentinelStreaming && (
-                    <div style={{ marginTop: 8, padding: "8px 10px", background: "var(--bg-tertiary)", borderRadius: 6, fontSize: 11 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-                        <span style={{
-                          width: 8, height: 8, borderRadius: "50%",
-                          background: sentinelStatus === "connected" || sentinelStatus === "Polling" ? "#22c55e"
-                            : sentinelStatus === "error" ? "#ef4444" : "#eab308",
-                          display: "inline-block",
-                          animation: sentinelStatus === "Polling" ? "pulse 1s infinite" : undefined,
-                        }} />
-                        <span style={{ color: "var(--text-primary)", fontWeight: 500 }}>
-                          {sentinelStatus === "Polling" ? "Polling..." : sentinelStatus === "Connected" || sentinelStatus === "connected" ? "Connected" : sentinelStatus}
-                        </span>
-                      </div>
-                      <div style={{ color: "var(--text-muted)" }}>
-                        +{sentinelLiveStats.entities.toLocaleString()} entities, +{sentinelLiveStats.relations.toLocaleString()} relations
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
+              <SentinelConnectForm
+                azureTenantId={azureTenantId}
+                setAzureTenantId={setAzureTenantId}
+                azureClientId={azureClientId}
+                setAzureClientId={setAzureClientId}
+                azureClientSecret={azureClientSecret}
+                setAzureClientSecret={setAzureClientSecret}
+                siemWorkspaceId={siemWorkspaceId}
+                setSiemWorkspaceId={setSiemWorkspaceId}
+                loading={loading}
+                onLoadDataSIEM={loadDataSIEM}
+                ingestProgress={ingestProgress}
+                extended={{
+                  azureSubscriptionId,
+                  setAzureSubscriptionId,
+                  azureResourceGroup,
+                  setAzureResourceGroup,
+                  azureWorkspaceName,
+                  setAzureWorkspaceName,
+                  sentinelStreaming,
+                  sentinelPollInterval,
+                  setSentinelPollInterval,
+                  sentinelStatus,
+                  sentinelLiveStats,
+                  onStartStream: startSentinelStream,
+                  onStopStream: stopSentinelStream,
+                }}
+              />
             )}
             {ingestSource === "elastic" && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Cluster URL</label>
-                <input
-                  type="text"
-                  value={elasticUrl}
-                  onChange={(e) => setElasticUrl(e.target.value)}
-                  placeholder="https://localhost:9200"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Index</label>
-                <input
-                  type="text"
-                  value={elasticIndex}
-                  onChange={(e) => setElasticIndex(e.target.value)}
-                  placeholder="_all or index name"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>API Key (optional; else use ELASTIC_API_KEY env)</label>
-                <input
-                  type="password"
-                  value={elasticApiKey}
-                  onChange={(e) => setElasticApiKey(e.target.value)}
-                  placeholder="ApiKey base64 or leave empty for env"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>User (optional; else use ELASTIC_USER env)</label>
-                <input
-                  type="text"
-                  value={elasticUser}
-                  onChange={(e) => setElasticUser(e.target.value)}
-                  placeholder="ELASTIC_USER"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Password (optional; else use ELASTIC_PASSWORD env)</label>
-                <input
-                  type="password"
-                  value={elasticPassword}
-                  onChange={(e) => setElasticPassword(e.target.value)}
-                  placeholder="ELASTIC_PASSWORD"
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Query (JSON)</label>
-                <textarea
-                  value={elasticQuery}
-                  onChange={(e) => setElasticQuery(e.target.value)}
-                  placeholder='{"match_all": {}}'
-                  rows={2}
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4, resize: "vertical" }}
-                />
-                <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Size</label>
-                <input
-                  type="number"
-                  value={elasticSize}
-                  onChange={(e) => setElasticSize(parseInt(e.target.value, 10) || 1000)}
-                  min={1}
-                  max={10000}
-                  style={{ padding: "6px 8px", fontSize: 12, background: "var(--bg-tertiary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 4 }}
-                />
-                <button className="btn btn-primary" onClick={loadDataSIEM} disabled={loading}>
-                  <Upload size={14} />
-                  {loading ? "Running query..." : "Run query and ingest"}
-                </button>
-              </div>
-            )}
-            {(ingestSource === "sentinel" || ingestSource === "elastic") && loading && ingestProgress && (
-              <div style={{ marginTop: 6, width: "100%" }}>
-                <div style={{ height: 6, background: "var(--bg-secondary)", borderRadius: 3, overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${ingestProgress.total > 0 ? Math.round((ingestProgress.processed / ingestProgress.total) * 100) : 0}%`, background: "var(--accent)", borderRadius: 3 }} />
-                </div>
-                <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
-                  {ingestProgress.processed.toLocaleString()} / {ingestProgress.total.toLocaleString()} — {ingestProgress.entities.toLocaleString()} entities, {ingestProgress.relations.toLocaleString()} relations
-                </div>
-              </div>
+              <ElasticConnectForm
+                elasticUrl={elasticUrl}
+                setElasticUrl={setElasticUrl}
+                elasticIndex={elasticIndex}
+                setElasticIndex={setElasticIndex}
+                elasticApiKey={elasticApiKey}
+                setElasticApiKey={setElasticApiKey}
+                elasticUser={elasticUser}
+                setElasticUser={setElasticUser}
+                elasticPassword={elasticPassword}
+                setElasticPassword={setElasticPassword}
+                elasticQuery={elasticQuery}
+                setElasticQuery={setElasticQuery}
+                elasticSize={elasticSize}
+                setElasticSize={setElasticSize}
+                loading={loading}
+                onLoadDataSIEM={loadDataSIEM}
+                ingestProgress={ingestProgress}
+              />
             )}
             {showFieldSelector && fieldPreview && (
               <div style={{ marginTop: 8 }}>
@@ -1353,327 +908,14 @@ export default function DatasetsLeftPanel({
         </button>
         {showDatasets && (
           <div className="panel-left-section">
-            {datasetsLoading ? (
-              <div className="types-available-loading">Loading…</div>
-            ) : datasets.length === 0 ? (
-              <div className="types-available-empty">
-                No datasets yet. Ingest a file to see them here.
-              </div>
-            ) : (
-              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                {datasets.map((d) => (
-                  <li
-                    key={d.id}
-                    style={{
-                      padding: "6px 8px",
-                      marginBottom: 6,
-                      background: "var(--bg-tertiary)",
-                      borderRadius: 4,
-                      fontSize: 11,
-                    }}
-                  >
-                    <div style={{ fontWeight: 600, marginBottom: 2 }}>
-                      {d.name}
-                    </div>
-                    <div
-                      style={{
-                        color: "var(--text-muted)",
-                        marginBottom: 6,
-                      }}
-                    >
-                      {d.entity_count} entities, {d.relation_count} relations
-                    </div>
-                    <div
-                      style={{
-                        display: "flex",
-                        gap: 6,
-                        flexWrap: "wrap",
-                      }}
-                    >
-                      <button
-                        type="button"
-                        className="btn btn-sm"
-                        onClick={async () => {
-                          setRenameFromType("");
-                          setRenameToType("");
-                          setRenameToTypeCustom("");
-                          setRenameError(null);
-                          let types: string[] = [];
-                          try {
-                            types = await invoke<string[]>("cmd_dataset_entity_types", {
-                              datasetId: d.id,
-                            });
-                          } catch {
-                            // ignore
-                          }
-                          if (types.length === 0) {
-                            try {
-                              types = await invoke<string[]>("cmd_get_entity_types_in_graph");
-                            } catch {
-                              types = [];
-                            }
-                          }
-                          setDatasetTypes(types);
-                          setRenameModal({
-                            datasetId: d.id,
-                            datasetName: d.name,
-                          });
-                        }}
-                        title="Rename entity type in this dataset"
-                      >
-                        <Edit3 size={12} />
-                        Rename types
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-sm"
-                        onClick={async () => {
-                          if (
-                            !confirm(
-                              `Remove dataset "${d.name}"? This will delete ${d.entity_count} entities and ${d.relation_count} relations.`
-                            )
-                          )
-                            return;
-                          try {
-                            await invoke<[number, number]>(
-                              "cmd_remove_dataset",
-                              { datasetId: d.id }
-                            );
-                            const s = await invoke<GraphStats>(
-                              "cmd_get_graph_stats"
-                            );
-                            onStatsUpdate(s);
-                            const list = await invoke<DatasetInfo[]>(
-                              "cmd_list_datasets"
-                            );
-                            setDatasets(list);
-                            onLog({
-                              time: now(),
-                              message: `Removed dataset: ${d.name}`,
-                              level: "success",
-                            });
-                          } catch (e) {
-                            onLog({
-                              time: now(),
-                              message: `Remove failed: ${e}`,
-                              level: "error",
-                            });
-                          }
-                        }}
-                        title="Remove this dataset from the graph"
-                      >
-                        <Trash2 size={12} />
-                        Remove
-                      </button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-            {renameModal && (
-              <div
-                style={{
-                  position: "fixed",
-                  inset: 0,
-                  background: "rgba(0,0,0,0.4)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  zIndex: 1000,
-                }}
-                onClick={() => setRenameModal(null)}
-              >
-                <div
-                  style={{
-                    background: "var(--bg-secondary)",
-                    padding: 16,
-                    borderRadius: 8,
-                    minWidth: 280,
-                    border: "1px solid var(--border)",
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div style={{ marginBottom: 12, fontWeight: 600 }}>
-                    Rename type in "{renameModal.datasetName}"
-                  </div>
-                  <div style={{ marginBottom: 8 }}>
-                    <label
-                      style={{
-                        fontSize: 11,
-                        color: "var(--text-muted)",
-                        display: "block",
-                        marginBottom: 4,
-                      }}
-                    >
-                      From type
-                    </label>
-                    <select
-                      value={renameFromType}
-                      onChange={(e) => setRenameFromType(e.target.value)}
-                      style={{
-                        width: "100%",
-                        padding: "6px 8px",
-                        background: "var(--bg-tertiary)",
-                        color: "var(--text-primary)",
-                        border: "1px solid var(--border)",
-                        borderRadius: 4,
-                        fontSize: 12,
-                      }}
-                    >
-                      <option value="">Select…</option>
-                      {datasetTypes.map((t) => (
-                        <option key={t} value={t}>
-                          {t}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div style={{ marginBottom: 12 }}>
-                    <label
-                      style={{
-                        fontSize: 11,
-                        color: "var(--text-muted)",
-                        display: "block",
-                        marginBottom: 4,
-                      }}
-                    >
-                      To type
-                    </label>
-                    <select
-                      value={renameToType}
-                      onChange={(e) => setRenameToType(e.target.value)}
-                      style={{
-                        width: "100%",
-                        padding: "6px 8px",
-                        background: "var(--bg-tertiary)",
-                        color: "var(--text-primary)",
-                        border: "1px solid var(--border)",
-                        borderRadius: 4,
-                        fontSize: 12,
-                      }}
-                    >
-                      <option value="">Select…</option>
-                      {ENTITY_TYPES.map((t) => (
-                        <option key={t} value={t}>
-                          {t}
-                        </option>
-                      ))}
-                      <option value={RENAME_TO_CUSTOM}>Custom…</option>
-                    </select>
-                    {renameToType === RENAME_TO_CUSTOM && (
-                      <input
-                        type="text"
-                        value={renameToTypeCustom}
-                        onChange={(e) => setRenameToTypeCustom(e.target.value)}
-                        placeholder="Type name"
-                        style={{
-                          marginTop: 6,
-                          width: "100%",
-                          padding: "6px 8px",
-                          background: "var(--bg-tertiary)",
-                          color: "var(--text-primary)",
-                          border: "1px solid var(--border)",
-                          borderRadius: 4,
-                          fontSize: 12,
-                          boxSizing: "border-box",
-                        }}
-                      />
-                    )}
-                  </div>
-                  {renameError && (
-                    <div
-                      style={{
-                        marginBottom: 12,
-                        padding: 8,
-                        background: "rgba(239, 68, 68, 0.15)",
-                        border: "1px solid var(--danger)",
-                        borderRadius: 4,
-                        fontSize: 12,
-                        color: "var(--danger)",
-                      }}
-                    >
-                      {renameError}
-                    </div>
-                  )}
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "flex-end",
-                      gap: 8,
-                    }}
-                  >
-                    <button
-                      type="button"
-                      className="btn"
-                      onClick={() => {
-                        setRenameModal(null);
-                        setRenameError(null);
-                      }}
-                      disabled={renameApplying}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={
-                        renameApplying ||
-                        !renameFromType ||
-                        !effectiveToType ||
-                        renameFromType === effectiveToType
-                      }
-                      onClick={async (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (
-                          !renameModal ||
-                          !renameFromType ||
-                          !effectiveToType
-                        )
-                          return;
-                        setRenameError(null);
-                        setRenameApplying(true);
-                        try {
-                          await invoke<number>(
-                            "cmd_rename_type_in_dataset",
-                            {
-                              datasetId: renameModal.datasetId,
-                              fromType: renameFromType,
-                              toType: effectiveToType,
-                            }
-                          );
-                          setRenameModal(null);
-                          setRenameError(null);
-                          setRenameApplying(false);
-                          invoke<GraphStats>("cmd_get_graph_stats")
-                            .then(onStatsUpdate)
-                            .catch(() => {});
-                          invoke<DatasetInfo[]>("cmd_list_datasets")
-                            .then(setDatasets)
-                            .catch(() => {});
-                          onLog({
-                            time: now(),
-                            message: `Renamed ${renameFromType} → ${effectiveToType} in dataset`,
-                            level: "success",
-                          });
-                        } catch (err) {
-                          const msg = err instanceof Error ? err.message : String(err);
-                          setRenameError(msg);
-                          setRenameApplying(false);
-                          onLog({
-                            time: now(),
-                            message: `Rename failed: ${msg}`,
-                            level: "error",
-                          });
-                        }
-                      }}
-                    >
-                      {renameApplying ? "Applying…" : "Apply"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
+            <DatasetList
+              datasets={datasets}
+              datasetsLoading={datasetsLoading}
+              onStatsUpdate={onStatsUpdate}
+              onLog={onLog}
+              onDatasetsChange={setDatasets}
+              allowCustomType
+            />
           </div>
         )}
       </div>

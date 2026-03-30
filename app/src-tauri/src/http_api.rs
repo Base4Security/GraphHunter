@@ -70,7 +70,7 @@ fn neighborhood_to_subgraph(hood: &Neighborhood) -> Subgraph {
 }
 
 /// Build subgraph for the given node IDs and emit to frontend map (used after search, events, run_hunt).
-fn build_subgraph_for_ids(state: &AppState, node_ids: &[String]) -> Result<Subgraph, String> {
+fn build_subgraph_for_ids(state: &AppState, node_ids: &[String]) -> Result<Subgraph, crate::error::CommandError> {
     const MAX_SUBGRAPH_EDGES: usize = 5000;
     let id_set: HashSet<&str> = node_ids.iter().map(|s| s.as_str()).collect();
     with_current_graph(state, |graph| {
@@ -109,10 +109,10 @@ fn ok_json<T: Serialize>(v: T) -> Response {
     (StatusCode::OK, Json(v)).into_response()
 }
 
-fn err_json(e: String) -> Response {
+fn err_json(e: impl std::fmt::Display) -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({ "error": e })),
+        Json(serde_json::json!({ "error": e.to_string() })),
     )
         .into_response()
 }
@@ -126,8 +126,7 @@ async fn handler_api_root() -> Response {
 }
 
 async fn handler_health(State(state): State<Arc<AppState>>) -> Response {
-    eprintln!("HTTP API: /health request received");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::debug!("HTTP API: /health request received");
     // Run state read in spawn_blocking with a short timeout so we never hang the handler.
     // If the lock is contended or the blocking pool is starved, we return after 500ms.
     let state = state.clone();
@@ -161,8 +160,7 @@ async fn log_requests(request: axum::extract::Request, next: Next) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
     let response = next.run(request).await;
-    eprintln!("HTTP API {} {} -> {}", method, uri, response.status());
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::debug!("HTTP API {} {} -> {}", method, uri, response.status());
     response
 }
 
@@ -241,18 +239,16 @@ fn build_app(state: Arc<AppState>) -> Router {
 pub async fn run_async(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let host = std::env::var("GRAPHHUNTER_API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = format!("{}:{}", host, port);
-    eprintln!("GraphHunter HTTP API: binding to {} ...", addr);
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::info!("GraphHunter HTTP API: binding to {} ...", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!(
+    tracing::info!(
         "GraphHunter HTTP API listening on http://{} (health: /health)",
         addr
     );
-    eprintln!("GraphHunter HTTP API: ready to accept connections.");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::info!("GraphHunter HTTP API: ready to accept connections.");
     if host == "0.0.0.0" {
-        eprintln!("  → Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)", port);
+        tracing::info!("Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)", port);
     }
 
     let app = build_app(state);
@@ -265,18 +261,15 @@ pub async fn run_async(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn st
 #[allow(dead_code)]
 pub fn run(state: Arc<AppState>, port: u16) {
     let host = std::env::var("GRAPHHUNTER_API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    eprintln!("GraphHunter HTTP API: binding to {}:{} ...", host, port);
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::info!("GraphHunter HTTP API: binding to {}:{} ...", host, port);
     let addr = (host.as_str(), port);
     let listener = std::net::TcpListener::bind(addr).unwrap_or_else(|e| {
-        eprintln!("GraphHunter HTTP API: failed to bind to {}:{}: {}", host, port, e);
+        tracing::error!("GraphHunter HTTP API: failed to bind to {}:{}: {}", host, port, e);
         std::process::exit(1);
     });
-    eprintln!("GraphHunter HTTP API: bind OK, building router ...");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::info!("GraphHunter HTTP API: bind OK, building router ...");
     let app = build_app(state);
-    eprintln!("GraphHunter HTTP API: creating tokio runtime (multi_thread, 8 workers) ...");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::info!("GraphHunter HTTP API: creating tokio runtime (multi_thread, 8 workers) ...");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)
         .enable_all()
@@ -284,14 +277,13 @@ pub fn run(state: Arc<AppState>, port: u16) {
         .expect("tokio runtime");
     rt.block_on(async {
         let listener = tokio::net::TcpListener::from_std(listener).expect("tcp listener");
-        eprintln!(
+        tracing::info!(
             "GraphHunter HTTP API listening on http://{}:{}/ (health: /health)",
             host, port
         );
-        eprintln!("GraphHunter HTTP API: ready to accept connections.");
-        let _ = std::io::Write::flush(&mut std::io::stderr());
+        tracing::info!("GraphHunter HTTP API: ready to accept connections.");
         if host == "0.0.0.0" {
-            eprintln!("  → Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)", port);
+            tracing::info!("Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)", port);
         }
         axum::serve(listener, app).await.expect("serve");
     });
@@ -352,11 +344,11 @@ async fn handler_expand(
                 q.max_nodes.unwrap_or(50),
                 None,
             )
-            .ok_or_else(|| format!("Entity not found: {}", q.node_id))?;
+            .ok_or_else(|| crate::error::CommandError::InvalidInput(format!("Entity not found: {}", q.node_id)))?;
         let path_ids: Vec<String> = session
             .path_node_ids
             .read()
-            .map_err(|e: std::sync::PoisonError<_>| format!("Lock poisoned: {}", e))?
+            .map_err(|e: std::sync::PoisonError<_>| crate::error::CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
             .clone();
         for path_id in path_ids {
             if hood.nodes.iter().any(|n| n.id == path_id) {
@@ -407,7 +399,7 @@ async fn handler_node_details(
     match with_current_graph(state.as_ref(), |graph| {
         graph
             .get_node_details(&q.node_id)
-            .ok_or_else(|| format!("Entity not found: {}", q.node_id))
+            .ok_or_else(|| crate::error::CommandError::InvalidInput(format!("Entity not found: {}", q.node_id)))
     }) {
         Ok(v) => ok_json(v),
         Err(e) => err_json(e),
@@ -626,10 +618,10 @@ async fn handler_run_hunt(
                     .unwrap_or(false);
                 if scorer_ready {
                     graph.search_temporal_pattern_smart(&hypothesis, None, 10_000)
-                        .map_err(|e| format!("Search failed: {}", e))
+                        .map_err(|e| crate::error::CommandError::Internal(format!("Search failed: {}", e)))
                 } else {
                     graph.search_temporal_pattern(&hypothesis, None, Some(10_000))
-                        .map_err(|e| format!("Search failed: {}", e))
+                        .map_err(|e| crate::error::CommandError::Internal(format!("Search failed: {}", e)))
                 }
             })
         }),
