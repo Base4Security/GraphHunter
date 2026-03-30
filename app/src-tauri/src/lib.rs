@@ -46,7 +46,12 @@ pub fn run() {
 
     let api_token = std::env::var("GRAPHHUNTER_API_TOKEN")
         .unwrap_or_else(|_| Uuid::new_v4().to_string());
-    eprintln!("GRAPHHUNTER_API_TOKEN={}", api_token);
+    let masked = if api_token.len() > 4 {
+        format!("{}...{}", &api_token[..4], &api_token[api_token.len() - 4..])
+    } else {
+        "****".to_string()
+    };
+    eprintln!("GRAPHHUNTER_API_TOKEN={}", masked);
     let _ = std::io::Write::flush(&mut std::io::stderr());
     let app_state = Arc::new(state::AppState {
         sessions: RwLock::new(HashMap::new()),
