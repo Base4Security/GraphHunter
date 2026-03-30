@@ -70,7 +70,7 @@ fn neighborhood_to_subgraph(hood: &Neighborhood) -> Subgraph {
 }
 
 /// Build subgraph for the given node IDs and emit to frontend map (used after search, events, run_hunt).
-fn build_subgraph_for_ids(state: &AppState, node_ids: &[String]) -> Result<Subgraph, String> {
+fn build_subgraph_for_ids(state: &AppState, node_ids: &[String]) -> Result<Subgraph, crate::error::CommandError> {
     const MAX_SUBGRAPH_EDGES: usize = 5000;
     let id_set: HashSet<&str> = node_ids.iter().map(|s| s.as_str()).collect();
     with_current_graph(state, |graph| {
@@ -109,10 +109,10 @@ fn ok_json<T: Serialize>(v: T) -> Response {
     (StatusCode::OK, Json(v)).into_response()
 }
 
-fn err_json(e: String) -> Response {
+fn err_json(e: impl std::fmt::Display) -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({ "error": e })),
+        Json(serde_json::json!({ "error": e.to_string() })),
     )
         .into_response()
 }
@@ -352,11 +352,11 @@ async fn handler_expand(
                 q.max_nodes.unwrap_or(50),
                 None,
             )
-            .ok_or_else(|| format!("Entity not found: {}", q.node_id))?;
+            .ok_or_else(|| crate::error::CommandError::InvalidInput(format!("Entity not found: {}", q.node_id)))?;
         let path_ids: Vec<String> = session
             .path_node_ids
             .read()
-            .map_err(|e: std::sync::PoisonError<_>| format!("Lock poisoned: {}", e))?
+            .map_err(|e: std::sync::PoisonError<_>| crate::error::CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
             .clone();
         for path_id in path_ids {
             if hood.nodes.iter().any(|n| n.id == path_id) {
@@ -407,7 +407,7 @@ async fn handler_node_details(
     match with_current_graph(state.as_ref(), |graph| {
         graph
             .get_node_details(&q.node_id)
-            .ok_or_else(|| format!("Entity not found: {}", q.node_id))
+            .ok_or_else(|| crate::error::CommandError::InvalidInput(format!("Entity not found: {}", q.node_id)))
     }) {
         Ok(v) => ok_json(v),
         Err(e) => err_json(e),
@@ -626,10 +626,10 @@ async fn handler_run_hunt(
                     .unwrap_or(false);
                 if scorer_ready {
                     graph.search_temporal_pattern_smart(&hypothesis, None, 10_000)
-                        .map_err(|e| format!("Search failed: {}", e))
+                        .map_err(|e| crate::error::CommandError::Internal(format!("Search failed: {}", e)))
                 } else {
                     graph.search_temporal_pattern(&hypothesis, None, Some(10_000))
-                        .map_err(|e| format!("Search failed: {}", e))
+                        .map_err(|e| crate::error::CommandError::Internal(format!("Search failed: {}", e)))
                 }
             })
         }),
