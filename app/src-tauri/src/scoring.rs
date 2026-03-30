@@ -23,13 +23,13 @@ pub fn run_full_scoring(graph: &mut GraphHunter) {
 }
 
 /// Adaptive scoring: skips expensive betweenness for large graphs.
-pub fn run_scoring_adaptive(graph: &mut GraphHunter) {
+pub fn run_scoring_adaptive(graph: &mut GraphHunter) -> Result<(), String> {
     // Sort edges once so searches can use &self (read lock) instead of &mut self
-    graph.sort_edges_by_timestamp();
+    graph.sort_edges_by_timestamp().map_err(|e| e.to_string())?;
 
     let n = graph.entity_count();
     let m = graph.relation_count();
-    eprintln!("SCORING: {} entities, {} relations", n, m);
+    tracing::info!("SCORING: {} entities, {} relations", n, m);
 
     // Degree centrality is always fast (O(n))
     graph.compute_scores();
@@ -38,19 +38,20 @@ pub fn run_scoring_adaptive(graph: &mut GraphHunter) {
     if m <= PAGERANK_RELATION_THRESHOLD {
         graph.compute_temporal_pagerank(None, None, Some(ADAPTIVE_PAGERANK_ITERATIONS), None, None);
     } else {
-        eprintln!("SCORING: skipping PageRank ({}M relations)", m / 1_000_000);
+        tracing::info!("SCORING: skipping PageRank ({}M relations)", m / 1_000_000);
     }
 
     // Betweenness: very expensive O(n*m), only for small graphs
     if n <= BETWEENNESS_ENTITY_THRESHOLD {
         graph.compute_betweenness(Some(ADAPTIVE_BETWEENNESS_SAMPLE));
     } else {
-        eprintln!("SCORING: skipping betweenness ({} entities)", n);
+        tracing::info!("SCORING: skipping betweenness ({} entities)", n);
     }
 
     graph.compute_composite_score(1.0, 1.0, 1.0);
     graph.finalize_anomaly_scorer();
-    eprintln!("SCORING: complete");
+    tracing::info!("SCORING: complete");
+    Ok(())
 }
 
 /// Lightweight scoring for real-time incremental updates.

@@ -6,4 +6,5 @@ pub mod graph_ops;
 pub mod dsl;
 pub mod ai_commands;
 pub mod analytics;
+pub mod export;
 pub mod sentinel;

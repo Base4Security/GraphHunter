@@ -113,7 +113,7 @@ impl CommandHandler {
         let chunk_size = 500;
         let req_id = id.to_string();
 
-        let (new_entities, new_relations) = match resolved.as_str() {
+        let ingest_result = match resolved.as_str() {
             "sysmon" => session.graph.ingest_logs_chunked(
                 &contents,
                 &SysmonJsonParser,
@@ -190,6 +190,13 @@ impl CommandHandler {
                         other
                     ),
                 ));
+                return;
+            }
+        };
+        let (new_entities, new_relations) = match ingest_result {
+            Ok(counts) => counts,
+            Err(e) => {
+                emit(&Response::error(id, e.to_string()));
                 return;
             }
         };
@@ -344,7 +351,7 @@ impl CommandHandler {
         let chunk_size = 500;
         let req_id = id.to_string();
 
-        let (new_entities, new_relations) = session.graph.ingest_logs_chunked(
+        let (new_entities, new_relations) = match session.graph.ingest_logs_chunked(
             &data,
             &SentinelJsonParser,
             dataset_id,
@@ -360,7 +367,13 @@ impl CommandHandler {
                     }),
                 ));
             },
-        );
+        ) {
+            Ok(counts) => counts,
+            Err(e) => {
+                emit(&Response::error(id, e.to_string()));
+                return;
+            }
+        };
 
         run_full_scoring(&mut session.graph);
 
