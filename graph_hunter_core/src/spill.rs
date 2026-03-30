@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::io::{Write, BufWriter};
 use std::sync::Mutex;
 
+use crate::config;
 use crate::interner::StrId;
 use crate::relation::CompactRelation;
 
@@ -112,14 +113,14 @@ impl SpillableEdgeStore {
             temp_dir: None,
             merged_mmap: None,
             merged_index: HashMap::new(),
-            cache: Mutex::new(LruCache::new(10_000)), // cache up to 10K nodes
+            cache: Mutex::new(LruCache::new(config::LRU_CACHE_CAPACITY)),
             finalized: false,
         }
     }
 
     /// Creates a store with default 2GB budget.
     pub fn with_default_budget() -> Self {
-        Self::new(2 * 1024 * 1024 * 1024) // 2GB
+        Self::new(config::DEFAULT_SPILL_BUDGET)
     }
 
     /// Appends a relation during ingestion.
