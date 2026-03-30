@@ -96,6 +96,8 @@ export default function DatasetsLeftPanel({
   const [sentinelLiveStats, setSentinelLiveStats] = useState<{ entities: number; relations: number }>({ entities: 0, relations: 0 });
   const [sentinelPollInterval, setSentinelPollInterval] = useState(30);
   const sentinelUnlistenRef = useRef<(() => void) | null>(null);
+  const statsRef = useRef(stats);
+  statsRef.current = stats;
 
   const [ingestProgress, setIngestProgress] = useState<{
     processed: number;
@@ -288,8 +290,8 @@ export default function DatasetsLeftPanel({
         }));
         setSentinelStatus("connected");
         onStatsUpdate({
-          entity_count: stats.entity_count + d.new_entities,
-          relation_count: stats.relation_count + d.new_relations,
+          entity_count: statsRef.current.entity_count + d.new_entities,
+          relation_count: statsRef.current.relation_count + d.new_relations,
         });
       });
 
