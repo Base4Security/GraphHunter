@@ -126,8 +126,7 @@ async fn handler_api_root() -> Response {
 }
 
 async fn handler_health(State(state): State<Arc<AppState>>) -> Response {
-    eprintln!("HTTP API: /health request received");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::debug!("HTTP API: /health request received");
     // Run state read in spawn_blocking with a short timeout so we never hang the handler.
     // If the lock is contended or the blocking pool is starved, we return after 500ms.
     let state = state.clone();
@@ -161,8 +160,7 @@ async fn log_requests(request: axum::extract::Request, next: Next) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
     let response = next.run(request).await;
-    eprintln!("HTTP API {} {} -> {}", method, uri, response.status());
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::debug!("HTTP API {} {} -> {}", method, uri, response.status());
     response
 }
 
@@ -241,18 +239,16 @@ fn build_app(state: Arc<AppState>) -> Router {
 pub async fn run_async(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let host = std::env::var("GRAPHHUNTER_API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = format!("{}:{}", host, port);
-    eprintln!("GraphHunter HTTP API: binding to {} ...", addr);
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::info!("GraphHunter HTTP API: binding to {} ...", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!(
+    tracing::info!(
         "GraphHunter HTTP API listening on http://{} (health: /health)",
         addr
     );
-    eprintln!("GraphHunter HTTP API: ready to accept connections.");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::info!("GraphHunter HTTP API: ready to accept connections.");
     if host == "0.0.0.0" {
-        eprintln!("  → Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)", port);
+        tracing::info!("Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)", port);
     }
 
     let app = build_app(state);
@@ -265,18 +261,15 @@ pub async fn run_async(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn st
 #[allow(dead_code)]
 pub fn run(state: Arc<AppState>, port: u16) {
     let host = std::env::var("GRAPHHUNTER_API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    eprintln!("GraphHunter HTTP API: binding to {}:{} ...", host, port);
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::info!("GraphHunter HTTP API: binding to {}:{} ...", host, port);
     let addr = (host.as_str(), port);
     let listener = std::net::TcpListener::bind(addr).unwrap_or_else(|e| {
-        eprintln!("GraphHunter HTTP API: failed to bind to {}:{}: {}", host, port, e);
+        tracing::error!("GraphHunter HTTP API: failed to bind to {}:{}: {}", host, port, e);
         std::process::exit(1);
     });
-    eprintln!("GraphHunter HTTP API: bind OK, building router ...");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::info!("GraphHunter HTTP API: bind OK, building router ...");
     let app = build_app(state);
-    eprintln!("GraphHunter HTTP API: creating tokio runtime (multi_thread, 8 workers) ...");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
+    tracing::info!("GraphHunter HTTP API: creating tokio runtime (multi_thread, 8 workers) ...");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)
         .enable_all()
@@ -284,14 +277,13 @@ pub fn run(state: Arc<AppState>, port: u16) {
         .expect("tokio runtime");
     rt.block_on(async {
         let listener = tokio::net::TcpListener::from_std(listener).expect("tcp listener");
-        eprintln!(
+        tracing::info!(
             "GraphHunter HTTP API listening on http://{}:{}/ (health: /health)",
             host, port
         );
-        eprintln!("GraphHunter HTTP API: ready to accept connections.");
-        let _ = std::io::Write::flush(&mut std::io::stderr());
+        tracing::info!("GraphHunter HTTP API: ready to accept connections.");
         if host == "0.0.0.0" {
-            eprintln!("  → Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)", port);
+            tracing::info!("Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)", port);
         }
         axum::serve(listener, app).await.expect("serve");
     });

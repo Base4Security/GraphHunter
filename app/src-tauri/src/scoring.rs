@@ -17,7 +17,7 @@ pub fn run_scoring_adaptive(graph: &mut GraphHunter) -> Result<(), String> {
 
     let n = graph.entity_count();
     let m = graph.relation_count();
-    eprintln!("SCORING: {} entities, {} relations", n, m);
+    tracing::info!("SCORING: {} entities, {} relations", n, m);
 
     // Degree centrality is always fast (O(n))
     graph.compute_scores();
@@ -26,19 +26,19 @@ pub fn run_scoring_adaptive(graph: &mut GraphHunter) -> Result<(), String> {
     if m <= 500_000 {
         graph.compute_temporal_pagerank(None, None, Some(10), None, None);
     } else {
-        eprintln!("SCORING: skipping PageRank ({}M relations)", m / 1_000_000);
+        tracing::info!("SCORING: skipping PageRank ({}M relations)", m / 1_000_000);
     }
 
     // Betweenness: very expensive O(n*m), only for small graphs
     if n <= 2_000 {
         graph.compute_betweenness(Some(200));
     } else {
-        eprintln!("SCORING: skipping betweenness ({} entities)", n);
+        tracing::info!("SCORING: skipping betweenness ({} entities)", n);
     }
 
     graph.compute_composite_score(1.0, 1.0, 1.0);
     graph.finalize_anomaly_scorer();
-    eprintln!("SCORING: complete");
+    tracing::info!("SCORING: complete");
     Ok(())
 }
 

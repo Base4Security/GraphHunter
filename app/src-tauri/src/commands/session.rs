@@ -146,7 +146,7 @@ pub fn cmd_load_session(state: State<Arc<AppState>>, session_id: String) -> Resu
         graph.sort_edges_by_timestamp()
             .map_err(|e| e.to_string())?;
 
-        eprintln!("SESSION LOAD: {} entities, {} relations loaded", entity_count, relation_count);
+        tracing::info!("SESSION LOAD: {} entities, {} relations loaded", entity_count, relation_count);
 
         let session = Arc::new(SessionState {
             id: file.id.clone(),
