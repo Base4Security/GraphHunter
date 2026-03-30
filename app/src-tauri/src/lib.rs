@@ -24,8 +24,25 @@ use uuid::Uuid;
 /// Entry point for the Tauri application.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Load .env file (silently ignore if not found)
-    let _ = dotenvy::dotenv();
+    // Load .env: walk up from CWD until we find one
+    {
+        let mut dir = std::env::current_dir().ok();
+        let mut loaded = false;
+        while let Some(d) = dir {
+            let candidate = d.join(".env");
+            if candidate.is_file() {
+                if dotenvy::from_path(&candidate).is_ok() {
+                    eprintln!(".env loaded from {}", candidate.display());
+                    loaded = true;
+                    break;
+                }
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+        if !loaded {
+            eprintln!(".env not found in any parent directory");
+        }
+    }
 
     let api_token = std::env::var("GRAPHHUNTER_API_TOKEN")
         .unwrap_or_else(|_| Uuid::new_v4().to_string());
