@@ -40,6 +40,14 @@ pub trait SentinelTransport: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Value, String>> + Send;
 }
 
+/// Rejects IDs containing path separators to prevent URL-injection.
+fn validate_url_segment(value: &str, name: &str) -> Result<(), String> {
+    if value.contains('/') || value.contains('\\') {
+        return Err(format!("invalid {name}: must not contain path separators"));
+    }
+    Ok(())
+}
+
 // ── HTTP transport (default implementation) ──
 
 /// Production transport using reqwest async client with connection pooling.
@@ -66,6 +74,7 @@ impl SentinelTransport for HttpSentinelTransport {
         client_id: &str,
         client_secret: &str,
     ) -> Result<TokenResponse, String> {
+        validate_url_segment(tenant_id, "tenant_id")?;
         let url = format!(
             "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
             tenant_id
@@ -116,6 +125,7 @@ impl SentinelTransport for HttpSentinelTransport {
         query: &str,
         bearer: &str,
     ) -> Result<Value, String> {
+        validate_url_segment(workspace_id, "workspace_id")?;
         let url = format!(
             "https://api.loganalytics.io/v1/workspaces/{}/query",
             workspace_id
