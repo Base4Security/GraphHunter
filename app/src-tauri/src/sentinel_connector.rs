@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use graph_hunter_core::{LogParser, SentinelJsonParser};
+use rand::Rng;
 use tauri::Emitter;
 use tokio::sync::{watch, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -134,9 +135,10 @@ pub async fn polling_loop<T: SentinelTransport>(
                     message: e,
                     consecutive: consecutive_errors,
                 });
-                // Backoff
-                let backoff = (2u64.pow(consecutive_errors.min(8))).min(max_backoff_secs);
-                tokio::time::sleep(Duration::from_secs(backoff)).await;
+                // Exponential backoff with jitter to avoid thundering herd
+                let base_backoff = (2u64.pow(consecutive_errors.min(8))).min(max_backoff_secs);
+                let jittered = base_backoff as f64 * (0.5 + rand::thread_rng().gen::<f64>() * 0.5);
+                tokio::time::sleep(Duration::from_secs_f64(jittered)).await;
                 continue;
             }
         };
