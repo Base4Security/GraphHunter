@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import { invoke } from "../lib/tauri";
 import { Search, Filter, ChevronDown, ChevronRight } from "lucide-react";
+import { useNotifications } from "../hooks/useNotifications";
 import type {
   SearchResult,
   Neighborhood,
@@ -21,6 +22,7 @@ export default function ExplorerPanel({
   neighborhood,
   onLog,
 }: ExplorerPanelProps) {
+  const { addNotification } = useNotifications();
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("");
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -48,7 +50,7 @@ export default function ExplorerPanel({
         level: "info",
       });
     } catch (e) {
-      console.error("Search failed:", e);
+      addNotification({ message: `Search failed: ${e instanceof Error ? e.message : String(e)}`, type: "error" });
       onLog?.({
         time: new Date().toLocaleTimeString("en-US", { hour12: false }),
         message: `Search failed: ${e instanceof Error ? e.message : String(e)}`,

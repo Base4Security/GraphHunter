@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "../lib/tauri";
+import { useNotifications } from "../hooks/useNotifications";
 import type { HeatmapRow, LogEntry } from "../types";
 
 interface HeatmapViewProps {
@@ -29,6 +30,7 @@ function intensityColor(count: number, max: number): string {
 }
 
 export default function HeatmapView({ statsKey, onShowRelationOnMap, onLog }: HeatmapViewProps) {
+  const { addNotification } = useNotifications();
   const [rows, setRows] = useState<HeatmapRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,7 +46,7 @@ export default function HeatmapView({ statsKey, onShowRelationOnMap, onLog }: He
       onShowRelationOnMap(nodeIds);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error("Failed to get node IDs by relation type:", e);
+      addNotification({ message: `Heatmap: failed to load nodes for "${relationType}": ${msg}`, type: "error" });
       onLog?.({
         time: new Date().toLocaleTimeString("en-US", { hour12: false }),
         message: `Heatmap: failed to load nodes for "${relationType}": ${msg}`,

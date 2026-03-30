@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "../lib/tauri";
+import { useNotifications } from "../hooks/useNotifications";
 import type { TimelineRow } from "../types";
 import { ENTITY_COLORS, type EntityType } from "../types";
 
@@ -23,6 +24,7 @@ function formatTs(ts: number): string {
 }
 
 export default function TimelineView({ statsKey, onShowTypeOnMap, onFilterByType }: TimelineViewProps) {
+  const { addNotification } = useNotifications();
   const [rows, setRows] = useState<TimelineRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +39,7 @@ export default function TimelineView({ statsKey, onShowTypeOnMap, onFilterByType
           onShowTypeOnMap(nodeIds);
         }
       } catch (e) {
-        console.error("Failed to get entities by type:", e);
+        addNotification({ message: `Failed to get entities by type: ${e instanceof Error ? e.message : String(e)}`, type: "error" });
       } finally {
         setLoadingType(null);
       }
