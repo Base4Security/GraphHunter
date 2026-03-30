@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Download } from "lucide-react";
 import { invoke } from "../lib/tauri";
 import type { PaginatedHuntResults, ScoredPath, LogEntry, ScoreBreakdown } from "../types";
 
@@ -103,6 +104,50 @@ export default function HuntResultsTable({
     setSelectedIdx(null);
   };
 
+  const [exportOpen, setExportOpen] = useState(false);
+  const exportRef = useRef<HTMLDivElement>(null);
+
+  // Close export dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (exportRef.current && !exportRef.current.contains(e.target as Node)) {
+        setExportOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const handleExport = useCallback(
+    async (format: "csv" | "json") => {
+      setExportOpen(false);
+      try {
+        const data = await invoke<string>("cmd_export_hunt_results", { format });
+        const blob = new Blob([data], {
+          type: format === "csv" ? "text/csv" : "application/json",
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `hunt_results.${format}`;
+        a.click();
+        URL.revokeObjectURL(url);
+        onLog({
+          time: new Date().toLocaleTimeString("en-US", { hour12: false }),
+          message: `Exported hunt results as ${format.toUpperCase()}`,
+          level: "success",
+        });
+      } catch (e) {
+        onLog({
+          time: new Date().toLocaleTimeString("en-US", { hour12: false }),
+          message: `Export failed: ${e}`,
+          level: "error",
+        });
+      }
+    },
+    [onLog]
+  );
+
   const totalPages = results
     ? Math.max(1, Math.ceil(results.filtered_paths / PAGE_SIZE))
     : 1;
@@ -130,6 +175,46 @@ export default function HuntResultsTable({
           <button className="btn btn-sm" onClick={handleTopAnomalies}>
             Top Anomalies
           </button>
+          <div ref={exportRef} style={{ position: "relative", display: "inline-block" }}>
+            <button
+              className="btn btn-sm"
+              onClick={() => setExportOpen((v) => !v)}
+              title="Export hunt results"
+            >
+              <Download size={14} style={{ marginRight: 4, verticalAlign: "middle" }} />
+              Export
+            </button>
+            {exportOpen && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  right: 0,
+                  background: "var(--bg-secondary)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 4,
+                  zIndex: 100,
+                  minWidth: 100,
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+                }}
+              >
+                <button
+                  className="btn btn-sm"
+                  style={{ display: "block", width: "100%", textAlign: "left" }}
+                  onClick={() => handleExport("csv")}
+                >
+                  CSV
+                </button>
+                <button
+                  className="btn btn-sm"
+                  style={{ display: "block", width: "100%", textAlign: "left" }}
+                  onClick={() => handleExport("json")}
+                >
+                  JSON
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
