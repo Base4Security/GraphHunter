@@ -29,6 +29,7 @@ tower-http = { version = "0.5", features = ["cors"] }
 evtx = { version = "0.11", default-features = false }
 memchr = "2"
 rayon = "1"
+rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
