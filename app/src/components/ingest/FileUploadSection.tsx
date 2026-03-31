@@ -11,10 +11,10 @@ import IngestProgressBar from "./IngestProgress";
 import { now } from "../../lib/time";
 
 interface FileUploadSectionProps {
-  filePath: string | null;
-  setFilePath: (path: string | null) => void;
-  webFile: File | null;
-  setWebFile: (file: File | null) => void;
+  filePaths: string[];
+  setFilePaths: (paths: string[]) => void;
+  webFiles: File[];
+  setWebFiles: (files: File[]) => void;
   format: "auto" | "evtx" | "sysmon" | "sentinel" | "generic" | "csv";
   setFormat: (f: "auto" | "evtx" | "sysmon" | "sentinel" | "generic" | "csv") => void;
   loading: boolean;
@@ -41,10 +41,10 @@ interface FileUploadSectionProps {
 }
 
 export default function FileUploadSection({
-  filePath,
-  setFilePath: _setFilePath,
-  webFile: _webFile,
-  setWebFile: _setWebFile,
+  filePaths,
+  setFilePaths,
+  webFiles: _webFiles,
+  setWebFiles,
   format,
   setFormat,
   loading,
@@ -70,13 +70,26 @@ export default function FileUploadSection({
   const webFileInputRef = useRef<HTMLInputElement | null>(null);
 
   function handleWebFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (file) {
-      _setWebFile(file);
-      _setFilePath(file.name);
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      const fileArray = Array.from(files);
+      setWebFiles(fileArray);
+      setFilePaths(fileArray.map((f) => f.name));
       _setPreviewResult(null);
       setMappingRows([]);
-      onLog({ time: now(), message: `Selected: ${file.name}`, level: "info" });
+      onLog({ time: now(), message: `Selected ${fileArray.length} file(s)`, level: "info" });
+    }
+  }
+
+  function removeFile(index: number) {
+    const newPaths = filePaths.filter((_, i) => i !== index);
+    setFilePaths(newPaths);
+    if (_webFiles.length > 0) {
+      setWebFiles(_webFiles.filter((_, i) => i !== index));
+    }
+    if (newPaths.length === 0) {
+      _setPreviewResult(null);
+      setMappingRows([]);
     }
   }
 
@@ -201,25 +214,53 @@ export default function FileUploadSection({
           type="file"
           style={{ display: "none" }}
           accept="*/*"
+          multiple
           onChange={handleWebFileChange}
         />
         <button className="btn" onClick={handlePickFile}>
           <FolderOpen size={14} />
           {format === "evtx"
-            ? "Select EVTX File"
+            ? "Select EVTX Files"
             : format === "sysmon"
-              ? "Select Sysmon File"
+              ? "Select Sysmon Files"
               : format === "sentinel"
-                ? "Select Sentinel File"
-                : "Select Log File"}
+                ? "Select Sentinel Files"
+                : "Select Log Files"}
         </button>
-        {filePath && (
-          <div className="file-info">{filePath.split(/[/\\]/).pop()}</div>
+        {filePaths.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            {filePaths.map((fp, i) => (
+              <div
+                key={`${fp}-${i}`}
+                className="file-info"
+                style={{ display: "flex", alignItems: "center", gap: 4 }}
+              >
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {fp.split(/[/\\]/).pop()}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => removeFile(i)}
+                  title="Remove file"
+                  aria-label="Remove"
+                  style={{ padding: "0 2px", minWidth: "auto", lineHeight: 1 }}
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            ))}
+            {filePaths.length > 1 && (
+              <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                {filePaths.length} files selected
+              </div>
+            )}
+          </div>
         )}
         <button
           className="btn"
           onClick={onRunPreview}
-          disabled={!filePath || previewLoading}
+          disabled={filePaths.length === 0 || previewLoading}
         >
           {previewLoading ? "Previewing\u2026" : "Preview"}
         </button>
@@ -400,7 +441,7 @@ export default function FileUploadSection({
         <button
           className="btn btn-primary"
           onClick={onLoadData}
-          disabled={!filePath || loading}
+          disabled={filePaths.length === 0 || loading}
         >
           <Upload size={14} />
           {loading ? "Loading..." : "Ingest Logs"}
@@ -411,7 +452,7 @@ export default function FileUploadSection({
         <button
           className="btn"
           onClick={onPreviewFields}
-          disabled={!filePath || previewLoading}
+          disabled={filePaths.length === 0 || previewLoading}
         >
           <SlidersHorizontal size={14} />
           {previewLoading ? "Previewing..." : "Preview Fields"}

@@ -65,7 +65,7 @@ export default function DatasetsLeftPanel({
   onShowTypeOnMap: _onShowTypeOnMap,
   onShowNodeOnMap: _onShowNodeOnMap,
 }: DatasetsLeftPanelProps) {
-  const [filePath, setFilePath] = useState<string | null>(null);
+  const [filePaths, setFilePaths] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [format, setFormat] = useState<"auto" | "evtx" | "sysmon" | "sentinel" | "generic" | "csv">("auto");
   const [ingestSource, setIngestSource] = useState<"file" | "sentinel" | "elastic">("file");
@@ -103,7 +103,7 @@ export default function DatasetsLeftPanel({
   } | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
 
-  const [webFile, setWebFile] = useState<File | null>(null);
+  const [webFiles, setWebFiles] = useState<File[]>([]);
 
   const [previewResult, setPreviewResult] = useState<PreviewIngestResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -361,17 +361,22 @@ export default function DatasetsLeftPanel({
       try {
         const { open } = await import("@tauri-apps/plugin-dialog");
         const selected = await open({
-          multiple: false,
-          filters: [], // allow all file types; user can pick any file
+          multiple: true,
+          filters: [
+            { name: "EVTX Files", extensions: ["evtx"] },
+            { name: "Log Files", extensions: ["json", "ndjson", "csv", "log", "evtx"] },
+            { name: "All Files", extensions: ["*"] },
+          ],
         });
         if (selected) {
-          setFilePath(selected as string);
-          setWebFile(null);
+          const paths = Array.isArray(selected) ? selected : [selected];
+          setFilePaths(paths);
+          setWebFiles([]);
           setPreviewResult(null);
           setMappingRows([]);
           onLog({
             time: now(),
-            message: `Selected: ${(selected as string).split(/[/\\]/).pop()}`,
+            message: `Selected ${paths.length} file(s): ${paths.map((p) => p.split(/[/\\]/).pop()).join(", ")}`,
             level: "info",
           });
         }
@@ -382,13 +387,13 @@ export default function DatasetsLeftPanel({
   }
 
   async function runPreview() {
-    if (!filePath) return;
+    if (filePaths.length === 0) return;
     setPreviewLoading(true);
     setPreviewResult(null);
     setMappingRows([]);
     try {
       const result = await invoke<PreviewIngestResult>("cmd_preview_ingest", {
-        path: filePath,
+        path: filePaths[0],
         format,
       });
       setPreviewResult(result);
@@ -406,10 +411,10 @@ export default function DatasetsLeftPanel({
   }
 
   async function loadData() {
-    if (!filePath) return;
+    if (filePaths.length === 0) return;
     setLoading(true);
     setIngestProgress(null);
-    onLog({ time: now(), message: "Ingesting logs...", level: "info" });
+    onLog({ time: now(), message: `Ingesting ${filePaths.length} file(s)...`, level: "info" });
 
     if (isTauri()) {
       try {
@@ -429,61 +434,6 @@ export default function DatasetsLeftPanel({
           unlistenRef.current();
         }
 
-        const unlistenProgress = await listen<{
-          processed?: number;
-          total_estimate?: number;
-          bytes_read?: number;
-          bytes_total?: number;
-          entities?: number;
-          relations?: number;
-        }>("ingest-progress", (event) => {
-          const p = event.payload;
-          const processed = p.processed ?? p.bytes_read ?? 0;
-          const total = p.total_estimate ?? p.bytes_total ?? 0;
-          setIngestProgress({
-            processed: Number(processed),
-            total: Number(total),
-            entities: Number(p.entities ?? 0),
-            relations: Number(p.relations ?? 0),
-          });
-        });
-
-        const unlistenComplete = await listen<IngestCompleteEvent>(
-          "ingest-complete",
-          (event) => {
-            const { result } = event.payload;
-            onStatsUpdate({
-              entity_count: result.total_entities,
-              relation_count: result.total_relations,
-            });
-            onLog({
-              time: now(),
-              message: `+${result.new_entities} entities, +${result.new_relations} relations`,
-              level: "success",
-            });
-            cleanup();
-          }
-        );
-
-        const unlistenError = await listen<IngestErrorEvent>(
-          "ingest-error",
-          (event) => {
-            onLog({ time: now(), message: event.payload.error, level: "error" });
-            cleanup();
-          }
-        );
-
-        const cleanup = () => {
-          setLoading(false);
-          setIngestProgress(null);
-          unlistenProgress();
-          unlistenComplete();
-          unlistenError();
-          unlistenRef.current = null;
-        };
-
-        unlistenRef.current = cleanup;
-
         const config =
           previewResult && mappingRows.length > 0
             ? {
@@ -494,75 +444,146 @@ export default function DatasetsLeftPanel({
                 })),
               }
             : undefined;
-        await invoke<IngestJobStarted>("cmd_load_data_streaming", {
-          path: filePath,
-          format,
-          config,
-          dateFrom: null,
-          dateTo: null,
-        });
+
+        for (let i = 0; i < filePaths.length; i++) {
+          const currentPath = filePaths[i];
+          const fileName = currentPath.split(/[/\\]/).pop() || currentPath;
+          if (filePaths.length > 1) {
+            onLog({ time: now(), message: `[${i + 1}/${filePaths.length}] Ingesting: ${fileName}`, level: "info" });
+          }
+
+          await new Promise<void>((resolve) => {
+            let unlistenProgress: (() => void) | null = null;
+            let unlistenComplete: (() => void) | null = null;
+            let unlistenError: (() => void) | null = null;
+
+            const fileCleanup = () => {
+              unlistenProgress?.();
+              unlistenComplete?.();
+              unlistenError?.();
+            };
+
+            (async () => {
+              unlistenProgress = await listen<any>("ingest-progress", (event) => {
+                const p = event.payload;
+                setIngestProgress({
+                  processed: Number(p.processed ?? p.bytes_read ?? 0),
+                  total: Number(p.total_estimate ?? p.bytes_total ?? 0),
+                  entities: Number(p.entities ?? 0),
+                  relations: Number(p.relations ?? 0),
+                });
+              });
+
+              unlistenComplete = await listen<IngestCompleteEvent>("ingest-complete", (event) => {
+                const { result } = event.payload;
+                onStatsUpdate({
+                  entity_count: result.total_entities,
+                  relation_count: result.total_relations,
+                });
+                onLog({
+                  time: now(),
+                  message: `${fileName}: +${result.new_entities} entities, +${result.new_relations} relations`,
+                  level: "success",
+                });
+                fileCleanup();
+                resolve();
+              });
+
+              unlistenError = await listen<IngestErrorEvent>("ingest-error", (event) => {
+                onLog({ time: now(), message: `${fileName}: ${event.payload.error}`, level: "error" });
+                fileCleanup();
+                resolve();
+              });
+
+              unlistenRef.current = () => {
+                fileCleanup();
+                resolve();
+              };
+
+              await invoke<IngestJobStarted>("cmd_load_data_streaming", {
+                path: currentPath,
+                format,
+                config,
+                dateFrom: null,
+                dateTo: null,
+              });
+            })().catch(() => {
+              fileCleanup();
+              resolve();
+            });
+          });
+        }
+
+        if (filePaths.length > 1) {
+          onLog({ time: now(), message: `All ${filePaths.length} files ingested.`, level: "success" });
+        }
       } catch (e) {
         onLog({ time: now(), message: errorMessage(e), level: "error" });
+      } finally {
         setLoading(false);
         setIngestProgress(null);
-        if (unlistenRef.current) {
-          unlistenRef.current();
-          unlistenRef.current = null;
-        }
+        unlistenRef.current = null;
       }
     } else {
-      if (!webFile) {
+      if (webFiles.length === 0) {
         onLog({ time: now(), message: "No file selected", level: "error" });
         setLoading(false);
         return;
       }
       try {
-        onLog({ time: now(), message: "Uploading file...", level: "info" });
-        const upload = await uploadFile(webFile);
-        onLog({
-          time: now(),
-          message: `Uploaded (${(upload.size / 1024 / 1024).toFixed(1)} MB)`,
-          level: "info",
-        });
-
         const sessionId = currentSessionId || "default";
 
-        const cleanupWS = connectProgressWS((event) => {
-          if (event.type === "ingest_progress" && event.data) {
-            const p = event.data.progress;
-            setIngestProgress({
-              processed: p.processed,
-              total: p.total,
-              entities: p.entities,
-              relations: p.relations,
+        for (let i = 0; i < webFiles.length; i++) {
+          const webFile = webFiles[i];
+          if (webFiles.length > 1) {
+            onLog({ time: now(), message: `[${i + 1}/${webFiles.length}] Uploading: ${webFile.name}`, level: "info" });
+          } else {
+            onLog({ time: now(), message: "Uploading file...", level: "info" });
+          }
+          const upload = await uploadFile(webFile);
+          onLog({ time: now(), message: `Uploaded (${(upload.size / 1024 / 1024).toFixed(1)} MB)`, level: "info" });
+
+          const cleanupWS = connectProgressWS((event) => {
+            if (event.type === "ingest_progress" && event.data) {
+              const p = event.data.progress;
+              setIngestProgress({
+                processed: p.processed,
+                total: p.total,
+                entities: p.entities,
+                relations: p.relations,
+              });
+            }
+          });
+          unlistenRef.current = cleanupWS;
+
+          const job = await createJob(upload.upload_id, format, sessionId);
+          const finalStatus = await pollJobStatus(job.id, (status: JobStatus) => {
+            if (status.progress) {
+              setIngestProgress({
+                processed: status.progress.processed,
+                total: status.progress.total,
+                entities: status.progress.entities,
+                relations: status.progress.relations,
+              });
+            }
+          });
+
+          if (finalStatus.result) {
+            onStatsUpdate({
+              entity_count: finalStatus.result.total_entities,
+              relation_count: finalStatus.result.total_relations,
+            });
+            onLog({
+              time: now(),
+              message: `${webFile.name}: +${finalStatus.result.new_entities} entities, +${finalStatus.result.new_relations} relations`,
+              level: "success",
             });
           }
-        });
-        unlistenRef.current = cleanupWS;
+          cleanupWS();
+        }
 
-        const job = await createJob(upload.upload_id, format, sessionId);
-
-        const finalStatus = await pollJobStatus(job.id, (status: JobStatus) => {
-          if (status.progress) {
-            setIngestProgress({
-              processed: status.progress.processed,
-              total: status.progress.total,
-              entities: status.progress.entities,
-              relations: status.progress.relations,
-            });
-          }
-        });
-
-        if (finalStatus.result) {
-          onStatsUpdate({
-            entity_count: finalStatus.result.total_entities,
-            relation_count: finalStatus.result.total_relations,
-          });
-          onLog({
-            time: now(),
-            message: `+${finalStatus.result.new_entities} entities, +${finalStatus.result.new_relations} relations`,
-            level: "success",
-          });
+        if (webFiles.length > 1) {
+          onLog({ time: now(), message: `All ${webFiles.length} files ingested.`, level: "success" });
         }
       } catch (e) {
         onLog({ time: now(), message: errorMessage(e), level: "error" });
@@ -686,12 +707,12 @@ export default function DatasetsLeftPanel({
   }
 
   async function previewFields() {
-    if (!filePath) return;
+    if (filePaths.length === 0) return;
     setPreviewLoading(true);
     onLog({ time: now(), message: "Previewing fields...", level: "info" });
     try {
       const fields = await invoke<FieldInfo[]>("cmd_preview_fields", {
-        path: filePath,
+        path: filePaths[0],
         sampleSize: 500,
       });
       setFieldPreview(fields);
@@ -709,7 +730,7 @@ export default function DatasetsLeftPanel({
   }
 
   async function loadDataWithConfig(mappings: FieldMapping[]) {
-    if (!filePath) return;
+    if (filePaths.length === 0) return;
     setConfigLoading(true);
     onLog({ time: now(), message: "Ingesting with custom field config...", level: "info" });
 
@@ -725,7 +746,7 @@ export default function DatasetsLeftPanel({
 
       const config: FieldConfig = { mappings };
       const result = await invoke<LoadResult>("cmd_load_data_with_config", {
-        path: filePath,
+        path: filePaths[0],
         config,
       });
 
@@ -811,10 +832,10 @@ export default function DatasetsLeftPanel({
             {ingestSource === "file" && (
             <>
               <FileUploadSection
-                filePath={filePath}
-                setFilePath={setFilePath}
-                webFile={webFile}
-                setWebFile={setWebFile}
+                filePaths={filePaths}
+                setFilePaths={setFilePaths}
+                webFiles={webFiles}
+                setWebFiles={setWebFiles}
                 format={format}
                 setFormat={setFormat}
                 loading={loading}
