@@ -323,6 +323,8 @@ fn extract_event_id(v: Option<&serde_json::Value>) -> Option<u64> {
     let v = v?;
     v.as_u64()
         .or_else(|| v.as_i64().map(|i| i as u64))
+        // #text can be a number or a string depending on the evtx crate version
+        .or_else(|| v.get("#text").and_then(|t| t.as_u64().or_else(|| t.as_i64().map(|i| i as u64))))
         .or_else(|| v.get("#text").and_then(|t| t.as_str()).and_then(|s| s.parse().ok()))
 }
 
@@ -330,6 +332,8 @@ fn extract_timestamp_str(v: Option<&serde_json::Value>) -> Option<String> {
     let v = v?;
     v.as_str()
         .map(String::from)
+        // evtx crate puts XML attributes under #attributes object
+        .or_else(|| v.get("#attributes").and_then(|a| a.get("SystemTime")).and_then(|t| t.as_str()).map(String::from))
         .or_else(|| v.get("@SystemTime").and_then(|t| t.as_str()).map(String::from))
         .or_else(|| v.get("#text").and_then(|t| t.as_str()).map(String::from))
 }
