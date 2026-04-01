@@ -47,65 +47,82 @@ impl GenericParser {
             // Source user
             "user" | "username" | "src_user" | "source_user" | "account_name"
             | "subjectusername" | "accountname" | "userprincipalname"
-            | "initiatingprocessaccountname" | "actor" | "caller" => {
+            | "initiatingprocessaccountname" | "actor" | "caller"
+            | "membername" | "samaccountname" | "logonid"
+            | "connecteduser" | "runasuser" => {
                 Some("source_user")
             }
 
             // Target user
             "target_user" | "targetusername" | "dst_user" | "dest_user"
-            | "targetaccountname" => Some("target_user"),
+            | "targetaccountname" | "targetusersid" | "targetsid" => Some("target_user"),
 
             // Source IP
             "sourceip" | "src_ip" | "source_ip" | "srcip" | "ipaddress"
             | "clientip" | "client_ip" | "callerip" | "caller_ip" | "src_addr"
-            | "sourceaddress" => Some("source_ip"),
+            | "sourceaddress" | "clientaddress" | "sourceipaddress" => Some("source_ip"),
 
             // Target IP
             "destinationip" | "dst_ip" | "dest_ip" | "target_ip" | "dstip"
             | "remoteip" | "remote_ip" | "dst_addr" | "destinationaddress"
-            | "server_ip" => Some("target_ip"),
+            | "server_ip" | "destinationaddress" | "remoteaddress"
+            | "targetaddress" => Some("target_ip"),
 
             // Source host
             "computer" | "hostname" | "devicename" | "source_host" | "src_host"
-            | "host" | "machine" | "workstation" | "device_name" | "agent_hostname" => {
+            | "host" | "machine" | "workstation" | "device_name" | "agent_hostname"
+            | "clientmachine" | "machinename" | "workstationname"
+            | "servername" | "sourceworkstation" => {
                 Some("source_host")
             }
+
+            // Target host (map to target_ip for graph connectivity)
+            "destination" | "destinationmachine" | "targetserver"
+            | "targetcomputer" | "remotehost" | "remotemachine"
+            | "destinationhostname" => Some("target_ip"),
 
             // Source process
             "image" | "process_name" | "newprocessname" | "filename"
             | "source_process" | "process" | "exe" | "executable"
-            | "initiatingprocessfilename" => Some("source_process"),
+            | "initiatingprocessfilename" | "hostapplication" | "processpath"
+            | "processname" | "servicename" | "providerpath"
+            | "providername" | "component" => Some("source_process"),
 
             // Parent process
             "parentimage" | "parent_process" | "parentprocessname"
-            | "initiatingprocessparentfilename" | "parent_exe" | "ppid_name" => {
+            | "initiatingprocessparentfilename" | "parent_exe" | "ppid_name"
+            | "callerprocessname" | "parentprocesspath" => {
                 Some("parent_process")
             }
 
             // Command line
             "commandline" | "command_line" | "cmdline" | "processcommandline"
-            | "cmd" | "command" | "initiatingprocesscommandline" => Some("command_line"),
+            | "cmd" | "command" | "initiatingprocesscommandline"
+            | "scriptblocktext" | "payload" | "param1" => Some("command_line"),
 
             // Target file
             "targetfilename" | "objectname" | "file_path" | "filepath"
-            | "folderpath" | "target_file" | "dest_file" | "file" | "path" => {
+            | "folderpath" | "target_file" | "dest_file" | "file" | "path"
+            | "sharename" | "relativetargetname" | "accesslist" => {
                 Some("target_file")
             }
 
             // Target domain
             "queryname" | "domain" | "dns_query" | "target_domain" | "dest_domain"
-            | "query" | "dnsquery" | "requested_domain" => Some("target_domain"),
+            | "query" | "dnsquery" | "requested_domain"
+            | "namespacename" | "namespace" => Some("target_domain"),
 
             // Target URL
             "url" | "target_url" | "remoteurl" | "request_url" | "uri"
-            | "dest_url" | "http_url" => Some("target_url"),
+            | "dest_url" | "http_url" | "resourceuri" => Some("target_url"),
 
             // Target registry
             "registry_path" | "registry_key" | "targetobject" | "target_registry"
             | "registrykey" | "registryvaluename" => Some("target_registry"),
 
             // Protocol
-            "protocol" | "proto" | "transport" | "network_protocol" => Some("protocol"),
+            "protocol" | "proto" | "transport" | "network_protocol"
+            | "layername" => Some("protocol"),
 
             // Source port
             "sourceport" | "src_port" | "source_port" | "sport" | "localport"
