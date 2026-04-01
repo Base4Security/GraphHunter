@@ -62,11 +62,11 @@ impl GenericParser {
             | "clientip" | "client_ip" | "callerip" | "caller_ip" | "src_addr"
             | "sourceaddress" | "clientaddress" | "sourceipaddress" => Some("source_ip"),
 
-            // Target IP
+            // Target IP (also used for client connecting IPs in RDP/TerminalServices)
             "destinationip" | "dst_ip" | "dest_ip" | "target_ip" | "dstip"
             | "remoteip" | "remote_ip" | "dst_addr" | "destinationaddress"
-            | "server_ip" | "destinationaddress" | "remoteaddress"
-            | "targetaddress" => Some("target_ip"),
+            | "server_ip" | "remoteaddress" | "targetaddress"
+            | "address" | "clientaddressv4" | "clientaddressv6" => Some("target_ip"),
 
             // Source host
             "computer" | "hostname" | "devicename" | "source_host" | "src_host"
@@ -86,7 +86,8 @@ impl GenericParser {
             | "source_process" | "process" | "exe" | "executable"
             | "initiatingprocessfilename" | "hostapplication" | "processpath"
             | "processname" | "servicename" | "providerpath"
-            | "providername" | "component" => Some("source_process"),
+            | "providername" | "component" | "taskname"
+            | "apppoollid" => Some("source_process"),
 
             // Parent process
             "parentimage" | "parent_process" | "parentprocessname"
@@ -98,7 +99,8 @@ impl GenericParser {
             // Command line
             "commandline" | "command_line" | "cmdline" | "processcommandline"
             | "cmd" | "command" | "initiatingprocesscommandline"
-            | "scriptblocktext" | "payload" | "param1" => Some("command_line"),
+            | "scriptblocktext" | "payload" | "param1"
+            | "operation" | "contextinfo" => Some("command_line"),
 
             // Target file
             "targetfilename" | "objectname" | "file_path" | "filepath"
