@@ -19,7 +19,10 @@ const API_BASE =
 /** Bearer token for API auth. GraphHunter app prints GRAPHHUNTER_API_TOKEN=... at startup. */
 const API_TOKEN = process.env.GRAPHHUNTER_API_TOKEN || "";
 
-const API_TIMEOUT_MS = 8000;
+const API_TIMEOUT_MS = 30_000;
+
+/** Extended timeout for graph operations that may touch high-degree nodes (1M+ edges). */
+const HEAVY_TIMEOUT_MS = 120_000;
 
 const LOG_PREFIX = "[graph-hunter-mcp]";
 const DEBUG = process.env.GRAPHHUNTER_MCP_DEBUG === "1" || process.env.GRAPHHUNTER_MCP_DEBUG === "true";
@@ -100,7 +103,8 @@ function authHeaders(): Record<string, string> {
   return h;
 }
 
-async function apiGet(path: string, params?: Record<string, string>): Promise<unknown> {
+async function apiGet(path: string, params?: Record<string, string>, timeoutMs?: number): Promise<unknown> {
+  const effectiveTimeout = timeoutMs ?? API_TIMEOUT_MS;
   const url = new URL(path, API_BASE);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
@@ -111,14 +115,14 @@ async function apiGet(path: string, params?: Record<string, string>): Promise<un
   log("api", "GET " + path, params ? { params: Object.keys(params).join(",") } : undefined);
   let res: Response;
   try {
-    res = await fetchWithTimeout(url.toString(), { headers: authHeaders() });
+    res = await fetchWithTimeout(url.toString(), { headers: authHeaders(), timeoutMs: effectiveTimeout });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const isAbort = msg.includes("abort") || (e instanceof Error && e.name === "AbortError");
     log("api", "GET " + path + " failed", { error: truncate(msg, 120), duration_ms: Date.now() - start });
     throw new Error(
       isAbort
-        ? `${CONNECTION_ERROR_MSG} Request timed out after ${API_TIMEOUT_MS}ms.`
+        ? `${CONNECTION_ERROR_MSG} Request timed out after ${effectiveTimeout}ms.`
         : `${CONNECTION_ERROR_MSG} Network error: ${msg}`
     );
   }
@@ -135,7 +139,8 @@ async function apiGet(path: string, params?: Record<string, string>): Promise<un
   return data;
 }
 
-async function apiPost(path: string, body: unknown): Promise<unknown> {
+async function apiPost(path: string, body: unknown, timeoutMs?: number): Promise<unknown> {
+  const effectiveTimeout = timeoutMs ?? API_TIMEOUT_MS;
   const url = new URL(path, API_BASE);
   const start = Date.now();
   const bodySummary =
@@ -152,7 +157,7 @@ async function apiPost(path: string, body: unknown): Promise<unknown> {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-      timeoutMs: API_TIMEOUT_MS,
+      timeoutMs: effectiveTimeout,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -160,7 +165,7 @@ async function apiPost(path: string, body: unknown): Promise<unknown> {
     log("api", "POST " + path + " failed", { error: truncate(msg, 120), duration_ms: Date.now() - start });
     throw new Error(
       isAbort
-        ? `${CONNECTION_ERROR_MSG} Request timed out after ${API_TIMEOUT_MS}ms.`
+        ? `${CONNECTION_ERROR_MSG} Request timed out after ${effectiveTimeout}ms.`
         : `${CONNECTION_ERROR_MSG} Network error: ${msg}`
     );
   }
@@ -270,7 +275,7 @@ server.tool(
       const params: Record<string, string> = { node_id };
       if (max_hops != null) params.max_hops = String(max_hops);
       if (max_nodes != null) params.max_nodes = String(max_nodes);
-      const v = await apiGet("/expand", params);
+      const v = await apiGet("/expand", params, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("expand_node", v);
       log("tool", "expand_node done", { duration_ms: Date.now() - start, result: summaryStr });
       return textContent(JSON.stringify(v, null, 2));
@@ -293,7 +298,7 @@ server.tool(
     const start = Date.now();
     log("tool", "get_node_details", { node_id: truncate(node_id, 50) });
     try {
-      const v = await apiGet("/node_details", { node_id });
+      const v = await apiGet("/node_details", { node_id }, HEAVY_TIMEOUT_MS);
       log("tool", "get_node_details done", { duration_ms: Date.now() - start, result: "ok" });
       return textContent(JSON.stringify(v, null, 2));
     } catch (e) {
@@ -315,7 +320,7 @@ server.tool(
     const start = Date.now();
     log("tool", "get_subgraph", { node_count: node_ids.length });
     try {
-      const v = await apiPost("/subgraph", { node_ids });
+      const v = await apiPost("/subgraph", { node_ids }, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("get_subgraph", v);
       log("tool", "get_subgraph done", { duration_ms: Date.now() - start, result: summaryStr });
       return textContent(JSON.stringify(v, null, 2));
@@ -338,7 +343,7 @@ server.tool(
     const start = Date.now();
     log("tool", "get_events_for_node", { node_id: truncate(node_id, 50) });
     try {
-      const v = await apiGet("/events_for_node", { node_id });
+      const v = await apiGet("/events_for_node", { node_id }, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("get_events_for_node", v);
       log("tool", "get_events_for_node done", { duration_ms: Date.now() - start, result: summaryStr });
       return textContent(JSON.stringify(v, null, 2));
@@ -365,7 +370,7 @@ server.tool(
     const start = Date.now();
     log("tool", "run_hunt", { hypothesis_dsl: truncate(hypothesis_dsl, 80) });
     try {
-      const v = await apiPost("/run_hunt", { hypothesis_dsl });
+      const v = await apiPost("/run_hunt", { hypothesis_dsl }, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("run_hunt", v);
       log("tool", "run_hunt done", { duration_ms: Date.now() - start, result: summaryStr });
       return textContent(JSON.stringify(v, null, 2));

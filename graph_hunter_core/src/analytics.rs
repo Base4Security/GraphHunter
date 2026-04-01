@@ -739,7 +739,10 @@ impl GraphHunter {
         let mut seen: HashSet<StrId> = HashSet::new();
         let mut neighbors: Vec<NeighborSummary> = Vec::new();
 
-        for compact in out_edges {
+        // Cap iteration to avoid stalling on extremely high-degree nodes (1M+ edges).
+        // neighbor_types counts become approximate beyond MAX_SCAN_EDGES; neighbors list
+        // is already capped at MAX_NEIGHBORS_RETURNED.
+        for compact in out_edges.iter().take(config::MAX_SCAN_EDGES) {
             if let Some(dest) = self.entities.get(&compact.dest_sid) {
                 *neighbor_types
                     .entry(format!("{}", dest.entity_type))
@@ -753,7 +756,7 @@ impl GraphHunter {
             }
         }
         if let Some(sources) = self.reverse_adj.get(&sid) {
-            for &source_sid in sources {
+            for &source_sid in sources.iter().take(config::MAX_SCAN_EDGES) {
                 if let Some(src) = self.entities.get(&source_sid) {
                     *neighbor_types
                         .entry(format!("{}", src.entity_type))

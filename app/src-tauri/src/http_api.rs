@@ -86,7 +86,8 @@ fn build_subgraph_for_ids(state: &AppState, node_ids: &[String]) -> Result<Subgr
             .collect();
         let mut edges: Vec<SubgraphEdge> = Vec::new();
         'outer: for source_id in node_ids {
-            for compact in graph.get_compact_relations(source_id) {
+            // Cap per-source iteration to avoid stalling on high-degree nodes (1M+ edges)
+            for compact in graph.get_compact_relations(source_id).iter().take(graph_hunter_core::config::MAX_SCAN_EDGES) {
                 if edges.len() >= MAX_SUBGRAPH_EDGES { break 'outer; }
                 let dest_str = graph.interner.resolve(compact.dest_sid);
                 if id_set.contains(dest_str) {
@@ -336,54 +337,71 @@ async fn handler_expand(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ExpandQuery>,
 ) -> Response {
-    match with_current_session_and_graph(state.as_ref(), |session, graph| {
-        let mut hood = graph
-            .get_neighborhood(
-                &q.node_id,
-                q.max_hops.unwrap_or(1),
-                q.max_nodes.unwrap_or(50),
-                None,
-            )
-            .ok_or_else(|| crate::error::CommandError::InvalidInput(format!("Entity not found: {}", q.node_id)))?;
-        let path_ids: Vec<String> = session
-            .path_node_ids
-            .read()
-            .map_err(|e: std::sync::PoisonError<_>| crate::error::CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
-            .clone();
-        for path_id in path_ids {
-            if hood.nodes.iter().any(|n| n.id == path_id) {
-                continue;
-            }
-            let Some(entity) = graph.get_entity(&path_id) else {
-                continue;
-            };
-            hood.nodes.push(graph_hunter_core::NeighborNode {
-                id: entity.id.clone(),
-                entity_type: format!("{}", entity.entity_type),
-                score: entity.score,
-                metadata: entity.metadata.clone(),
-            });
-            for compact in graph.get_compact_relations(&path_id) {
-                let dest_str = graph.interner.resolve(compact.dest_sid);
-                if hood.nodes.iter().any(|n| n.id == dest_str) {
-                    hood.edges.push(graph_hunter_core::NeighborEdge {
-                        source: graph.interner.resolve(compact.source_sid).to_string(),
-                        target: dest_str.to_string(),
-                        rel_type: format!("{}", compact.rel_type()),
-                        timestamp: compact.timestamp,
-                        metadata: graph.meta_store.get(compact.metadata_offset),
+    let state_clone = state.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            with_current_session_and_graph(state_clone.as_ref(), |session, graph| {
+                let mut hood = graph
+                    .get_neighborhood(
+                        &q.node_id,
+                        q.max_hops.unwrap_or(1),
+                        q.max_nodes.unwrap_or(50),
+                        None,
+                    )
+                    .ok_or_else(|| crate::error::CommandError::InvalidInput(format!("Entity not found: {}", q.node_id)))?;
+                let path_ids: Vec<String> = session
+                    .path_node_ids
+                    .read()
+                    .map_err(|e: std::sync::PoisonError<_>| crate::error::CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
+                    .clone();
+                // Use HashSet for O(1) lookups instead of O(n) linear scan per edge
+                let mut hood_node_set: HashSet<String> = hood.nodes.iter().map(|n| n.id.clone()).collect();
+                for path_id in path_ids {
+                    if hood_node_set.contains(&path_id) {
+                        continue;
+                    }
+                    let Some(entity) = graph.get_entity(&path_id) else {
+                        continue;
+                    };
+                    hood.nodes.push(graph_hunter_core::NeighborNode {
+                        id: entity.id.clone(),
+                        entity_type: format!("{}", entity.entity_type),
+                        score: entity.score,
+                        metadata: entity.metadata.clone(),
                     });
+                    hood_node_set.insert(path_id.clone());
+                    // Cap per-path-node edge iteration to avoid stalling on 1M+ edge nodes
+                    for compact in graph.get_compact_relations(&path_id)
+                        .iter()
+                        .take(graph_hunter_core::config::MAX_SCAN_EDGES)
+                    {
+                        let dest_str = graph.interner.resolve(compact.dest_sid);
+                        if hood_node_set.contains(dest_str) {
+                            hood.edges.push(graph_hunter_core::NeighborEdge {
+                                source: graph.interner.resolve(compact.source_sid).to_string(),
+                                target: dest_str.to_string(),
+                                rel_type: format!("{}", compact.rel_type()),
+                                timestamp: compact.timestamp,
+                                metadata: graph.meta_store.get(compact.metadata_offset),
+                            });
+                        }
+                    }
                 }
-            }
-        }
-        Ok(hood)
-    }) {
-        Ok(hood) => {
+                Ok(hood)
+            })
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok(hood))) => {
             let sg = neighborhood_to_subgraph(&hood);
             mcp_emit_view(state.as_ref(), sg);
             ok_json(hood)
         }
-        Err(e) => err_json(e),
+        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Err(e)) => err_json(format!("Task error: {}", e)),
+        Err(_) => err_json("Expand timed out after 60 seconds"),
     }
 }
 
@@ -396,13 +414,23 @@ async fn handler_node_details(
     State(state): State<Arc<AppState>>,
     Query(q): Query<NodeDetailsQuery>,
 ) -> Response {
-    match with_current_graph(state.as_ref(), |graph| {
-        graph
-            .get_node_details(&q.node_id)
-            .ok_or_else(|| crate::error::CommandError::InvalidInput(format!("Entity not found: {}", q.node_id)))
-    }) {
-        Ok(v) => ok_json(v),
-        Err(e) => err_json(e),
+    let state_clone = state.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || {
+            with_current_graph(state_clone.as_ref(), |graph| {
+                graph
+                    .get_node_details(&q.node_id)
+                    .ok_or_else(|| crate::error::CommandError::InvalidInput(format!("Entity not found: {}", q.node_id)))
+            })
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok(v))) => ok_json(v),
+        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Err(e)) => err_json(format!("Task error: {}", e)),
+        Err(_) => err_json("Node details timed out after 30 seconds"),
     }
 }
 
@@ -415,44 +443,55 @@ async fn handler_subgraph(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SubgraphBody>,
 ) -> Response {
-    const MAX_SUBGRAPH_EDGES: usize = 5000;
-    let node_ids = body.node_ids;
-    let id_set: HashSet<&str> = node_ids.iter().map(|s| s.as_str()).collect();
-    match with_current_graph(state.as_ref(), |graph| {
-        let nodes: Vec<SubgraphNode> = node_ids
-            .iter()
-            .filter_map(|id| graph.get_entity(id))
-            .map(|e| SubgraphNode {
-                id: e.id.clone(),
-                entity_type: format!("{}", e.entity_type),
-                score: e.score,
-                metadata: e.metadata.clone(),
-            })
-            .collect();
-        let mut edges: Vec<SubgraphEdge> = Vec::new();
-        'outer: for source_id in &node_ids {
-            for compact in graph.get_compact_relations(source_id) {
-                if edges.len() >= MAX_SUBGRAPH_EDGES { break 'outer; }
-                let dest_str = graph.interner.resolve(compact.dest_sid);
-                if id_set.contains(dest_str) {
-                    edges.push(SubgraphEdge {
-                        source: graph.interner.resolve(compact.source_sid).to_string(),
-                        target: dest_str.to_string(),
-                        rel_type: format!("{}", compact.rel_type()),
-                        timestamp: compact.timestamp,
-                        metadata: graph.meta_store.get(compact.metadata_offset),
-                        dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
-                    });
+    let state_clone = state.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            const MAX_SUBGRAPH_EDGES: usize = 5000;
+            let node_ids = body.node_ids;
+            let id_set: HashSet<String> = node_ids.iter().cloned().collect();
+            with_current_graph(state_clone.as_ref(), |graph| {
+                let nodes: Vec<SubgraphNode> = node_ids
+                    .iter()
+                    .filter_map(|id| graph.get_entity(id))
+                    .map(|e| SubgraphNode {
+                        id: e.id.clone(),
+                        entity_type: format!("{}", e.entity_type),
+                        score: e.score,
+                        metadata: e.metadata.clone(),
+                    })
+                    .collect();
+                let mut edges: Vec<SubgraphEdge> = Vec::new();
+                'outer: for source_id in &node_ids {
+                    // Cap per-source iteration to avoid stalling on high-degree nodes (1M+ edges)
+                    for compact in graph.get_compact_relations(source_id).iter().take(graph_hunter_core::config::MAX_SCAN_EDGES) {
+                        if edges.len() >= MAX_SUBGRAPH_EDGES { break 'outer; }
+                        let dest_str = graph.interner.resolve(compact.dest_sid);
+                        if id_set.contains(dest_str) {
+                            edges.push(SubgraphEdge {
+                                source: graph.interner.resolve(compact.source_sid).to_string(),
+                                target: dest_str.to_string(),
+                                rel_type: format!("{}", compact.rel_type()),
+                                timestamp: compact.timestamp,
+                                metadata: graph.meta_store.get(compact.metadata_offset),
+                                dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
+                            });
+                        }
+                    }
                 }
-            }
-        }
-        Ok(Subgraph { nodes, edges })
-    }) {
-        Ok(sg) => {
+                Ok(Subgraph { nodes, edges })
+            })
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok(sg))) => {
             mcp_emit_view(state.as_ref(), sg.clone());
             ok_json(sg)
         }
-        Err(e) => err_json(e),
+        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Err(e)) => err_json(format!("Task error: {}", e)),
+        Err(_) => err_json("Subgraph query timed out after 60 seconds"),
     }
 }
 
@@ -465,25 +504,16 @@ async fn handler_events_for_node(
     State(state): State<Arc<AppState>>,
     Query(q): Query<EventsQuery>,
 ) -> Response {
-    match with_current_graph(state.as_ref(), |graph| {
-        const MAX_EVENTS: usize = 500;
-        let mut edges: Vec<SubgraphEdge> = Vec::new();
-        for compact in graph.get_compact_relations(&q.node_id) {
-            if edges.len() >= MAX_EVENTS { break; }
-            edges.push(SubgraphEdge {
-                source: graph.interner.resolve(compact.source_sid).to_string(),
-                target: graph.interner.resolve(compact.dest_sid).to_string(),
-                rel_type: format!("{}", compact.rel_type()),
-                timestamp: compact.timestamp,
-                metadata: graph.meta_store.get(compact.metadata_offset),
-                dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
-            });
-        }
-        for &source_sid in graph.get_reverse_source_sids(&q.node_id).iter().take(MAX_EVENTS) {
-            if edges.len() >= MAX_EVENTS { break; }
-            let source_str = graph.interner.resolve(source_sid);
-            for compact in graph.get_compact_relations(source_str) {
-                if compact.dest_sid == graph.interner.get(&q.node_id).unwrap_or(compact.dest_sid) {
+    let state_clone = state.clone();
+    let node_id = q.node_id.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            let edges = with_current_graph(state_clone.as_ref(), |graph| {
+                const MAX_EVENTS: usize = 500;
+                let mut edges: Vec<SubgraphEdge> = Vec::new();
+                for compact in graph.get_compact_relations(&node_id) {
+                    if edges.len() >= MAX_EVENTS { break; }
                     edges.push(SubgraphEdge {
                         source: graph.interner.resolve(compact.source_sid).to_string(),
                         target: graph.interner.resolve(compact.dest_sid).to_string(),
@@ -492,28 +522,53 @@ async fn handler_events_for_node(
                         metadata: graph.meta_store.get(compact.metadata_offset),
                         dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
                     });
-                    break;
                 }
-            }
-        }
-        Ok(edges)
-    }) {
-        Ok(v) => {
+                for &source_sid in graph.get_reverse_source_sids(&node_id).iter().take(MAX_EVENTS) {
+                    if edges.len() >= MAX_EVENTS { break; }
+                    let source_str = graph.interner.resolve(source_sid);
+                    for compact in graph.get_compact_relations(source_str) {
+                        if compact.dest_sid == graph.interner.get(&node_id).unwrap_or(compact.dest_sid) {
+                            edges.push(SubgraphEdge {
+                                source: graph.interner.resolve(compact.source_sid).to_string(),
+                                target: graph.interner.resolve(compact.dest_sid).to_string(),
+                                rel_type: format!("{}", compact.rel_type()),
+                                timestamp: compact.timestamp,
+                                metadata: graph.meta_store.get(compact.metadata_offset),
+                                dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
+                            });
+                            break;
+                        }
+                    }
+                }
+                Ok(edges)
+            })?;
+            // Build subgraph for the event participants to update the frontend map
             let mut ids: HashSet<String> = HashSet::new();
-            ids.insert(q.node_id.clone());
-            for e in &v {
+            ids.insert(node_id);
+            for e in &edges {
                 ids.insert(e.source.clone());
                 ids.insert(e.target.clone());
             }
             let node_ids: Vec<String> = ids.into_iter().collect();
-            if !node_ids.is_empty() {
-                if let Ok(sg) = build_subgraph_for_ids(state.as_ref(), &node_ids) {
-                    mcp_emit_view(state.as_ref(), sg);
-                }
+            let sg = if !node_ids.is_empty() {
+                build_subgraph_for_ids(state_clone.as_ref(), &node_ids).ok()
+            } else {
+                None
+            };
+            Ok::<_, crate::error::CommandError>((edges, sg))
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok((edges, sg)))) => {
+            if let Some(sg) = sg {
+                mcp_emit_view(state.as_ref(), sg);
             }
-            ok_json(v)
+            ok_json(edges)
         }
-        Err(e) => err_json(e),
+        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Err(e)) => err_json(format!("Task error: {}", e)),
+        Err(_) => err_json("Events query timed out after 60 seconds"),
     }
 }
 
