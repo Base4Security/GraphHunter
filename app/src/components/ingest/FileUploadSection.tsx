@@ -1,6 +1,7 @@
 import { useRef } from "react";
 import { isTauri } from "../../lib/runtime";
 import { FolderOpen, SlidersHorizontal, Upload, X } from "lucide-react";
+import { LoadingButton } from "../ui";
 import type {
   LogEntry,
   PreviewIngestResult,
@@ -438,25 +439,29 @@ export default function FileUploadSection({
             </div>
           </div>
         )}
-        <button
+        <LoadingButton
           className="btn btn-primary"
           onClick={onLoadData}
-          disabled={filePaths.length === 0 || loading}
+          loading={loading}
+          loadingText="Ingesting..."
+          disabled={filePaths.length === 0}
         >
           <Upload size={14} />
-          {loading ? "Loading..." : "Ingest Logs"}
-        </button>
+          Ingest Logs
+        </LoadingButton>
         {loading && ingestProgress && (
           <IngestProgressBar progress={ingestProgress} showPhase={showPhase} />
         )}
-        <button
+        <LoadingButton
           className="btn"
           onClick={onPreviewFields}
-          disabled={filePaths.length === 0 || previewLoading}
+          loading={previewLoading}
+          loadingText="Previewing..."
+          disabled={filePaths.length === 0}
         >
           <SlidersHorizontal size={14} />
-          {previewLoading ? "Previewing..." : "Preview Fields"}
-        </button>
+          Preview Fields
+        </LoadingButton>
       </div>
     </>
   );

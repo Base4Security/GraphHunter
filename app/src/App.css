@@ -2743,6 +2743,49 @@ select option {
   background: var(--text-muted);
 }
 
+/* ── Loading / spinner animations ── */
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes btn-loading-pulse {
+  0%, 100% { box-shadow: 0 0 0 transparent; }
+  50% { box-shadow: 0 0 12px var(--accent-dim); }
+}
+
+.loading-spinner {
+  display: inline-flex;
+  align-items: center;
+  animation: spin 1s linear infinite;
+}
+
+.btn-loading {
+  opacity: 0.85 !important;
+  cursor: wait !important;
+  animation: btn-loading-pulse 2s ease-in-out infinite;
+}
+
+.btn-loading:hover {
+  border-color: var(--border) !important;
+}
+
+.section-loader {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text-muted);
+}
+
+.section-loader-text {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* ── Toast notification animation ── */
 
 @keyframes toast-slide-in {

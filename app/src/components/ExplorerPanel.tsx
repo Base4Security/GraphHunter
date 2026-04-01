@@ -1,6 +1,7 @@
 import { useState, useCallback } from "react";
 import { invoke, errorMessage } from "../lib/tauri";
 import { Search, Filter, ChevronDown, ChevronRight } from "lucide-react";
+import { LoadingButton } from "./ui";
 import { useNotifications } from "../hooks/useNotifications";
 import type {
   SearchResult,
@@ -118,13 +119,15 @@ export default function ExplorerPanel({
               </option>
             ))}
           </select>
-          <button
+          <LoadingButton
             className="btn btn-primary btn-sm"
             onClick={handleSearch}
-            disabled={searching || !query.trim()}
+            loading={searching}
+            loadingText="Searching..."
+            disabled={!query.trim()}
           >
-            {searching ? "..." : "Search"}
-          </button>
+            Search
+          </LoadingButton>
         </div>
       </div>
 
