@@ -203,41 +203,16 @@ pub fn evtx_record_to_sysmon_like(ev: &serde_json::Value) -> Option<serde_json::
     out.insert("UtcTime".to_string(), Value::String(time_created));
     out.insert("Computer".to_string(), Value::String(computer));
 
+    // Extract fields from EventData and UserData (many providers use one or the other)
     let event_data = event
         .get("EventData")
         .or_else(|| event.get("eventdata"));
-    if let Some(ed) = event_data {
-        if let Some(data_arr) = ed.get("Data").or_else(|| ed.get("data")).and_then(|v| v.as_array()) {
-            for item in data_arr {
-                if let Some(o) = item.as_object() {
-                    let name = o
-                        .get("@Name")
-                        .or_else(|| o.get("Name"))
-                        .and_then(|v| v.as_str())
-                        .or_else(|| o.get("#text").and_then(|v| v.as_str()));
-                    let value = o.get("#text").and_then(|v| v.as_str()).unwrap_or("");
-                    if let Some(name) = name {
-                        out.insert(name.to_string(), Value::String(value.to_string()));
-                    }
-                }
-            }
-        } else if let Some(data_obj) = ed.get("Data").or_else(|| ed.get("data")).and_then(|v| v.as_object()) {
-            for (k, v) in data_obj {
-                if let Some(s) = v.as_str() {
-                    out.insert(k.clone(), Value::String(s.to_string()));
-                }
-            }
-        }
-        // EventData itself can be key-value (evtx sometimes flattens)
-        if let Some(ed_obj) = ed.as_object() {
-            for (k, v) in ed_obj {
-                if k != "Data" && k != "data" {
-                    if let Some(s) = v.as_str() {
-                        out.insert(k.clone(), Value::String(s.to_string()));
-                    }
-                }
-            }
-        }
+    let user_data = event
+        .get("UserData")
+        .or_else(|| event.get("userdata"));
+
+    for data_section in [event_data, user_data].into_iter().flatten() {
+        flatten_data_section(data_section, &mut out);
     }
 
     // If event is the root and we have no EventData, flatten all string/number fields from event
@@ -259,6 +234,89 @@ pub fn evtx_record_to_sysmon_like(ev: &serde_json::Value) -> Option<serde_json::
     }
 
     Some(Value::Object(out))
+}
+
+/// Flattens a data section (EventData or UserData) into the output map.
+/// Handles: Data[@Name] arrays, Data objects, direct key-value pairs,
+/// and nested provider-specific elements (common in UserData).
+fn flatten_data_section(section: &serde_json::Value, out: &mut serde_json::Map<String, serde_json::Value>) {
+    use serde_json::Value;
+
+    // Try Data array: [{@Name: "Field", #text: "Value"}, ...]
+    if let Some(data_arr) = section
+        .get("Data")
+        .or_else(|| section.get("data"))
+        .and_then(|v| v.as_array())
+    {
+        for item in data_arr {
+            if let Some(o) = item.as_object() {
+                let name = o
+                    .get("@Name")
+                    .or_else(|| o.get("Name"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| o.get("#text").and_then(|v| v.as_str()));
+                let value = o.get("#text").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(name) = name {
+                    out.insert(name.to_string(), Value::String(value.to_string()));
+                }
+            }
+        }
+    } else if let Some(data_obj) = section
+        .get("Data")
+        .or_else(|| section.get("data"))
+        .and_then(|v| v.as_object())
+    {
+        // Data as flat object: {Field1: "val1", Field2: "val2"}
+        for (k, v) in data_obj {
+            if let Some(s) = v.as_str() {
+                out.insert(k.clone(), Value::String(s.to_string()));
+            }
+        }
+    }
+
+    // Direct key-value pairs on the section itself
+    if let Some(obj) = section.as_object() {
+        for (k, v) in obj {
+            if k == "Data" || k == "data" || k.starts_with('@') {
+                continue;
+            }
+            match v {
+                Value::String(s) => {
+                    out.entry(k.clone()).or_insert_with(|| Value::String(s.clone()));
+                }
+                Value::Number(n) => {
+                    out.entry(k.clone()).or_insert_with(|| Value::Number(n.clone()));
+                }
+                // Nested provider element (UserData/<ProviderElement>/{fields})
+                Value::Object(nested) => {
+                    for (nk, nv) in nested {
+                        if nk.starts_with('@') {
+                            continue; // skip xmlns attributes
+                        }
+                        match nv {
+                            Value::String(s) => {
+                                out.entry(nk.clone())
+                                    .or_insert_with(|| Value::String(s.clone()));
+                            }
+                            Value::Number(n) => {
+                                out.entry(nk.clone())
+                                    .or_insert_with(|| Value::Number(n.clone()));
+                            }
+                            // Handle #text inside nested objects
+                            Value::Object(inner) => {
+                                if let Some(text) = inner.get("#text").and_then(|t| t.as_str()) {
+                                    out.entry(nk.clone())
+                                        .or_insert_with(|| Value::String(text.to_string()));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 fn extract_event_id(v: Option<&serde_json::Value>) -> Option<u64> {
