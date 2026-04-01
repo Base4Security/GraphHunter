@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke, errorMessage } from "../lib/tauri";
 import { Plus, Trash2, Crosshair, X, BookOpen, Code, Sparkles } from "lucide-react";
+import { LoadingButton } from "./ui";
 import type {
   HypothesisStep,
   Hypothesis,
@@ -408,14 +409,15 @@ export default function HypothesisBuilder({
                 boxSizing: "border-box",
               }}
             />
-            <button
+            <LoadingButton
               className="btn btn-primary"
               onClick={aiProposeHypothesis}
-              disabled={aiLoading}
+              loading={aiLoading}
+              loadingText="Proposing..."
               style={{ marginBottom: 12 }}
             >
-              {aiLoading ? "Proposing..." : "Propose hypothesis"}
-            </button>
+              Propose hypothesis
+            </LoadingButton>
             {aiError && (
               <div style={{ color: "var(--danger)", fontSize: 11, marginBottom: 8 }}>{aiError}</div>
             )}
@@ -576,10 +578,10 @@ export default function HypothesisBuilder({
         <button className="btn" onClick={addStep}>
           <Plus size={14} /> Add Step
         </button>
-        <button className="btn btn-primary" onClick={runHunt} disabled={hunting}>
+        <LoadingButton className="btn btn-primary" onClick={runHunt} loading={hunting} loadingText="Hunting...">
           <Crosshair size={14} />
-          {hunting ? "Hunting..." : "Run Hunt"}
-        </button>
+          Run Hunt
+        </LoadingButton>
         {results && (
           <button className="btn btn-danger btn-sm" onClick={() => setResults(null)}>
             <Trash2 size={12} /> Clear

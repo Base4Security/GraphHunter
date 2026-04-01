@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke, errorMessage } from "../lib/tauri";
 import { BarChart3, X, SlidersHorizontal, Palette, Activity, ArrowRight, Shield, Brain } from "lucide-react";
+import { LoadingButton } from "./ui";
 import type {
   GraphStats,
   LogEntry,
@@ -350,9 +351,11 @@ export default function GraphMetricsLeftPanel({
                 style={{ width: "100%" }}
               />
             </div>
-            <button
+            <LoadingButton
               className="btn btn-primary"
-              disabled={scoringLoading || !currentSessionId}
+              loading={scoringLoading}
+              loadingText="Recalculating..."
+              disabled={!currentSessionId}
               onClick={async () => {
                 setScoringLoading(true);
                 try {
@@ -371,8 +374,8 @@ export default function GraphMetricsLeftPanel({
               }}
             >
               <SlidersHorizontal size={14} />
-              {scoringLoading ? "Recalculating..." : "Recalculate"}
-            </button>
+              Recalculate
+            </LoadingButton>
 
             <div style={{ marginTop: 12, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>
@@ -393,9 +396,11 @@ export default function GraphMetricsLeftPanel({
                   marginBottom: 6,
                 }}
               />
-              <button
+              <LoadingButton
                 className="btn"
-                disabled={compactLoading || !compactDate || !currentSessionId}
+                loading={compactLoading}
+                loadingText="Compacting..."
+                disabled={!compactDate || !currentSessionId}
                 onClick={async () => {
                   setCompactLoading(true);
                   try {
@@ -414,8 +419,8 @@ export default function GraphMetricsLeftPanel({
                   }
                 }}
               >
-                {compactLoading ? "Compacting..." : "Compact"}
-              </button>
+                Compact
+              </LoadingButton>
             </div>
           </div>
         )}

@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { invoke, errorMessage } from "../lib/tauri";
 import { Database, ChevronLeft, ChevronRight } from "lucide-react";
+import { SectionLoader } from "./ui";
 import type { PaginatedEvents, DatasetInfo } from "../types";
 
 interface EventsViewPanelProps {
@@ -111,7 +112,7 @@ export default function EventsViewPanel({ selectedNodeId }: EventsViewPanelProps
   if (loading && !events) {
     return (
       <div className="events-view-panel events-view-loading">
-        <p>Loading events...</p>
+        <SectionLoader message="Loading events..." />
       </div>
     );
   }

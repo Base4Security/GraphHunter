@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { invoke, errorMessage } from "../lib/tauri";
 import { Plus, Save, Check, Trash2, X, FolderPlus } from "lucide-react";
+import { LoadingButton } from "./ui";
 import type { SessionInfo, LogEntry } from "../types";
 
 interface SessionSelectorProps {
@@ -21,6 +22,7 @@ const SessionSelector: React.FC<SessionSelectorProps> = ({
   onLog,
 }) => {
   const [saveFlash, setSaveFlash] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [newSessionName, setNewSessionName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -95,12 +97,15 @@ const SessionSelector: React.FC<SessionSelectorProps> = ({
       onError("No session selected");
       return;
     }
+    setSaving(true);
     try {
       await invoke("cmd_save_session", { sessionId: currentSession.id });
       setSaveFlash(true);
       setTimeout(() => setSaveFlash(false), 2000);
     } catch (e) {
       onError(errorMessage(e));
+    } finally {
+      setSaving(false);
     }
   }, [currentSession, onError]);
 
@@ -161,15 +166,16 @@ const SessionSelector: React.FC<SessionSelectorProps> = ({
         )}
         {currentSession && (
           <>
-            <button
+            <LoadingButton
               type="button"
               className={`session-btn${saveFlash ? " session-btn-success" : ""}`}
               onClick={handleSaveSession}
+              loading={saving}
               title="Save session"
-              aria-label={saveFlash ? "Saved" : "Save session"}
+              aria-label={saving ? "Saving..." : saveFlash ? "Saved" : "Save session"}
             >
               {saveFlash ? <Check size={14} /> : <Save size={14} />}
-            </button>
+            </LoadingButton>
             <button
               type="button"
               className="session-btn session-btn-danger"
@@ -236,21 +242,16 @@ const SessionSelector: React.FC<SessionSelectorProps> = ({
               >
                 Cancel
               </button>
-              <button
+              <LoadingButton
                 type="button"
                 className="session-btn session-btn-primary"
                 onClick={handleCreateSession}
-                disabled={creating}
+                loading={creating}
+                loadingText="Creating…"
               >
-                {creating ? (
-                  <>Creating…</>
-                ) : (
-                  <>
-                    <Plus size={14} />
-                    Create session
-                  </>
-                )}
-              </button>
+                <Plus size={14} />
+                Create session
+              </LoadingButton>
             </div>
           </div>
         </div>
