@@ -49,7 +49,8 @@ impl GenericParser {
             | "subjectusername" | "accountname" | "userprincipalname"
             | "initiatingprocessaccountname" | "actor" | "caller"
             | "membername" | "samaccountname" | "logonid"
-            | "connecteduser" | "runasuser" => {
+            | "connecteduser" | "runasuser"
+            | "modifyinguser" | "usercontext" => {
                 Some("source_user")
             }
 
@@ -66,7 +67,8 @@ impl GenericParser {
             "destinationip" | "dst_ip" | "dest_ip" | "target_ip" | "dstip"
             | "remoteip" | "remote_ip" | "dst_addr" | "destinationaddress"
             | "server_ip" | "remoteaddress" | "targetaddress"
-            | "address" | "clientaddressv4" | "clientaddressv6" => Some("target_ip"),
+            | "address" | "clientaddressv4" | "clientaddressv6"
+            | "remoteaddresses" => Some("target_ip"),
 
             // Source host
             "computer" | "hostname" | "devicename" | "source_host" | "src_host"
@@ -87,7 +89,8 @@ impl GenericParser {
             | "initiatingprocessfilename" | "hostapplication" | "processpath"
             | "processname" | "servicename" | "providerpath"
             | "providername" | "component" | "taskname"
-            | "apppoollid" => Some("source_process"),
+            | "apppoollid" | "applicationpath" | "modifyingapplication"
+            | "actionname" => Some("source_process"),
 
             // Parent process
             "parentimage" | "parent_process" | "parentprocessname"
@@ -425,6 +428,23 @@ impl GenericParser {
             }
         }
 
+        // Rule: source_host + source_process → Host -[Execute]-> Process
+        // Captures EVTX events where a process/service/task runs on a host (TaskScheduler, OpenSSH, Firewall, etc.)
+        if let (Some(host), Some(proc)) = (&n.source_host, &n.source_process) {
+            if n.source_user.is_none() {
+                let src = Entity::new(host, EntityType::Host);
+                let dst = {
+                    let mut e = Entity::new(proc, EntityType::Process);
+                    if let Some(ref cmd) = n.command_line {
+                        e = e.with_metadata("cmdline", cmd);
+                    }
+                    e
+                };
+                let rel = Relation::new(host, proc, RelationType::Execute, n.timestamp);
+                triples.push((src, rel, dst));
+            }
+        }
+
         // Rule: source_user + source_host → User -[Auth]-> Host
         if let (Some(user), Some(host)) = (&n.source_user, &n.source_host) {
             // Only if we don't have a process (otherwise user→execute→process is more specific)
@@ -434,6 +454,17 @@ impl GenericParser {
                 let rel = Relation::new(user, host, RelationType::Auth, n.timestamp);
                 triples.push((src, rel, dst));
             }
+        }
+
+        // Rule: source_user + source_process + source_host → User -[Execute]-> Process (+ Process -[Execute]-> Host)
+        // When all three are present, link user to process and process to host
+        if let (Some(user), Some(proc), Some(host)) = (&n.source_user, &n.source_process, &n.source_host) {
+            let src = Entity::new(proc, EntityType::Process);
+            let dst = Entity::new(host, EntityType::Host);
+            let rel = Relation::new(proc, host, RelationType::Execute, n.timestamp);
+            triples.push((src, rel, dst));
+            // user→execute→process already emitted above
+            let _ = (user, host); // suppress unused warnings; triples already cover the chain
         }
 
         // Rule: target_user + source_host → User -[Auth]-> Host (e.g. EVTX 4624 TargetUserName + Computer)
