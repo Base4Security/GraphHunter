@@ -277,7 +277,7 @@ fn flatten_data_section(section: &serde_json::Value, out: &mut serde_json::Map<S
     // Direct key-value pairs on the section itself
     if let Some(obj) = section.as_object() {
         for (k, v) in obj {
-            if k == "Data" || k == "data" || k.starts_with('@') {
+            if k == "Data" || k == "data" || k.starts_with('@') || k.starts_with('#') {
                 continue;
             }
             match v {
@@ -290,8 +290,8 @@ fn flatten_data_section(section: &serde_json::Value, out: &mut serde_json::Map<S
                 // Nested provider element (UserData/<ProviderElement>/{fields})
                 Value::Object(nested) => {
                     for (nk, nv) in nested {
-                        if nk.starts_with('@') {
-                            continue; // skip xmlns attributes
+                        if nk.starts_with('@') || nk.starts_with('#') {
+                            continue; // skip xmlns attributes and #text/#attributes
                         }
                         match nv {
                             Value::String(s) => {
