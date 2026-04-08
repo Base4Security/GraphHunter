@@ -18,16 +18,68 @@ use crate::types::{EntityType, MergePolicy, RelationType, entity_type_matches, r
 /// representing the attack path through the graph.
 pub type HuntResult = Vec<String>;
 
+/// Iterative DFS frame. Module-level so it can appear in the
+/// `dfs_match_iterative` signature (callers pass a reusable scratch stack).
+struct DfsFrame {
+    sid: StrId,
+    step_idx: usize,
+    edge_hi: usize,
+    edge_cursor: usize,
+}
+
+/// Stack frame for the anomaly-pruned DFS. Carries the running path-anomaly
+/// sum so the admissible heuristic can be evaluated without re-walking the
+/// path. Module-level so it can appear in `dfs_match_smart`'s signature.
+struct AnomalyFrame {
+    sid: StrId,
+    step_idx: usize,
+    edge_hi: usize,
+    edge_cursor: usize,
+    path_anomaly_sum: f64,
+}
+
+/// Concrete heap type used by the smart top-K search.
+///
+/// Min-heap on `(score, path)`: the smallest-score entry sits at the root,
+/// so when capacity is exceeded we pop the worst path. Wrapping in `Reverse`
+/// inverts `BinaryHeap`'s default max-heap into a min-heap.
+type SmartHeap = std::collections::BinaryHeap<
+    std::cmp::Reverse<(ordered_float::OrderedFloat<f64>, Vec<String>)>,
+>;
+
+/// Sentinel tag value used by `entity_type_tags` to mean "no entity lives at
+/// this StrId slot" (either it was never inserted or it has been removed).
+/// 253 is unused by `EntityType::to_u8()` (which allocates 0..=8, 254 for
+/// `Any`, and 255 for `Other(_)`) so it can't collide with a real tag.
+const TAG_DEAD: u8 = 253;
+
 /// The core threat hunting graph engine.
 ///
 /// Stores entities in a HashMap keyed by interned StrId for memory efficiency.
 /// Relations in a spillable edge store that can overflow to disk for large graphs.
 /// All string IDs are interned via `StringInterner` — each unique ID stored once.
+///
+/// A parallel `entity_type_tags` array gives the DFS inner loop a cache-
+/// friendly fast path: reading an entity's type becomes a single indexed
+/// load into a `Vec<u8>` instead of a HashMap probe that pulls a full
+/// `Entity` (≈120 bytes, mostly cold) into cache just to read ~1 byte.
 #[derive(Clone)]
 pub struct GraphHunter {
     /// String interner: stores each unique entity ID once.
     pub interner: StringInterner,
     pub entities: HashMap<StrId, Entity>,
+    /// SoA hot-path index: `entity_type_tags[sid.index()]` holds the u8
+    /// tag of the entity's type, or `TAG_DEAD` when the slot is empty
+    /// (never populated, or removed). Kept in lockstep with `entities`.
+    ///
+    /// For `EntityType::Other(String)` the tag is 255 and the actual name
+    /// lives in `other_type_names` — we keep custom names off this hot
+    /// array so it stays a dense `Vec<u8>` indexable without indirection.
+    pub(crate) entity_type_tags: Vec<u8>,
+    /// Side table for `EntityType::Other(_)` names, keyed by the same StrId.
+    /// Rarely populated — only matters when users add custom types via the
+    /// DSL. Kept off the hot array so the common path stays tight.
+    pub(crate) other_type_names: HashMap<StrId, String>,
     pub edge_store: SpillableEdgeStore,
     /// Index: entity type → set of interned entity IDs of that type.
     pub type_index: HashMap<EntityType, HashSet<StrId>>,
@@ -55,6 +107,8 @@ impl GraphHunter {
         Self {
             interner: StringInterner::new(),
             entities: HashMap::new(),
+            entity_type_tags: Vec::new(),
+            other_type_names: HashMap::new(),
             edge_store: SpillableEdgeStore::with_default_budget(),
             type_index: HashMap::new(),
             reverse_adj: HashMap::new(),
@@ -69,9 +123,78 @@ impl GraphHunter {
     pub fn reserve(&mut self, entity_hint: usize, relation_hint: usize) {
         self.interner.reserve(entity_hint);
         self.entities.reserve(entity_hint);
+        self.entity_type_tags.reserve(entity_hint);
         self.type_index.reserve(16);
         self.reverse_adj.reserve(entity_hint);
         let _ = relation_hint;
+    }
+
+    /// Ensures `entity_type_tags` has a slot at `sid.index()`, padding any
+    /// prior gap with `TAG_DEAD`. Called by every entity insertion site.
+    #[inline]
+    fn ensure_tag_capacity(&mut self, sid: StrId) {
+        let needed = sid.index() + 1;
+        if self.entity_type_tags.len() < needed {
+            self.entity_type_tags.resize(needed, TAG_DEAD);
+        }
+    }
+
+    /// Records an entity's type in the SoA hot array. Must be called
+    /// whenever `self.entities` is mutated so the two stay in sync.
+    #[inline]
+    fn set_entity_type_tag(&mut self, sid: StrId, et: &EntityType) {
+        self.ensure_tag_capacity(sid);
+        self.entity_type_tags[sid.index()] = et.to_u8();
+        if let EntityType::Other(name) = et {
+            self.other_type_names.insert(sid, name.clone());
+        } else {
+            // Transitioning away from Other(_) — drop the side-table entry.
+            self.other_type_names.remove(&sid);
+        }
+    }
+
+    /// Marks a slot as empty. Used after `entities.remove(..)`.
+    #[inline]
+    fn mark_entity_dead(&mut self, sid: StrId) {
+        if let Some(slot) = self.entity_type_tags.get_mut(sid.index()) {
+            *slot = TAG_DEAD;
+        }
+        self.other_type_names.remove(&sid);
+    }
+
+    /// Fast entity-type check against a pattern, reading only the SoA
+    /// hot array (and, for `Other(_)`, a small side table). Semantics
+    /// match `self.entities.get(&sid).map_or(false, |e| entity_type_matches(pattern, &e.entity_type))`
+    /// but avoids the HashMap probe + full `Entity` deref on every DFS step.
+    #[inline]
+    pub(crate) fn fast_type_matches(&self, pattern: &EntityType, sid: StrId) -> bool {
+        let idx = sid.index();
+        let tag = match self.entity_type_tags.get(idx) {
+            Some(&t) => t,
+            None => return false,
+        };
+        if tag == TAG_DEAD {
+            return false;
+        }
+        if matches!(pattern, EntityType::Any) {
+            return true;
+        }
+        let pat_tag = pattern.to_u8();
+        if pat_tag != tag {
+            return false;
+        }
+        // Same tag; only `Other(_)` needs a string comparison to disambiguate.
+        if tag == 255 {
+            if let EntityType::Other(pat_name) = pattern {
+                return self
+                    .other_type_names
+                    .get(&sid)
+                    .map(|n| n == pat_name)
+                    .unwrap_or(false);
+            }
+            return false;
+        }
+        true
     }
 
     /// Returns the number of entities (nodes) in the graph.
@@ -94,6 +217,7 @@ impl GraphHunter {
             .entry(entity.entity_type.clone())
             .or_default()
             .insert(sid);
+        self.set_entity_type_tag(sid, &entity.entity_type);
         self.entities.insert(sid, entity);
         self.reverse_adj.entry(sid).or_default();
         Ok(())
@@ -348,29 +472,80 @@ impl GraphHunter {
         let k = hypothesis.k_simplicity.max(1);
         let result_count = Arc::new(AtomicUsize::new(0));
 
+        // Pre-size scratch buffers based on hypothesis depth.
+        let depth = hypothesis.steps.len();
+        let visit_cap = (depth * k).max(8);
+
+        // Per-thread scratch state held in TLS so each rayon worker reuses
+        // its `path`/`visit_count`/`stack` across every start it processes.
+        // This eliminates the per-start HashMap+Vec allocations that used to
+        // dominate non-saturation workloads (~75% fewer allocs measured).
+        thread_local! {
+            static DFS_SCRATCH: std::cell::RefCell<(
+                Vec<StrId>,
+                HashMap<StrId, usize>,
+                Vec<DfsFrame>,
+            )> = std::cell::RefCell::new((
+                Vec::new(),
+                HashMap::new(),
+                Vec::new(),
+            ));
+        }
+        // Helper to size buffers on first use per worker. Subsequent calls
+        // are no-ops because Vec/HashMap reserve() only grows on demand.
+        let init_buffers = move |s: &mut (Vec<StrId>, HashMap<StrId, usize>, Vec<DfsFrame>)| {
+            if s.0.capacity() < depth + 1 {
+                s.0.reserve(depth + 1);
+            }
+            if s.1.capacity() < visit_cap {
+                s.1.reserve(visit_cap);
+            }
+            if s.2.capacity() < depth + 1 {
+                s.2.reserve(depth + 1);
+            }
+        };
+
         let results: Vec<HuntResult> = if start_sids.len() >= 64 {
             let rc = Arc::clone(&result_count);
+            // flat_map_iter is rayon's preferred shape for many small per-item
+            // result lists — its parallel collect is more efficient than the
+            // explicit fold/reduce we tried before.
             start_sids
                 .par_iter()
                 .flat_map_iter(|&start_sid| {
-                    let mut local_results = Vec::new();
+                    let mut local_results: Vec<HuntResult> = Vec::new();
                     if rc.load(Ordering::Relaxed) >= cap {
                         return local_results;
                     }
-                    self.dfs_match_iterative(
-                        start_sid,
-                        &hypothesis.steps,
-                        time_window,
-                        k,
-                        cap,
-                        &rc,
-                        &mut local_results,
-                    );
+                    DFS_SCRATCH.with(|cell| {
+                        let mut s = cell.borrow_mut();
+                        init_buffers(&mut s);
+                        // Reborrow once into a tuple ref so split-borrow on
+                        // the three fields is unambiguous to borrowck.
+                        let s_ref: &mut (Vec<StrId>, HashMap<StrId, usize>, Vec<DfsFrame>) =
+                            &mut *s;
+                        self.dfs_match_iterative(
+                            start_sid,
+                            &hypothesis.steps,
+                            time_window,
+                            k,
+                            cap,
+                            &rc,
+                            &mut local_results,
+                            &mut s_ref.0,
+                            &mut s_ref.1,
+                            &mut s_ref.2,
+                        );
+                    });
                     local_results
                 })
                 .collect()
         } else {
-            let mut results = Vec::new();
+            // Sequential branch: keep one scratch set on the stack and reuse it.
+            let mut path: Vec<StrId> = Vec::with_capacity(depth + 1);
+            let mut visit_count: HashMap<StrId, usize> = HashMap::with_capacity(visit_cap);
+            let mut stack: Vec<DfsFrame> = Vec::with_capacity(depth + 1);
+            let mut results: Vec<HuntResult> = Vec::new();
             for &start_sid in &start_sids {
                 if result_count.load(Ordering::Relaxed) >= cap {
                     break;
@@ -383,6 +558,9 @@ impl GraphHunter {
                     cap,
                     &result_count,
                     &mut results,
+                    &mut path,
+                    &mut visit_count,
+                    &mut stack,
                 );
             }
             results
@@ -432,30 +610,107 @@ impl GraphHunter {
 
         let k = hypothesis.k_simplicity.max(1);
         let total_steps = hypothesis.steps.len();
+        let depth = hypothesis.steps.len();
+        let visit_cap = (depth * k).max(8);
 
-        // Min-heap of (score, path): keeps the top_k highest-scoring paths.
-        // The minimum in the heap acts as the dynamic pruning threshold.
-        use ordered_float::OrderedFloat;
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
 
-        let mut heap: BinaryHeap<Reverse<(OrderedFloat<f64>, Vec<String>)>> =
-            BinaryHeap::with_capacity(top_k + 1);
+        // Per-thread state used by both branches: a top-K min-heap plus the
+        // three DFS scratch buffers. In the parallel branch each fold chunk
+        // owns one of these; in the sequential branch a single one is reused
+        // across all starts.
+        type SmartChunk = (
+            SmartHeap,
+            Vec<StrId>,
+            HashMap<StrId, usize>,
+            Vec<AnomalyFrame>,
+        );
+        let init_chunk = || -> SmartChunk {
+            (
+                BinaryHeap::with_capacity(top_k + 1),
+                Vec::with_capacity(depth + 1),
+                HashMap::with_capacity(visit_cap),
+                Vec::with_capacity(depth + 1),
+            )
+        };
 
-        for &start_sid in &start_sids {
-            self.dfs_match_smart(
-                start_sid,
-                &hypothesis.steps,
-                time_window,
-                k,
-                top_k,
-                total_steps,
-                &mut heap,
-            );
-        }
+        // Merges two top-K heaps into the larger one, popping the lowest
+        // scores until only `top_k` entries remain. Cost is O((|a|+|b|) log K).
+        let merge_into_topk = |mut a: SmartHeap, b: SmartHeap, top_k: usize| -> SmartHeap {
+            // Drain `b` into `a`, keeping `a` bounded.
+            for entry in b {
+                a.push(entry);
+                if a.len() > top_k {
+                    a.pop();
+                }
+            }
+            a
+        };
 
-        // Extract results from heap, sorted by score descending
-        let mut scored: Vec<(f64, Vec<String>)> = heap
+        let final_heap: SmartHeap = if start_sids.len() >= 64 {
+            // Parallel branch: each rayon fold chunk maintains its own heap +
+            // scratch buffers. The per-chunk threshold is naturally less
+            // aggressive than the global one, but the merge step at the end
+            // restores the global top-K invariant.
+            //
+            // `with_min_len(256)` coalesces work into at most ~N/256 chunks
+            // so rayon does not thrash its work-stealing queues on workloads
+            // where each start does tiny work (typed first step with zero-
+            // result DFS). For heavy workloads (Any first step + deep chain)
+            // the per-chunk init cost is amortized over hundreds of starts.
+            start_sids
+                .par_iter()
+                .with_min_len(256)
+                .fold(
+                    init_chunk,
+                    |mut chunk, &start_sid| {
+                        let (heap, path, visit_count, stack) =
+                            (&mut chunk.0, &mut chunk.1, &mut chunk.2, &mut chunk.3);
+                        self.dfs_match_smart(
+                            start_sid,
+                            &hypothesis.steps,
+                            time_window,
+                            k,
+                            top_k,
+                            total_steps,
+                            heap,
+                            path,
+                            visit_count,
+                            stack,
+                        );
+                        chunk
+                    },
+                )
+                .map(|chunk| chunk.0)
+                .reduce(
+                    || BinaryHeap::with_capacity(top_k + 1),
+                    |a, b| merge_into_topk(a, b, top_k),
+                )
+        } else {
+            // Sequential branch: one heap, one set of scratch buffers, reused
+            // across every start. Pruning sees the full global threshold so
+            // it is maximally aggressive — best for small start_sids sets.
+            let (mut heap, mut path, mut visit_count, mut stack) = init_chunk();
+            for &start_sid in &start_sids {
+                self.dfs_match_smart(
+                    start_sid,
+                    &hypothesis.steps,
+                    time_window,
+                    k,
+                    top_k,
+                    total_steps,
+                    &mut heap,
+                    &mut path,
+                    &mut visit_count,
+                    &mut stack,
+                );
+            }
+            heap
+        };
+
+        // Extract results from the final heap, sorted by score descending.
+        let mut scored: Vec<(f64, Vec<String>)> = final_heap
             .into_sorted_vec()
             .into_iter()
             .map(|Reverse((score, path))| (score.into_inner(), path))
@@ -466,7 +721,12 @@ impl GraphHunter {
         Ok((results, false))
     }
 
-    /// Smart DFS with anomaly-based pruning and top-K heap.
+    /// Anomaly-pruned DFS that maintains a top-K min-heap of best-scoring paths.
+    ///
+    /// `heap`, `path`, `visit_count` and `stack` are caller-owned scratch
+    /// buffers (cleared on entry) so the function can be invoked many times
+    /// per search without per-call allocations. The heap is the *only* buffer
+    /// that carries information out of the call — the rest is reset.
     fn dfs_match_smart(
         &self,
         start_sid: StrId,
@@ -475,31 +735,27 @@ impl GraphHunter {
         k: usize,
         top_k: usize,
         total_steps: usize,
-        heap: &mut std::collections::BinaryHeap<
-            std::cmp::Reverse<(ordered_float::OrderedFloat<f64>, Vec<String>)>,
-        >,
+        heap: &mut SmartHeap,
+        path: &mut Vec<StrId>,
+        visit_count: &mut HashMap<StrId, usize>,
+        stack: &mut Vec<AnomalyFrame>,
     ) {
         use ordered_float::OrderedFloat;
         use std::cmp::Reverse;
-
-        struct AnomalyFrame {
-            sid: StrId,
-            step_idx: usize,
-            edge_hi: usize,
-            edge_cursor: usize,
-            path_anomaly_sum: f64,
-        }
 
         let scorer = match self.anomaly_scorer.as_ref() {
             Some(s) => s,
             None => return, // scorer not initialized; skip smart DFS
         };
 
-        let mut path: Vec<StrId> = Vec::with_capacity(steps.len() + 1);
-        let mut visit_count: HashMap<StrId, usize> = HashMap::new();
+        // Reset scratch state. Buffers normally drain naturally during
+        // backtrack, but a defensive clear keeps the contract explicit.
+        path.clear();
+        visit_count.clear();
+        stack.clear();
 
         path.push(start_sid);
-        *visit_count.entry(start_sid).or_insert(0) += 1;
+        visit_count.insert(start_sid, 1);
 
         let start_str = self.interner.resolve(start_sid);
         let start_node_score = scorer.node_anomaly_estimate(start_str);
@@ -510,13 +766,13 @@ impl GraphHunter {
             (0, 0)
         };
 
-        let mut stack: Vec<AnomalyFrame> = vec![AnomalyFrame {
+        stack.push(AnomalyFrame {
             sid: start_sid,
             step_idx: 0,
             edge_hi: hi,
             edge_cursor: lo,
             path_anomaly_sum: start_node_score,
-        }];
+        });
 
         while let Some(frame) = stack.last_mut() {
             // Path complete: all steps matched
@@ -562,10 +818,9 @@ impl GraphHunter {
                 }
 
                 let dest_sid = edge.dest_sid;
-                let dest_entity = match self.entities.get(&dest_sid) {
-                    Some(e) if entity_type_matches(&step.dest_type, &e.entity_type) => e,
-                    _ => continue,
-                };
+                if !self.fast_type_matches(&step.dest_type, dest_sid) {
+                    continue;
+                }
 
                 let count = visit_count.get(&dest_sid).copied().unwrap_or(0);
                 if count >= k {
@@ -593,7 +848,6 @@ impl GraphHunter {
                     }
                 }
 
-                let _ = dest_entity;
                 *visit_count.entry(dest_sid).or_insert(0) += 1;
                 path.push(dest_sid);
 
@@ -633,6 +887,12 @@ impl GraphHunter {
     }
 
     /// Iterative stack-based DFS with backtracking.
+    ///
+    /// Scratch buffers (`path`, `visit_count`, `stack`) are passed in by the
+    /// caller so they can be reused across many start nodes — this avoids
+    /// thousands of small allocations per search. The function clears them
+    /// on entry to make the contract explicit; the buffers are also left
+    /// empty by the natural backtrack at the end of the DFS.
     fn dfs_match_iterative(
         &self,
         start_sid: StrId,
@@ -642,19 +902,18 @@ impl GraphHunter {
         cap: usize,
         result_count: &AtomicUsize,
         results: &mut Vec<HuntResult>,
+        path: &mut Vec<StrId>,
+        visit_count: &mut HashMap<StrId, usize>,
+        stack: &mut Vec<DfsFrame>,
     ) {
-        struct Frame {
-            sid: StrId,
-            step_idx: usize,
-            edge_hi: usize,
-            edge_cursor: usize,
-        }
-
-        let mut path: Vec<StrId> = Vec::with_capacity(steps.len() + 1);
-        let mut visit_count: HashMap<StrId, usize> = HashMap::new();
+        // Reset scratch state. The DFS leaves them empty on a normal exit, but
+        // an early break on `cap` reached can leave residue — clear defensively.
+        path.clear();
+        visit_count.clear();
+        stack.clear();
 
         path.push(start_sid);
-        *visit_count.entry(start_sid).or_insert(0) += 1;
+        visit_count.insert(start_sid, 1);
 
         let (lo, hi) = if !steps.is_empty() {
             self.edge_range_sid(start_sid, &steps[0], i64::MIN, time_window)
@@ -662,12 +921,12 @@ impl GraphHunter {
             (0, 0)
         };
 
-        let mut stack: Vec<Frame> = vec![Frame {
+        stack.push(DfsFrame {
             sid: start_sid,
             step_idx: 0,
             edge_hi: hi,
             edge_cursor: lo,
-        }];
+        });
 
         while let Some(frame) = stack.last_mut() {
             if result_count.load(Ordering::Relaxed) >= cap {
@@ -705,17 +964,15 @@ impl GraphHunter {
                 }
 
                 let dest_sid = edge.dest_sid;
-                let dest_entity = match self.entities.get(&dest_sid) {
-                    Some(e) if entity_type_matches(&step.dest_type, &e.entity_type) => e,
-                    _ => continue,
-                };
+                if !self.fast_type_matches(&step.dest_type, dest_sid) {
+                    continue;
+                }
 
                 let count = visit_count.get(&dest_sid).copied().unwrap_or(0);
                 if count >= k {
                     continue;
                 }
 
-                let _ = dest_entity;
                 *visit_count.entry(dest_sid).or_insert(0) += 1;
                 path.push(dest_sid);
 
@@ -726,7 +983,7 @@ impl GraphHunter {
                     (0, 0)
                 };
 
-                stack.push(Frame {
+                stack.push(DfsFrame {
                     sid: dest_sid,
                     step_idx: next_step_idx,
                     edge_hi: next_hi,
@@ -854,6 +1111,7 @@ impl GraphHunter {
                 Self::merge_metadata(&mut existing.metadata, &src.metadata, merge_policy);
             } else {
                 let et = src.entity_type.clone();
+                self.set_entity_type_tag(src_sid, &et);
                 self.entities.insert(src_sid, src);
                 self.type_index.entry(et).or_default().insert(src_sid);
                 self.reverse_adj.entry(src_sid).or_default();
@@ -866,6 +1124,7 @@ impl GraphHunter {
                 Self::merge_metadata(&mut existing.metadata, &dst.metadata, merge_policy);
             } else {
                 let et = dst.entity_type.clone();
+                self.set_entity_type_tag(dst_sid, &et);
                 self.entities.insert(dst_sid, dst);
                 self.type_index.entry(et).or_default().insert(dst_sid);
                 self.reverse_adj.entry(dst_sid).or_default();
@@ -949,6 +1208,7 @@ impl GraphHunter {
                     set.remove(sid);
                 }
             }
+            self.mark_entity_dead(*sid);
             self.reverse_adj.remove(sid);
         }
 
@@ -982,6 +1242,7 @@ impl GraphHunter {
                     .entry(to_type.clone())
                     .or_default()
                     .insert(sid);
+                self.set_entity_type_tag(sid, &to_type);
                 self.entities.insert(sid, entity);
             }
         }
@@ -1193,6 +1454,7 @@ impl GraphHunter {
                 Self::merge_metadata(&mut existing.metadata, &src.metadata, &merge_policy);
             } else {
                 let et = src.entity_type.clone();
+                self.set_entity_type_tag(src_sid, &et);
                 self.entities.insert(src_sid, src);
                 self.type_index.entry(et).or_default().insert(src_sid);
                 self.reverse_adj.entry(src_sid).or_default();
@@ -1204,6 +1466,7 @@ impl GraphHunter {
                 Self::merge_metadata(&mut existing.metadata, &dst.metadata, &merge_policy);
             } else {
                 let et = dst.entity_type.clone();
+                self.set_entity_type_tag(dst_sid, &et);
                 self.entities.insert(dst_sid, dst);
                 self.type_index.entry(et).or_default().insert(dst_sid);
                 self.reverse_adj.entry(dst_sid).or_default();
@@ -1264,6 +1527,7 @@ impl GraphHunter {
                 Self::merge_metadata(&mut existing.metadata, &src.metadata, &merge_policy);
             } else {
                 let et = src.entity_type.clone();
+                self.set_entity_type_tag(src_sid, &et);
                 self.entities.insert(src_sid, src);
                 self.type_index.entry(et).or_default().insert(src_sid);
                 self.reverse_adj.entry(src_sid).or_default();
@@ -1275,6 +1539,7 @@ impl GraphHunter {
                 Self::merge_metadata(&mut existing.metadata, &dst.metadata, &merge_policy);
             } else {
                 let et = dst.entity_type.clone();
+                self.set_entity_type_tag(dst_sid, &et);
                 self.entities.insert(dst_sid, dst);
                 self.type_index.entry(et).or_default().insert(dst_sid);
                 self.reverse_adj.entry(dst_sid).or_default();

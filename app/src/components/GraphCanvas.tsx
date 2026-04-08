@@ -48,6 +48,190 @@ const ENTITY_SHAPES: Record<string, string> = {
   Domain: "triangle",
 };
 
+// ── Diff-based graph update ─────────────────────────────────────────────────
+//
+// `applyGraphDiff` replaces the previous destroy-and-rebuild update cycle.
+// Cytoscape held the entire graph as a black box; every data change caused
+// `cy.elements().remove()` + `cy.add()` + `cy.layout(...).run()`. That:
+//   1. Destroyed any user-dragged positions.
+//   2. Re-ran the layout engine (dagre/cose) on every update — O(N) work.
+//   3. Forced Cytoscape to rebuild all internal indexes and event bindings.
+//
+// The new function diffs the incoming element list against a caller-owned
+// snapshot and applies only the deltas inside a `cy.batch(...)` block. For
+// incremental updates (e.g. Explorer "show more neighbours") existing node
+// positions are preserved, and newly added nodes are placed at the centroid
+// of their already-laid-out neighbours — a zero-layout heuristic that keeps
+// the visual state stable while still giving new nodes a sensible position.
+//
+// Full rebuilds (fresh hunt, mode switch) fall back to the original behaviour
+// because the incoming graph overlaps little with the previous one.
+//
+// `RETAIN_RATIO_THRESHOLD` is the fraction of new nodes that must already
+// exist in the previous snapshot for the update to be treated as incremental.
+// 0.3 was chosen empirically: it keeps Hunt reruns on the full-rebuild path
+// (they usually replace most of the graph) while catching incremental
+// Explorer expands (which typically add 5–20 nodes to a stable set).
+
+const RETAIN_RATIO_THRESHOLD = 0.3;
+
+type ElementMap = Map<string, ElementDefinition>;
+
+/** Shallow-compare two element `data` objects to detect changed metadata. */
+function dataEquals(a: ElementDefinition["data"], b: ElementDefinition["data"]): boolean {
+  const ak = Object.keys(a);
+  const bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) {
+    if ((a as Record<string, unknown>)[k] !== (b as Record<string, unknown>)[k]) return false;
+  }
+  return true;
+}
+
+interface DiffResult {
+  /** IDs of elements present before but not after. */
+  removed: string[];
+  /** New elements present after but not before. */
+  added: ElementDefinition[];
+  /** Elements whose id matched but whose data changed. */
+  updated: ElementDefinition[];
+  /** True when the change is large enough that a full rebuild is cheaper. */
+  isFullRebuild: boolean;
+}
+
+function computeDiff(prev: ElementMap, next: ElementMap): DiffResult {
+  const removed: string[] = [];
+  const added: ElementDefinition[] = [];
+  const updated: ElementDefinition[] = [];
+  let retained = 0;
+
+  for (const [id] of prev) {
+    if (!next.has(id)) removed.push(id);
+  }
+  for (const [id, newEl] of next) {
+    const prevEl = prev.get(id);
+    if (!prevEl) {
+      added.push(newEl);
+    } else {
+      retained++;
+      if (!dataEquals(prevEl.data, newEl.data)) {
+        updated.push(newEl);
+      }
+    }
+  }
+
+  // Cold start or almost-complete replacement → full rebuild is simpler.
+  const nextSize = next.size;
+  const prevSize = prev.size;
+  const retainRatio = nextSize === 0 ? 1 : retained / nextSize;
+  const isFullRebuild =
+    prevSize === 0 || nextSize === 0 || retainRatio < RETAIN_RATIO_THRESHOLD;
+
+  return { removed, added, updated, isFullRebuild };
+}
+
+/**
+ * Places newly added nodes at the centroid of any neighbours that were
+ * already laid out. Nodes with no prior neighbour keep Cytoscape's default
+ * position — usually (0,0) — and a small random jitter prevents overlaps.
+ * This is a O(|added| * avg_degree) pass with no layout engine invocation.
+ */
+function positionAddedNodes(cy: Core, added: ElementDefinition[]) {
+  for (const el of added) {
+    if (el.group !== "nodes") continue;
+    const id = el.data.id;
+    if (!id) continue;
+    const node = cy.getElementById(id);
+    if (node.length === 0) continue;
+
+    const connected = node.connectedEdges();
+    let sumX = 0;
+    let sumY = 0;
+    let count = 0;
+    connected.forEach((edge) => {
+      const other = edge.source().id() === id ? edge.target() : edge.source();
+      // Only consider neighbours that were already positioned (i.e. not also
+      // in the added batch). New-to-new edges give no position signal.
+      const wasPresent = !added.some(
+        (a) => a.group === "nodes" && a.data.id === other.id()
+      );
+      if (wasPresent) {
+        const p = other.position();
+        sumX += p.x;
+        sumY += p.y;
+        count++;
+      }
+    });
+
+    if (count > 0) {
+      // Jitter by a few pixels to avoid stacking when multiple new nodes
+      // share the exact same neighbour set.
+      const jitter = () => (Math.random() - 0.5) * 40;
+      node.position({ x: sumX / count + jitter(), y: sumY / count + jitter() });
+    }
+  }
+}
+
+/**
+ * Applies a diff between `prevMap` and the incoming `elements` to the
+ * Cytoscape instance. Returns the new element map the caller should store
+ * for the next update.
+ */
+function applyGraphDiff(
+  cy: Core,
+  elements: ElementDefinition[],
+  prevMap: ElementMap,
+  layoutOptions: cytoscape.LayoutOptions
+): ElementMap {
+  const nextMap: ElementMap = new Map();
+  for (const el of elements) {
+    const id = el.data?.id;
+    if (id) nextMap.set(id, el);
+  }
+
+  const diff = computeDiff(prevMap, nextMap);
+
+  if (diff.isFullRebuild) {
+    cy.batch(() => {
+      cy.elements().remove();
+      if (elements.length > 0) cy.add(elements);
+    });
+    if (elements.length > 0) {
+      cy.layout(layoutOptions).run();
+    }
+    return nextMap;
+  }
+
+  // Incremental path: only mutate what changed, and leave existing node
+  // positions alone so user drags are preserved.
+  cy.batch(() => {
+    if (diff.removed.length > 0) {
+      for (const id of diff.removed) {
+        cy.getElementById(id).remove();
+      }
+    }
+    if (diff.added.length > 0) {
+      cy.add(diff.added);
+    }
+    if (diff.updated.length > 0) {
+      for (const el of diff.updated) {
+        const id = el.data?.id;
+        if (!id) continue;
+        cy.getElementById(id).data(el.data);
+      }
+    }
+  });
+
+  // Position newly added nodes near their existing neighbours. Runs AFTER
+  // the batch so edges are already in the graph and `connectedEdges()` is
+  // accurate.
+  if (diff.added.length > 0) {
+    positionAddedNodes(cy, diff.added);
+  }
+
+  return nextMap;
+}
+
 export default function GraphCanvas({
   subgraph,
   highlightPaths,
@@ -70,6 +254,10 @@ export default function GraphCanvas({
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<Core | null>(null);
+  // Snapshot of the elements currently in Cytoscape, keyed by id. Used by
+  // applyGraphDiff to compute removed/added/updated deltas instead of doing
+  // a destroy-and-rebuild on every subgraph/neighborhood change.
+  const prevElementMapRef = useRef<ElementMap>(new Map());
   const [contextMenu, setContextMenu] = useState<{
     nodeId: string;
     x: number;
@@ -401,15 +589,14 @@ export default function GraphCanvas({
 
     if (!subgraph || (subgraph.nodes.length === 0 && subgraph.edges.length === 0)) {
       cy.elements().remove();
+      prevElementMapRef.current = new Map();
       return;
     }
 
     const elements = buildElements(subgraph);
 
-    cy.elements().remove();
-    cy.add(elements);
-
-    // Use faster layout for large graphs (>1000 nodes rendered)
+    // Use faster layout for large graphs (>1000 nodes rendered). Only matters
+    // on the full-rebuild path; incremental diffs reuse existing positions.
     const renderedNodeCount = elements.filter((el) => el.group === "nodes").length;
     const layoutOptions: cytoscape.LayoutOptions =
       renderedNodeCount > 1000
@@ -434,7 +621,12 @@ export default function GraphCanvas({
             padding: 50,
           } as cytoscape.LayoutOptions;
 
-    cy.layout(layoutOptions).run();
+    prevElementMapRef.current = applyGraphDiff(
+      cy,
+      elements,
+      prevElementMapRef.current,
+      layoutOptions
+    );
   }, [subgraph, buildElements, explorerMode]);
 
   // ── Update graph in Explorer mode ──
@@ -446,10 +638,9 @@ export default function GraphCanvas({
 
     const elements = buildElements(neighborhood);
 
-    cy.elements().remove();
-    cy.add(elements);
-
-    // Use faster layout for large graphs (>1000 nodes rendered)
+    // Use faster layout for large graphs (>1000 nodes rendered). Only matters
+    // on the full-rebuild path; incremental "Show neighbours" expands reuse
+    // existing node positions via applyGraphDiff.
     const renderedNodeCount = elements.filter((el) => el.group === "nodes").length;
     const layoutOptions: cytoscape.LayoutOptions =
       renderedNodeCount > 1000
@@ -474,7 +665,12 @@ export default function GraphCanvas({
             padding: 50,
           } as cytoscape.LayoutOptions;
 
-    cy.layout(layoutOptions).run();
+    prevElementMapRef.current = applyGraphDiff(
+      cy,
+      elements,
+      prevElementMapRef.current,
+      layoutOptions
+    );
   }, [neighborhood, buildElements, explorerMode]);
 
   // ── Highlight attack paths (Hunt mode) ──
@@ -547,10 +743,13 @@ export default function GraphCanvas({
   }, [centerNodeId, onCenterDone]);
 
   // ── Clear canvas on mode switch ──
+  // Also wipe the diff snapshot — otherwise the next render in the new mode
+  // would diff against ghost elements that no longer exist in Cytoscape.
   useEffect(() => {
     const cy = cyRef.current;
     if (!cy) return;
     cy.elements().remove();
+    prevElementMapRef.current = new Map();
   }, [explorerMode]);
 
   const isEmpty = explorerMode

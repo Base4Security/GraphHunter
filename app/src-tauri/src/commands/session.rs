@@ -3,7 +3,7 @@ use std::fs;
 use std::sync::{Arc, RwLock};
 
 use graph_hunter_core::GraphHunter;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::error::CommandError;
@@ -13,6 +13,40 @@ use crate::state::{
     session_data_dir, session_file_path,
 };
 use crate::types::SessionInfo;
+
+/// Computes a sensible "emit every N items" stride so we send at most ~100
+/// progress events for any payload size (and never less than every 1000
+/// items, so small loads still feel responsive instead of jumping 0→100%).
+#[inline]
+fn progress_stride(total: usize) -> usize {
+    let pct1 = total / 100;
+    if pct1 > 1000 { pct1 } else { 1000 }
+}
+
+/// Emits a session-load progress event. Failures are ignored — progress is
+/// best-effort and must not abort the load.
+fn emit_load_progress(app: &AppHandle, phase: &str, current: usize, total: usize) {
+    let _ = app.emit(
+        "session-load-progress",
+        serde_json::json!({
+            "phase": phase,
+            "current": current,
+            "total": total,
+        }),
+    );
+}
+
+/// Emits a session-save progress event. See `emit_load_progress`.
+fn emit_save_progress(app: &AppHandle, phase: &str, current: usize, total: usize) {
+    let _ = app.emit(
+        "session-save-progress",
+        serde_json::json!({
+            "phase": phase,
+            "current": current,
+            "total": total,
+        }),
+    );
+}
 
 /// Create a new empty session and set it as current.
 #[tauri::command]
@@ -116,8 +150,34 @@ pub fn cmd_list_sessions(state: State<Arc<AppState>>) -> Result<Vec<SessionInfo>
 }
 
 /// Load a session by id (from memory or from disk) and set as current.
+///
+/// Async wrapper: the heavy work — file I/O, JSON parsing, graph rebuild —
+/// runs on a `spawn_blocking` worker so the Tauri IPC thread (and therefore
+/// the WebView UI) stays responsive. Big sessions used to freeze Windows
+/// and trigger "Not Responding" because the sync version blocked the
+/// runtime for the entire `serde_json::from_reader` + `add_entity` loop.
+///
+/// Emits `session-load-progress` events with `{ phase, current, total }`
+/// throughout the load so the frontend can show a progress bar. Phases:
+/// `reading` (file open) → `parsing` (serde_json) → `entities` (add loop)
+/// → `relations` (add loop) → `sorting` (sort_edges) → `done`.
 #[tauri::command]
-pub fn cmd_load_session(state: State<Arc<AppState>>, session_id: String) -> Result<SessionInfo, CommandError> {
+pub async fn cmd_load_session(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    session_id: String,
+) -> Result<SessionInfo, CommandError> {
+    let app_state: Arc<AppState> = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || load_session_blocking(&app_state, &app, session_id))
+        .await
+        .map_err(|e| CommandError::Internal(format!("spawn_blocking join error: {}", e)))?
+}
+
+fn load_session_blocking(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    session_id: String,
+) -> Result<SessionInfo, CommandError> {
     let dir = session_data_dir().map_err(|e| CommandError::IoError(e))?;
     let path = dir.join(format!("{}.json", session_id));
 
@@ -127,9 +187,12 @@ pub fn cmd_load_session(state: State<Arc<AppState>>, session_id: String) -> Resu
         .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
 
     if !sessions.contains_key(&session_id) && path.exists() {
+        emit_load_progress(app, "reading", 0, 0);
         let file_handle = fs::File::open(&path)
             .map_err(|e| CommandError::IoError(format!("Failed to open session file: {}", e)))?;
         let reader = std::io::BufReader::with_capacity(8 * 1024 * 1024, file_handle);
+
+        emit_load_progress(app, "parsing", 0, 0);
         let file: SessionFile = serde_json::from_reader(reader)
             .map_err(|e| CommandError::ParseError(format!("Invalid session file: {}", e)))?;
 
@@ -138,12 +201,29 @@ pub fn cmd_load_session(state: State<Arc<AppState>>, session_id: String) -> Resu
         let relation_count = file.relations.len();
         graph.reserve(entity_count, relation_count);
 
-        for entity in file.entities {
+        // Entities phase: emit at most every `stride` inserts to keep the
+        // event channel from being flooded on >100K-entity sessions.
+        let entity_stride = progress_stride(entity_count);
+        emit_load_progress(app, "entities", 0, entity_count);
+        for (i, entity) in file.entities.into_iter().enumerate() {
             let _ = graph.add_entity(entity);
+            if (i + 1) % entity_stride == 0 {
+                emit_load_progress(app, "entities", i + 1, entity_count);
+            }
         }
-        for relation in file.relations {
+        emit_load_progress(app, "entities", entity_count, entity_count);
+
+        let relation_stride = progress_stride(relation_count);
+        emit_load_progress(app, "relations", 0, relation_count);
+        for (i, relation) in file.relations.into_iter().enumerate() {
             let _ = graph.add_relation(relation);
+            if (i + 1) % relation_stride == 0 {
+                emit_load_progress(app, "relations", i + 1, relation_count);
+            }
         }
+        emit_load_progress(app, "relations", relation_count, relation_count);
+
+        emit_load_progress(app, "sorting", 0, 0);
         graph.sort_edges_by_timestamp()
             .map_err(|e| CommandError::Internal(e.to_string()))?;
 
@@ -180,6 +260,8 @@ pub fn cmd_load_session(state: State<Arc<AppState>>, session_id: String) -> Resu
         *cache = Vec::new();
     }
 
+    emit_load_progress(app, "done", 1, 1);
+
     Ok(SessionInfo {
         id: session.id.clone(),
         name: session.name.clone(),
@@ -188,8 +270,31 @@ pub fn cmd_load_session(state: State<Arc<AppState>>, session_id: String) -> Resu
 }
 
 /// Save current (or specified) session to disk.
+///
+/// Async wrapper: see the rationale on `cmd_load_session`. Save is just as
+/// blocking — we iterate every entity + relation and stream them through
+/// `serde_json::to_writer`, which can take seconds for large graphs.
+///
+/// Emits `session-save-progress` events with `{ phase, current, total }`.
+/// Phases: `entities` (single big serde_json::to_writer call) →
+/// `relations` (per-edge loop, throttled) → `done`.
 #[tauri::command]
-pub fn cmd_save_session(state: State<Arc<AppState>>, session_id: Option<String>) -> Result<(), CommandError> {
+pub async fn cmd_save_session(
+    state: State<'_, Arc<AppState>>,
+    app: AppHandle,
+    session_id: Option<String>,
+) -> Result<(), CommandError> {
+    let app_state: Arc<AppState> = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || save_session_blocking(&app_state, &app, session_id))
+        .await
+        .map_err(|e| CommandError::Internal(format!("spawn_blocking join error: {}", e)))?
+}
+
+fn save_session_blocking(
+    state: &Arc<AppState>,
+    app: &AppHandle,
+    session_id: Option<String>,
+) -> Result<(), CommandError> {
     let id = session_id
         .or_else(|| {
             state
@@ -239,17 +344,30 @@ pub fn cmd_save_session(state: State<Arc<AppState>>, session_id: Option<String>)
         session.created_at,
     ).map_err(|e| CommandError::IoError(e.to_string()))?;
 
+    let entity_count = graph.entities.len();
+    let relation_count = graph.edge_store.len();
+
+    // Entities phase: single big to_writer call. We can't progress mid-call,
+    // so we just bracket it with a 0/total and total/total emit.
+    emit_save_progress(app, "entities", 0, entity_count);
     let entities: Vec<_> = graph.entities.values().cloned().collect();
     serde_json::to_writer(&mut w, &entities).map_err(|e| CommandError::IoError(e.to_string()))?;
+    emit_save_progress(app, "entities", entity_count, entity_count);
 
     write!(w, ",\"relations\":[").map_err(|e| CommandError::IoError(e.to_string()))?;
+    let relation_stride = progress_stride(relation_count);
+    emit_save_progress(app, "relations", 0, relation_count);
     let mut first = true;
-    for compact in graph.edge_store.iter_all() {
+    for (i, compact) in graph.edge_store.iter_all().enumerate() {
         if !first { write!(w, ",").map_err(|e| CommandError::IoError(e.to_string()))?; }
         first = false;
         let rel = graph.materialize_relation(compact);
         serde_json::to_writer(&mut w, &rel).map_err(|e| CommandError::IoError(e.to_string()))?;
+        if (i + 1) % relation_stride == 0 {
+            emit_save_progress(app, "relations", i + 1, relation_count);
+        }
     }
+    emit_save_progress(app, "relations", relation_count, relation_count);
     write!(w, "]").map_err(|e| CommandError::IoError(e.to_string()))?;
 
     write!(w, ",\"path_node_ids\":").map_err(|e| CommandError::IoError(e.to_string()))?;
@@ -261,6 +379,8 @@ pub fn cmd_save_session(state: State<Arc<AppState>>, session_id: Option<String>)
     write!(w, "}}").map_err(|e| CommandError::IoError(e.to_string()))?;
 
     w.flush().map_err(|e| CommandError::IoError(e.to_string()))?;
+
+    emit_save_progress(app, "done", 1, 1);
     Ok(())
 }
 
