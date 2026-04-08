@@ -36,6 +36,7 @@
 - [Architecture](#architecture)
 - [HTTP API & MCP (AI integration)](#http-api--mcp-ai-integration)
 - [Installation](#installation)
+- [SIMD acceleration](#simd-acceleration)
 - [Usage](#usage)
 - [Demo Data & Try It](#demo-data--try-it)
 - [Privacy & Data](#privacy--data)
@@ -184,6 +185,38 @@ cargo test
 cd app
 npm run tauri build
 ```
+
+---
+
+## SIMD acceleration
+
+Graph Hunter includes **libgraphmatch**, an optional C++20 / AVX2 SIMD graph-matching engine at [`libgraphmatch/`](libgraphmatch/). It ports the DFS hot path of Graph Hunter's pattern matcher to C++ with sorted-set intersection vectorized via AVX2, and is integrated into the Rust core over a C ABI (see `graph_hunter_core/src/simd_matcher.rs`). It is **off by default**; the pure-Rust matcher remains the baseline.
+
+**How to enable** — build with the `simd` Cargo feature on each crate that consumes it:
+
+```bash
+cargo build --release --features simd -p graph_hunter_core
+cargo build --release --features simd -p graph-hunter-app
+cargo build --release --features simd -p graph_hunter_cli
+```
+
+When the feature is enabled, `graph_hunter_core/build.rs` compiles `libgraphmatch` via the `cc` crate and links it into the core.
+
+**Runtime behavior** — `libgraphmatch` detects AVX2 support at runtime via `cpuid`. On hosts without AVX2 (or if SIMD dispatch fails for any reason), the wrapper transparently falls back to the pure-Rust DFS path, so the same binary runs on both vectorized and scalar CPUs. Current ISA selection can be queried from the app via the `cmd_get_simd_isa` Tauri command.
+
+**Prerequisites** — A C++20 compiler: **MSVC ≥ 2022**, **GCC ≥ 10**, or **Clang ≥ 12**. AVX2-capable hardware is preferred but not required. On Windows, run the build from the **x64 Native Tools Command Prompt for VS 2022** so that `cl.exe` and the Windows SDK are on `PATH`.
+
+**Standalone C++ tests** — `libgraphmatch` ships its own CMake project and test suite; you can build and run it independently of the Rust workspace:
+
+```bash
+cmake -B libgraphmatch/build -S libgraphmatch -DCMAKE_BUILD_TYPE=Release
+cmake --build libgraphmatch/build --config Release
+ctest --test-dir libgraphmatch/build --output-on-failure -C Release
+```
+
+See [`libgraphmatch/README.md`](libgraphmatch/README.md) for architecture details and benchmark results.
+
+**Performance expectation** — 2–5× speedup over the pure-Rust DFS on dense graphs.
 
 ---
 
