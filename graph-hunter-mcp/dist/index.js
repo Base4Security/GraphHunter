@@ -14,7 +14,9 @@ import { z } from "zod";
 const API_BASE = process.env.GRAPHHUNTER_API_URL || "http://127.0.0.1:37891";
 /** Bearer token for API auth. GraphHunter app prints GRAPHHUNTER_API_TOKEN=... at startup. */
 const API_TOKEN = process.env.GRAPHHUNTER_API_TOKEN || "";
-const API_TIMEOUT_MS = 8000;
+const API_TIMEOUT_MS = 30_000;
+/** Extended timeout for graph operations that may touch high-degree nodes (1M+ edges). */
+const HEAVY_TIMEOUT_MS = 120_000;
 const LOG_PREFIX = "[graph-hunter-mcp]";
 const DEBUG = process.env.GRAPHHUNTER_MCP_DEBUG === "1" || process.env.GRAPHHUNTER_MCP_DEBUG === "true";
 /** Log to stderr so it appears in MCP/activity logs; stdout is used for the protocol. */
@@ -89,7 +91,8 @@ function authHeaders() {
         h["Authorization"] = `Bearer ${API_TOKEN}`;
     return h;
 }
-async function apiGet(path, params) {
+async function apiGet(path, params, timeoutMs) {
+    const effectiveTimeout = timeoutMs ?? API_TIMEOUT_MS;
     const url = new URL(path, API_BASE);
     if (params) {
         for (const [k, v] of Object.entries(params)) {
@@ -101,14 +104,14 @@ async function apiGet(path, params) {
     log("api", "GET " + path, params ? { params: Object.keys(params).join(",") } : undefined);
     let res;
     try {
-        res = await fetchWithTimeout(url.toString(), { headers: authHeaders() });
+        res = await fetchWithTimeout(url.toString(), { headers: authHeaders(), timeoutMs: effectiveTimeout });
     }
     catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const isAbort = msg.includes("abort") || (e instanceof Error && e.name === "AbortError");
         log("api", "GET " + path + " failed", { error: truncate(msg, 120), duration_ms: Date.now() - start });
         throw new Error(isAbort
-            ? `${CONNECTION_ERROR_MSG} Request timed out after ${API_TIMEOUT_MS}ms.`
+            ? `${CONNECTION_ERROR_MSG} Request timed out after ${effectiveTimeout}ms.`
             : `${CONNECTION_ERROR_MSG} Network error: ${msg}`);
     }
     const data = await parseJsonResponse(res);
@@ -123,7 +126,8 @@ async function apiGet(path, params) {
     log("api", "GET " + path + " ok", { status: res.status, duration_ms: durationMs, ...(responseSize != null ? { response_bytes: responseSize } : {}) });
     return data;
 }
-async function apiPost(path, body) {
+async function apiPost(path, body, timeoutMs) {
+    const effectiveTimeout = timeoutMs ?? API_TIMEOUT_MS;
     const url = new URL(path, API_BASE);
     const start = Date.now();
     const bodySummary = body && typeof body === "object" && !Array.isArray(body)
@@ -137,7 +141,7 @@ async function apiPost(path, body) {
             method: "POST",
             headers,
             body: JSON.stringify(body),
-            timeoutMs: API_TIMEOUT_MS,
+            timeoutMs: effectiveTimeout,
         });
     }
     catch (e) {
@@ -145,7 +149,7 @@ async function apiPost(path, body) {
         const isAbort = msg.includes("abort") || (e instanceof Error && e.name === "AbortError");
         log("api", "POST " + path + " failed", { error: truncate(msg, 120), duration_ms: Date.now() - start });
         throw new Error(isAbort
-            ? `${CONNECTION_ERROR_MSG} Request timed out after ${API_TIMEOUT_MS}ms.`
+            ? `${CONNECTION_ERROR_MSG} Request timed out after ${effectiveTimeout}ms.`
             : `${CONNECTION_ERROR_MSG} Network error: ${msg}`);
     }
     const data = await parseJsonResponse(res);
@@ -238,7 +242,7 @@ server.tool("expand_node", "Expand from a node to get its neighbors (nodes and e
             params.max_hops = String(max_hops);
         if (max_nodes != null)
             params.max_nodes = String(max_nodes);
-        const v = await apiGet("/expand", params);
+        const v = await apiGet("/expand", params, HEAVY_TIMEOUT_MS);
         const summaryStr = summarizeResult("expand_node", v);
         log("tool", "expand_node done", { duration_ms: Date.now() - start, result: summaryStr });
         return textContent(JSON.stringify(v, null, 2));
@@ -256,7 +260,7 @@ server.tool("get_node_details", "Get detailed information about a node: scores, 
     const start = Date.now();
     log("tool", "get_node_details", { node_id: truncate(node_id, 50) });
     try {
-        const v = await apiGet("/node_details", { node_id });
+        const v = await apiGet("/node_details", { node_id }, HEAVY_TIMEOUT_MS);
         log("tool", "get_node_details done", { duration_ms: Date.now() - start, result: "ok" });
         return textContent(JSON.stringify(v, null, 2));
     }
@@ -273,7 +277,7 @@ server.tool("get_subgraph", "Get the subgraph (nodes and edges) for a list of no
     const start = Date.now();
     log("tool", "get_subgraph", { node_count: node_ids.length });
     try {
-        const v = await apiPost("/subgraph", { node_ids });
+        const v = await apiPost("/subgraph", { node_ids }, HEAVY_TIMEOUT_MS);
         const summaryStr = summarizeResult("get_subgraph", v);
         log("tool", "get_subgraph done", { duration_ms: Date.now() - start, result: summaryStr });
         return textContent(JSON.stringify(v, null, 2));
@@ -291,7 +295,7 @@ server.tool("get_events_for_node", "Get all relations/events for a node (incomin
     const start = Date.now();
     log("tool", "get_events_for_node", { node_id: truncate(node_id, 50) });
     try {
-        const v = await apiGet("/events_for_node", { node_id });
+        const v = await apiGet("/events_for_node", { node_id }, HEAVY_TIMEOUT_MS);
         const summaryStr = summarizeResult("get_events_for_node", v);
         log("tool", "get_events_for_node done", { duration_ms: Date.now() - start, result: summaryStr });
         return textContent(JSON.stringify(v, null, 2));
@@ -311,7 +315,7 @@ server.tool("run_hunt", "Run a threat-hunting hypothesis. Pass a DSL chain like 
     const start = Date.now();
     log("tool", "run_hunt", { hypothesis_dsl: truncate(hypothesis_dsl, 80) });
     try {
-        const v = await apiPost("/run_hunt", { hypothesis_dsl });
+        const v = await apiPost("/run_hunt", { hypothesis_dsl }, HEAVY_TIMEOUT_MS);
         const summaryStr = summarizeResult("run_hunt", v);
         log("tool", "run_hunt done", { duration_ms: Date.now() - start, result: summaryStr });
         return textContent(JSON.stringify(v, null, 2));
