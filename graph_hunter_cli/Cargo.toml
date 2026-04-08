@@ -19,3 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["sync", "time"] }
+
+[features]
+default = []
+simd = ["graph_hunter_core/simd"]
