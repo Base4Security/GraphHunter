@@ -28,7 +28,8 @@ static CSRTemporalGraph make_random_graph(
     std::mt19937 rng(seed);
     std::uniform_int_distribution<uint32_t> node_dist(0, num_nodes - 1);
     std::uniform_int_distribution<int64_t> ts_dist(1000, 1000000);
-    std::uniform_int_distribution<uint8_t> rel_dist(0, 8);
+    // MSVC rejects uniform_int_distribution over uint8_t; use uint32_t and cast.
+    std::uniform_int_distribution<uint32_t> rel_dist(0, 8);
 
     EntityTypeTag types[] = {
         GM_ENTITY_PROCESS, GM_ENTITY_HOST, GM_ENTITY_FILE,
@@ -40,7 +41,8 @@ static CSRTemporalGraph make_random_graph(
         g.add_node(i, types[i % 5]);
     }
     for (uint32_t i = 0; i < num_edges; ++i) {
-        g.add_edge(node_dist(rng), node_dist(rng), rel_dist(rng), ts_dist(rng));
+        g.add_edge(node_dist(rng), node_dist(rng),
+                   static_cast<uint8_t>(rel_dist(rng)), ts_dist(rng));
     }
     g.finalize();
     return g;
