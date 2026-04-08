@@ -665,20 +665,30 @@ async fn handler_run_hunt(
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::task::spawn_blocking(move || {
-            with_current_graph(state_clone.as_ref(), |graph| {
-                let scorer_ready = graph
-                    .anomaly_scorer
-                    .as_ref()
-                    .map(|s| s.is_finalized())
-                    .unwrap_or(false);
-                if scorer_ready {
-                    graph.search_temporal_pattern_smart(&hypothesis, None, 10_000)
+            #[cfg(feature = "simd")]
+            {
+                with_current_graph(state_clone.as_ref(), |graph| {
+                    graph.search_temporal_pattern_simd(&hypothesis, None, Some(10_000))
                         .map_err(|e| crate::error::CommandError::Internal(format!("Search failed: {}", e)))
-                } else {
-                    graph.search_temporal_pattern(&hypothesis, None, Some(10_000))
-                        .map_err(|e| crate::error::CommandError::Internal(format!("Search failed: {}", e)))
-                }
-            })
+                })
+            }
+            #[cfg(not(feature = "simd"))]
+            {
+                with_current_graph(state_clone.as_ref(), |graph| {
+                    let scorer_ready = graph
+                        .anomaly_scorer
+                        .as_ref()
+                        .map(|s| s.is_finalized())
+                        .unwrap_or(false);
+                    if scorer_ready {
+                        graph.search_temporal_pattern_smart(&hypothesis, None, 10_000)
+                            .map_err(|e| crate::error::CommandError::Internal(format!("Search failed: {}", e)))
+                    } else {
+                        graph.search_temporal_pattern(&hypothesis, None, Some(10_000))
+                            .map_err(|e| crate::error::CommandError::Internal(format!("Search failed: {}", e)))
+                    }
+                })
+            }
         }),
     )
     .await;
