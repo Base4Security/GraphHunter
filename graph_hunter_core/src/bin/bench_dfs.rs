@@ -178,5 +178,96 @@ fn main() {
     bench_smart("big   / smart spawn_chain L=2", &mut g_big_a, &h2, 1000, 10);
     bench_smart("big   / smart lateral L=3", &mut g_big_a, &h_lat3, 1000, 10);
 
+    #[cfg(feature = "simd")]
+    {
+        use graph_hunter_core::simd_matcher::ffi::{build_gm_graph, simd_isa_name};
+
+        let isa = simd_isa_name();
+        println!("\n=== SIMD vs pure-Rust comparison ===");
+        if matches!(isa, "scalar" | "none" | "unknown") {
+            println!("[bench_dfs] SIMD ISA = {} — measuring scalar fallback path", isa);
+        } else {
+            println!("[bench_dfs] SIMD ISA = {}", isa);
+        }
+
+        let cached_small = build_gm_graph(&g_small);
+        let cached_big = build_gm_graph(&g_big);
+
+        let small_cases: [(&str, &Hypothesis, usize); 7] = [
+            ("small / spawn_chain L=2", &h2, 20),
+            ("small / spawn_chain L=3", &h3, 20),
+            ("small / lateral L=3", &h_lat3, 20),
+            ("small / lateral L=4", &h_lat4, 20),
+            ("small / any_chain L=2", &h_any2, 10),
+            ("small / any_chain L=3", &h_any3, 10),
+            ("small / any_chain L=4", &h_any4, 10),
+        ];
+        for (label, h, iters) in small_cases {
+            bench_simd_vs_rust(label, &mut g_small, &cached_small, h, iters);
+        }
+
+        let big_cases: [(&str, &Hypothesis, usize); 7] = [
+            ("big   / spawn_chain L=2", &h2, 10),
+            ("big   / spawn_chain L=3", &h3, 10),
+            ("big   / lateral L=3", &h_lat3, 10),
+            ("big   / lateral L=4", &h_lat4, 10),
+            ("big   / any_chain L=2", &h_any2, 10),
+            ("big   / any_chain L=3", &h_any3, 10),
+            ("big   / any_chain L=4", &h_any4, 10),
+        ];
+        for (label, h, iters) in big_cases {
+            bench_simd_vs_rust(label, &mut g_big, &cached_big, h, iters);
+        }
+    }
+
     println!("\nOK: all paths produced valid, resolvable entity ids.");
+}
+
+/// Times both paths back-to-back so they measure the exact same graph state.
+/// `bench_one` above can't be reused because it discards its timing and
+/// doesn't touch the SIMD path.
+#[cfg(feature = "simd")]
+fn bench_simd_vs_rust(
+    label: &str,
+    g: &mut GraphHunter,
+    cached: &graph_hunter_core::simd_matcher::ffi::CachedSimdGraph,
+    h: &Hypothesis,
+    iters: usize,
+) {
+    use graph_hunter_core::simd_matcher::ffi::run_simd_search;
+
+    g.sort_edges_by_timestamp().expect("sort edges");
+
+    let _ = g
+        .search_temporal_pattern(h, None, Some(10_000))
+        .expect("search failed");
+    let _ = run_simd_search(cached, &g.interner, h, None, Some(10_000));
+
+    let mut rust_ns: u128 = 0;
+    let mut rust_count: usize = 0;
+    for _ in 0..iters {
+        let t0 = Instant::now();
+        let (results, _) = g
+            .search_temporal_pattern(h, None, Some(10_000))
+            .expect("search failed");
+        rust_ns += t0.elapsed().as_nanos();
+        rust_count = results.len();
+    }
+
+    let mut simd_ns: u128 = 0;
+    let mut simd_count: usize = 0;
+    for _ in 0..iters {
+        let t0 = Instant::now();
+        let results = run_simd_search(cached, &g.interner, h, None, Some(10_000));
+        simd_ns += t0.elapsed().as_nanos();
+        simd_count = results.len();
+    }
+
+    let rust_ms = (rust_ns as f64 / iters as f64) / 1_000_000.0;
+    let simd_ms = (simd_ns as f64 / iters as f64) / 1_000_000.0;
+    let speedup = if simd_ms > 0.0 { rust_ms / simd_ms } else { 0.0 };
+    println!(
+        "{:<40} rust={:>10.3} ms  simd={:>10.3} ms  x{:.2}  (rust={} simd={})",
+        label, rust_ms, simd_ms, speedup, rust_count, simd_count
+    );
 }
