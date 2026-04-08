@@ -141,6 +141,7 @@ pub fn run() {
             commands::graph_ops::cmd_get_events_for_node,
             commands::graph_ops::cmd_get_events_paginated,
             commands::graph_ops::cmd_expand_node_grouped,
+            commands::graph_ops::cmd_get_simd_isa,
             // DSL commands
             commands::dsl::cmd_parse_dsl,
             commands::dsl::cmd_get_catalog,
