@@ -468,3 +468,10 @@ pub fn cmd_load_data_with_config(
         })
     })
 }
+
+/// Returns the runtime-detected SIMD ISA name (e.g. "avx2", "scalar", or "none").
+/// Frontend can display a "SIMD: AVX2" badge based on this.
+#[tauri::command]
+pub fn cmd_get_simd_isa() -> String {
+    graph_hunter_core::simd_matcher::ffi::simd_isa_name().to_string()
+}
