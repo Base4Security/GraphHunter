@@ -9,6 +9,7 @@ license = "GPL-3.0"
 default = []
 ml-scoring = ["ort", "ndarray"]
 directml = []
+simd = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -23,3 +24,6 @@ ndarray = { version = "0.17", optional = true }
 lru = "0.12"
 tempfile = "3"
 memmap2 = "0.9"
+
+[build-dependencies]
+cc = "1"

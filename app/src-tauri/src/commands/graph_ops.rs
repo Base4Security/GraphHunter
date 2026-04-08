@@ -42,20 +42,34 @@ pub fn cmd_run_hunt(
     let hypothesis: Hypothesis = serde_json::from_str(&hypothesis_json)
         .map_err(|e| CommandError::ParseError(format!("Invalid hypothesis JSON: {}", e)))?;
 
-    let (paths, truncated) = with_current_graph(state.as_ref(), |graph| {
-        let scorer_ready = graph
-            .anomaly_scorer
-            .as_ref()
-            .map(|s| s.is_finalized())
-            .unwrap_or(false);
-        if scorer_ready {
-            graph.search_temporal_pattern_smart(&hypothesis, time_window, 10_000)
-                .map_err(|e| CommandError::Internal(format!("Search failed: {}", e)))
-        } else {
-            graph.search_temporal_pattern(&hypothesis, time_window, Some(10_000))
-                .map_err(|e| CommandError::Internal(format!("Search failed: {}", e)))
+    let (paths, truncated) = {
+        #[cfg(feature = "simd")]
+        {
+            // SIMD path: uses the C++ AVX2-accelerated matcher (transparent to the user).
+            use crate::helpers::with_current_graph_mut;
+            with_current_graph_mut(state.as_ref(), |graph| {
+                graph.search_temporal_pattern_simd(&hypothesis, time_window, Some(10_000))
+                    .map_err(|e| CommandError::Internal(format!("Search failed: {}", e)))
+            })?
         }
-    })?;
+        #[cfg(not(feature = "simd"))]
+        {
+            with_current_graph(state.as_ref(), |graph| {
+                let scorer_ready = graph
+                    .anomaly_scorer
+                    .as_ref()
+                    .map(|s| s.is_finalized())
+                    .unwrap_or(false);
+                if scorer_ready {
+                    graph.search_temporal_pattern_smart(&hypothesis, time_window, 10_000)
+                        .map_err(|e| CommandError::Internal(format!("Search failed: {}", e)))
+                } else {
+                    graph.search_temporal_pattern(&hypothesis, time_window, Some(10_000))
+                        .map_err(|e| CommandError::Internal(format!("Search failed: {}", e)))
+                }
+            })?
+        }
+    };
 
     let path_count = paths.len();
 
