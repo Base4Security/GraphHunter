@@ -5,7 +5,6 @@ import type {
   Subgraph,
   Neighborhood,
   NodeDetails,
-  LogEntry,
   SessionInfo,
   Note,
 } from "../types";
@@ -31,7 +30,9 @@ export interface MapState {
 export interface AppState {
   // Graph data
   stats: GraphStats;
-  log: LogEntry[];
+  // NOTE: `log` used to live here but was extracted to LogContext in 2026-04-07
+  // because ADD_LOG is the highest-frequency dispatch in the app and was
+  // re-rendering the whole App tree on every entry. See context/LogContext.tsx.
 
   // UI mode
   mode: AppMode;
@@ -79,7 +80,6 @@ export interface AppState {
 
 export const initialAppState: AppState = {
   stats: { entity_count: 0, relation_count: 0 },
-  log: [],
   mode: "hunt",
   bottomTab: "explore",
   currentSession: null,
@@ -107,7 +107,6 @@ export const initialAppState: AppState = {
 
 export type AppAction =
   | { type: "SET_STATS"; payload: GraphStats }
-  | { type: "ADD_LOG"; payload: LogEntry }
   | { type: "SET_MODE"; payload: AppMode }
   | { type: "SET_BOTTOM_TAB"; payload: BottomTab }
   | { type: "SET_CURRENT_SESSION"; payload: SessionInfo | null }
@@ -142,8 +141,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "SET_STATS":
       return { ...state, stats: action.payload };
-    case "ADD_LOG":
-      return { ...state, log: [action.payload, ...state.log].slice(0, 100) };
     case "SET_MODE":
       return { ...state, mode: action.payload };
     case "SET_BOTTOM_TAB":

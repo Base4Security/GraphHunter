@@ -1,24 +1,31 @@
-import { useCallback, useEffect, useRef } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke, errorMessage } from "./lib/tauri";
+// Eager: everything on the initial-render path. The Welcome page, the left-
+// side panels, the graph canvas and the Explorer bottom panel (default tab)
+// must be in the main bundle so the first paint has no flicker.
 import DatasetsLeftPanel from "./components/DatasetsLeftPanel";
-import ActivityLogLeftPanel from "./components/ActivityLogLeftPanel";
+import ActivityLogContainer from "./components/ActivityLogContainer";
 import GraphMetricsLeftPanel from "./components/GraphMetricsLeftPanel";
 import SessionSelector from "./components/SessionSelector";
 import WelcomePage from "./components/WelcomePage";
-import HelpPanel from "./components/HelpPanel";
-import HypothesisBuilder from "./components/HypothesisBuilder";
 import GraphCanvas from "./components/GraphCanvas";
 import ExplorerPanel from "./components/ExplorerPanel";
 import PathNodesPanel from "./components/PathNodesPanel";
-import NotesPanel from "./components/NotesPanel";
-import NodeDetailPanel from "./components/NodeDetailPanel";
-import HuntResultsTable from "./components/HuntResultsTable";
-import EventsViewPanel from "./components/EventsViewPanel";
-import HeatmapView from "./components/HeatmapView";
-import TimelineView from "./components/TimelineView";
+import { SectionLoader } from "./components/ui";
+// Lazy: only mounted when the user opens a specific tab, slide-out or
+// modal. Each becomes its own chunk so the initial bundle stays small.
+const HelpPanel = lazy(() => import("./components/HelpPanel"));
+const HypothesisBuilder = lazy(() => import("./components/HypothesisBuilder"));
+const NotesPanel = lazy(() => import("./components/NotesPanel"));
+const NodeDetailPanel = lazy(() => import("./components/NodeDetailPanel"));
+const HuntResultsTable = lazy(() => import("./components/HuntResultsTable"));
+const EventsViewPanel = lazy(() => import("./components/EventsViewPanel"));
+const HeatmapView = lazy(() => import("./components/HeatmapView"));
+const TimelineView = lazy(() => import("./components/TimelineView"));
 import { ChevronLeft, ChevronRight, Sparkles, Database, Activity, BarChart3, X, MapPin, FileText, HelpCircle } from "lucide-react";
 import { useAppState, useAppDispatch } from "./context/AppStateContext";
+import { useLogDispatch, LogProvider } from "./context/LogContext";
 import { useNotifications } from "./hooks/useNotifications";
 import type {
   GraphStats,
@@ -39,16 +46,31 @@ import type {
 import type { MapState, BottomTab } from "./context/AppStateContext";
 import "./App.css";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
+
+/**
+ * Suspense boundary used for every lazy-loaded chunk in this file.
+ *
+ * Using a single wrapper keeps the JSX tidy and guarantees a consistent
+ * fallback (a centred spinner) whenever React needs to stream a chunk in.
+ * Chunks typically resolve in a single animation frame on a warm cache,
+ * so the fallback is rarely visible — but we still want a graceful state
+ * for first-time loads and cold tabs.
+ */
+function LazyBoundary({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<SectionLoader />}>{children}</Suspense>;
+}
 
 function AppInner() {
   const state = useAppState();
   const dispatch = useAppDispatch();
+  // Log dispatch lives in its own context so addLog() does not re-render
+  // App tree when the log grows — see context/LogContext.tsx.
+  const logDispatch = useLogDispatch();
   const { addNotification } = useNotifications();
 
   const {
     stats,
-    log,
     mode,
     bottomTab,
     currentSession,
@@ -91,9 +113,9 @@ function AppInner() {
 
   const addLog = useCallback(
     (entry: LogEntry) => {
-      dispatch({ type: "ADD_LOG", payload: entry });
+      logDispatch({ type: "ADD_LOG", payload: entry });
     },
-    [dispatch]
+    [logDispatch]
   );
 
   // Auto-save session after notes or path nodes change (no-op if no session).
@@ -711,7 +733,9 @@ function AppInner() {
           </div>
         )}
         {helpPanelOpen && (
-          <HelpPanel onClose={() => setHelpPanelOpen(false)} />
+          <LazyBoundary>
+            <HelpPanel onClose={() => setHelpPanelOpen(false)} />
+          </LazyBoundary>
         )}
         <div className="welcome-page-wrapper">
           <WelcomePage
@@ -868,7 +892,7 @@ function AppInner() {
           />
         )}
         {leftMenuOpen === "activity" && (
-          <ActivityLogLeftPanel log={log} onClose={() => dispatch({ type: "SET_LEFT_MENU", payload: null })} />
+          <ActivityLogContainer onClose={() => dispatch({ type: "SET_LEFT_MENU", payload: null })} />
         )}
         {leftMenuOpen === "metrics" && (
           <GraphMetricsLeftPanel
@@ -904,11 +928,13 @@ function AppInner() {
         onNodeContextRemoveFromPathNodes={handleRemoveFromPathNodes}
       >
         {showHuntTable && mode === "hunt" && (
-          <HuntResultsTable
-            totalPaths={huntPathCount}
-            onViewPath={handleViewPath}
-            onLog={addLog}
-          />
+          <LazyBoundary>
+            <HuntResultsTable
+              totalPaths={huntPathCount}
+              onViewPath={handleViewPath}
+              onLog={addLog}
+            />
+          </LazyBoundary>
         )}
       </GraphCanvas>
 
@@ -955,12 +981,10 @@ function AppInner() {
           </button>
         </div>
 
-        {bottomTab === "hunt" && (
-          <HypothesisBuilder
-            onHuntResults={handleHuntResults}
-            onLog={addLog}
-          />
-        )}
+        {/* `ExplorerPanel` is the default tab and stays eager so the
+            first paint has no Suspense flicker. The other four tabs are
+            lazy chunks and share a single Suspense boundary — only one
+            can be mounted at a time, so a shared boundary is sufficient. */}
         {bottomTab === "explore" && (
           <ExplorerPanel
             onExploreNode={handleExploreNode}
@@ -968,21 +992,31 @@ function AppInner() {
             onLog={addLog}
           />
         )}
-        {bottomTab === "events" && (
-          <EventsViewPanel selectedNodeId={selectedNodeId} />
-        )}
-        {bottomTab === "heatmap" && (
-          <HeatmapView
-            statsKey={stats.entity_count + stats.relation_count}
-            onShowRelationOnMap={handleShowTypeOnMap}
-            onLog={addLog}
-          />
-        )}
-        {bottomTab === "timeline" && (
-          <TimelineView
-            statsKey={stats.entity_count + stats.relation_count}
-            onShowTypeOnMap={handleShowTypeOnMap}
-          />
+        {bottomTab !== "explore" && (
+          <LazyBoundary>
+            {bottomTab === "hunt" && (
+              <HypothesisBuilder
+                onHuntResults={handleHuntResults}
+                onLog={addLog}
+              />
+            )}
+            {bottomTab === "events" && (
+              <EventsViewPanel selectedNodeId={selectedNodeId} />
+            )}
+            {bottomTab === "heatmap" && (
+              <HeatmapView
+                statsKey={stats.entity_count + stats.relation_count}
+                onShowRelationOnMap={handleShowTypeOnMap}
+                onLog={addLog}
+              />
+            )}
+            {bottomTab === "timeline" && (
+              <TimelineView
+                statsKey={stats.entity_count + stats.relation_count}
+                onShowTypeOnMap={handleShowTypeOnMap}
+              />
+            )}
+          </LazyBoundary>
         )}
       </div>
 
@@ -1026,13 +1060,15 @@ function AppInner() {
               </button>
             </div>
             <div className="left-menu-panel-content">
-              <NotesPanel
-                notes={notes}
-                selectedNodeId={selectedNodeId}
-                onNotesChange={setNotes}
-                onAutoSave={handleAutoSave}
-                onShowNodeOnMap={(nodeId) => handleNodeContextExpandOrShow(nodeId)}
-              />
+              <LazyBoundary>
+                <NotesPanel
+                  notes={notes}
+                  selectedNodeId={selectedNodeId}
+                  onNotesChange={setNotes}
+                  onAutoSave={handleAutoSave}
+                  onShowNodeOnMap={(nodeId) => handleNodeContextExpandOrShow(nodeId)}
+                />
+              </LazyBoundary>
             </div>
           </div>
         )}
@@ -1040,22 +1076,26 @@ function AppInner() {
 
       {/* Node detail sidebar (shown when a node is selected, in Hunt or Explorer) */}
       {nodeDetails && (
-        <NodeDetailPanel
-          details={nodeDetails}
-          onClose={() => {
-            addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: "Cleared selection", level: "info" });
-            dispatch({ type: "SET_NODE_DETAILS", payload: null });
-            dispatch({ type: "SET_SELECTED_NODE_ID", payload: null });
-          }}
-          onExpand={handleExploreNode}
-          onSetCenter={handleExploreNode}
-          onShowNeighbourTypeOnMap={handleShowNeighbourTypeOnMap}
-        />
+        <LazyBoundary>
+          <NodeDetailPanel
+            details={nodeDetails}
+            onClose={() => {
+              addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: "Cleared selection", level: "info" });
+              dispatch({ type: "SET_NODE_DETAILS", payload: null });
+              dispatch({ type: "SET_SELECTED_NODE_ID", payload: null });
+            }}
+            onExpand={handleExploreNode}
+            onSetCenter={handleExploreNode}
+            onShowNeighbourTypeOnMap={handleShowNeighbourTypeOnMap}
+          />
+        </LazyBoundary>
       )}
 
       {/* Guide panel (slide-out, ? button in header) */}
       {helpPanelOpen && (
-        <HelpPanel onClose={() => setHelpPanelOpen(false)} />
+        <LazyBoundary>
+          <HelpPanel onClose={() => setHelpPanelOpen(false)} />
+        </LazyBoundary>
       )}
 
       {/* AI Analysis Panel (slide-out) */}
@@ -1286,9 +1326,11 @@ import { NotificationProvider } from "./hooks/useNotifications";
 function App() {
   return (
     <AppStateProvider>
-      <NotificationProvider>
-        <AppInner />
-      </NotificationProvider>
+      <LogProvider>
+        <NotificationProvider>
+          <AppInner />
+        </NotificationProvider>
+      </LogProvider>
     </AppStateProvider>
   );
 }
