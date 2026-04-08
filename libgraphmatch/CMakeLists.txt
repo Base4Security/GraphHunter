@@ -7,13 +7,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ── Compiler flags ─────────────────────────────────────────────────────────
+# Global flags: optimization + AVX2. Exception/RTTI opt-out is per-target so
+# test executables (which need doctest's throwing macros) can re-enable them.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-O3 -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    add_compile_options(-O3 -Wall -Wextra -Wpedantic)
     # SIMD: enable AVX2 by default on x86_64 (override with -DGMATCH_ARCH=native)
     set(GMATCH_ARCH "native" CACHE STRING "Architecture flag for -march")
     add_compile_options(-march=${GMATCH_ARCH})
 elseif(MSVC)
-    add_compile_options(/O2 /W4 /arch:AVX2 /EHs-c- /GR-)
+    add_compile_options(/O2 /W4 /arch:AVX2)
 endif()
 
 # ── Sources ────────────────────────────────────────────────────────────────
@@ -35,6 +37,12 @@ set_target_properties(graphmatch PROPERTIES
     POSITION_INDEPENDENT_CODE ON
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
 )
+# Library itself is built without exceptions/RTTI for size & codegen.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(graphmatch PRIVATE -fno-exceptions -fno-rtti)
+elseif(MSVC)
+    target_compile_options(graphmatch PRIVATE /EHs-c- /GR-)
+endif()
 
 # ── Tests (doctest) ────────────────────────────────────────────────────────
 option(GMATCH_BUILD_TESTS "Build unit tests" ON)

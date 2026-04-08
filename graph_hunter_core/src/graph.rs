@@ -570,6 +570,71 @@ impl GraphHunter {
         Ok((results, truncated))
     }
 
+    /// SIMD-accelerated temporal pattern search via the C++ libgraphmatch backend.
+    ///
+    /// Falls back to `search_temporal_pattern_smart` (when a finalized scorer is
+    /// available) or `search_temporal_pattern` whenever the runtime-detected ISA
+    /// is not an AVX2-or-better SIMD target.
+    #[cfg(feature = "simd")]
+    pub fn search_temporal_pattern_simd(
+        &self,
+        hypothesis: &Hypothesis,
+        time_window: Option<(i64, i64)>,
+        max_results: Option<usize>,
+    ) -> Result<(Vec<HuntResult>, bool), GraphError> {
+        hypothesis
+            .validate()
+            .map_err(GraphError::InvalidHypothesis)?;
+
+        let cap = max_results.unwrap_or(10_000);
+
+        let isa = crate::simd_matcher::ffi::simd_isa_name();
+        if matches!(isa, "scalar" | "none" | "unknown") {
+            let scorer_ready = self
+                .anomaly_scorer
+                .as_ref()
+                .map(|s| s.is_finalized())
+                .unwrap_or(false);
+            return if scorer_ready {
+                self.search_temporal_pattern_smart(hypothesis, time_window, cap)
+            } else {
+                self.search_temporal_pattern(hypothesis, time_window, max_results)
+            };
+        }
+
+        let cached = crate::simd_matcher::ffi::build_gm_graph(self);
+        let results = crate::simd_matcher::ffi::run_simd_search(
+            &cached,
+            &self.interner,
+            hypothesis,
+            time_window,
+            max_results,
+        );
+        let truncated = results.len() >= cap;
+        Ok((results, truncated))
+    }
+
+    /// Pure-Rust fallback used when the `simd` feature is disabled.
+    #[cfg(not(feature = "simd"))]
+    pub fn search_temporal_pattern_simd(
+        &self,
+        hypothesis: &Hypothesis,
+        time_window: Option<(i64, i64)>,
+        max_results: Option<usize>,
+    ) -> Result<(Vec<HuntResult>, bool), GraphError> {
+        let scorer_ready = self
+            .anomaly_scorer
+            .as_ref()
+            .map(|s| s.is_finalized())
+            .unwrap_or(false);
+        if scorer_ready {
+            let cap = max_results.unwrap_or(10_000);
+            self.search_temporal_pattern_smart(hypothesis, time_window, cap)
+        } else {
+            self.search_temporal_pattern(hypothesis, time_window, max_results)
+        }
+    }
+
     /// Anomaly-guided smart search: uses a top-K min-heap to prune low-anomaly
     /// branches during DFS, eliminating the dependency on the cap for performance.
     ///
