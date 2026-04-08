@@ -66,17 +66,30 @@ impl Relation {
 }
 
 /// Memory-efficient edge representation for the adjacency list.
-/// 27 bytes vs ~200 bytes per Relation. Metadata is stored externally
-/// in MetadataStore, referenced by offset.
+///
+/// **Layout note (2026-04-07 repack):** the previous field order was
+/// [source_sid, dest_sid, rel_type_tag, timestamp, metadata_offset, dataset_tag]
+/// which under `#[repr(C)]` produced 40 bytes due to padding before `timestamp`
+/// (i64 alignment) and after `dataset_tag` (struct alignment to 8). Reordering
+/// from largest to smallest alignment compacts inline data to 27 bytes plus
+/// 5 bytes of trailing struct-alignment padding → **32 bytes** total.
+///
+/// This is a 20% saving over the previous 40-byte layout (~1.6 GB on a
+/// 28 GB EVTX with ~200M relations). Going further to 27 bytes requires
+/// `#[repr(C, packed)]`, which complicates field references and is deferred.
+///
+/// Compared to the full `Relation` struct (~200 B), this is still ~84% smaller.
+/// Metadata is stored externally in `MetadataStore`, referenced by offset.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct CompactRelation {
+    pub timestamp: i64,         // 8 bytes (align 8) — placed first to avoid pre-padding
+    pub metadata_offset: u64,   // 8 bytes (0 = no metadata)
     pub source_sid: StrId,      // 4 bytes
     pub dest_sid: StrId,        // 4 bytes
-    pub rel_type_tag: u8,       // 1 byte
-    pub timestamp: i64,         // 8 bytes
-    pub metadata_offset: u64,   // 8 bytes (0 = no metadata)
     pub dataset_tag: u16,       // 2 bytes (index into dataset_tags vec, 0 = none)
+    pub rel_type_tag: u8,       // 1 byte
+    // 27 bytes inline + 5 bytes trailing struct-alignment padding (mult. of 8) = 32 B.
 }
 
 impl CompactRelation {
