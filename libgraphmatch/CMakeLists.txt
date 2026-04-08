@@ -7,8 +7,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ── Compiler flags ─────────────────────────────────────────────────────────
-# Global flags: optimization + AVX2. Exception/RTTI opt-out is per-target so
-# test executables (which need doctest's throwing macros) can re-enable them.
+# Shared warning/arch flags go directory-wide so tests and benches pick them
+# up too. Library-only flags (no-exceptions, no-RTTI) are applied as
+# target_compile_options on `graphmatch` to avoid contaminating test targets
+# that need exceptions (doctest's REQUIRE requires _CPPUNWIND on MSVC).
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-O3 -Wall -Wextra -Wpedantic)
     # SIMD: enable AVX2 by default on x86_64 (override with -DGMATCH_ARCH=native)
@@ -85,6 +87,8 @@ if(GMATCH_BUILD_BENCH)
     target_include_directories(bench_intersect PRIVATE tests)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(bench_intersect PRIVATE -fexceptions)
+    elseif(MSVC)
+        target_compile_options(bench_intersect PRIVATE /EHsc)
     endif()
 
     add_executable(bench_matching bench/bench_matching.cpp)
@@ -92,6 +96,8 @@ if(GMATCH_BUILD_BENCH)
     target_include_directories(bench_matching PRIVATE tests)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(bench_matching PRIVATE -fexceptions)
+    elseif(MSVC)
+        target_compile_options(bench_matching PRIVATE /EHsc)
     endif()
 endif()
 
