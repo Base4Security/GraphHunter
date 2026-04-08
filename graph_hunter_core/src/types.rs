@@ -141,6 +141,27 @@ impl RelationType {
     }
 }
 
+impl EntityType {
+    /// Numeric tag matching libgraphmatch's GM_ENTITY_* constants.
+    /// `Other(_)` returns 255 as a sentinel — the SIMD bridge resolves it
+    /// dynamically via `OtherTypeMap`.
+    pub fn to_u8(&self) -> u8 {
+        match self {
+            EntityType::IP       => 0,
+            EntityType::Host     => 1,
+            EntityType::User     => 2,
+            EntityType::Process  => 3,
+            EntityType::File     => 4,
+            EntityType::Domain   => 5,
+            EntityType::Registry => 6,
+            EntityType::URL      => 7,
+            EntityType::Service  => 8,
+            EntityType::Any      => 254,
+            EntityType::Other(_) => 255,
+        }
+    }
+}
+
 /// Helper: checks if two entity types match, treating `Any` as a wildcard.
 pub fn entity_type_matches(pattern: &EntityType, actual: &EntityType) -> bool {
     *pattern == EntityType::Any || *pattern == *actual

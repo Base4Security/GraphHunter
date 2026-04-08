@@ -1472,6 +1472,7 @@ name = "graph_hunter_core"
 version = "1.0.0"
 dependencies = [
  "ahash",
+ "cc",
  "chrono",
  "lru",
  "memmap2",

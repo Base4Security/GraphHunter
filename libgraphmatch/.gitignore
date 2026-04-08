@@ -1,0 +1,13 @@
+# Build artifacts produced by CMake / direct compilation. The Rust build
+# script (graph_hunter_core/build.rs) compiles the C++ sources via the
+# `cc` crate into the Cargo target directory, so nothing in this folder
+# should ever be checked in.
+build/
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.dll
+*.so
+*.dylib

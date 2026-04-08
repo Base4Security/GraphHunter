@@ -12,8 +12,9 @@ impl StrId {
         self.0 as usize
     }
 
-    /// Creates a StrId from a raw u32 value. For testing only.
-    #[cfg(test)]
+    /// Creates a StrId from a raw u32 value.
+    /// Used by the SIMD bridge to reconstruct StrIds from C++ node IDs.
+    #[inline]
     pub fn from_raw(n: u32) -> Self {
         StrId(n)
     }

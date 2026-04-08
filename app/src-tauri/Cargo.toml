@@ -34,5 +34,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
+# `simd` is intentionally excluded from default until the SIMD path is rewired:
+# `cmd_run_hunt` references `graph.search_temporal_pattern_simd(...)` which no
+# longer exists in `graph_hunter_core::graph` after an in-progress refactor.
+# Re-add `"simd"` here once that method is restored or the call site is updated.
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+simd = ["graph_hunter_core/simd"]

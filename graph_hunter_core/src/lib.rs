@@ -23,6 +23,7 @@ pub mod parser;
 pub mod preview;
 pub mod relation;
 pub mod sentinel;
+pub mod simd_matcher;
 pub mod spill;
 pub mod sysmon;
 
