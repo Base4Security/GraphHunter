@@ -9,6 +9,13 @@ pub enum SpillError {
     Io(std::io::Error),
     /// Failed to memory-map a spill or merged file.
     Mmap(std::io::Error),
+    /// Refused to spill because available disk space is below the guard
+    /// threshold. `free_bytes` is what was observed; `required_bytes` is
+    /// the minimum we insist on keeping free.
+    DiskFull {
+        free_bytes: u64,
+        required_bytes: u64,
+    },
 }
 
 impl fmt::Display for SpillError {
@@ -17,6 +24,12 @@ impl fmt::Display for SpillError {
             SpillError::TempDir(e) => write!(f, "Failed to create temp dir for spill store: {e}"),
             SpillError::Io(e) => write!(f, "Spill store I/O error: {e}"),
             SpillError::Mmap(e) => write!(f, "Spill store mmap error: {e}"),
+            SpillError::DiskFull { free_bytes, required_bytes } => write!(
+                f,
+                "Refusing to spill: only {} MB free, need at least {} MB to continue safely",
+                free_bytes / (1024 * 1024),
+                required_bytes / (1024 * 1024),
+            ),
         }
     }
 }
@@ -25,6 +38,7 @@ impl std::error::Error for SpillError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             SpillError::TempDir(e) | SpillError::Io(e) | SpillError::Mmap(e) => Some(e),
+            SpillError::DiskFull { .. } => None,
         }
     }
 }

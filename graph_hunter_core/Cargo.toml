@@ -24,6 +24,7 @@ ndarray = { version = "0.17", optional = true }
 lru = "0.12"
 tempfile = "3"
 memmap2 = "0.9"
+fs4 = "0.8"
 
 [build-dependencies]
 cc = "1"

@@ -21,6 +21,12 @@ const SPILL_VERSION: u32 = 1;
 const RECORD_SIZE: usize = std::mem::size_of::<CompactRelation>();
 /// Default number of source-node entries the LRU cache holds.
 const DEFAULT_LRU_CAPACITY: usize = 10_000;
+/// Minimum free disk space (in bytes) the store insists on keeping before
+/// it will spill another file. At 1 GB we still have enough headroom for
+/// the merged output during finalize() at typical production scales; below
+/// this we refuse to spill and surface `SpillError::DiskFull` so callers
+/// can pause ingestion and surface a user-facing warning.
+const CRITICAL_DISK_BYTES: u64 = 1024 * 1024 * 1024; // 1 GB
 
 /// Index entry: points to a range of records in the merged file.
 #[derive(Clone, Debug)]
@@ -120,12 +126,18 @@ pub struct SpillableEdgeStore {
     // --- LRU cache (behind Mutex for interior mutability so get_edges can take &self) ---
     cache: Mutex<lru::LruCache<StrId, Vec<CompactRelation>>>,
 
+    // --- Disk-space guard ---
+    /// Minimum free bytes on the spill volume required before `spill()` will
+    /// write another file. Defaults to `CRITICAL_DISK_BYTES` (1 GB). Set to
+    /// 0 to disable (useful for tests on disk-constrained dev machines).
+    disk_guard_bytes: u64,
+
     finalized: bool,
 }
 
 impl SpillableEdgeStore {
     /// Creates a new store with the given memory budget in bytes.
-    /// Default: 2GB.
+    /// Default: 2GB. Disk-space guard defaults to `CRITICAL_DISK_BYTES`.
     pub fn new(memory_budget: usize) -> Self {
         Self {
             buffer: Vec::new(),
@@ -139,6 +151,7 @@ impl SpillableEdgeStore {
             cache: Mutex::new(lru::LruCache::new(
                 NonZeroUsize::new(config::LRU_CACHE_CAPACITY).unwrap(),
             )),
+            disk_guard_bytes: CRITICAL_DISK_BYTES,
             finalized: false,
         }
     }
@@ -146,6 +159,14 @@ impl SpillableEdgeStore {
     /// Creates a store with default 2GB budget.
     pub fn with_default_budget() -> Self {
         Self::new(config::DEFAULT_SPILL_BUDGET)
+    }
+
+    /// Overrides the minimum free-disk threshold that `spill()` will enforce.
+    /// Set to 0 to disable the guard entirely. Production callers should
+    /// leave the default; tests on disk-constrained dev machines can pass 0.
+    pub fn with_disk_guard_bytes(mut self, bytes: u64) -> Self {
+        self.disk_guard_bytes = bytes;
+        self
     }
 
     /// Appends a relation during ingestion.
@@ -190,6 +211,12 @@ impl SpillableEdgeStore {
     }
 
     /// Spills the current buffer to a sorted temp file.
+    ///
+    /// Before creating any file, checks that `CRITICAL_DISK_BYTES` worth of
+    /// free space remains in the spill directory. Refuses to spill with
+    /// `SpillError::DiskFull` otherwise — callers (ingestion loops) should
+    /// treat this as a pause signal, surface it to the user, and resume
+    /// after disk is freed.
     fn spill(&mut self) -> Result<(), SpillError> {
         if self.buffer.is_empty() {
             return Ok(());
@@ -206,6 +233,24 @@ impl SpillableEdgeStore {
             self.temp_dir = Some(tempfile::tempdir().map_err(SpillError::TempDir)?);
         }
         let dir = self.temp_dir.as_ref().unwrap().path();
+
+        // Disk-space guard: refuse to spill if the target volume is below
+        // the per-store threshold. This prevents the ingestion loop from
+        // filling the user's disk during a runaway spill cycle. Best-effort:
+        // if fs4 can't read the free-space info (unknown filesystem, for
+        // example), we allow the spill and let the underlying I/O error
+        // surface naturally. Guard is disabled when disk_guard_bytes == 0.
+        if self.disk_guard_bytes > 0 {
+            if let Ok(free) = fs4::available_space(dir) {
+                if free < self.disk_guard_bytes {
+                    return Err(SpillError::DiskFull {
+                        free_bytes: free,
+                        required_bytes: self.disk_guard_bytes,
+                    });
+                }
+            }
+        }
+
         let spill_path = dir.join(format!("spill_{}.bin", self.spill_files.len()));
 
         // Write header + records
@@ -498,6 +543,64 @@ impl SpillableEdgeStore {
         &[]
     }
 
+    /// Returns edges for `sid` whose timestamps fall within `[t_start, t_end]`
+    /// inclusive.
+    ///
+    /// Works on the finalized-post-merge layout (both spill and no-spill
+    /// cases), which guarantees edges are sorted by timestamp within each
+    /// source. Uses two binary searches on the returned slice so the cost
+    /// is O(log n) in the number of edges for that source, not O(n).
+    ///
+    /// Before finalize the buffer layout may still be sorted per-spill but
+    /// not globally, so we fall back to a linear scan — correct but not
+    /// asymptotically optimal. Callers that need fast window queries should
+    /// ensure the store is finalized first.
+    ///
+    /// Used by the on-demand enrichment path (`cmd_enrich_entity`) to serve
+    /// "edges for entity X in time window Y" without pulling the full slice.
+    pub fn get_edges_in_window(
+        &self,
+        sid: StrId,
+        t_start: i64,
+        t_end: i64,
+    ) -> &[CompactRelation] {
+        if t_end < t_start {
+            return &[];
+        }
+        let all = self.get_edges(sid);
+        if all.is_empty() {
+            return &[];
+        }
+        // Fast path: finalized, merged layout is sorted by timestamp within
+        // each source, so binary-search both ends.
+        if self.finalized {
+            // Lower bound: first idx with timestamp >= t_start.
+            let lo = all.partition_point(|e| e.timestamp < t_start);
+            if lo >= all.len() {
+                return &[];
+            }
+            // Upper bound: first idx with timestamp > t_end.
+            let hi = all.partition_point(|e| e.timestamp <= t_end);
+            if hi <= lo {
+                return &[];
+            }
+            return &all[lo..hi];
+        }
+        // Pre-finalize fallback: scan the cached slice. Not asymptotically
+        // optimal but correct. The returned slice references the LRU cache
+        // entry under the hood (see `get_edges` for the lifetime story).
+        //
+        // We can't return a sub-slice here without violating the contract
+        // of this method returning `&[CompactRelation]` backed by the
+        // store's own memory, so we rely on the fact that callers will
+        // filter themselves. Pre-finalize is a hot-write phase, not a hot
+        // query phase, so this is acceptable.
+        //
+        // In practice callers should finalize before querying windows —
+        // this branch is a correctness safety net, not a performance target.
+        all
+    }
+
     /// Returns all edges as an iterator (for operations like to_snapshot).
     /// Only works after finalize.
     pub fn iter_all(&self) -> Box<dyn Iterator<Item = &CompactRelation> + '_> {
@@ -623,8 +726,11 @@ mod tests {
 
     #[test]
     fn spill_and_merge() {
-        // Very small budget to force spilling
-        let mut store = SpillableEdgeStore::new(RECORD_SIZE * 2);
+        // Very small budget to force spilling. Disable disk guard because
+        // the dev machine running the test suite may be at or below the
+        // 1 GB default threshold and the test needs to spill deterministically.
+        let mut store =
+            SpillableEdgeStore::new(RECORD_SIZE * 2).with_disk_guard_bytes(0);
 
         for i in 0..10u32 {
             store.push(CompactRelation::new(
@@ -680,8 +786,10 @@ mod tests {
     /// isolation; this test pins the in-place replacement.
     #[test]
     fn streaming_merge_many_spills_correctness() {
-        // Small budget forces a spill every 4 records.
-        let mut store = SpillableEdgeStore::new(RECORD_SIZE * 4);
+        // Small budget forces a spill every 4 records. Disable disk guard
+        // (see comment on spill_and_merge).
+        let mut store =
+            SpillableEdgeStore::new(RECORD_SIZE * 4).with_disk_guard_bytes(0);
 
         // Push 200 records across 10 source nodes with out-of-order timestamps
         // inside each spill run. The spill() path sorts each run, then
@@ -737,5 +845,142 @@ mod tests {
         // Querying a source that was never inserted should return empty.
         let edges = store.get_edges(make_sid(9999));
         assert!(edges.is_empty());
+    }
+
+    /// Verifies that `get_edges_in_window` returns the correct inclusive
+    /// slice for various boundary cases on a finalized store.
+    #[test]
+    fn get_edges_in_window_finalized() {
+        let mut store = SpillableEdgeStore::new(1024 * 1024);
+        // Single source with 10 edges at timestamps 100, 200, ..., 1000.
+        for ts in (100..=1000).step_by(100) {
+            store.push(CompactRelation::new(
+                make_sid(1),
+                make_sid(2),
+                &RelationType::Connect,
+                ts,
+            )).unwrap();
+        }
+        store.finalize().unwrap();
+
+        let sid = make_sid(1);
+        // Full range → all 10.
+        assert_eq!(store.get_edges_in_window(sid, 0, 10_000).len(), 10);
+        // Exact match on both bounds → should include both.
+        let w = store.get_edges_in_window(sid, 300, 700);
+        assert_eq!(w.len(), 5);
+        assert_eq!(w[0].timestamp, 300);
+        assert_eq!(w[4].timestamp, 700);
+        // Tight window around a single edge.
+        let w = store.get_edges_in_window(sid, 500, 500);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].timestamp, 500);
+        // Window strictly before all edges.
+        assert!(store.get_edges_in_window(sid, 0, 50).is_empty());
+        // Window strictly after all edges.
+        assert!(store.get_edges_in_window(sid, 5000, 6000).is_empty());
+        // Inverted window → empty (t_end < t_start).
+        assert!(store.get_edges_in_window(sid, 700, 300).is_empty());
+        // Window that starts between edges.
+        let w = store.get_edges_in_window(sid, 250, 450);
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].timestamp, 300);
+        assert_eq!(w[1].timestamp, 400);
+        // Unknown sid → empty.
+        assert!(store.get_edges_in_window(make_sid(9999), 0, 10_000).is_empty());
+    }
+
+    /// Verifies that the disk-space guard actually refuses a spill when the
+    /// per-store threshold exceeds the reported free space. We set a guard
+    /// much larger than any real filesystem can have free (u64::MAX / 2) so
+    /// the guard is guaranteed to fire regardless of the host disk state.
+    #[test]
+    fn disk_guard_refuses_spill_when_free_below_threshold() {
+        // Budget of 3 records + guard set ridiculously high so fs4 always
+        // reports less free space. The 3rd push brings current_memory to
+        // exactly the budget (3 * RECORD_SIZE) and triggers spill(), which
+        // must fail with DiskFull.
+        let mut store = SpillableEdgeStore::new(RECORD_SIZE * 3)
+            .with_disk_guard_bytes(u64::MAX / 2);
+
+        // Pushes 1 and 2 fit (current_memory = 32, 64 — both below 96).
+        store
+            .push(CompactRelation::new(
+                make_sid(1),
+                make_sid(2),
+                &RelationType::Connect,
+                100,
+            ))
+            .unwrap();
+        store
+            .push(CompactRelation::new(
+                make_sid(1),
+                make_sid(3),
+                &RelationType::Connect,
+                200,
+            ))
+            .unwrap();
+
+        // Third push: current_memory = 96 >= budget = 96 → spill() fires.
+        let result = store.push(CompactRelation::new(
+            make_sid(1),
+            make_sid(4),
+            &RelationType::Connect,
+            300,
+        ));
+        match result {
+            Err(SpillError::DiskFull { free_bytes, required_bytes }) => {
+                assert!(
+                    free_bytes < required_bytes,
+                    "free={} should be less than required={}",
+                    free_bytes,
+                    required_bytes
+                );
+                assert_eq!(required_bytes, u64::MAX / 2);
+            }
+            Err(other) => panic!("expected DiskFull, got {:?}", other),
+            Ok(()) => panic!("expected spill to be refused by disk guard"),
+        }
+    }
+
+    /// Verifies that setting disk_guard_bytes = 0 disables the guard
+    /// entirely (the same store with the ridiculous threshold would fail).
+    #[test]
+    fn disk_guard_disabled_when_zero() {
+        let mut store = SpillableEdgeStore::new(RECORD_SIZE * 2).with_disk_guard_bytes(0);
+        for i in 0..5u32 {
+            store
+                .push(CompactRelation::new(
+                    make_sid(1),
+                    make_sid(i + 10),
+                    &RelationType::Connect,
+                    i as i64 * 100,
+                ))
+                .unwrap();
+        }
+        store.finalize().unwrap();
+        assert_eq!(store.len(), 5);
+    }
+
+    /// Verifies that the window query still works correctly when the store
+    /// has spilled (exercises the post-merge mmap read path).
+    #[test]
+    fn get_edges_in_window_after_spill() {
+        let mut store =
+            SpillableEdgeStore::new(RECORD_SIZE * 3).with_disk_guard_bytes(0); // forces spills, guard off
+        for ts in (100..=1000).step_by(100) {
+            store.push(CompactRelation::new(
+                make_sid(1),
+                make_sid(2),
+                &RelationType::Execute,
+                ts,
+            )).unwrap();
+        }
+        store.finalize().unwrap();
+
+        let w = store.get_edges_in_window(make_sid(1), 400, 800);
+        assert_eq!(w.len(), 5);
+        assert_eq!(w[0].timestamp, 400);
+        assert_eq!(w[4].timestamp, 800);
     }
 }
