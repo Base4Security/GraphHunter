@@ -117,7 +117,15 @@ pub struct SpillableEdgeStore {
 
     // --- Spill files ---
     spill_files: Vec<SpillFile>,
+    /// When `external_spill_dir` is None, this holds an owned tempdir that
+    /// gets auto-cleaned on drop. Populated lazily on the first spill.
     temp_dir: Option<tempfile::TempDir>,
+    /// When set via `with_spill_dir`, spill files land here instead of in a
+    /// tempdir. The caller owns the directory's lifetime — typically a
+    /// session-scoped path the app manages. This is the hook Phase 9 uses
+    /// to point spills at `<session_dir>/spill/` so on-shutdown overflow
+    /// replay works.
+    external_spill_dir: Option<std::path::PathBuf>,
 
     // --- Merged (query mode) ---
     merged_mmap: Option<memmap2::Mmap>,
@@ -146,6 +154,7 @@ impl SpillableEdgeStore {
             current_memory: 0,
             spill_files: Vec::new(),
             temp_dir: None,
+            external_spill_dir: None,
             merged_mmap: None,
             merged_index: HashMap::new(),
             cache: Mutex::new(lru::LruCache::new(
@@ -166,6 +175,22 @@ impl SpillableEdgeStore {
     /// leave the default; tests on disk-constrained dev machines can pass 0.
     pub fn with_disk_guard_bytes(mut self, bytes: u64) -> Self {
         self.disk_guard_bytes = bytes;
+        self
+    }
+
+    /// Routes spill files into an external directory owned by the caller,
+    /// instead of the internal auto-cleaned tempdir.
+    ///
+    /// This is the hook the plan's Phase 9 will use to point spills at a
+    /// session-scoped path (`<session_dir>/spill/`) so on-shutdown
+    /// overflow replay can find pending spill files across restarts.
+    ///
+    /// The directory must already exist and be writable. The caller is
+    /// responsible for its lifetime — `SpillableEdgeStore` does NOT clean
+    /// it up on drop. If both `with_spill_dir` and the lazy tempdir would
+    /// apply, `external_spill_dir` wins.
+    pub fn with_spill_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.external_spill_dir = Some(dir);
         self
     }
 
@@ -228,11 +253,18 @@ impl SpillableEdgeStore {
                 .then(a.timestamp.cmp(&b.timestamp))
         });
 
-        // Ensure temp dir exists
-        if self.temp_dir.is_none() {
-            self.temp_dir = Some(tempfile::tempdir().map_err(SpillError::TempDir)?);
-        }
-        let dir = self.temp_dir.as_ref().unwrap().path();
+        // Resolve the spill directory. Caller-provided `external_spill_dir`
+        // wins; otherwise we lazily create an auto-cleaned tempdir.
+        let dir: std::path::PathBuf = if let Some(ext) = &self.external_spill_dir {
+            ext.clone()
+        } else {
+            if self.temp_dir.is_none() {
+                self.temp_dir =
+                    Some(tempfile::tempdir().map_err(SpillError::TempDir)?);
+            }
+            self.temp_dir.as_ref().unwrap().path().to_path_buf()
+        };
+        let dir = dir.as_path();
 
         // Disk-space guard: refuse to spill if the target volume is below
         // the per-store threshold. This prevents the ingestion loop from
@@ -346,7 +378,17 @@ impl SpillableEdgeStore {
         // (~400× smaller) and throughput increased from 3.4 Mrec/s to
         // 6.0 Mrec/s because O(N log k) with k=4 beats O(N log N) plus the
         // Vec allocation overhead.
-        let dir = self.temp_dir.as_ref().unwrap().path();
+        //
+        // Resolve the output directory: external_spill_dir wins over tempdir.
+        let dir: std::path::PathBuf = if let Some(ext) = &self.external_spill_dir {
+            ext.clone()
+        } else {
+            self.temp_dir
+                .as_ref()
+                .expect("temp_dir populated by earlier spill() call")
+                .path()
+                .to_path_buf()
+        };
         let merged_path = dir.join("merged.bin");
 
         let file = std::fs::File::create(&merged_path).map_err(SpillError::Io)?;
@@ -493,9 +535,19 @@ impl SpillableEdgeStore {
                 let mut cache = self.cache.lock().unwrap();
                 // Check if already cached
                 if let Some(cached) = cache.get(&sid) {
-                    // SAFETY: we return a reference tied to &self lifetime.
-                    // The cache is only cleared on &mut self calls (clear/finalize).
-                    // The Mutex ensures no concurrent mutation of the cache entry.
+                    // SAFETY (lifetime extension via raw pointer):
+                    //   The returned slice is tied to &self's lifetime. The
+                    //   LRU `cache` is wrapped in a Mutex, so no concurrent
+                    //   writer can evict or mutate `cached` during this call
+                    //   — the MutexGuard is held until we return the slice.
+                    //   The cache is only cleared via `clear()` or rebuilt by
+                    //   `finalize()`, both of which require `&mut self` and
+                    //   therefore cannot interleave with this `&self` call.
+                    //   The `Vec<CompactRelation>` inside the cache entry is
+                    //   never reallocated while the entry is live (we only
+                    //   insert complete Vecs, never mutate them in place).
+                    //   Therefore the raw pointer remains valid for the
+                    //   duration of the returned slice.
                     let ptr = cached.as_ptr();
                     let len = cached.len();
                     return unsafe { std::slice::from_raw_parts(ptr, len) };
@@ -505,6 +557,9 @@ impl SpillableEdgeStore {
                     .collect();
                 cache.put(sid, edges);
                 let cached = cache.peek(&sid).unwrap();
+                // SAFETY: same invariants as the cache-hit path above. We
+                // just populated this entry via `cache.put` and immediately
+                // `peek` it (no eviction possible between put and peek).
                 let ptr = cached.as_ptr();
                 let len = cached.len();
                 return unsafe { std::slice::from_raw_parts(ptr, len) };
@@ -524,7 +579,32 @@ impl SpillableEdgeStore {
             return &[];
         }
 
-        // Mmap case: return a slice directly from the mmap'd memory
+        // Mmap case: return a slice directly from the mmap'd memory.
+        //
+        // SAFETY invariants for the raw-pointer cast below:
+        //   1. The merged file was written by `finalize()` in a layout of
+        //      [16-byte header][total_count × RECORD_SIZE bytes of records]
+        //      [index section]. See the finalize() merge loop for the
+        //      write side.
+        //   2. `entry.offset` is a RECORD index (not a byte offset), written
+        //      by finalize() as `emitted` (the running count of records
+        //      written before this source_sid group). Therefore
+        //      `header_size + entry.offset * RECORD_SIZE` is the byte
+        //      offset of the first record for this sid.
+        //   3. `CompactRelation` is `#[repr(C)]` with natural alignment
+        //      (largest field is i64, requiring 8-byte alignment). Every
+        //      record starts at a byte offset of `16 + k * 32` where k >= 0,
+        //      which is always 8-aligned (16 and 32 are both multiples of 8).
+        //      The mmap itself is page-aligned (4 KB on Windows), so the
+        //      base pointer is already 8-aligned. Therefore the cast
+        //      `*const u8 → *const CompactRelation` satisfies alignment.
+        //   4. The `byte_end <= mmap.len()` check below guarantees the
+        //      slice read stays within the mmap's valid region, so the
+        //      `slice::from_raw_parts` call is a read of initialized bytes.
+        //   5. The mmap is owned by `self.merged_mmap` which is not mutated
+        //      while `&self` is held (it's only replaced by `&mut self`
+        //      methods: `clear()` and `finalize()`). The returned slice's
+        //      lifetime is tied to `&self`, so it cannot outlive the mmap.
         if let Some(entry) = self.merged_index.get(&sid) {
             if let Some(ref mmap) = self.merged_mmap {
                 let header_size = 16;
@@ -624,6 +704,25 @@ impl SpillableEdgeStore {
                     count_bytes[4], count_bytes[5], count_bytes[6], count_bytes[7],
                 ]) as usize;
                 let data = &mmap[header_size..header_size + count * RECORD_SIZE];
+                // SAFETY: same invariants as `get_edges` mmap path:
+                //   1. `data` is `count * RECORD_SIZE` bytes of initialized
+                //      records written by `finalize()`.
+                //   2. `data.as_ptr()` is 8-aligned because the mmap base is
+                //      page-aligned and `header_size = 16` is 8-aligned, so
+                //      `data` starts at an 8-aligned offset.
+                //   3. `CompactRelation` is `#[repr(C)]` with natural
+                //      alignment (largest field i64, 8 bytes). The cast is
+                //      layout-compatible with the bytes we wrote.
+                //   4. The mmap is owned by `&self.merged_mmap` and cannot
+                //      be replaced while `&self` is held.
+                //   5. `header_size + count * RECORD_SIZE <= mmap.len()`
+                //      implicitly holds because `count` was read from the
+                //      header that `finalize()` wrote as `total_count`,
+                //      and finalize() wrote exactly `total_count` records
+                //      right after the header. A bounds overflow would only
+                //      happen if the file is truncated after mmap, which we
+                //      do not do (the merged file is mmap'd once and held
+                //      until `clear()` or `finalize()` replaces it).
                 let records: &[CompactRelation] = unsafe {
                     std::slice::from_raw_parts(
                         data.as_ptr() as *const CompactRelation,
@@ -656,6 +755,10 @@ impl SpillableEdgeStore {
     }
 
     /// Clears all data (for rebuild operations).
+    ///
+    /// Does NOT touch `external_spill_dir` — it's a persistent configuration
+    /// choice, not a per-run artifact. The caller owns the dir's lifetime
+    /// and is responsible for wiping old files from it if needed.
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.buffer_index.clear();
@@ -960,6 +1063,71 @@ mod tests {
         }
         store.finalize().unwrap();
         assert_eq!(store.len(), 5);
+    }
+
+    /// Verifies that `with_spill_dir` routes spill files into a
+    /// caller-owned directory instead of the internal tempdir, and that
+    /// the merged file correctly lands in the same external dir.
+    #[test]
+    fn with_spill_dir_uses_external_location() {
+        use std::path::PathBuf;
+
+        let ext = tempfile::tempdir().expect("create external tempdir");
+        let ext_path: PathBuf = ext.path().to_path_buf();
+
+        let mut store = SpillableEdgeStore::new(RECORD_SIZE * 2)
+            .with_disk_guard_bytes(0)
+            .with_spill_dir(ext_path.clone());
+
+        for i in 0..6u32 {
+            store
+                .push(CompactRelation::new(
+                    make_sid(1),
+                    make_sid(i + 10),
+                    &RelationType::Auth,
+                    i as i64 * 100,
+                ))
+                .unwrap();
+        }
+
+        // Spill files must exist in the external dir before finalize.
+        let pre_finalize_entries: Vec<_> = std::fs::read_dir(&ext_path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("spill_")
+            })
+            .collect();
+        assert!(
+            !pre_finalize_entries.is_empty(),
+            "at least one spill file should be written to the external dir"
+        );
+
+        store.finalize().unwrap();
+        assert_eq!(store.len(), 6);
+
+        // merged.bin must also land in the external dir.
+        let merged_path = ext_path.join("merged.bin");
+        assert!(
+            merged_path.exists(),
+            "merged.bin should be written to external dir: {:?}",
+            merged_path
+        );
+
+        // Verify reads still work through the external-dir path.
+        let edges = store.get_edges(make_sid(1));
+        assert_eq!(edges.len(), 6);
+        for i in 0..6 {
+            assert_eq!(edges[i].timestamp, (i as i64) * 100);
+        }
+
+        // The internal tempdir field should NOT have been populated.
+        assert!(
+            store.temp_dir.is_none(),
+            "internal temp_dir should stay None when external_spill_dir is set"
+        );
     }
 
     /// Verifies that the window query still works correctly when the store
