@@ -84,6 +84,8 @@
 pub mod batch;
 pub mod channels;
 pub mod coverage;
+pub mod enrichment;
+pub mod enrichment_cache;
 pub mod graph_access;
 pub mod metrics;
 pub mod parser_task;
