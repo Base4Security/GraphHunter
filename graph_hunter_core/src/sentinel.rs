@@ -553,4 +553,22 @@ impl LogParser for SentinelJsonParser {
             .flat_map(|event| Self::parse_event(&event))
             .collect()
     }
+
+    /// Efficient override of the default `parse_rows`: iterates pre-decoded
+    /// `serde_json::Value` rows and dispatches to `parse_event` directly.
+    ///
+    /// This is the Phase 4 fix for the `normalize_response` double-parse
+    /// in `graph_hunter_cli::siem::sentinel_streaming`. When the streaming
+    /// ingest pipeline pre-decodes a Log Analytics / Advanced Hunting
+    /// response into rows, it calls this method instead of rebuilding a
+    /// JSON string and re-parsing it. Avoids a GB-scale allocation per
+    /// poll at tera-scale.
+    ///
+    /// Uses the same `rayon::par_iter` fan-out as `parse()` so throughput
+    /// is identical on large row sets.
+    fn parse_rows(&self, rows: &[Value]) -> Vec<ParsedTriple> {
+        rows.par_iter()
+            .flat_map(|event| Self::parse_event(event))
+            .collect()
+    }
 }

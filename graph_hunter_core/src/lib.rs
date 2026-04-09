@@ -22,6 +22,7 @@ pub mod metadata_store;
 pub mod parser;
 pub mod preview;
 pub mod relation;
+pub mod ingest;
 pub mod sentinel;
 pub mod simd_matcher;
 pub mod sources;
@@ -76,6 +77,12 @@ pub use sources::data_lake::DataLakeV2Source;
 pub use sources::defender_xdr::{DefenderXdrConfig, DefenderXdrSource, DEFAULT_XDR_ENDPOINT};
 pub use sources::log_analytics::{
     LogAnalyticsConfig, LogAnalyticsSource, DEFAULT_LA_ENDPOINT,
+};
+pub use ingest::{
+    parsed_channel, raw_channel, GraphAccess, GraphWriter, ParsedBatch, ParsedReceiver,
+    ParsedSender, ParserTask, PollerConfig, Priority, RawReceiver, RawSender, SourcePoller,
+    WriterMetrics, WriterMetricsSnapshot, DEFAULT_PARSED_CAPACITY, DEFAULT_POLL_INTERVAL,
+    DEFAULT_RAW_CAPACITY, DEFAULT_WRITE_CHUNK_SIZE,
 };
 pub use watermark_store::{
     EnrichmentAuditEntry, SourceState, SourceStatus, SqliteWatermarkStore, WatermarkError,

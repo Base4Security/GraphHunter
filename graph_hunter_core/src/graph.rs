@@ -1569,6 +1569,43 @@ impl GraphHunter {
         Ok((new_entities, new_relations))
     }
 
+    /// Processes one chunk of up to `chunk_size` triples from the front
+    /// of `pending`, inserting them into the graph.
+    ///
+    /// Returns the number of triples inserted. The caller (typically the
+    /// `GraphWriter` task in `crate::ingest::writer`) is expected to hold
+    /// an external write lock only for the duration of this single call
+    /// and release it between chunks so readers (hunts, enrichment) can
+    /// make progress under concurrent load.
+    ///
+    /// The input `pending` vector is drained in-place — after the call
+    /// returns, the remaining triples sit at positions `0..pending.len()`.
+    /// Loop until `pending.is_empty()` on the caller side to flush a
+    /// whole batch.
+    ///
+    /// This is the per-chunk entry point used by the streaming ingest
+    /// pipeline (plan §3). The existing `insert_triples` method is kept
+    /// as-is for non-streaming callers (file ingest, session load,
+    /// single-shot hunts).
+    pub fn insert_triples_chunk(
+        &mut self,
+        pending: &mut Vec<crate::parser::ParsedTriple>,
+        dataset_id: Option<&str>,
+        chunk_size: usize,
+    ) -> Result<usize, GraphError> {
+        if pending.is_empty() || chunk_size == 0 {
+            return Ok(0);
+        }
+        let n = pending.len().min(chunk_size);
+        // Drain `n` triples from the front. `drain(..n)` leaves the
+        // remainder shifted to the beginning of the Vec in O(N) time —
+        // acceptable because chunk_size is typically 5K and the Vec is
+        // small (one batch at a time).
+        let chunk: Vec<crate::parser::ParsedTriple> = pending.drain(..n).collect();
+        self.insert_triples(chunk, dataset_id)?;
+        Ok(n)
+    }
+
     /// Inserts pre-parsed triples directly (streaming ingestion).
     pub fn insert_triples(
         &mut self,
