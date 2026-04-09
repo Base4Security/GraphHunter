@@ -335,6 +335,7 @@ pub mod http_token_fetcher;
 pub mod log_analytics;
 pub mod quota;
 pub mod token_cache;
+pub mod token_storage;
 
 // ---------------------------------------------------------------------------
 // Tests — just enough to prove the trait is object-safe and the types all
