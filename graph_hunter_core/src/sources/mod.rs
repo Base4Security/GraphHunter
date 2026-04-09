@@ -327,6 +327,12 @@ pub trait LogSource: Send + Sync {
 }
 
 // Submodules.
+pub mod backoff;
+pub mod data_lake;
+pub mod defender_xdr;
+pub mod http_client;
+pub mod http_token_fetcher;
+pub mod log_analytics;
 pub mod token_cache;
 
 // ---------------------------------------------------------------------------

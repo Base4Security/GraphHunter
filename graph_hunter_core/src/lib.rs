@@ -63,6 +63,20 @@ pub use sources::{
 pub use sources::token_cache::{
     AzureTokenCache, CachedToken, TokenError, TokenFetcher, TokenKey, DEFAULT_REFRESH_HORIZON,
 };
+pub use sources::backoff::{
+    ExponentialBackoff, DEFAULT_BASE_DELAY, DEFAULT_JITTER, DEFAULT_MAX_AUTH_FAILURES,
+    DEFAULT_MAX_DELAY, DEFAULT_MULTIPLIER,
+};
+pub use sources::http_client::{
+    HttpClient, HttpError, HttpMethod, HttpRequest, HttpResponse, MockHttpClient, MockResponse,
+    StatusClass,
+};
+pub use sources::http_token_fetcher::{HttpTokenFetcher, DEFAULT_AAD_AUTHORITY};
+pub use sources::data_lake::DataLakeV2Source;
+pub use sources::defender_xdr::{DefenderXdrConfig, DefenderXdrSource, DEFAULT_XDR_ENDPOINT};
+pub use sources::log_analytics::{
+    LogAnalyticsConfig, LogAnalyticsSource, DEFAULT_LA_ENDPOINT,
+};
 pub use watermark_store::{
     EnrichmentAuditEntry, SourceState, SourceStatus, SqliteWatermarkStore, WatermarkError,
     WatermarkKey, WatermarkStore,
