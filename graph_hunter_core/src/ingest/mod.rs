@@ -83,7 +83,9 @@
 
 pub mod batch;
 pub mod channels;
+pub mod coverage;
 pub mod graph_access;
+pub mod metrics;
 pub mod parser_task;
 pub mod source_poller;
 pub mod writer;
@@ -93,7 +95,14 @@ pub use channels::{
     parsed_channel, raw_channel, ParsedReceiver, ParsedSender, RawReceiver, RawSender,
     DEFAULT_PARSED_CAPACITY, DEFAULT_RAW_CAPACITY,
 };
+pub use coverage::{
+    CoverageBucket, CoverageGap, DataCoverage, DEFAULT_BUCKET_SECONDS, DEFAULT_MAX_BUCKETS,
+};
 pub use graph_access::{GraphAccess, DEFAULT_WRITE_CHUNK_SIZE};
+pub use metrics::{
+    IngestMetricsRegistry, IngestMetricsSnapshot, QuotaKey, QuotaSnapshot, SourceMetricHandles,
+    SourceMetricsSnapshot,
+};
 pub use parser_task::ParserTask;
 pub use source_poller::{PollerConfig, SourcePoller, DEFAULT_POLL_INTERVAL};
 pub use writer::{GraphWriter, WriterMetrics, WriterMetricsSnapshot};

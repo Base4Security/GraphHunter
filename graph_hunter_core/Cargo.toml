@@ -49,5 +49,10 @@ bytes = "1"
 # database lives under each session's directory (<session>/ops.sqlite).
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+[dev-dependencies]
+# Enables `tokio::time::advance` + `#[tokio::test(start_paused = true)]`
+# for deterministic rate-limiter tests. Only pulled during test builds.
+tokio = { version = "1", features = ["test-util"] }
+
 [build-dependencies]
 cc = "1"

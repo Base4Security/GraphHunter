@@ -268,7 +268,10 @@ impl SourcePoller {
 mod tests {
     use super::*;
     use crate::ingest::channels::raw_channel;
-    use crate::sources::{ChunkEncoding, ChunkStream, LogSource, PollStream, QueryScope, RawChunk, SourceKind};
+    use crate::sources::{
+        ChunkEncoding, ChunkStream, LogSource, PollStream, QueryScope, RawChunk, SourceError,
+        SourceKind,
+    };
     use crate::watermark_store::SqliteWatermarkStore;
     use async_trait::async_trait;
     use bytes::Bytes;

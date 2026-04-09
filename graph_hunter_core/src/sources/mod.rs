@@ -54,7 +54,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Which Azure surface a `LogSource` queries. Drives quota accounting,
 /// retry policy, and parser dispatch in the upper layers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SourceKind {
     /// Log Analytics Query API (REST) — the existing `SentinelTransport`
     /// path, generalized. Auth scope: `https://api.loganalytics.io/.default`.
@@ -333,6 +333,7 @@ pub mod defender_xdr;
 pub mod http_client;
 pub mod http_token_fetcher;
 pub mod log_analytics;
+pub mod quota;
 pub mod token_cache;
 
 // ---------------------------------------------------------------------------
