@@ -15,6 +15,8 @@
 //!   successfully inserted.
 //! - Diagnostic counters (`row_count`, `dropped_rows`) for metrics.
 
+use serde::{Deserialize, Serialize};
+
 use crate::parser::ParsedTriple;
 use crate::sources::Watermark;
 
@@ -32,7 +34,7 @@ use crate::sources::Watermark;
 ///    separate, higher-priority channel that the writer drains first.
 ///    The [`Priority`] field on every batch is the hook that enables
 ///    that without changing the writer's public API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Priority {
     /// Background streaming ingest. The default for `SourcePoller`-
     /// originated batches.
@@ -54,7 +56,12 @@ impl Default for Priority {
 /// The batch owns its `triples` Vec. The writer drains the Vec via
 /// repeated calls to `GraphHunter::insert_triples_chunk`, releasing the
 /// write lock between chunks to let readers make progress.
-#[derive(Debug)]
+///
+/// `Serialize + Deserialize` derives support the overflow persistence
+/// code path in `crate::ingest::overflow` — when a writer is cancelled
+/// mid-shutdown with pending batches, they get round-tripped through
+/// JSON to disk so the next startup can replay them.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ParsedBatch {
     /// Stable identifier of the source that produced the underlying
     /// raw chunk. Stored here so the writer can tag metrics and so

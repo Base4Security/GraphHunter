@@ -143,7 +143,7 @@ pub struct QueryScope {
 ///
 /// The [`crate::watermark_store::WatermarkStore`] persists these strings
 /// transparently — it does not need to understand the encoding.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Watermark(pub String);
 
 impl Watermark {

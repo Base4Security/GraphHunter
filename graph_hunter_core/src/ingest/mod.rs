@@ -82,12 +82,14 @@
 //! [`GraphWriter`]: writer::GraphWriter
 
 pub mod batch;
+pub mod cancellation;
 pub mod channels;
 pub mod coverage;
 pub mod enrichment;
 pub mod enrichment_cache;
 pub mod graph_access;
 pub mod metrics;
+pub mod overflow;
 pub mod parser_task;
 pub mod source_poller;
 pub mod writer;
