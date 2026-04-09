@@ -24,8 +24,10 @@ pub mod preview;
 pub mod relation;
 pub mod sentinel;
 pub mod simd_matcher;
+pub mod sources;
 pub mod spill;
 pub mod sysmon;
+pub mod watermark_store;
 
 // Re-export core types at crate root for ergonomic imports.
 pub use analytics::{
@@ -54,6 +56,17 @@ pub use metadata_store::MetadataStore;
 pub use relation::{CompactRelation, Relation};
 pub use spill::SpillableEdgeStore;
 pub use sentinel::SentinelJsonParser;
+pub use sources::{
+    ChunkEncoding, ChunkStream, EntityRef, LogSource, PollStream, QueryScope, RawChunk,
+    SourceError, SourceKind, Watermark,
+};
+pub use sources::token_cache::{
+    AzureTokenCache, CachedToken, TokenError, TokenFetcher, TokenKey, DEFAULT_REFRESH_HORIZON,
+};
+pub use watermark_store::{
+    EnrichmentAuditEntry, SourceState, SourceStatus, SqliteWatermarkStore, WatermarkError,
+    WatermarkKey, WatermarkStore,
+};
 pub use sysmon::SysmonJsonParser;
 pub use catalog::{CatalogEntry, get_catalog};
 pub use dsl::{DslError, DslParseResult, parse_dsl, format_hypothesis};

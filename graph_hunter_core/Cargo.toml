@@ -26,5 +26,28 @@ tempfile = "3"
 memmap2 = "0.9"
 fs4 = "0.8"
 
+# ── Azure streaming plan deps (Phase 2 foundation) ─────────────────────
+# async-trait: object-safe `dyn LogSource` (RPITIT is not object-safe,
+# verified by Spike 1 at spikes/logsource_objectsafety/).
+async-trait = "0.1"
+# tokio: shared async runtime primitives. We pull "rt", "sync", "time"
+# rather than "full" so graph_hunter_core stays a library-sized async
+# dep, not a kitchen-sink runtime.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+# tokio-util: CancellationToken — the cancellation primitive the existing
+# sentinel_connector.rs already uses. Generalized across all LogSource
+# impls via the trait.
+tokio-util = "0.7"
+# futures: BoxStream and stream combinators. Used for the `ChunkStream`
+# type alias the trait returns.
+futures = "0.3"
+# bytes: `RawChunk.rows` is a `Bytes` so HTTP transports can pass
+# ownership of response buffers without cloning.
+bytes = "1"
+# rusqlite (bundled): watermark store backing. Bundled feature statically
+# links SQLite so there's no system library dep on Windows. The per-store
+# database lives under each session's directory (<session>/ops.sqlite).
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 [build-dependencies]
 cc = "1"
