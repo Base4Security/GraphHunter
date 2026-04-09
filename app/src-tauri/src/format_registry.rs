@@ -1,6 +1,6 @@
 use graph_hunter_core::{
-    CognitoParser, CsvParser, GenericParser, IisW3cParser, LogParser, SentinelJsonParser,
-    SysmonJsonParser, looks_like_cognito, looks_like_iis_w3c,
+    CognitoParser, CsvParser, FortiAnalyzerXmlParser, GenericParser, IisW3cParser, LogParser,
+    SentinelJsonParser, SysmonJsonParser, looks_like_cognito, looks_like_iis_w3c,
     preview_generic_from_keys, preview_sentinel, preview_sysmon,
 };
 
@@ -58,6 +58,14 @@ fn detect_generic_json(contents: &str) -> bool {
     trimmed.starts_with('[') || trimmed.starts_with('{')
 }
 
+/// Detects a FortiAnalyzer XML report. Requires both a valid XML
+/// declaration *and* the FortiAnalyzer root element name so unrelated
+/// XML files (e.g., other vendor reports) don't false-match.
+fn detect_fortianalyzer(contents: &str) -> bool {
+    let trimmed = contents.trim_start();
+    trimmed.starts_with("<?xml") && contents.contains("<FortiAnalyzer_Report")
+}
+
 fn preview_iis(_contents: &str) -> Vec<(String, String)> {
     vec![
         ("c-ip".to_string(), "IP (Client)".to_string()),
@@ -81,6 +89,22 @@ fn preview_cognito(_contents: &str) -> Vec<(String, String)> {
         ("country".to_string(), "metadata".to_string()),
         ("deviceName".to_string(), "metadata".to_string()),
         ("email".to_string(), "metadata".to_string()),
+    ]
+}
+
+/// Preview for FortiAnalyzer XML reports. Static suggestions — the
+/// real field names are buried inside per-section rows so a dynamic
+/// preview would require parsing the XML twice.
+fn preview_fortianalyzer(_contents: &str) -> Vec<(String, String)> {
+    vec![
+        ("User_Name".to_string(), "IP (Top User by Traffic)".to_string()),
+        ("Col (Top Website)".to_string(), "Domain".to_string()),
+        ("Host_Name".to_string(), "Host (Compromised Host)".to_string()),
+        ("Threat".to_string(), "Other:Threat".to_string()),
+        ("Application".to_string(), "Other:Application".to_string()),
+        ("Category".to_string(), "Other:ThreatCategory / AppCategory".to_string()),
+        ("Bytes".to_string(), "metadata".to_string()),
+        ("Percent_of_Total".to_string(), "metadata".to_string()),
     ]
 }
 
@@ -114,6 +138,17 @@ static FORMAT_REGISTRY: &[FormatDescriptor] = &[
         detect: detect_iis,
         make_parser: || Box::new(IisW3cParser),
         preview: preview_iis,
+    },
+    // FortiAnalyzer XML report. Must come before `generic` because
+    // `generic` matches any JSON but the XML detector only matches
+    // real FortiAnalyzer files (the `<FortiAnalyzer_Report>` root
+    // check prevents false positives on other vendors' XML).
+    FormatDescriptor {
+        name: "fortianalyzer",
+        aliases: &["faz", "forti", "xml"],
+        detect: detect_fortianalyzer,
+        make_parser: || Box::new(FortiAnalyzerXmlParser::new()),
+        preview: preview_fortianalyzer,
     },
     FormatDescriptor {
         name: "generic",
@@ -169,7 +204,7 @@ pub fn make_parser_for_format(format_name: &str) -> Result<Box<dyn LogParser + S
     find_descriptor(format_name)
         .map(|desc| (desc.make_parser)())
         .ok_or_else(|| format!(
-            "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', or 'iis'.",
+            "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', or 'fortianalyzer'.",
             format_name
         ))
 }

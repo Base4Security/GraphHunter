@@ -149,6 +149,7 @@ export default function FileUploadSection({
           <option value="evtx">Windows EVTX</option>
           <option value="sysmon">Sysmon (Event Log)</option>
           <option value="sentinel">Azure Sentinel</option>
+          <option value="fortianalyzer">FortiAnalyzer XML Report</option>
           <option value="generic">Generic JSON</option>
           <option value="csv">CSV</option>
         </select>

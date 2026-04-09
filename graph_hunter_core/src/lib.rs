@@ -11,6 +11,7 @@ pub mod entity;
 pub mod errors;
 pub mod export;
 pub mod field_preview;
+pub mod forti_analyzer;
 pub mod generic;
 pub mod gnn_bridge;
 pub mod iis_w3c;
@@ -47,6 +48,12 @@ pub use field_preview::{
 };
 pub use errors::{GraphError, SpillError};
 pub use generic::GenericParser;
+pub use forti_analyzer::{
+    ChartHandler, CompromisedHostHandler, FortiAnalyzerXmlParser, GenericFortiHandler,
+    HandlerRegistry, ReportContext, Row, TopApplicationBySeverityHandler,
+    TopApplicationCategoryHandler, TopThreatHandler, TopUserByTrafficHandler,
+    TopWebsiteByTrafficHandler,
+};
 pub use iis_w3c::{IisW3cParser, looks_like_iis_w3c, extract_fields_header};
 pub use graph::{CompactionStats, GraphHunter};
 pub use interner::{StrId, StringInterner};

@@ -1525,6 +1525,7 @@ dependencies = [
  "ndarray",
  "ordered-float",
  "ort",
+ "quick-xml",
  "rayon",
  "rusqlite",
  "serde",

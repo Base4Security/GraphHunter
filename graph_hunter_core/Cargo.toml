@@ -48,6 +48,11 @@ bytes = "1"
 # links SQLite so there's no system library dep on Windows. The per-store
 # database lives under each session's directory (<session>/ops.sqlite).
 rusqlite = { version = "0.31", features = ["bundled"] }
+# quick-xml: FortiAnalyzer XML report parser (see `src/forti_analyzer.rs`).
+# Already present transitively via `plist` → `tauri`, so this is a
+# zero-compile-cost promotion to a direct dependency. Uses the raw
+# event-based Reader API — no `serialize` feature needed.
+quick-xml = "0.38"
 
 [dev-dependencies]
 # Enables `tokio::time::advance` + `#[tokio::test(start_paused = true)]`

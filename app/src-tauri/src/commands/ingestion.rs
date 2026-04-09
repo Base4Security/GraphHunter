@@ -421,9 +421,9 @@ pub async fn cmd_load_data_streaming(
 
     // Validate format before spawning (fail fast for bad format)
     let pre_check = format.to_lowercase();
-    if !["auto", "evtx", "sysmon", "sentinel", "cognito", "generic", "csv", "iis", "iis_w3c", "w3c"].contains(&pre_check.as_str()) {
+    if !["auto", "evtx", "sysmon", "sentinel", "cognito", "generic", "csv", "iis", "iis_w3c", "w3c", "fortianalyzer", "faz", "forti", "xml"].contains(&pre_check.as_str()) {
         return Err(CommandError::InvalidInput(format!(
-            "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', or 'iis'.",
+            "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', or 'fortianalyzer'.",
             format
         )));
     }

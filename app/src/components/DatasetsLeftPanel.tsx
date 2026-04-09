@@ -364,7 +364,8 @@ export default function DatasetsLeftPanel({
           multiple: true,
           filters: [
             { name: "EVTX Files", extensions: ["evtx"] },
-            { name: "Log Files", extensions: ["json", "ndjson", "csv", "log", "evtx"] },
+            { name: "FortiAnalyzer XML Reports", extensions: ["xml"] },
+            { name: "Log Files", extensions: ["json", "ndjson", "csv", "log", "evtx", "xml"] },
             { name: "All Files", extensions: ["*"] },
           ],
         });
