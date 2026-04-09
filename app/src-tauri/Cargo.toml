@@ -5,7 +5,14 @@ edition = "2021"
 
 [lib]
 name = "graph_hunter_app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Removed "staticlib" from crate-type (was previously ["staticlib",
+# "cdylib", "rlib"]). Tauri v2 only needs "cdylib" (for the runtime
+# entry point) and "rlib" (for Rust tests / the main binary's link).
+# The "staticlib" output was producing a ~1.5 GB .lib file on every
+# build — a disk-pressure foot-gun on constrained dev machines. Add
+# it back if a non-Rust consumer ever needs to statically link the
+# library.
+crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -32,6 +39,14 @@ rayon = "1"
 rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Azure streaming smoke test (Phase 8 frontend validation)
+# These are transitive through graph_hunter_core; declared explicitly so
+# azure_streaming_smoke.rs can use them by name. Small / already-compiled.
+async-trait = "0.1"
+futures = "0.3"
+bytes = "1"
+tempfile = "3"
 
 [features]
 # Opt-in: enable with --features simd. Runtime falls back to pure-Rust DFS when AVX2 is unavailable.

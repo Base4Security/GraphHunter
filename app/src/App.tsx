@@ -4,6 +4,7 @@ import { invoke, errorMessage } from "./lib/tauri";
 // Eager: everything on the initial-render path. The Welcome page, the left-
 // side panels, the graph canvas and the Explorer bottom panel (default tab)
 // must be in the main bundle so the first paint has no flicker.
+import AzureStreamingSmokeTest from "./components/AzureStreamingSmokeTest";
 import DatasetsLeftPanel from "./components/DatasetsLeftPanel";
 import ActivityLogContainer from "./components/ActivityLogContainer";
 import GraphMetricsLeftPanel from "./components/GraphMetricsLeftPanel";
@@ -746,6 +747,14 @@ function AppInner() {
             onError={setSessionError}
             onLog={addLog}
           />
+          {/* Azure streaming plan Phase 5-9 smoke test.
+              Visible on the welcome page so the diagnostic is one click
+              away without needing a session. Delete this wrapper and
+              the AzureStreamingSmokeTest import once real Tauri
+              commands (cmd_enrich_entity etc.) land. */}
+          <div style={{ marginTop: 32, display: "flex", justifyContent: "center" }}>
+            <AzureStreamingSmokeTest />
+          </div>
         </div>
       </div>
     );

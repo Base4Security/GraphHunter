@@ -56,9 +56,7 @@ use crate::parser::LogParser;
 use crate::sources::{ChunkEncoding, EntityRef, LogSource, QueryScope, SourceError};
 use futures::StreamExt;
 
-use super::enrichment_cache::{
-    CachedEnrichment, EnrichmentCache, EnrichmentCacheKey, DEFAULT_BUCKET_SECONDS,
-};
+use super::enrichment_cache::{CachedEnrichment, EnrichmentCache, EnrichmentCacheKey};
 use super::graph_access::GraphAccess;
 
 /// Default row cap per source per enrichment query. Matches plan §5

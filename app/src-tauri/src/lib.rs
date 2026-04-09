@@ -178,6 +178,8 @@ pub fn run() {
             commands::sentinel::cmd_sentinel_disconnect,
             commands::sentinel::cmd_sentinel_status,
             commands::sentinel::cmd_sentinel_check_env,
+            // Azure streaming plan smoke test (Phase 5-9 core validation)
+            commands::azure_streaming_smoke::cmd_azure_streaming_smoke_test,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Graph Hunter");

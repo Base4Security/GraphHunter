@@ -8,3 +8,4 @@ pub mod ai_commands;
 pub mod analytics;
 pub mod export;
 pub mod sentinel;
+pub mod azure_streaming_smoke;

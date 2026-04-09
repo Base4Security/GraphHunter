@@ -958,6 +958,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
+name = "fallible-streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+
+[[package]]
 name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1083,6 +1095,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs4"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7e180ac76c23b45e767bd7ae9579bc0bb458618c4bc71835926e098e61d15f8"
+dependencies = [
+ "rustix 0.38.44",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "futf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1090,6 +1112,21 @@ checksum = "df420e2e84819663797d1ec6544b13c5be84629e7bb00dc960d6917db2987843"
 dependencies = [
  "mac",
  "new_debug_unreachable",
+]
+
+[[package]]
+name = "futures"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
 ]
 
 [[package]]
@@ -1154,6 +1191,7 @@ version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
+ "futures-channel",
  "futures-core",
  "futures-io",
  "futures-macro",
@@ -1431,10 +1469,13 @@ dependencies = [
 name = "graph-hunter-app"
 version = "1.0.0"
 dependencies = [
+ "async-trait",
  "axum",
+ "bytes",
  "dirs 5.0.1",
  "dotenvy",
  "evtx",
+ "futures",
  "graph_hunter_cli",
  "graph_hunter_core",
  "memchr",
@@ -1447,6 +1488,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tower-http 0.5.2",
@@ -1472,18 +1514,25 @@ name = "graph_hunter_core"
 version = "1.0.0"
 dependencies = [
  "ahash",
+ "async-trait",
+ "bytes",
  "cc",
  "chrono",
+ "fs4",
+ "futures",
  "lru",
  "memmap2",
  "ndarray",
  "ordered-float",
  "ort",
  "rayon",
+ "rusqlite",
  "serde",
  "serde_json",
  "simd-json",
  "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1599,6 +1648,15 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+
+[[package]]
+name = "hashlink"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
+dependencies = [
+ "hashbrown 0.14.5",
+]
 
 [[package]]
 name = "heck"
@@ -2165,6 +2223,23 @@ dependencies = [
  "bitflags 2.11.0",
  "libc",
 ]
+
+[[package]]
+name = "libsqlite3-sys"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
+dependencies = [
+ "cc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
 name = "linux-raw-sys"
@@ -3583,12 +3658,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusqlite"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b838eba278d213a8beaf485bd313fd580ca4505a00d5871caeb1457c55322cae"
+dependencies = [
+ "bitflags 2.11.0",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "hashlink",
+ "libsqlite3-sys",
+ "smallvec",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "rustix"
+version = "0.38.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
+dependencies = [
+ "bitflags 2.11.0",
+ "errno",
+ "libc",
+ "linux-raw-sys 0.4.15",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3600,7 +3702,7 @@ dependencies = [
  "bitflags 2.11.0",
  "errno",
  "libc",
- "linux-raw-sys",
+ "linux-raw-sys 0.12.1",
  "windows-sys 0.61.2",
 ]
 
@@ -4625,7 +4727,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.1",
  "once_cell",
- "rustix",
+ "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
 
