@@ -31,6 +31,12 @@ demo_data/mega_dataset_1gb.json
 app/dist/
 graph-hunter-mcp/dist/
 docs/_build/
-.claude/*
+**/.claude/
 .vscode/*
 dev-*
+
+# Local exploratory work — not part of the shipped product
+spikes/
+
+# Confidential incident reports — keep out of VCS
+CSIRT-Report-*.md
