@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ahash::{HashMap, HashMapExt};
 
 /// A compact handle representing an interned string.
@@ -24,10 +26,16 @@ impl StrId {
 ///
 /// Stores each unique string exactly once. Returns a StrId handle
 /// that can be used in HashMaps and other data structures for minimal memory.
+///
+/// Both `map` and `strings` hold `Arc<str>` so a new intern allocates the
+/// string bytes once (the initial `Arc::from(&str)`) and then only bumps
+/// refcounts when inserting into both containers. At 100M+ interns this
+/// halves the allocator pressure compared to the previous `String`-per-side
+/// layout.
 #[derive(Clone, Debug)]
 pub struct StringInterner {
-    map: HashMap<String, StrId>,
-    strings: Vec<String>,
+    map: HashMap<Arc<str>, StrId>,
+    strings: Vec<Arc<str>>,
 }
 
 impl StringInterner {
@@ -54,8 +62,9 @@ impl StringInterner {
             return id;
         }
         let id = StrId(self.strings.len() as u32);
-        self.strings.push(s.to_string());
-        self.map.insert(s.to_string(), id);
+        let arc: Arc<str> = Arc::from(s);
+        self.strings.push(arc.clone());
+        self.map.insert(arc, id);
         id
     }
 
@@ -70,7 +79,7 @@ impl StringInterner {
     /// Returns None if the StrId is out of bounds (e.g. from a different interner).
     #[inline]
     pub fn try_resolve(&self, id: StrId) -> Option<&str> {
-        self.strings.get(id.0 as usize).map(|s| s.as_str())
+        self.strings.get(id.0 as usize).map(|s| &**s)
     }
 
     /// Tries to get the StrId for a string without interning it.

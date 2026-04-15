@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState, type ReactNode } from "react";
-import { Download } from "lucide-react";
+import { Download, ZoomIn, ZoomOut, Maximize2, RotateCcw } from "lucide-react";
 import { invoke } from "../lib/tauri";
 import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
 // @ts-expect-error no types for cytoscape-dagre
@@ -7,6 +7,7 @@ import dagre from "cytoscape-dagre";
 import type { Subgraph, Neighborhood } from "../types";
 import { ENTITY_COLORS, type EntityType } from "../types";
 import NodeContextMenu from "./NodeContextMenu";
+import { useAppState, useAppDispatch } from "../context/AppStateContext";
 
 // Register dagre layout
 cytoscape.use(dagre);
@@ -177,11 +178,41 @@ function positionAddedNodes(cy: Core, added: ElementDefinition[]) {
  * Cytoscape instance. Returns the new element map the caller should store
  * for the next update.
  */
+/**
+ * Returns a callback that restores a saved zoom + pan to the given Cytoscape
+ * instance, guarding against the echo loop where `cy.viewport()` itself fires
+ * a `viewport` event that would otherwise be persisted as the new state.
+ * Returns `undefined` when there's nothing to restore so callers can pass it
+ * straight through to applyGraphDiff.
+ */
+function makeRestoreView(
+  cy: Core,
+  saved: { zoom: number; pan: { x: number; y: number } } | null,
+  isRestoringRef: { current: boolean }
+): (() => void) | undefined {
+  if (!saved) return undefined;
+  return () => {
+    isRestoringRef.current = true;
+    cy.viewport({ zoom: saved.zoom, pan: saved.pan });
+    // Some Cytoscape versions fire `viewport` synchronously after the call,
+    // so defer the flag reset to the next frame.
+    requestAnimationFrame(() => {
+      isRestoringRef.current = false;
+    });
+  };
+}
+
 function applyGraphDiff(
   cy: Core,
   elements: ElementDefinition[],
   prevMap: ElementMap,
-  layoutOptions: cytoscape.LayoutOptions
+  layoutOptions: cytoscape.LayoutOptions,
+  /**
+   * Called once after the layout finishes (only on the full-rebuild path).
+   * Used by callers to restore a saved viewport. Registered as a one-shot
+   * `layoutstop` listener so it fires regardless of layout duration.
+   */
+  onLayoutDone?: () => void
 ): ElementMap {
   const nextMap: ElementMap = new Map();
   for (const el of elements) {
@@ -197,7 +228,9 @@ function applyGraphDiff(
       if (elements.length > 0) cy.add(elements);
     });
     if (elements.length > 0) {
-      cy.layout(layoutOptions).run();
+      const layout = cy.layout(layoutOptions);
+      if (onLayoutDone) cy.one("layoutstop", onLayoutDone);
+      layout.run();
     }
     return nextMap;
   }
@@ -258,6 +291,17 @@ export default function GraphCanvas({
   // applyGraphDiff to compute removed/added/updated deltas instead of doing
   // a destroy-and-rebuild on every subgraph/neighborhood change.
   const prevElementMapRef = useRef<ElementMap>(new Map());
+
+  // ── Persisted viewport (zoom + pan) ──
+  // Cytoscape emits `viewport` events at 60+/sec during drag/wheel; debounce
+  // saves so we only persist the resting position. `isRestoringRef` prevents
+  // an echo loop where our own restore triggers a save of the same value.
+  const { viewState } = useAppState();
+  const dispatch = useAppDispatch();
+  const viewStateRef = useRef(viewState);
+  viewStateRef.current = viewState;
+  const isRestoringRef = useRef(false);
+  const viewportDebounceRef = useRef<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     nodeId: string;
     x: number;
@@ -354,6 +398,28 @@ export default function GraphCanvas({
             "text-wrap": "ellipsis",
           },
         },
+        // IP classification: public IPs get a warning-colored ring so analysts
+        // can see internal/external at a glance without opening the side panel
+        // (per analyst feedback 2026-04-10: first question on any finding).
+        // Private/loopback get a cool ring so the distinction pops on the
+        // canvas. Specific selectors below (highlighted/selected) override
+        // with their own border color.
+        {
+          selector: 'node[ip_class = "Public"]',
+          style: {
+            "border-color": "#f97316",
+            "border-width": 3,
+            "border-opacity": 0.9,
+          },
+        },
+        {
+          selector: 'node[ip_class = "Private"]',
+          style: {
+            "border-color": "#38bdf8",
+            "border-width": 3,
+            "border-opacity": 0.7,
+          },
+        },
         {
           selector: "node.highlighted",
           style: {
@@ -415,15 +481,43 @@ export default function GraphCanvas({
       layout: { name: "grid" },
       minZoom: 0.2,
       maxZoom: 4,
-      wheelSensitivity: 4,
+      // Cytoscape's docs warn against any non-1 wheelSensitivity ("disruptive
+      // to the default UX") — keep at 1 so the wheel feels native.
+      wheelSensitivity: 1,
+      userPanningEnabled: true,
+      userZoomingEnabled: true,
+      boxSelectionEnabled: false,
     });
 
     cyRef.current = cy;
 
+    // Persist viewport (zoom + pan) to global state, debounced. Skipped while
+    // a programmatic restore is in flight (isRestoringRef) to avoid an echo
+    // loop where the restore itself fires a viewport event.
+    const handleViewport = () => {
+      if (isRestoringRef.current) return;
+      if (viewportDebounceRef.current !== null) {
+        window.clearTimeout(viewportDebounceRef.current);
+      }
+      viewportDebounceRef.current = window.setTimeout(() => {
+        viewportDebounceRef.current = null;
+        dispatch({
+          type: "SET_VIEW_STATE",
+          payload: { zoom: cy.zoom(), pan: cy.pan() },
+        });
+      }, 200);
+    };
+    cy.on("viewport", handleViewport);
+
     return () => {
+      cy.off("viewport", handleViewport);
+      if (viewportDebounceRef.current !== null) {
+        window.clearTimeout(viewportDebounceRef.current);
+        viewportDebounceRef.current = null;
+      }
       cy.destroy();
     };
-  }, []);
+  }, [dispatch]);
 
   // ── Register click handlers ──
   useEffect(() => {
@@ -454,12 +548,9 @@ export default function GraphCanvas({
       if (!nodeId) return;
       const pos = evt.originalEvent as MouseEvent;
       if (!pos) return;
-      const container = containerRef.current;
-      if (!container) return;
-      const rect = container.getBoundingClientRect();
-      const x = Math.min(Math.max(pos.clientX - rect.left, 0), rect.width - 180);
-      const y = Math.min(Math.max(pos.clientY - rect.top, 0), rect.height - 120);
-      setContextMenu({ nodeId, x: rect.left + x, y: rect.top + y });
+      // Pass raw viewport coordinates — NodeContextMenu measures itself and
+      // does smart flip-up / horizontal clamping based on its actual size.
+      setContextMenu({ nodeId, x: pos.clientX, y: pos.clientY });
     };
 
     cy.on("tap", "node", handleTap);
@@ -490,7 +581,7 @@ export default function GraphCanvas({
 
   // ── Build Cytoscape elements from subgraph ──
   const buildElements = useCallback(
-    (sg: { nodes: Array<{ id: string; entity_type: string; score: number }>; edges: Array<{ source: string; target: string; rel_type: string; timestamp: number }> }): ElementDefinition[] => {
+    (sg: { nodes: Array<{ id: string; entity_type: string; score: number; ip_class?: string | null }>; edges: Array<{ source: string; target: string; rel_type: string; timestamp: number }> }): ElementDefinition[] => {
       const elements: ElementDefinition[] = [];
 
       // Cap nodes: if over limit, take top N by score
@@ -519,6 +610,10 @@ export default function GraphCanvas({
             entityType: node.entity_type,
             score: node.score,
             size: scoreToSize(node.score),
+            // ip_class drives the node[ip_class="Public"|"Private"] stylesheet
+            // selectors above. Only set for IP entities where the backend was
+            // able to classify the address.
+            ...(node.ip_class ? { ip_class: node.ip_class } : {}),
           },
         });
       }
@@ -621,11 +716,16 @@ export default function GraphCanvas({
             padding: 50,
           } as cytoscape.LayoutOptions;
 
+    const savedView = viewStateRef.current;
+    const restoreView = makeRestoreView(cy, savedView, isRestoringRef);
+    if (savedView) (layoutOptions as { fit?: boolean }).fit = false;
+
     prevElementMapRef.current = applyGraphDiff(
       cy,
       elements,
       prevElementMapRef.current,
-      layoutOptions
+      layoutOptions,
+      restoreView
     );
   }, [subgraph, buildElements, explorerMode]);
 
@@ -665,11 +765,16 @@ export default function GraphCanvas({
             padding: 50,
           } as cytoscape.LayoutOptions;
 
+    const savedView = viewStateRef.current;
+    const restoreView = makeRestoreView(cy, savedView, isRestoringRef);
+    if (savedView) (layoutOptions as { fit?: boolean }).fit = false;
+
     prevElementMapRef.current = applyGraphDiff(
       cy,
       elements,
       prevElementMapRef.current,
-      layoutOptions
+      layoutOptions,
+      restoreView
     );
   }, [neighborhood, buildElements, explorerMode]);
 
@@ -761,7 +866,14 @@ export default function GraphCanvas({
       {children}
       <div
         ref={containerRef}
-        style={{ width: "100%", height: "100%", position: "absolute", top: 0, left: 0 }}
+        style={{
+          width: "100%",
+          height: "100%",
+          position: "absolute",
+          top: 0,
+          left: 0,
+          touchAction: "none",
+        }}
       />
       {isEmpty && (
         <div className="watermark">GRAPH HUNTER</div>
@@ -784,6 +896,77 @@ export default function GraphCanvas({
           }}
         >
           Large graph truncated: showing {truncationInfo.shownNodes.toLocaleString()}/{truncationInfo.nodes.toLocaleString()} nodes, {truncationInfo.shownEdges.toLocaleString()} edge groups
+        </div>
+      )}
+      {!isEmpty && (
+        <div className="graph-zoom-controls">
+          <button
+            type="button"
+            title="Zoom in"
+            onClick={() => {
+              const cy = cyRef.current;
+              if (!cy) return;
+              cy.stop();
+              cy.animate(
+                {
+                  zoom: {
+                    level: Math.min(cy.zoom() * 1.25, 4),
+                    renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 },
+                  },
+                },
+                { duration: 150 },
+              );
+            }}
+          >
+            <ZoomIn size={14} />
+          </button>
+          <button
+            type="button"
+            title="Zoom out"
+            onClick={() => {
+              const cy = cyRef.current;
+              if (!cy) return;
+              cy.stop();
+              cy.animate(
+                {
+                  zoom: {
+                    level: Math.max(cy.zoom() * 0.8, 0.2),
+                    renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 },
+                  },
+                },
+                { duration: 150 },
+              );
+            }}
+          >
+            <ZoomOut size={14} />
+          </button>
+          <button
+            type="button"
+            title="Fit to screen"
+            onClick={() => {
+              const cy = cyRef.current;
+              if (!cy || cy.elements().length === 0) return;
+              cy.stop();
+              cy.animate({ fit: { eles: cy.elements(), padding: 40 } }, { duration: 200 });
+            }}
+          >
+            <Maximize2 size={14} />
+          </button>
+          <button
+            type="button"
+            title="Reset view"
+            onClick={() => {
+              const cy = cyRef.current;
+              if (!cy) return;
+              cy.stop();
+              cy.animate(
+                { zoom: 1, pan: { x: cy.width() / 2, y: cy.height() / 2 } },
+                { duration: 200 },
+              );
+            }}
+          >
+            <RotateCcw size={14} />
+          </button>
         </div>
       )}
       {!isEmpty && (

@@ -1,9 +1,21 @@
 //! LLM integration for AI hypothesis proposal and graph analysis.
 //! Supports multiple providers: OpenAI, Anthropic, Google.
 
+use std::time::Duration;
+
 use graph_hunter_core::{parse_dsl, DslParseResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Shared reqwest client with conservative timeouts. Without these, a hung
+/// LLM provider would pin a Tauri command handler indefinitely.
+fn llm_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
+}
 
 // ── Tool call types (agentic loop) ──
 
@@ -379,7 +391,7 @@ async fn call_openai(
         max_tokens: max_tokens.or(Some(4096)),
     };
 
-    let client = reqwest::Client::new();
+    let client = llm_client()?;
     let res = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", config.api_key))
@@ -425,7 +437,7 @@ async fn call_anthropic(
         messages,
     };
 
-    let client = reqwest::Client::new();
+    let client = llm_client()?;
     let res = client
         .post(&url)
         .header("x-api-key", &config.api_key)
@@ -481,7 +493,7 @@ async fn call_google(
         }),
     };
 
-    let client = reqwest::Client::new();
+    let client = llm_client()?;
     let res = client
         .post(&url)
         .header("Content-Type", "application/json")

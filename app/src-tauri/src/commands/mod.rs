@@ -1,5 +1,6 @@
 pub mod session;
 pub mod entity;
+pub mod enrichment;
 pub mod ingestion;
 pub mod dataset;
 pub mod graph_ops;

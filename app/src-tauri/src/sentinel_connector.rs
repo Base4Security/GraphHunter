@@ -144,7 +144,7 @@ pub async fn polling_loop<T: SentinelTransport>(
                 });
                 // Exponential backoff with jitter to avoid thundering herd
                 let base_backoff = (2u64.pow(consecutive_errors.min(8))).min(MAX_BACKOFF_SECS);
-                let jittered = base_backoff as f64 * (0.5 + rand::thread_rng().gen::<f64>() * 0.5);
+                let jittered = base_backoff as f64 * (0.5 + rand::thread_rng().r#gen::<f64>() * 0.5);
                 tokio::time::sleep(Duration::from_secs_f64(jittered)).await;
                 continue;
             }

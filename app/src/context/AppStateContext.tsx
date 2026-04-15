@@ -74,6 +74,10 @@ export interface AppState {
   // Map navigation history
   mapPast: MapState[];
   mapFuture: MapState[];
+
+  // Persisted graph viewport (zoom + pan), so view doesn't reset on mode
+  // switch or graph rebuild. Cleared by CLEAR_SESSION_STATE.
+  viewState: { zoom: number; pan: { x: number; y: number } } | null;
 }
 
 // ── Initial state ──
@@ -101,6 +105,7 @@ export const initialAppState: AppState = {
   bottomPanelHeight: 300,
   mapPast: [],
   mapFuture: [],
+  viewState: null,
 };
 
 // ── Action types ──
@@ -133,6 +138,7 @@ export type AppAction =
   | { type: "SET_MAP_PAST"; payload: MapState[] }
   | { type: "SET_MAP_FUTURE"; payload: MapState[] }
   | { type: "RESTORE_MAP_STATE"; payload: MapState }
+  | { type: "SET_VIEW_STATE"; payload: { zoom: number; pan: { x: number; y: number } } | null }
   | { type: "CLEAR_SESSION_STATE" };
 
 // ── Reducer ──
@@ -210,6 +216,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         selectedNodeId: action.payload.selectedNodeId,
         nodeDetails: action.payload.nodeDetails,
       };
+    case "SET_VIEW_STATE":
+      return { ...state, viewState: action.payload };
     case "CLEAR_SESSION_STATE":
       return {
         ...state,
@@ -226,6 +234,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         notes: [],
         mapPast: [],
         mapFuture: [],
+        viewState: null,
       };
     default:
       return state;

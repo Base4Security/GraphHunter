@@ -389,54 +389,6 @@ impl GraphHunter {
         })
     }
 
-    /// Checks whether a relation and its neighbor node pass the given filter.
-    fn passes_filter(
-        &self,
-        rel: &crate::relation::Relation,
-        neighbor_id: &str,
-        filter: Option<&NeighborhoodFilter>,
-    ) -> bool {
-        let filter = match filter {
-            Some(f) => f,
-            None => return true,
-        };
-
-        if let Some(ref rel_types) = filter.relation_types {
-            if !rel_types.contains(&rel.rel_type) {
-                return false;
-            }
-        }
-
-        if let Some(start) = filter.time_start {
-            if rel.timestamp < start {
-                return false;
-            }
-        }
-        if let Some(end) = filter.time_end {
-            if rel.timestamp > end {
-                return false;
-            }
-        }
-
-        if let Some(ref entity_types) = filter.entity_types {
-            if let Some(entity) = self.get_entity(neighbor_id) {
-                if !entity_types.contains(&entity.entity_type) {
-                    return false;
-                }
-            }
-        }
-
-        if let Some(min_score) = filter.min_score {
-            if let Some(entity) = self.get_entity(neighbor_id) {
-                if entity.score < min_score {
-                    return false;
-                }
-            }
-        }
-
-        true
-    }
-
     /// Computes degree centrality scores for all entities.
     pub fn compute_scores(&mut self) {
         if self.entities.is_empty() {
@@ -853,7 +805,8 @@ impl GraphHunter {
         page_size: usize,
         min_score: Option<f64>,
     ) -> (Vec<ScoredPath>, usize) {
-        let has_anomaly = self.anomaly_scorer.as_ref().is_some_and(|s| s.is_finalized());
+        let scorer = self.anomaly_scorer.as_ref().filter(|s| s.is_finalized());
+        let has_anomaly = scorer.is_some();
 
         // Phase 1: lightweight scoring
         let mut lightweight: Vec<(usize, f64, f64, f64)> = paths
@@ -871,11 +824,7 @@ impl GraphHunter {
                         total_score += s;
                     }
                 }
-                let anomaly = if has_anomaly {
-                    self.anomaly_scorer.as_ref().unwrap().score_path(path, self).0
-                } else {
-                    0.0
-                };
+                let anomaly = scorer.map(|s| s.score_path(path, self).0).unwrap_or(0.0);
                 (idx, max_score, total_score, anomaly)
             })
             .collect();
@@ -954,11 +903,12 @@ impl GraphHunter {
                     if time_start == i64::MAX { time_start = 0; }
                     if time_end == i64::MIN { time_end = 0; }
 
-                    let (anomaly_score, anomaly_breakdown) = if has_anomaly {
-                        let (score, breakdown) = self.anomaly_scorer.as_ref().unwrap().score_path(path, self);
-                        (Some(score), Some(breakdown))
-                    } else {
-                        (None, None)
+                    let (anomaly_score, anomaly_breakdown) = match scorer {
+                        Some(s) => {
+                            let (score, breakdown) = s.score_path(path, self);
+                            (Some(score), Some(breakdown))
+                        }
+                        None => (None, None),
                     };
 
                     ScoredPath {

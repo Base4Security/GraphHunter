@@ -29,6 +29,7 @@ demo_data/mega_dataset_1gb.json
 **/target/
 **/node_modules/
 app/dist/
+graph-hunter-mcp/dist/
 docs/_build/
 .claude/*
 .vscode/*

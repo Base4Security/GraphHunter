@@ -139,11 +139,23 @@ export interface PaginatedHuntResults {
   paths: ScoredPath[];
 }
 
+/** IP classification returned by the backend for IP entities.
+ *  Matches `graph_hunter_core::ip_utils::IpClass` Debug output. */
+export type IpClass =
+  | "Private"
+  | "Loopback"
+  | "LinkLocal"
+  | "Multicast"
+  | "Reserved"
+  | "Public";
+
 export interface SubgraphNode {
   id: string;
   entity_type: string;
   score: number;
   metadata: Record<string, string>;
+  /** Present only for IP entities; absent/null otherwise. */
+  ip_class?: IpClass | null;
 }
 
 export interface SubgraphEdge {
@@ -428,4 +440,24 @@ export interface TimelineRow {
   min_time: number;
   max_time: number;
   bins: [number, number][];
+}
+
+// ── IP enrichment & subnet analysis ──
+
+export interface GeoIpResult {
+  country_code: string | null;
+  country_name: string | null;
+  city: string | null;
+  asn: number | null;
+  as_org: string | null;
+  isp: string | null;
+}
+
+export interface SubnetGroup {
+  subnet: string;
+  ip_count: number;
+  ips: string[];
+  total_bytes: number | null;
+  is_internal: boolean;
+  top_services: string[];
 }

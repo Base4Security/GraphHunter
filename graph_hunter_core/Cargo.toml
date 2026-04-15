@@ -10,6 +10,7 @@ default = []
 ml-scoring = ["ort", "ndarray"]
 directml = []
 simd = []
+geoip = ["maxminddb"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -53,6 +54,9 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # zero-compile-cost promotion to a direct dependency. Uses the raw
 # event-based Reader API — no `serialize` feature needed.
 quick-xml = "0.38"
+# MaxMind GeoLite2 offline GeoIP/ASN lookup. Optional: only pulled when the
+# `geoip` feature is enabled. The reader is ~50KB compiled, no network deps.
+maxminddb = { version = "0.24", optional = true }
 
 [dev-dependencies]
 # Enables `tokio::time::advance` + `#[tokio::test(start_paused = true)]`

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use graph_hunter_core::{Entity, GraphHunter, Relation};
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,10 @@ pub struct AppState {
     pub npu_scorer: RwLock<Option<graph_hunter_core::NpuScorer>>,
     /// Real-time Sentinel connector handle. None = not connected.
     pub sentinel_connector: RwLock<Option<crate::sentinel_connector::SentinelConnectorHandle>>,
+    /// Offline MaxMind GeoIP provider (loaded on startup if .mmdb files found).
+    pub geoip_provider: Mutex<Option<graph_hunter_core::geoip::maxmind::MaxMindProvider>>,
+    /// HTTP client for GeoIP fallback (cloned out of lock before async calls).
+    pub http_geoip_client: Mutex<Option<Arc<dyn graph_hunter_core::HttpClient>>>,
 }
 
 pub fn session_data_dir() -> Result<PathBuf, String> {
@@ -91,6 +95,26 @@ pub fn ensure_session_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Validates that a session_id is safe to use as a filename component.
+///
+/// Session IDs are generated server-side as UUIDs, but we accept them from
+/// the frontend over IPC, so a compromised frontend could send
+/// `../../etc/passwd` or similar. Restrict to `[A-Za-z0-9_-]` to neutralize
+/// path traversal and NUL-byte injection at the boundary.
+pub fn validate_session_id(session_id: &str) -> Result<(), String> {
+    if session_id.is_empty() || session_id.len() > 128 {
+        return Err(format!("session_id must be 1..=128 chars; got {}", session_id.len()));
+    }
+    if !session_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("session_id must contain only [A-Za-z0-9_-]".into());
+    }
+    Ok(())
+}
+
 pub fn session_file_path(session_id: &str) -> Result<PathBuf, String> {
+    validate_session_id(session_id)?;
     Ok(ensure_session_dir()?.join(format!("{}.json", session_id)))
 }

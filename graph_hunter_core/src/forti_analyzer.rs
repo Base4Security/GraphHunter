@@ -69,9 +69,45 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use crate::entity::Entity;
+use crate::ip_utils::{self, IpClass};
 use crate::parser::{LogParser, ParsedTriple};
 use crate::relation::Relation;
+use crate::service_classifier;
 use crate::types::{EntityType, RelationType};
+
+/// Enriches an IP entity with classification metadata (private/public,
+/// subnet) at parse time. Called by handlers that emit IP entities.
+fn enrich_ip_entity(entity: &mut Entity) {
+    if let Some(class) = ip_utils::classify_ip(&entity.id) {
+        entity
+            .metadata
+            .insert("ip_class".into(), format!("{class:?}"));
+        entity.metadata.insert(
+            "is_internal".into(),
+            matches!(class, IpClass::Private | IpClass::Loopback).to_string(),
+        );
+    }
+    if let Some(subnet) = ip_utils::subnet_24(&entity.id) {
+        entity.metadata.insert("subnet".into(), subnet);
+    }
+}
+
+/// Enriches an Application entity and its radial relation with service
+/// classification metadata (category, risk tag, description).
+fn enrich_app_entity(entity: &mut Entity, radial: &mut Relation, app_name: &str) {
+    let info = service_classifier::classify_application(app_name);
+    let cat = format!("{:?}", info.category);
+    entity
+        .metadata
+        .insert("service_category".into(), cat.clone());
+    entity
+        .metadata
+        .insert("risk_tag".into(), info.risk_tag.into());
+    entity
+        .metadata
+        .insert("service_description".into(), info.description.into());
+    radial.metadata.insert("service_category".into(), cat);
+}
 
 // ---------------------------------------------------------------------------
 // Row: one <id value="N"> inside a <chart> or <table>.
@@ -252,7 +288,8 @@ impl ChartHandler for TopUserByTrafficHandler {
                 }
                 let bytes = row.first("Bytes").unwrap_or("").to_string();
                 let percent = row.first("Percent_of_Total").unwrap_or("").to_string();
-                let ip = Entity::new(id, EntityType::IP);
+                let mut ip = Entity::new(id, EntityType::IP);
+                enrich_ip_entity(&mut ip);
                 let mut rel = Relation::new(
                     &ctx.id,
                     id,
@@ -462,7 +499,7 @@ impl ChartHandler for TopApplicationBySeverityHandler {
             let bytes = row.first("Bytes").unwrap_or("").trim().to_string();
 
             let app_id = format!("application:{}", app_name);
-            let app_entity =
+            let mut app_entity =
                 Entity::new(&app_id, EntityType::Other("Application".to_string()));
 
             // Radial
@@ -481,6 +518,7 @@ impl ChartHandler for TopApplicationBySeverityHandler {
             radial
                 .metadata
                 .insert("source_chart".to_string(), section_name.to_string());
+            enrich_app_entity(&mut app_entity, &mut radial, app_name);
             out.push((context_entity(ctx), radial, app_entity.clone()));
 
             // Pair-wise: Application → AppCategory
@@ -577,7 +615,11 @@ impl ChartHandler for GenericFortiHandler {
     ) -> Vec<ParsedTriple> {
         let mut out = Vec::new();
         for row in rows {
-            if let Some((entity, relation_type)) = detect_primary_entity(row) {
+            if let Some((mut entity, relation_type)) = detect_primary_entity(row) {
+                // Enrich IP entities with classification metadata.
+                if entity.entity_type == EntityType::IP {
+                    enrich_ip_entity(&mut entity);
+                }
                 let target_id = entity.id.clone();
                 let mut rel =
                     Relation::new(&ctx.id, &target_id, relation_type, ctx.timestamp);
@@ -590,6 +632,18 @@ impl ChartHandler for GenericFortiHandler {
                 rel.metadata
                     .insert("source_chart".to_string(), section_name.to_string());
                 rel.metadata.insert("handler".to_string(), "generic_forti".to_string());
+                // Enrich Application entities with service classification.
+                if let EntityType::Other(ref kind) = entity.entity_type {
+                    if kind == "Application" {
+                        let app_name = entity.id.strip_prefix("application:").unwrap_or(&entity.id);
+                        let info = service_classifier::classify_application(app_name);
+                        let cat = format!("{:?}", info.category);
+                        entity.metadata.insert("service_category".into(), cat.clone());
+                        entity.metadata.insert("risk_tag".into(), info.risk_tag.into());
+                        entity.metadata.insert("service_description".into(), info.description.into());
+                        rel.metadata.insert("service_category".into(), cat);
+                    }
+                }
                 out.push((context_entity(ctx), rel, entity));
             }
         }
@@ -1479,5 +1533,110 @@ mod tests {
         let triples = parser.parse(xml);
         // Only the self-loop survives; the user row is suppressed.
         assert_eq!(triples.len(), 1);
+    }
+
+    // ── IP enrichment at parse time ──
+
+    #[test]
+    fn ip_entity_gets_classification_metadata() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<FortiAnalyzer_Report name="Daily Summary Report">
+    <chart name="Top User by Traffic">
+        <id value="1">
+            <User_Name>10.3.10.66</User_Name>
+            <Bytes>100</Bytes>
+            <Percent_of_Total>50%</Percent_of_Total>
+        </id>
+        <id value="2">
+            <User_Name>8.8.8.8</User_Name>
+            <Bytes>50</Bytes>
+            <Percent_of_Total>25%</Percent_of_Total>
+        </id>
+    </chart>
+</FortiAnalyzer_Report>"#;
+        let triples = run(xml);
+        // Private IP
+        let private_ip = triples
+            .iter()
+            .find(|(_, _, d)| d.id == "10.3.10.66")
+            .unwrap();
+        assert_eq!(
+            private_ip.2.metadata.get("ip_class").unwrap(),
+            "Private"
+        );
+        assert_eq!(
+            private_ip.2.metadata.get("is_internal").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            private_ip.2.metadata.get("subnet").unwrap(),
+            "10.3.10.0/24"
+        );
+        // Public IP
+        let public_ip = triples
+            .iter()
+            .find(|(_, _, d)| d.id == "8.8.8.8")
+            .unwrap();
+        assert_eq!(
+            public_ip.2.metadata.get("ip_class").unwrap(),
+            "Public"
+        );
+        assert_eq!(
+            public_ip.2.metadata.get("is_internal").unwrap(),
+            "false"
+        );
+    }
+
+    // ── Application service classification at parse time ──
+
+    #[test]
+    fn application_entity_gets_service_classification() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<FortiAnalyzer_Report name="Daily Summary Report">
+    <table name="Top Application by Severity">
+        <id value="1">
+            <Application>AnyDesk</Application>
+            <Category>Remote.Access</Category>
+            <Sessions>3021</Sessions>
+            <Bytes>135.04 MB</Bytes>
+        </id>
+        <id value="2">
+            <Application>ADFS</Application>
+            <Category>Authentication</Category>
+            <Sessions>500</Sessions>
+            <Bytes>10 MB</Bytes>
+        </id>
+    </table>
+</FortiAnalyzer_Report>"#;
+        let triples = run(xml);
+        // AnyDesk → RemoteAccess, high
+        let anydesk = triples
+            .iter()
+            .find(|(_, _, d)| d.id == "application:AnyDesk")
+            .unwrap();
+        assert_eq!(
+            anydesk.2.metadata.get("service_category").unwrap(),
+            "RemoteAccess"
+        );
+        assert_eq!(anydesk.2.metadata.get("risk_tag").unwrap(), "high");
+        // Radial relation also gets service_category
+        let anydesk_radial = triples
+            .iter()
+            .find(|(_, r, d)| d.id == "application:AnyDesk" && r.rel_type == RelationType::Connect && r.source_id.starts_with("faz:"))
+            .unwrap();
+        assert_eq!(
+            anydesk_radial.1.metadata.get("service_category").unwrap(),
+            "RemoteAccess"
+        );
+        // ADFS → Authentication, info
+        let adfs = triples
+            .iter()
+            .find(|(_, _, d)| d.id == "application:ADFS")
+            .unwrap();
+        assert_eq!(
+            adfs.2.metadata.get("service_category").unwrap(),
+            "Authentication"
+        );
+        assert_eq!(adfs.2.metadata.get("risk_tag").unwrap(), "info");
     }
 }

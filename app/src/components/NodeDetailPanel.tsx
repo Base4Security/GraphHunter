@@ -1,4 +1,6 @@
-import { X, Expand, Crosshair, Copy, MapPin } from "lucide-react";
+import { useState } from "react";
+import { X, Expand, Crosshair, Copy, MapPin, Globe } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import type { NodeDetails, EntityType } from "../types";
 import { ENTITY_COLORS } from "../types";
 
@@ -11,6 +13,13 @@ interface NodeDetailPanelProps {
   onShowNeighbourTypeOnMap?: (nodeId: string, entityType: string) => void;
 }
 
+/** Metadata keys rendered as enrichment badges instead of plain key-value rows. */
+const ENRICHMENT_KEYS = new Set([
+  "ip_class", "is_internal", "subnet",
+  "geo_country", "geo_country_code", "geo_city", "geo_asn", "geo_as_org", "geo_isp",
+  "service_category", "risk_tag", "service_description",
+]);
+
 export default function NodeDetailPanel({
   details,
   onClose,
@@ -20,10 +29,34 @@ export default function NodeDetailPanel({
 }: NodeDetailPanelProps) {
   const color =
     ENTITY_COLORS[details.entity_type as EntityType] || "#94a3b8";
+  const [enriching, setEnriching] = useState(false);
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(details.id);
   };
+
+  const handleEnrichIp = async () => {
+    setEnriching(true);
+    try {
+      await invoke("cmd_enrich_ip", { ip: details.id });
+      // Trigger a re-fetch of node details by clicking the node again
+      // (the enrichment data is now written into the entity's metadata)
+      onExpand(details.id);
+    } catch {
+      // Silently ignore — user can retry
+    } finally {
+      setEnriching(false);
+    }
+  };
+
+  const meta = details.metadata;
+  const isIp = details.entity_type === "IP";
+  const isApp = details.entity_type === "Application" || meta.service_category;
+  const isExternal = meta.is_internal === "false";
+  const hasGeo = !!meta.geo_country;
+
+  // Remaining metadata keys (not rendered as badges)
+  const regularMeta = Object.entries(meta).filter(([k]) => !ENRICHMENT_KEYS.has(k));
 
   const formatTimestamp = (ts: number) => {
     return new Date(ts * 1000).toISOString().replace("T", " ").slice(0, 19);
@@ -53,6 +86,51 @@ export default function NodeDetailPanel({
           </span>
         )}
       </div>
+
+      {/* Enrichment badges */}
+      {(isIp || isApp) && (
+        <div className="detail-badges">
+          {isIp && meta.is_internal === "true" && (
+            <span className="badge badge-internal">Internal</span>
+          )}
+          {isIp && isExternal && (
+            <span className="badge badge-external">External</span>
+          )}
+          {meta.subnet && (
+            <span className="badge badge-subnet">{meta.subnet}</span>
+          )}
+          {meta.geo_country && (
+            <span className="badge badge-geo">
+              {meta.geo_country_code || meta.geo_country}
+              {meta.geo_as_org ? ` / ${meta.geo_as_org}` : ""}
+            </span>
+          )}
+          {meta.geo_city && (
+            <span className="badge badge-geo">{meta.geo_city}</span>
+          )}
+          {meta.geo_asn && (
+            <span className="badge badge-geo">{meta.geo_asn}</span>
+          )}
+          {meta.service_category && (
+            <span className={`badge risk-${meta.risk_tag || "info"}`}>
+              {meta.service_category}
+            </span>
+          )}
+          {meta.service_description && (
+            <span className="badge badge-desc">{meta.service_description}</span>
+          )}
+          {isIp && isExternal && !hasGeo && (
+            <button
+              className="badge badge-action"
+              onClick={handleEnrichIp}
+              disabled={enriching}
+              title="Enrich IP with GeoIP data"
+            >
+              <Globe size={10} /> {enriching ? "..." : "Enrich IP"}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Degrees */}
       <div className="detail-degrees">
@@ -108,12 +186,12 @@ export default function NodeDetailPanel({
         </div>
       )}
 
-      {/* Metadata */}
-      {Object.keys(details.metadata).length > 0 && (
+      {/* Metadata (keys not rendered as badges above) */}
+      {regularMeta.length > 0 && (
         <div className="detail-section">
           <div className="detail-section-title">Metadata</div>
           <div className="detail-metadata">
-            {Object.entries(details.metadata).map(([k, v]) => (
+            {regularMeta.map(([k, v]) => (
               <div key={k} className="metadata-row">
                 <span className="metadata-key">{k}</span>
                 <span className="metadata-value" title={v}>

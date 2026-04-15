@@ -189,7 +189,6 @@ pub mod ffi {
     /// Rebuilt lazily when the Rust graph mutates.
     pub struct CachedSimdGraph {
         graph: GmGraph,
-        pub generation: u64,
         other_type_map: OtherTypeMap,
     }
 
@@ -246,7 +245,6 @@ pub mod ffi {
 
         CachedSimdGraph {
             graph: gm,
-            generation: 0,
             other_type_map: other_map,
         }
     }
@@ -337,9 +335,7 @@ pub mod ffi {
     use crate::interner::StringInterner;
 
     /// Placeholder — no C++ graph when SIMD is disabled.
-    pub struct CachedSimdGraph {
-        pub generation: u64,
-    }
+    pub struct CachedSimdGraph;
 
     pub fn simd_available() -> bool {
         false
@@ -350,7 +346,7 @@ pub mod ffi {
     }
 
     pub fn build_gm_graph(_hunter: &GraphHunter) -> CachedSimdGraph {
-        CachedSimdGraph { generation: 0 }
+        CachedSimdGraph
     }
 
     pub fn run_simd_search(

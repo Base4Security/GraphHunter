@@ -186,9 +186,10 @@ namespace avx2 {
 /// This is the "broadcast from shorter list" variant, optimal when
 /// lists have similar sizes (ratio < 32:1).
 
-#if defined(__AVX2__) || (defined(_MSC_VER) && defined(__AVX2__)) || (defined(_MSC_VER) && !defined(__clang__))
-// MSVC: AVX2 intrinsics available when compiled with /arch:AVX2.
-// GCC/Clang: __attribute__((target("avx2"))) enables AVX2 codegen for this function.
+#if (defined(__x86_64__) && !defined(_MSC_VER)) || (defined(_MSC_VER) && !defined(__clang__))
+// GCC/Clang on x86_64: __attribute__((target("avx2"))) enables AVX2 codegen
+// per function, so the AVX2 impl is always compiled in regardless of -march.
+// MSVC non-clang: whole-TU /arch:AVX2 is assumed (see CMakeLists.txt).
 
 #ifdef _MSC_VER
 #define GM_AVX2_TARGET

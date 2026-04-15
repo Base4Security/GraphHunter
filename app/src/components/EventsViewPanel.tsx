@@ -162,6 +162,7 @@ export default function EventsViewPanel({ selectedNodeId }: EventsViewPanelProps
               <th style={{ cursor: "pointer" }} onClick={() => handleSort("rel_type")} title="Sort by type">
                 Type{sortBy === "rel_type" ? " *" : ""}
               </th>
+              <th>Service</th>
               <th style={{ cursor: "pointer" }} onClick={() => handleSort("source")} title="Sort by source">
                 Source{sortBy === "source" ? " *" : ""}
               </th>
@@ -181,6 +182,13 @@ export default function EventsViewPanel({ selectedNodeId }: EventsViewPanelProps
                 </td>
                 <td className="events-view-time">{formatTimestamp(evt.timestamp)}</td>
                 <td className="events-view-type">{evt.rel_type}</td>
+                <td className="events-view-service">
+                  {evt.metadata.service_category ? (
+                    <span className={`service-tag risk-${evt.metadata.risk_tag || "info"}`}>
+                      {evt.metadata.service_category}
+                    </span>
+                  ) : "—"}
+                </td>
                 <td className="events-view-id" title={evt.source}>{evt.source.length > 32 ? evt.source.slice(0, 28) + "..." : evt.source}</td>
                 <td className="events-view-id" title={evt.target}>{evt.target.length > 32 ? evt.target.slice(0, 28) + "..." : evt.target}</td>
                 <td className="events-view-meta">

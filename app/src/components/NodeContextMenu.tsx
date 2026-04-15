@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Expand, Crosshair, Copy, Users, Pin, PinOff, ChevronDown } from "lucide-react";
 import type { ExpandFilter } from "../types";
@@ -34,6 +34,37 @@ export default function NodeContextMenu({
   onRemoveFromPathNodes,
 }: NodeContextMenuProps) {
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const [adjusted, setAdjusted] = useState<{ x: number; y: number } | null>(null);
+
+  // Measure menu after mount and flip / clamp so it always fits in the viewport.
+  // useLayoutEffect runs synchronously before paint so the user never sees the
+  // menu at an unadjusted position. The menu is hidden until adjusted is set.
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    // Top bar offset — query it live so changes to the bar height are picked up.
+    const topBar = document.querySelector(".top-bar");
+    const topOffset = topBar ? topBar.getBoundingClientRect().bottom + 4 : 56;
+
+    const margin = 8;
+    let finalX = Math.min(position.x, vw - rect.width - margin);
+    finalX = Math.max(margin, finalX);
+
+    let finalY: number;
+    if (position.y + rect.height + margin > vh) {
+      // Not enough space below — flip up.
+      finalY = position.y - rect.height;
+    } else {
+      finalY = position.y;
+    }
+    finalY = Math.max(topOffset, finalY);
+    finalY = Math.min(finalY, vh - rect.height - margin);
+
+    setAdjusted({ x: finalX, y: finalY });
+  }, [position.x, position.y]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -68,8 +99,9 @@ export default function NodeContextMenu({
       className="node-context-menu"
       style={{
         position: "fixed",
-        left: position.x,
-        top: position.y,
+        left: adjusted?.x ?? position.x,
+        top: adjusted?.y ?? position.y,
+        visibility: adjusted ? "visible" : "hidden",
       }}
       onClick={(e) => e.stopPropagation()}
     >

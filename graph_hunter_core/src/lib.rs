@@ -13,8 +13,10 @@ pub mod export;
 pub mod field_preview;
 pub mod forti_analyzer;
 pub mod generic;
+pub mod geoip;
 pub mod gnn_bridge;
 pub mod iis_w3c;
+pub mod ip_utils;
 pub mod graph;
 pub mod npu_scorer;
 pub mod hypothesis;
@@ -25,6 +27,7 @@ pub mod preview;
 pub mod relation;
 pub mod ingest;
 pub mod sentinel;
+pub mod service_classifier;
 pub mod simd_matcher;
 pub mod sources;
 pub mod spill;
@@ -106,6 +109,9 @@ pub use benchmark::{
     build_spawn_chain_hypothesis, build_lateral_movement_hypothesis,
     format_latex_row,
 };
+pub use geoip::{GeoIpError, GeoIpResult, write_geoip_to_metadata};
+pub use ip_utils::{classify_ip, is_private, is_public, subnet_24, group_by_subnet, same_subnet_24, IpClass};
+pub use service_classifier::{classify_application, is_remote_access, is_file_transfer, ServiceCategory, ServiceInfo};
 
 #[cfg(test)]
 mod tests {

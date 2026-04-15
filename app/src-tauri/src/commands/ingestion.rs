@@ -767,7 +767,7 @@ pub async fn cmd_load_data_streaming(
                                     ull_avail_virtual: u64,
                                     ull_avail_extended_virtual: u64,
                                 }
-                                extern "system" {
+                                unsafe extern "system" {
                                     fn GlobalMemoryStatusEx(lp_buffer: *mut MEMORYSTATUSEX) -> i32;
                                 }
                                 let mut mem_info = MaybeUninit::<MEMORYSTATUSEX>::zeroed();

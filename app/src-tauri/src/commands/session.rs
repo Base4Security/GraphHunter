@@ -178,8 +178,8 @@ fn load_session_blocking(
     app: &AppHandle,
     session_id: String,
 ) -> Result<SessionInfo, CommandError> {
-    let dir = session_data_dir().map_err(|e| CommandError::IoError(e))?;
-    let path = dir.join(format!("{}.json", session_id));
+    let _ = session_data_dir().map_err(CommandError::IoError)?;
+    let path = session_file_path(&session_id).map_err(CommandError::IoError)?;
 
     let mut sessions = state
         .sessions

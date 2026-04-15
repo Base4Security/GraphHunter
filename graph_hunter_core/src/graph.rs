@@ -302,6 +302,12 @@ impl GraphHunter {
         self.entities.get(&sid)
     }
 
+    /// Retrieves a mutable reference to an entity by its ID.
+    pub fn get_entity_mut(&mut self, id: &str) -> Option<&mut Entity> {
+        let sid = self.interner.get(id)?;
+        self.entities.get_mut(&sid)
+    }
+
     /// Retrieves all outgoing relations from a given entity (materialized).
     pub fn get_relations(&self, source_id: &str) -> Vec<Relation> {
         self.interner
@@ -435,13 +441,6 @@ impl GraphHunter {
         self.edge_store.finalize()?;
         self.edges_sorted = true;
         Ok(())
-    }
-
-    /// Ensures edges are sorted. Called internally before searches.
-    /// Returns true if edges were already sorted (no mutation needed).
-    #[inline]
-    fn ensure_sorted(&self) -> bool {
-        self.edges_sorted
     }
 
     /// Searches for paths matching a temporal hypothesis pattern.

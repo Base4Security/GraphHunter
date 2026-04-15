@@ -68,6 +68,20 @@ pub fn run() {
         api_token,
         npu_scorer: RwLock::new(None),
         sentinel_connector: RwLock::new(None),
+        geoip_provider: {
+            // Try to load MaxMind databases from $APP_DATA/GraphHunter/geoip/
+            let provider = dirs::data_dir()
+                .map(|d| d.join("GraphHunter").join("geoip"))
+                .and_then(|dir| {
+                    graph_hunter_core::geoip::maxmind::MaxMindProvider::from_directory(&dir).ok()
+                })
+                .filter(|p| p.is_available());
+            if provider.is_some() {
+                tracing::info!("MaxMind GeoIP databases loaded");
+            }
+            std::sync::Mutex::new(provider)
+        },
+        http_geoip_client: std::sync::Mutex::new(None), // set up after reqwest client is available
     });
     let http_port = std::env::var("GRAPHHUNTER_API_PORT")
         .ok()
@@ -180,6 +194,9 @@ pub fn run() {
             commands::sentinel::cmd_sentinel_check_env,
             // Azure streaming plan smoke test (Phase 5-9 core validation)
             commands::azure_streaming_smoke::cmd_azure_streaming_smoke_test,
+            // IP enrichment & subnet analysis
+            commands::enrichment::cmd_enrich_ip,
+            commands::enrichment::cmd_get_subnet_analysis,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Graph Hunter");

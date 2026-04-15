@@ -19,6 +19,16 @@ impl MetadataStore {
             return 0;
         }
         let offset = self.data.len() as u64;
+        // Compute the exact byte size up front so we grow the backing Vec
+        // once per append instead of letting `extend_from_slice` double-grow
+        // across 4 (count) + N × (2 + key_len + 2 + val_len) writes. At 200M
+        // relations this is the difference between amortized O(N) and
+        // log-factor thrash on the allocator.
+        let mut needed = 4usize; // count: u32
+        for (k, v) in metadata {
+            needed += 2 + k.len() + 2 + v.len();
+        }
+        self.data.reserve(needed);
         let count = metadata.len() as u32;
         self.data.extend_from_slice(&count.to_le_bytes());
         for (k, v) in metadata {

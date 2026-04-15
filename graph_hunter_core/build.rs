@@ -38,7 +38,13 @@ fn main() {
         } else {
             build.flag("-fno-exceptions");
             build.flag("-fno-rtti");
-            build.flag("-march=native");
+            // Baseline x86-64-v2 (SSE4.2). AVX2 code is emitted only inside
+            // functions marked __attribute__((target("avx2"))) and dispatched
+            // at runtime from `intersect_sorted`, so a binary built here runs
+            // on non-AVX2 CPUs via the scalar fallback. Override with
+            // GMATCH_ARCH=native when building for the exact host CPU.
+            let arch = std::env::var("GMATCH_ARCH").unwrap_or_else(|_| "x86-64-v2".into());
+            build.flag(&format!("-march={arch}"));
             build.flag("-Wall");
             build.flag("-Wextra");
         }

@@ -19,8 +19,6 @@ const SPILL_MAGIC: u32 = 0x47485350; // "GHSP"
 const SPILL_VERSION: u32 = 1;
 /// Size of a single CompactRelation record on disk (fixed layout).
 const RECORD_SIZE: usize = std::mem::size_of::<CompactRelation>();
-/// Default number of source-node entries the LRU cache holds.
-const DEFAULT_LRU_CAPACITY: usize = 10_000;
 /// Minimum free disk space (in bytes) the store insists on keeping before
 /// it will spill another file. At 1 GB we still have enough headroom for
 /// the merged output during finalize() at typical production scales; below

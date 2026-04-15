@@ -55,7 +55,6 @@ struct AllocSnapshot {
     allocs: usize,
     bytes: usize,
     deallocs: usize,
-    dealloc_bytes: usize,
 }
 
 fn enable_counting() {
@@ -72,7 +71,6 @@ fn disable_counting() -> AllocSnapshot {
         allocs: ALLOCS.load(Ordering::Relaxed),
         bytes: ALLOC_BYTES.load(Ordering::Relaxed),
         deallocs: DEALLOCS.load(Ordering::Relaxed),
-        dealloc_bytes: DEALLOC_BYTES.load(Ordering::Relaxed),
     }
 }
 

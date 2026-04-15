@@ -239,12 +239,12 @@ pub fn cmd_get_subgraph(state: State<Arc<AppState>>, node_ids: Vec<String>) -> R
         let nodes: Vec<SubgraphNode> = node_ids
             .iter()
             .filter_map(|id| graph.get_entity(id))
-            .map(|e| SubgraphNode {
-                id: e.id.clone(),
-                entity_type: format!("{}", e.entity_type),
-                score: e.score,
-                metadata: e.metadata.clone(),
-            })
+            .map(|e| SubgraphNode::new(
+                e.id.clone(),
+                format!("{}", e.entity_type),
+                e.score,
+                e.metadata.clone(),
+            ))
             .collect();
 
         const MAX_SUBGRAPH_EDGES: usize = 5000;

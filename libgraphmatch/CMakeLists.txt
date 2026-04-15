@@ -13,10 +13,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # that need exceptions (doctest's REQUIRE requires _CPPUNWIND on MSVC).
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-O3 -Wall -Wextra -Wpedantic)
-    # SIMD: enable AVX2 by default on x86_64 (override with -DGMATCH_ARCH=native)
-    set(GMATCH_ARCH "native" CACHE STRING "Architecture flag for -march")
+    # Baseline x86-64-v2 (SSE4.2). AVX2 is emitted only for functions marked
+    # __attribute__((target("avx2"))); scalar fallback is dispatched at runtime
+    # in `intersect_sorted`. Override with -DGMATCH_ARCH=native for host-specific
+    # builds when portability is not a concern.
+    set(GMATCH_ARCH "x86-64-v2" CACHE STRING "Architecture flag for -march")
     add_compile_options(-march=${GMATCH_ARCH})
 elseif(MSVC)
+    # MSVC lacks per-function target attributes, so the whole TU requires AVX2.
+    # Follow-up: split scalar/AVX2 into separate translation units for MSVC
+    # runtime portability.
     add_compile_options(/O2 /W4 /arch:AVX2)
 endif()
 

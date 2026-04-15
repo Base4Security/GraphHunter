@@ -47,12 +47,12 @@ fn neighborhood_to_subgraph(hood: &Neighborhood) -> Subgraph {
     let nodes = hood
         .nodes
         .iter()
-        .map(|n| SubgraphNode {
-            id: n.id.clone(),
-            entity_type: n.entity_type.clone(),
-            score: n.score,
-            metadata: n.metadata.clone(),
-        })
+        .map(|n| SubgraphNode::new(
+            n.id.clone(),
+            n.entity_type.clone(),
+            n.score,
+            n.metadata.clone(),
+        ))
         .collect();
     let edges = hood
         .edges
@@ -77,12 +77,12 @@ fn build_subgraph_for_ids(state: &AppState, node_ids: &[String]) -> Result<Subgr
         let nodes: Vec<SubgraphNode> = node_ids
             .iter()
             .filter_map(|id| graph.get_entity(id))
-            .map(|e| SubgraphNode {
-                id: e.id.clone(),
-                entity_type: format!("{}", e.entity_type),
-                score: e.score,
-                metadata: e.metadata.clone(),
-            })
+            .map(|e| SubgraphNode::new(
+                e.id.clone(),
+                format!("{}", e.entity_type),
+                e.score,
+                e.metadata.clone(),
+            ))
             .collect();
         let mut edges: Vec<SubgraphEdge> = Vec::new();
         'outer: for source_id in node_ids {
@@ -228,7 +228,28 @@ fn build_app(state: Arc<AppState>) -> Router {
         .route("/hunt_results", get(handler_hunt_results))
         .route("/notes", post(handler_create_note))
         .route("/notes/", post(handler_create_note))
+        .route("/notes/list", get(handler_list_notes))
+        .route("/graph_summary", get(handler_graph_summary))
+        .route("/entity_type_counts", get(handler_entity_type_counts))
+        .route("/temporal_heatmap", get(handler_temporal_heatmap))
+        .route("/subnet_analysis", get(handler_subnet_analysis))
+        .route("/enrich_ip", post(handler_enrich_ip))
+        .route("/catalog", get(handler_catalog))
+        .route("/datasets", get(handler_list_datasets))
+        .route("/path_nodes", get(handler_path_nodes))
+        .route("/export_subgraph", post(handler_export_subgraph))
+        .route("/parse_dsl", post(handler_parse_dsl))
+        .route("/events_paginated", get(handler_events_paginated))
+        .route("/expand_grouped", get(handler_expand_grouped))
+        .route("/export_hunt_results", post(handler_export_hunt_results))
+        .route("/enable_anomaly_scoring", post(handler_enable_anomaly_scoring))
+        .route("/compute_scores", post(handler_compute_scores))
         .fallback(fallback_404)
+        // 10 MB cap on request bodies. Hunt payloads are small (a DSL string
+        // plus maybe a note); anything larger is almost certainly malformed
+        // or hostile. Without this, a POST with a 1 GB JSON body would OOM
+        // the whole process before a handler ever runs.
+        .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
         .layer(axum::middleware::from_fn(log_requests))
         .with_state(state)
@@ -454,12 +475,12 @@ async fn handler_subgraph(
                 let nodes: Vec<SubgraphNode> = node_ids
                     .iter()
                     .filter_map(|id| graph.get_entity(id))
-                    .map(|e| SubgraphNode {
-                        id: e.id.clone(),
-                        entity_type: format!("{}", e.entity_type),
-                        score: e.score,
-                        metadata: e.metadata.clone(),
-                    })
+                    .map(|e| SubgraphNode::new(
+                        e.id.clone(),
+                        format!("{}", e.entity_type),
+                        e.score,
+                        e.metadata.clone(),
+                    ))
                     .collect();
                 let mut edges: Vec<SubgraphEdge> = Vec::new();
                 'outer: for source_id in &node_ids {
@@ -723,5 +744,447 @@ async fn handler_run_hunt(
         Ok(Ok(Err(e))) => err_json(e),
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
         Err(_) => err_json("Hunt timed out after 30 seconds".to_string()),
+    }
+}
+
+// ── New MCP endpoints ──────────────────────────────────────────────────
+
+async fn handler_graph_summary(State(state): State<Arc<AppState>>) -> Response {
+    match with_current_graph(state.as_ref(), |g| Ok(g.get_graph_summary())) {
+        Ok(v) => ok_json(v),
+        Err(e) => err_json(e),
+    }
+}
+
+async fn handler_entity_type_counts(State(state): State<Arc<AppState>>) -> Response {
+    match with_current_graph(state.as_ref(), |g| {
+        let counts: Vec<serde_json::Value> = g
+            .entity_type_counts()
+            .into_iter()
+            .map(|(t, c)| serde_json::json!({ "entity_type": t, "count": c }))
+            .collect();
+        Ok(counts)
+    }) {
+        Ok(v) => ok_json(v),
+        Err(e) => err_json(e),
+    }
+}
+
+async fn handler_temporal_heatmap(State(state): State<Arc<AppState>>) -> Response {
+    match with_current_graph(state.as_ref(), |g| Ok(g.temporal_heatmap())) {
+        Ok(v) => ok_json(v),
+        Err(e) => err_json(e),
+    }
+}
+
+async fn handler_subnet_analysis(State(state): State<Arc<AppState>>) -> Response {
+    match with_current_graph(state.as_ref(), |graph| {
+        use graph_hunter_core::types::EntityType;
+        use graph_hunter_core::ip_utils;
+        use std::collections::HashMap;
+
+        let ip_ids: Vec<String> = graph
+            .entity_ids_for_type(&EntityType::IP)
+            .unwrap_or_default();
+
+        if ip_ids.is_empty() {
+            return Ok(serde_json::json!([]));
+        }
+
+        let refs: Vec<&str> = ip_ids.iter().map(|s| s.as_str()).collect();
+        let subnet_groups = ip_utils::group_by_subnet(&refs);
+
+        let mut result: Vec<serde_json::Value> = Vec::new();
+        for (subnet, ips) in subnet_groups {
+            let is_internal = ips.first().map(|ip| ip_utils::is_private(ip)).unwrap_or(false);
+            let mut total_bytes: u64 = 0;
+            let mut has_bytes = false;
+            let mut service_counts: HashMap<String, usize> = HashMap::new();
+
+            for ip_str in &ips {
+                if let Some(entity) = graph.get_entity(ip_str) {
+                    if let Some(b) = entity.metadata.get("bytes") {
+                        if let Ok(n) = b.trim().parse::<u64>() {
+                            total_bytes += n;
+                            has_bytes = true;
+                        }
+                    }
+                }
+                for rel in graph.get_relations(ip_str) {
+                    if let Some(cat) = rel.metadata.get("service_category") {
+                        *service_counts.entry(cat.clone()).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            let mut top: Vec<(String, usize)> = service_counts.into_iter().collect();
+            top.sort_by(|a, b| b.1.cmp(&a.1));
+            let top_services: Vec<String> = top.into_iter().map(|(name, _)| name).collect();
+
+            result.push(serde_json::json!({
+                "subnet": subnet,
+                "ip_count": ips.len(),
+                "ips": ips,
+                "total_bytes": if has_bytes { Some(total_bytes) } else { None::<u64> },
+                "is_internal": is_internal,
+                "top_services": top_services,
+            }));
+        }
+        result.sort_by(|a, b| {
+            let ca = a["ip_count"].as_u64().unwrap_or(0);
+            let cb = b["ip_count"].as_u64().unwrap_or(0);
+            cb.cmp(&ca)
+        });
+        Ok(serde_json::json!(result))
+    }) {
+        Ok(v) => ok_json(v),
+        Err(e) => err_json(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EnrichIpBody {
+    ip: String,
+}
+
+async fn handler_enrich_ip(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<EnrichIpBody>,
+) -> Response {
+    use graph_hunter_core::{ip_utils, geoip, write_geoip_to_metadata};
+
+    if !ip_utils::is_public(&body.ip) {
+        return err_json(format!("IP {} is not a public/routable address", body.ip));
+    }
+
+    // Try offline MaxMind first
+    let maxmind_result = {
+        let provider = state.geoip_provider.lock().ok();
+        provider.and_then(|guard| guard.as_ref().and_then(|p| p.lookup(&body.ip)))
+    };
+
+    let result = if let Some(r) = maxmind_result {
+        r
+    } else {
+        // Try HTTP fallback
+        let client = {
+            let guard = state.http_geoip_client.lock().ok();
+            guard.and_then(|g| g.clone())
+        };
+        match client {
+            Some(c) => {
+                let provider = geoip::http::HttpGeoIpProvider::new(c);
+                let cancel = tokio_util::sync::CancellationToken::new();
+                match provider.lookup(&body.ip, cancel).await {
+                    Ok(r) => r,
+                    Err(e) => return err_json(format!("GeoIP lookup failed: {e}")),
+                }
+            }
+            None => return err_json("No GeoIP provider available".to_string()),
+        }
+    };
+
+    // Write to entity metadata
+    let _ = crate::with_current_graph_mut(state.as_ref(), |graph| {
+        if let Some(entity) = graph.get_entity_mut(&body.ip) {
+            write_geoip_to_metadata(&mut entity.metadata, &result);
+        }
+        Ok(())
+    });
+
+    ok_json(result)
+}
+
+async fn handler_catalog(State(_state): State<Arc<AppState>>) -> Response {
+    let catalog = graph_hunter_core::get_catalog();
+    ok_json(catalog)
+}
+
+async fn handler_list_datasets(State(state): State<Arc<AppState>>) -> Response {
+    match crate::with_current_session(state.as_ref(), |session| {
+        let datasets = session.datasets.read().map_err(|e| {
+            crate::error::CommandError::GraphLocked(format!("Lock poisoned: {e}"))
+        })?;
+        Ok(datasets.clone())
+    }) {
+        Ok(v) => ok_json(v),
+        Err(e) => err_json(e),
+    }
+}
+
+async fn handler_path_nodes(State(state): State<Arc<AppState>>) -> Response {
+    match crate::with_current_session(state.as_ref(), |session| {
+        let nodes = session.path_node_ids.read().map_err(|e| {
+            crate::error::CommandError::GraphLocked(format!("Lock poisoned: {e}"))
+        })?;
+        Ok(nodes.clone())
+    }) {
+        Ok(v) => ok_json(v),
+        Err(e) => err_json(e),
+    }
+}
+
+async fn handler_list_notes(State(state): State<Arc<AppState>>) -> Response {
+    match crate::with_current_session(state.as_ref(), |session| {
+        let notes = session.notes.read().map_err(|e| {
+            crate::error::CommandError::GraphLocked(format!("Lock poisoned: {e}"))
+        })?;
+        Ok(notes.clone())
+    }) {
+        Ok(v) => ok_json(v),
+        Err(e) => err_json(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportSubgraphBody {
+    node_ids: Vec<String>,
+    format: Option<String>,
+}
+
+async fn handler_export_subgraph(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ExportSubgraphBody>,
+) -> Response {
+    let fmt = body.format.unwrap_or_else(|| "json".to_string());
+    match with_current_graph(state.as_ref(), |graph| {
+        use graph_hunter_core::export::{
+            ExportSubgraphEdge, ExportSubgraphNode, export_subgraph_csv, export_subgraph_json,
+        };
+        let id_set: HashSet<&str> = body.node_ids.iter().map(|s| s.as_str()).collect();
+        struct ON { id: String, entity_type: String, score: f64 }
+        struct OE { source: String, target: String, rel_type: String, timestamp: i64 }
+        let owned_nodes: Vec<ON> = body.node_ids.iter()
+            .filter_map(|id| graph.get_entity(id))
+            .map(|e| ON { id: e.id.clone(), entity_type: format!("{}", e.entity_type), score: e.score })
+            .collect();
+        let mut owned_edges: Vec<OE> = Vec::new();
+        for src in &body.node_ids {
+            for c in graph.get_compact_relations(src) {
+                if owned_edges.len() >= 10_000 { break; }
+                let dst = graph.interner.resolve(c.dest_sid);
+                if id_set.contains(dst) {
+                    owned_edges.push(OE {
+                        source: graph.interner.resolve(c.source_sid).to_string(),
+                        target: dst.to_string(),
+                        rel_type: format!("{}", c.rel_type()),
+                        timestamp: c.timestamp,
+                    });
+                }
+            }
+        }
+        let en: Vec<ExportSubgraphNode<'_>> = owned_nodes.iter()
+            .map(|n| ExportSubgraphNode { id: &n.id, entity_type: &n.entity_type, score: n.score })
+            .collect();
+        let ee: Vec<ExportSubgraphEdge<'_>> = owned_edges.iter()
+            .map(|e| ExportSubgraphEdge { source: &e.source, target: &e.target, rel_type: &e.rel_type, timestamp: e.timestamp })
+            .collect();
+        let mut buf = Vec::new();
+        match fmt.as_str() {
+            "csv" => export_subgraph_csv(&en, &ee, &mut buf)
+                .map_err(|e| crate::error::CommandError::IoError(e.to_string()))?,
+            _ => export_subgraph_json(&en, &ee, &mut buf)
+                .map_err(|e| crate::error::CommandError::IoError(e.to_string()))?,
+        }
+        String::from_utf8(buf).map_err(|e| crate::error::CommandError::Internal(format!("{e}")))
+    }) {
+        Ok(text) => ok_json(serde_json::json!({ "data": text, "format": fmt })),
+        Err(e) => err_json(e),
+    }
+}
+
+// ── Phase 2: Complete MCP coverage ─────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct ParseDslBody {
+    dsl: String,
+    name: Option<String>,
+}
+
+async fn handler_parse_dsl(Json(body): Json<ParseDslBody>) -> Response {
+    match graph_hunter_core::parse_dsl(&body.dsl, body.name.as_deref()) {
+        Ok(result) => ok_json(serde_json::json!({
+            "valid": true,
+            "formatted": result.formatted,
+            "steps": result.hypothesis.steps.len(),
+        })),
+        Err(e) => ok_json(serde_json::json!({
+            "valid": false,
+            "error": e.to_string(),
+        })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EventsPaginatedQuery {
+    node_id: String,
+    page: Option<usize>,
+    page_size: Option<usize>,
+    sort_by: Option<String>,
+}
+
+async fn handler_events_paginated(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<EventsPaginatedQuery>,
+) -> Response {
+    let state_clone = state.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            with_current_graph(state_clone.as_ref(), |graph| {
+                let page = q.page.unwrap_or(0);
+                let page_size = q.page_size.unwrap_or(100);
+
+                let mut all_edges: Vec<SubgraphEdge> = Vec::new();
+                for compact in graph.get_compact_relations(&q.node_id) {
+                    all_edges.push(SubgraphEdge {
+                        source: graph.interner.resolve(compact.source_sid).to_string(),
+                        target: graph.interner.resolve(compact.dest_sid).to_string(),
+                        rel_type: format!("{}", compact.rel_type()),
+                        timestamp: compact.timestamp,
+                        metadata: graph.meta_store.get(compact.metadata_offset),
+                        dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
+                    });
+                }
+                let target_sid = graph.interner.get(&q.node_id);
+                for &source_sid in graph.get_reverse_source_sids(&q.node_id) {
+                    for compact in graph.get_relations_by_sid(source_sid) {
+                        if Some(compact.dest_sid) == target_sid {
+                            all_edges.push(SubgraphEdge {
+                                source: graph.interner.resolve(compact.source_sid).to_string(),
+                                target: graph.interner.resolve(compact.dest_sid).to_string(),
+                                rel_type: format!("{}", compact.rel_type()),
+                                timestamp: compact.timestamp,
+                                metadata: graph.meta_store.get(compact.metadata_offset),
+                                dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
+                            });
+                        }
+                    }
+                }
+
+                match q.sort_by.as_deref() {
+                    Some("timestamp") => all_edges.sort_by_key(|e| e.timestamp),
+                    Some("rel_type") => all_edges.sort_by(|a, b| a.rel_type.cmp(&b.rel_type)),
+                    Some("source") => all_edges.sort_by(|a, b| a.source.cmp(&b.source)),
+                    Some("target") => all_edges.sort_by(|a, b| a.target.cmp(&b.target)),
+                    _ => {}
+                }
+
+                let total_count = all_edges.len();
+                let start = page * page_size;
+                let events: Vec<SubgraphEdge> = all_edges.into_iter().skip(start).take(page_size).collect();
+
+                Ok(serde_json::json!({
+                    "events": events,
+                    "total_count": total_count,
+                    "page": page,
+                    "page_size": page_size,
+                }))
+            })
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok(v))) => ok_json(v),
+        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Err(e)) => err_json(format!("Task error: {e}")),
+        Err(_) => err_json("Events query timed out"),
+    }
+}
+
+async fn handler_expand_grouped(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ExpandQuery>,
+) -> Response {
+    let state_clone = state.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            with_current_graph(state_clone.as_ref(), |graph| {
+                graph
+                    .get_neighborhood_grouped(
+                        &q.node_id,
+                        q.max_hops.unwrap_or(1),
+                        q.max_nodes.unwrap_or(50),
+                        None,
+                    )
+                    .ok_or_else(|| crate::error::CommandError::InvalidInput(
+                        format!("Entity not found: {}", q.node_id),
+                    ))
+            })
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok(v))) => ok_json(v),
+        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Err(e)) => err_json(format!("Task error: {e}")),
+        Err(_) => err_json("Expand grouped timed out"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportHuntBody {
+    format: Option<String>,
+}
+
+async fn handler_export_hunt_results(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ExportHuntBody>,
+) -> Response {
+    let fmt = body.format.unwrap_or_else(|| "json".to_string());
+
+    let cache = {
+        let guard = state.cached_hunt_paths.read();
+        match guard {
+            Ok(g) if !g.is_empty() => g.clone(),
+            _ => return err_json("No hunt results to export. Run a hunt first."),
+        }
+    };
+
+    match with_current_graph(state.as_ref(), |graph| {
+        use graph_hunter_core::export::{export_hunt_results_csv, export_hunt_results_json};
+        let (scored, _) = graph.score_and_paginate_paths(&cache, 0, cache.len(), None);
+        let mut buf = Vec::new();
+        match fmt.as_str() {
+            "csv" => export_hunt_results_csv(&scored, &mut buf)
+                .map_err(|e| crate::error::CommandError::IoError(e.to_string()))?,
+            _ => export_hunt_results_json(&scored, &mut buf)
+                .map_err(|e| crate::error::CommandError::IoError(e.to_string()))?,
+        }
+        String::from_utf8(buf).map_err(|e| crate::error::CommandError::Internal(format!("{e}")))
+    }) {
+        Ok(text) => ok_json(serde_json::json!({ "data": text, "format": fmt })),
+        Err(e) => err_json(e),
+    }
+}
+
+async fn handler_enable_anomaly_scoring(State(state): State<Arc<AppState>>) -> Response {
+    match crate::with_current_graph_mut(state.as_ref(), |graph| {
+        graph.enable_anomaly_scoring(Default::default());
+        Ok(serde_json::json!({ "enabled": true }))
+    }) {
+        Ok(v) => ok_json(v),
+        Err(e) => err_json(e),
+    }
+}
+
+async fn handler_compute_scores(State(state): State<Arc<AppState>>) -> Response {
+    let state_clone = state.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        tokio::task::spawn_blocking(move || {
+            crate::with_current_graph_mut(state_clone.as_ref(), |graph| {
+                graph.compute_scores();
+                Ok(serde_json::json!({ "computed": true }))
+            })
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok(v))) => ok_json(v),
+        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Err(e)) => err_json(format!("Task error: {e}")),
+        Err(_) => err_json("Score computation timed out"),
     }
 }

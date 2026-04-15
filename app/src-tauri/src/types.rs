@@ -55,6 +55,38 @@ pub struct SubgraphNode {
     pub entity_type: String,
     pub score: f64,
     pub metadata: HashMap<String, String>,
+    /// For `IP` entities: "Private" / "Public" / "Loopback" / etc. so the
+    /// frontend can badge internal vs external IPs without re-parsing the
+    /// address on every render. `None` for non-IP entities or unparseable
+    /// values. Per analyst feedback (2026-04-10), internal/external is the
+    /// very first question asked of any finding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_class: Option<String>,
+}
+
+/// Computes the IP class label for a node about to be serialized to the
+/// frontend. Returns `None` for non-IP entity types so the field is omitted.
+pub fn ip_class_for(entity_type: &str, id: &str) -> Option<String> {
+    if entity_type != "IP" {
+        return None;
+    }
+    graph_hunter_core::classify_ip(id).map(|c| format!("{:?}", c))
+}
+
+impl SubgraphNode {
+    /// Builds a SubgraphNode and eagerly computes its `ip_class` via
+    /// [`ip_class_for`]. Callers should prefer this over struct-literal
+    /// construction so the frontend always sees the internal/external
+    /// classification for IP entities.
+    pub fn new(
+        id: String,
+        entity_type: String,
+        score: f64,
+        metadata: HashMap<String, String>,
+    ) -> Self {
+        let ip_class = ip_class_for(&entity_type, &id);
+        Self { id, entity_type, score, metadata, ip_class }
+    }
 }
 
 #[derive(Clone, Serialize)]

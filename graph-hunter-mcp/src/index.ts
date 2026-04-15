@@ -188,7 +188,7 @@ function textContent(text: string) {
 
 const server = new McpServer({
   name: "graph-hunter-mcp",
-  version: "1.0.0",
+  version: "1.2.0",
 });
 
 // check_connection – verify app is running and optionally if a session is loaded (no session required)
@@ -438,13 +438,371 @@ server.tool(
   }
 );
 
+// ── New tools: maximize info extraction for LLMs ──
+
+// get_graph_summary – comprehensive overview of the entire graph
+server.tool(
+  "get_graph_summary",
+  "Get a comprehensive summary of the entire graph: entity counts, relation counts, type distribution, time range, and top anomalies. This is the best starting point for understanding what data is in the graph. Call this first to orient yourself before diving into specific entities or hunts.",
+  async () => {
+    const start = Date.now();
+    log("tool", "get_graph_summary", {});
+    try {
+      const v = await apiGet("/graph_summary");
+      log("tool", "get_graph_summary done", { duration_ms: Date.now() - start, result: "ok" });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "get_graph_summary error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// get_entity_type_counts – how many entities of each type exist
+server.tool(
+  "get_entity_type_counts",
+  "Get the count of entities for each type (e.g. 150 IPs, 42 Hosts, 30 Users). Use to understand the composition of the graph and identify which entity types are most prevalent.",
+  async () => {
+    const start = Date.now();
+    log("tool", "get_entity_type_counts", {});
+    try {
+      const v = await apiGet("/entity_type_counts");
+      const summaryStr = summarizeResult("get_entity_type_counts", v);
+      log("tool", "get_entity_type_counts done", { duration_ms: Date.now() - start, result: summaryStr });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "get_entity_type_counts error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// get_temporal_heatmap – hourly activity patterns by relation type
+server.tool(
+  "get_temporal_heatmap",
+  "Get hourly activity patterns showing when events occur by relation type (Auth, Connect, Execute, etc.). Returns bucketed counts. Use to identify spikes, off-hours activity, or unusual temporal patterns that may indicate compromise.",
+  async () => {
+    const start = Date.now();
+    log("tool", "get_temporal_heatmap", {});
+    try {
+      const v = await apiGet("/temporal_heatmap", undefined, HEAVY_TIMEOUT_MS);
+      const summaryStr = summarizeResult("get_temporal_heatmap", v);
+      log("tool", "get_temporal_heatmap done", { duration_ms: Date.now() - start, result: summaryStr });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "get_temporal_heatmap error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// get_subnet_analysis – group IPs by /24 subnet
+server.tool(
+  "get_subnet_analysis",
+  "Analyze IP entities by /24 subnet: groups all IPs in the graph by their network segment, shows whether each subnet is internal or external, aggregates byte counts, and lists connected services. Use to identify which network segments are most active, detect lateral movement within subnets, or find unusual external destinations.",
+  async () => {
+    const start = Date.now();
+    log("tool", "get_subnet_analysis", {});
+    try {
+      const v = await apiGet("/subnet_analysis", undefined, HEAVY_TIMEOUT_MS);
+      const summaryStr = summarizeResult("get_subnet_analysis", v);
+      log("tool", "get_subnet_analysis done", { duration_ms: Date.now() - start, result: summaryStr });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "get_subnet_analysis error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// enrich_ip – GeoIP enrichment for external IPs
+server.tool(
+  "enrich_ip",
+  "Enrich a public/external IP address with GeoIP data: country, city, ASN, ISP/organization. Only works for public IPs (returns error for private/internal IPs). The enrichment data is persisted on the entity's metadata, so subsequent get_node_details calls will include it. Use to identify where external connections go (country, ISP) for threat analysis.",
+  {
+    ip: z.string().describe("Public IP address to enrich (e.g. '8.8.8.8')"),
+  },
+  async ({ ip }) => {
+    const start = Date.now();
+    log("tool", "enrich_ip", { ip });
+    try {
+      const v = await apiPost("/enrich_ip", { ip });
+      log("tool", "enrich_ip done", { duration_ms: Date.now() - start, result: "ok" });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "enrich_ip error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// get_catalog – available ATT&CK hypothesis patterns
+server.tool(
+  "get_catalog",
+  "Get the catalog of pre-built threat-hunting hypotheses based on MITRE ATT&CK techniques. Each entry has an id, name, description, and DSL pattern that can be passed to run_hunt. Use this to discover what hunt patterns are available and find the right hypothesis for a given threat scenario.",
+  async () => {
+    const start = Date.now();
+    log("tool", "get_catalog", {});
+    try {
+      const v = await apiGet("/catalog");
+      const summaryStr = summarizeResult("get_catalog", v);
+      log("tool", "get_catalog done", { duration_ms: Date.now() - start, result: summaryStr });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "get_catalog error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// list_datasets – loaded data sources
+server.tool(
+  "list_datasets",
+  "List all ingested datasets in the current session. Each dataset represents a data source (e.g. a log file or SIEM query) with its name, file path, entity/relation counts, and timestamp. Use to understand what data is available for analysis and where it came from.",
+  async () => {
+    const start = Date.now();
+    log("tool", "list_datasets", {});
+    try {
+      const v = await apiGet("/datasets");
+      const summaryStr = summarizeResult("list_datasets", v);
+      log("tool", "list_datasets done", { duration_ms: Date.now() - start, result: summaryStr });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "list_datasets error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// get_path_nodes – pinned investigation nodes
+server.tool(
+  "get_path_nodes",
+  "Get the list of pinned 'path nodes' in the current session. Path nodes are entities marked by the analyst as important to the investigation — they serve as waypoints in the threat hunting workflow. Use to understand the current investigation focus.",
+  async () => {
+    const start = Date.now();
+    log("tool", "get_path_nodes", {});
+    try {
+      const v = await apiGet("/path_nodes");
+      const summaryStr = summarizeResult("get_path_nodes", v);
+      log("tool", "get_path_nodes done", { duration_ms: Date.now() - start, result: summaryStr });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "get_path_nodes error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// get_notes – all session notes
+server.tool(
+  "get_notes",
+  "Get all notes in the current session. Notes are analyst observations, findings, or reports — optionally linked to specific graph nodes. Use to read the analyst's existing findings and build on their investigation.",
+  async () => {
+    const start = Date.now();
+    log("tool", "get_notes", {});
+    try {
+      const v = await apiGet("/notes/list");
+      const summaryStr = summarizeResult("get_notes", v);
+      log("tool", "get_notes done", { duration_ms: Date.now() - start, result: summaryStr });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "get_notes error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// export_subgraph – export subgraph as JSON or CSV text
+server.tool(
+  "export_subgraph",
+  "Export the subgraph (nodes + edges) for given node IDs as JSON or CSV text. Use when you need the raw data for a set of entities — for example, to produce a detailed report of a suspicious path, or to analyze entity metadata in bulk.",
+  {
+    node_ids: z.array(z.string()).describe("List of entity IDs to include in the export"),
+    format: z.enum(["json", "csv"]).optional().default("json").describe("Export format: 'json' or 'csv'"),
+  },
+  async ({ node_ids, format }) => {
+    const start = Date.now();
+    log("tool", "export_subgraph", { node_count: node_ids.length, format });
+    try {
+      const v = await apiPost("/export_subgraph", { node_ids, format }, HEAVY_TIMEOUT_MS) as { data: string; format: string };
+      log("tool", "export_subgraph done", { duration_ms: Date.now() - start, result: `format=${v.format} len=${v.data.length}` });
+      return textContent(v.data);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "export_subgraph error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// ── Phase 2: Complete MCP coverage (6 new tools) ──
+
+// parse_dsl – validate DSL before executing hunt
+server.tool(
+  "parse_dsl",
+  "Validate a hunt hypothesis DSL pattern WITHOUT executing it. Returns whether the DSL is valid, the formatted version, and step count. Use BEFORE run_hunt to catch syntax errors cheaply. DSL syntax: 'EntityType -[RelationType]-> EntityType -[RelationType]-> EntityType'. Example: 'IP -[Connect]-> Host -[Auth]-> User -[Execute]-> Process'.",
+  {
+    dsl: z.string().describe("DSL pattern to validate, e.g. 'IP -[Connect]-> Host -[Execute]-> Process'"),
+    name: z.string().optional().describe("Optional name for the hypothesis"),
+  },
+  async ({ dsl, name }) => {
+    const start = Date.now();
+    log("tool", "parse_dsl", { dsl: truncate(dsl, 80), name: name ?? "-" });
+    try {
+      const v = await apiPost("/parse_dsl", { dsl, name });
+      const result = v as { valid: boolean; formatted?: string; error?: string };
+      log("tool", "parse_dsl done", { duration_ms: Date.now() - start, valid: result.valid });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "parse_dsl error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// get_events_paginated – paginated, sortable events for a node
+server.tool(
+  "get_events_paginated",
+  "Get paginated and sortable events (relations/edges) for a node. Returns events where the node is source or target. Supports sort_by: 'timestamp' (chronological order), 'rel_type', 'source', 'target'. Returns total_count for pagination. Better than get_events_for_node when the node has many connections.",
+  {
+    node_id: z.string().describe("Entity ID to get events for"),
+    page: z.number().optional().default(0).describe("Page index (0-based)"),
+    page_size: z.number().optional().default(50).describe("Events per page (default 50)"),
+    sort_by: z.string().optional().describe("Sort field: 'timestamp', 'rel_type', 'source', 'target'"),
+  },
+  async ({ node_id, page, page_size, sort_by }) => {
+    const start = Date.now();
+    log("tool", "get_events_paginated", { node_id: truncate(node_id, 50), page, page_size, sort_by: sort_by ?? "-" });
+    try {
+      const params: Record<string, string> = { node_id, page: String(page), page_size: String(page_size) };
+      if (sort_by) params.sort_by = sort_by;
+      const v = await apiGet("/events_paginated", params, HEAVY_TIMEOUT_MS);
+      const summaryStr = summarizeResult("get_events_paginated", v);
+      log("tool", "get_events_paginated done", { duration_ms: Date.now() - start, result: summaryStr });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "get_events_paginated error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// expand_node_grouped – neighborhood with grouped edges for high-degree nodes
+server.tool(
+  "expand_node_grouped",
+  "Expand a node's neighborhood with edge GROUPING — collapses repeated edge types into summaries (e.g. '42 Connect edges to IPs' instead of 42 individual edges). Use for HIGH-DEGREE nodes where expand_node would return too much data or timeout. Returns grouped neighbor edges with counts, first/last timestamps per group.",
+  {
+    node_id: z.string().describe("Entity ID to expand from"),
+    max_hops: z.number().optional().describe("Max hops (default 1)"),
+    max_nodes: z.number().optional().describe("Max nodes in result (default 50)"),
+  },
+  async ({ node_id, max_hops, max_nodes }) => {
+    const start = Date.now();
+    log("tool", "expand_node_grouped", { node_id: truncate(node_id, 50), max_hops: max_hops ?? 1, max_nodes: max_nodes ?? "-" });
+    try {
+      const params: Record<string, string> = { node_id };
+      if (max_hops != null) params.max_hops = String(max_hops);
+      if (max_nodes != null) params.max_nodes = String(max_nodes);
+      const v = await apiGet("/expand_grouped", params, HEAVY_TIMEOUT_MS);
+      const summaryStr = summarizeResult("expand_node_grouped", v);
+      log("tool", "expand_node_grouped done", { duration_ms: Date.now() - start, result: summaryStr });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "expand_node_grouped error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// export_hunt_results – export last hunt results as text
+server.tool(
+  "export_hunt_results",
+  "Export the results of the last run_hunt as JSON or CSV text. Includes full scoring for all paths (max_score, total_score, anomaly_score, chain_summary, time range). Use to produce a detailed threat report after hunting. Call run_hunt first.",
+  {
+    format: z.enum(["json", "csv"]).optional().default("json").describe("Export format"),
+  },
+  async ({ format }) => {
+    const start = Date.now();
+    log("tool", "export_hunt_results", { format });
+    try {
+      const v = await apiPost("/export_hunt_results", { format }, HEAVY_TIMEOUT_MS) as { data: string; format: string };
+      log("tool", "export_hunt_results done", { duration_ms: Date.now() - start, result: `format=${v.format} len=${v.data.length}` });
+      return textContent(v.data);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "export_hunt_results error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// enable_anomaly_scoring – activate anomaly-based hunt ranking
+server.tool(
+  "enable_anomaly_scoring",
+  "Enable anomaly-based scoring for hunt results. Once enabled, run_hunt uses score-guided DFS and get_hunt_results includes anomaly_score and anomaly_breakdown (entity rarity, edge rarity, temporal novelty, neighborhood concentration). Call this BEFORE running hunts to get anomaly-ranked results instead of just structural scores.",
+  async () => {
+    const start = Date.now();
+    log("tool", "enable_anomaly_scoring", {});
+    try {
+      const v = await apiPost("/enable_anomaly_scoring", {});
+      log("tool", "enable_anomaly_scoring done", { duration_ms: Date.now() - start, result: "ok" });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "enable_anomaly_scoring error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// compute_scores – recalculate all entity scores
+server.tool(
+  "compute_scores",
+  "Recalculate all entity scores: degree centrality, PageRank, and betweenness. Use after enabling anomaly scoring or when you suspect scores are stale. Scores affect hunt result ranking and node_details output.",
+  async () => {
+    const start = Date.now();
+    log("tool", "compute_scores", {});
+    try {
+      const v = await apiPost("/compute_scores", {}, HEAVY_TIMEOUT_MS);
+      log("tool", "compute_scores done", { duration_ms: Date.now() - start, result: "ok" });
+      return textContent(JSON.stringify(v, null, 2));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "compute_scores error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
 async function main() {
   log("info", "GraphHunter MCP server starting", {
     name: "graph-hunter-mcp",
-    version: "1.0.0",
+    version: "1.2.0",
     api_base: API_BASE,
     debug: DEBUG,
+    auth: API_TOKEN ? "bearer" : "none",
   });
+  if (!API_TOKEN) {
+    const allow = process.env.GRAPHHUNTER_MCP_ALLOW_NO_TOKEN === "1"
+      || process.env.GRAPHHUNTER_MCP_ALLOW_NO_TOKEN === "true";
+    if (!allow) {
+      log("error", "GRAPHHUNTER_API_TOKEN is not set — refusing to start unauthenticated. Set GRAPHHUNTER_MCP_ALLOW_NO_TOKEN=1 for local dev.");
+      process.exit(2);
+    }
+    log("info", "Running without API token (GRAPHHUNTER_MCP_ALLOW_NO_TOKEN=1)");
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
   log("info", "GraphHunter MCP server connected (stdio transport ready)");

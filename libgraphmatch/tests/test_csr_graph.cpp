@@ -377,3 +377,97 @@ TEST_CASE("get without interning") {
 }
 
 } // TEST_SUITE interner
+
+// ---------------------------------------------------------------------------
+// add_edge boundary conditions
+//
+// The CSR store silently drops edges whose src or dst indices are outside
+// [0, node_count_) during finalize() (see csr_graph.hpp:252 and :289). The
+// tests below pin that behavior at the exact boundary so a future refactor
+// can't accidentally flip "silently drop" into "silently accept" or "crash".
+// ---------------------------------------------------------------------------
+
+TEST_SUITE("add_edge_boundary") {
+
+TEST_CASE("src at node_count - 1 is accepted") {
+    // 3 nodes (ids 0, 1, 2) → node_count == 3; max valid src/dst is 2.
+    CSRTemporalGraph g;
+    g.add_node(0, GM_ENTITY_IP);
+    g.add_node(1, GM_ENTITY_HOST);
+    g.add_node(2, GM_ENTITY_USER);
+    g.add_edge(/*src=*/2, /*dst=*/0, GM_REL_CONNECT, 100);
+    g.finalize();
+
+    CHECK(g.node_count() == 3);
+    CHECK(g.edge_count() == 1);
+
+    size_t count = 0;
+    const TemporalEdge* edges = g.outgoing(2, count);
+    REQUIRE(count == 1);
+    CHECK(edges[0].target == 0);
+}
+
+TEST_CASE("dst at node_count - 1 is accepted") {
+    CSRTemporalGraph g;
+    g.add_node(0, GM_ENTITY_IP);
+    g.add_node(1, GM_ENTITY_HOST);
+    g.add_node(2, GM_ENTITY_USER);
+    g.add_edge(/*src=*/0, /*dst=*/2, GM_REL_CONNECT, 100);
+    g.finalize();
+
+    CHECK(g.edge_count() == 1);
+
+    size_t count = 0;
+    const TemporalEdge* edges = g.outgoing(0, count);
+    REQUIRE(count == 1);
+    CHECK(edges[0].target == 2);
+}
+
+TEST_CASE("src at node_count is silently dropped during finalize") {
+    // node_count == 3; src=3 is one past the end.
+    CSRTemporalGraph g;
+    g.add_node(0, GM_ENTITY_IP);
+    g.add_node(1, GM_ENTITY_HOST);
+    g.add_node(2, GM_ENTITY_USER);
+    g.add_edge(/*src=*/3, /*dst=*/0, GM_REL_CONNECT, 100); // out of range
+    g.add_edge(/*src=*/0, /*dst=*/1, GM_REL_CONNECT, 200); // valid
+    g.finalize();
+
+    // Graph must still finalize and expose the valid edge. The invalid edge
+    // is silently dropped from the forward CSR (see csr_graph.hpp:252).
+    CHECK(g.node_count() == 3);
+
+    size_t count = 0;
+    const TemporalEdge* edges = g.outgoing(0, count);
+    REQUIRE(count == 1);
+    CHECK(edges[0].target == 1);
+}
+
+TEST_CASE("dst at node_count is silently dropped from reverse index") {
+    CSRTemporalGraph g;
+    g.add_node(0, GM_ENTITY_IP);
+    g.add_node(1, GM_ENTITY_HOST);
+    g.add_node(2, GM_ENTITY_USER);
+    g.add_edge(/*src=*/0, /*dst=*/3, GM_REL_CONNECT, 100); // out of range
+    g.add_edge(/*src=*/1, /*dst=*/2, GM_REL_CONNECT, 200); // valid
+    g.finalize();
+
+    // Reverse index at node 2 must see only the valid edge.
+    size_t count = 0;
+    const TemporalEdge* rev = g.incoming(2, count);
+    REQUIRE(count == 1);
+    CHECK(rev[0].target == 1); // TemporalEdge.target holds the source in reverse
+}
+
+TEST_CASE("out-of-range edges do not crash empty graph") {
+    // Defensive: finalize() must tolerate a pending edge even if node_count
+    // ends up zero (no add_node calls).
+    CSRTemporalGraph g;
+    g.add_edge(/*src=*/0, /*dst=*/0, GM_REL_CONNECT, 42);
+    g.finalize();
+
+    CHECK(g.node_count() == 0);
+    CHECK(g.is_finalized());
+}
+
+} // TEST_SUITE add_edge_boundary
