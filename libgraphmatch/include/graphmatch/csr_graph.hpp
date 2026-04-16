@@ -88,8 +88,16 @@ public:
 
     // -- Builder API (before finalize) ------------------------------------
 
-    /// Add a node with the given type. Duplicate IDs are ignored.
+    /// Maximum node ID accepted by add_node(). Prevents OOM from a single
+    /// malicious or buggy call (e.g. add_node(UINT32_MAX, ...) would try to
+    /// allocate >4 GB). 16M nodes ≈ 64 MB for the type+score arrays — a
+    /// reasonable ceiling for a single CSR graph. Raise if needed.
+    static constexpr NodeId MAX_NODE_ID = 16'000'000;
+
+    /// Add a node with the given type. IDs above MAX_NODE_ID are silently
+    /// rejected (same drop semantics as out-of-range edges in finalize).
     void add_node(NodeId id, EntityTypeTag type) {
+        if (id >= MAX_NODE_ID) return;
         if (id >= node_types_.size()) {
             node_types_.resize(id + 1, GM_ENTITY_ANY);
             node_scores_.resize(id + 1, 0.0f);
@@ -101,7 +109,8 @@ public:
         if (id >= node_count_) node_count_ = id + 1;
     }
 
-    /// Add a directed temporal edge.
+    /// Add a directed temporal edge. Edges referencing nodes above
+    /// MAX_NODE_ID will be dropped during finalize().
     void add_edge(NodeId src, NodeId dst, RelTypeTag rel_type, Timestamp ts) {
         pending_edges_.push_back({src, dst, rel_type, ts});
     }

@@ -470,4 +470,26 @@ TEST_CASE("out-of-range edges do not crash empty graph") {
     CHECK(g.is_finalized());
 }
 
+TEST_CASE("add_node above MAX_NODE_ID is silently rejected") {
+    CSRTemporalGraph g;
+    g.add_node(0, GM_ENTITY_IP);
+    // Attempt to add a node with an absurd ID — must NOT allocate 4 GB+
+    g.add_node(CSRTemporalGraph::MAX_NODE_ID, GM_ENTITY_HOST);      // at limit — rejected
+    g.add_node(CSRTemporalGraph::MAX_NODE_ID + 1, GM_ENTITY_USER);  // above limit — rejected
+    g.add_node(UINT32_MAX, GM_ENTITY_HOST);                         // worst case — rejected
+    g.finalize();
+
+    CHECK(g.node_count() == 1);   // only node 0 was accepted
+    CHECK(g.node_type(0) == GM_ENTITY_IP);
+}
+
+TEST_CASE("add_node just below MAX_NODE_ID is accepted") {
+    CSRTemporalGraph g;
+    g.add_node(CSRTemporalGraph::MAX_NODE_ID - 1, GM_ENTITY_FILE);
+    g.finalize();
+
+    CHECK(g.node_count() == CSRTemporalGraph::MAX_NODE_ID);
+    CHECK(g.node_type(CSRTemporalGraph::MAX_NODE_ID - 1) == GM_ENTITY_FILE);
+}
+
 } // TEST_SUITE add_edge_boundary
