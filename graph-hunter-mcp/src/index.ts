@@ -182,8 +182,98 @@ async function apiPost(path: string, body: unknown, timeoutMs?: number): Promise
   return data;
 }
 
+// ── Response sanitization for large datasets ──────────────────────────
+// LLM context windows are finite (~128K tokens). Raw API responses with
+// 10K+ nodes or events can easily produce 50MB of JSON. These helpers
+// ensure every tool response stays within a budget that fits comfortably
+// in context while still giving the LLM useful, actionable data.
+
+/** Hard cap on text returned to the LLM (characters). ~25K tokens. */
+const MAX_RESPONSE_CHARS = 100_000;
+
+/** Max items in any array before we truncate and summarize. */
+const MAX_ARRAY_ITEMS = 100;
+
+/** Max length for individual metadata string values. */
+const MAX_METADATA_VALUE_LEN = 200;
+
+/** Truncate a metadata value, preserving start + end for readability. */
+function truncateValue(v: unknown): unknown {
+  if (typeof v === "string" && v.length > MAX_METADATA_VALUE_LEN) {
+    return v.slice(0, MAX_METADATA_VALUE_LEN - 20) + " ... " + v.slice(-15);
+  }
+  if (Array.isArray(v)) return v.slice(0, 20).map(truncateValue);
+  if (v && typeof v === "object") return sanitizeObject(v as Record<string, unknown>);
+  return v;
+}
+
+/** Recursively sanitize an object: truncate long strings, cap arrays. */
+function sanitizeObject(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(obj)) {
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      result[key] = sanitizeObject(val as Record<string, unknown>);
+    } else {
+      result[key] = truncateValue(val);
+    }
+  }
+  return result;
+}
+
+/**
+ * Sanitize an API response for LLM consumption:
+ * - Cap known collection fields (nodes, edges, events, paths, entities) to MAX_ARRAY_ITEMS
+ * - Truncate metadata string values
+ * - Add _truncated summary when data was clipped
+ */
+function sanitizeApiResponse(data: unknown): unknown {
+  if (data == null || typeof data !== "object") return data;
+  if (Array.isArray(data)) {
+    if (data.length <= MAX_ARRAY_ITEMS) return data.map((item) => typeof item === "object" && item ? sanitizeObject(item as Record<string, unknown>) : item);
+    const truncated = data.slice(0, MAX_ARRAY_ITEMS).map((item) =>
+      typeof item === "object" && item ? sanitizeObject(item as Record<string, unknown>) : item
+    );
+    return { _truncated: true, _total: data.length, _showing: MAX_ARRAY_ITEMS, _hint: `Showing first ${MAX_ARRAY_ITEMS} of ${data.length} items. Use pagination or filters to access the rest.`, items: truncated };
+  }
+  const obj = data as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  const COLLECTION_KEYS = ["nodes", "edges", "events", "paths", "entities", "items", "subnets", "datasets", "notes"];
+  for (const [key, val] of Object.entries(obj)) {
+    if (Array.isArray(val) && COLLECTION_KEYS.includes(key)) {
+      if (val.length > MAX_ARRAY_ITEMS) {
+        result[`_${key}_total`] = val.length;
+        result[`_${key}_truncated`] = true;
+        result[key] = val.slice(0, MAX_ARRAY_ITEMS).map((item: unknown) =>
+          typeof item === "object" && item ? sanitizeObject(item as Record<string, unknown>) : item
+        );
+      } else {
+        result[key] = val.map((item: unknown) =>
+          typeof item === "object" && item ? sanitizeObject(item as Record<string, unknown>) : item
+        );
+      }
+    } else if (val && typeof val === "object" && !Array.isArray(val)) {
+      result[key] = sanitizeObject(val as Record<string, unknown>);
+    } else {
+      result[key] = truncateValue(val);
+    }
+  }
+  return result;
+}
+
 function textContent(text: string) {
-  return { content: [{ type: "text" as const, text }] };
+  if (text.length <= MAX_RESPONSE_CHARS) {
+    return { content: [{ type: "text" as const, text }] };
+  }
+  // Hard truncation with clear signal to the LLM
+  const trimmed = text.slice(0, MAX_RESPONSE_CHARS - 200);
+  const notice = `\n\n--- RESPONSE TRUNCATED (${text.length} chars total, showing first ${MAX_RESPONSE_CHARS - 200}). Use pagination parameters or narrower filters to get manageable results. ---`;
+  return { content: [{ type: "text" as const, text: trimmed + notice }] };
+}
+
+/** Format API data as sanitized JSON text for the LLM. */
+function safeJsonContent(data: unknown) {
+  const sanitized = sanitizeApiResponse(data);
+  return textContent(JSON.stringify(sanitized, null, 2));
 }
 
 const server = new McpServer({
@@ -202,7 +292,7 @@ server.tool(
       const v = await apiGet("/health");
       const summary = typeof v === "object" && v !== null && "session_loaded" in v ? { session_loaded: (v as { session_loaded?: boolean }).session_loaded } : {};
       log("tool", "check_connection done", { duration_ms: Date.now() - start, ...summary });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "check_connection error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -222,7 +312,7 @@ server.tool(
       const v = await apiGet("/entity_types");
       const summaryStr = summarizeResult("get_entity_types", v);
       log("tool", "get_entity_types done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_entity_types error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -236,9 +326,9 @@ server.tool(
   "search_entities",
   "Search entities by substring. Use to find nodes by ID, name, or metadata. Optional type filter (e.g. IP, Host).",
   {
-    q: z.string().describe("Search query (substring match)"),
-    type: z.string().optional().describe("Optional entity type filter"),
-    limit: z.number().optional().describe("Max results (default 50)"),
+    q: z.string().max(1000).describe("Search query (substring match)"),
+    type: z.string().max(100).optional().describe("Optional entity type filter"),
+    limit: z.number().int().min(1).max(500).optional().describe("Max results (default 50)"),
   },
   async ({ q, type, limit }) => {
     const start = Date.now();
@@ -250,7 +340,7 @@ server.tool(
       const v = await apiGet("/search", params);
       const summaryStr = summarizeResult("search_entities", v);
       log("tool", "search_entities done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "search_entities error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -264,9 +354,9 @@ server.tool(
   "expand_node",
   "Expand from a node to get its neighbors (nodes and edges). Use to explore the graph from a starting node and find suspicious paths.",
   {
-    node_id: z.string().describe("Entity ID to expand from"),
-    max_hops: z.number().optional().describe("Max hops (default 1)"),
-    max_nodes: z.number().optional().describe("Max nodes in result (default 50)"),
+    node_id: z.string().max(500).describe("Entity ID to expand from"),
+    max_hops: z.number().int().min(1).max(5).optional().describe("Max hops (default 1)"),
+    max_nodes: z.number().int().min(1).max(500).optional().describe("Max nodes in result (default 50)"),
   },
   async ({ node_id, max_hops, max_nodes }) => {
     const start = Date.now();
@@ -278,7 +368,7 @@ server.tool(
       const v = await apiGet("/expand", params, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("expand_node", v);
       log("tool", "expand_node done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "expand_node error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -292,7 +382,7 @@ server.tool(
   "get_node_details",
   "Get detailed information about a node: scores, degrees, neighbor counts, time range.",
   {
-    node_id: z.string().describe("Entity ID"),
+    node_id: z.string().max(500).describe("Entity ID"),
   },
   async ({ node_id }) => {
     const start = Date.now();
@@ -300,7 +390,7 @@ server.tool(
     try {
       const v = await apiGet("/node_details", { node_id }, HEAVY_TIMEOUT_MS);
       log("tool", "get_node_details done", { duration_ms: Date.now() - start, result: "ok" });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_node_details error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -314,7 +404,7 @@ server.tool(
   "get_subgraph",
   "Get the subgraph (nodes and edges) for a list of node IDs.",
   {
-    node_ids: z.array(z.string()).describe("List of entity IDs"),
+    node_ids: z.array(z.string().max(500)).max(1000).describe("List of entity IDs (max 1000)"),
   },
   async ({ node_ids }) => {
     const start = Date.now();
@@ -323,7 +413,7 @@ server.tool(
       const v = await apiPost("/subgraph", { node_ids }, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("get_subgraph", v);
       log("tool", "get_subgraph done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_subgraph error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -337,7 +427,7 @@ server.tool(
   "get_events_for_node",
   "Get all relations/events for a node (incoming and outgoing edges).",
   {
-    node_id: z.string().describe("Entity ID"),
+    node_id: z.string().max(500).describe("Entity ID"),
   },
   async ({ node_id }) => {
     const start = Date.now();
@@ -346,7 +436,7 @@ server.tool(
       const v = await apiGet("/events_for_node", { node_id }, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("get_events_for_node", v);
       log("tool", "get_events_for_node done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_events_for_node error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -362,6 +452,7 @@ server.tool(
   {
     hypothesis_dsl: z
       .string()
+      .max(2000)
       .describe(
         "Hypothesis in DSL form, e.g. 'IP -[Connect]-> Host -[Auth]-> User -[Execute]-> Process'"
       ),
@@ -373,7 +464,7 @@ server.tool(
       const v = await apiPost("/run_hunt", { hypothesis_dsl }, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("run_hunt", v);
       log("tool", "run_hunt done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "run_hunt error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -387,9 +478,9 @@ server.tool(
   "get_hunt_results",
   "Get one page of the last run_hunt results. When anomaly scoring is enabled, paths include anomaly_score and anomaly_breakdown (including gnn_threat) and are sorted by anomaly (highest first). When scoring is not enabled, paths still include max_score and total_score (structural scores) and are sorted by those; anomaly_score and anomaly_breakdown will be null/absent. Use total_paths and filtered_paths in the response to decide whether to fetch more pages (higher page or larger page_size). Call run_hunt first.",
   {
-    page: z.number().optional().default(0).describe("Page index (0-based)."),
-    page_size: z.number().optional().default(20).describe("Number of paths per page."),
-    min_score: z.number().optional().describe("Filter paths by max node score (0–100)."),
+    page: z.number().int().min(0).max(10000).optional().default(0).describe("Page index (0-based)."),
+    page_size: z.number().int().min(1).max(200).optional().default(20).describe("Number of paths per page."),
+    min_score: z.number().min(0).max(100).optional().describe("Filter paths by max node score (0–100)."),
   },
   async ({ page, page_size, min_score }) => {
     const start = Date.now();
@@ -403,7 +494,7 @@ server.tool(
       const v = await apiGet("/hunt_results", params);
       const summaryStr = summarizeResult("get_hunt_results", v);
       log("tool", "get_hunt_results done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_hunt_results error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -417,9 +508,10 @@ server.tool(
   "create_note",
   "Add a note to the current GraphHunter session. Use for saving hunt reports or findings. Optional node_id links the note to a graph node.",
   {
-    content: z.string().describe("Note content (e.g. markdown or plain text report)."),
+    content: z.string().max(50000).describe("Note content (e.g. markdown or plain text report)."),
     node_id: z
       .string()
+      .max(500)
       .optional()
       .describe("Optional entity/node ID to link this note to."),
   },
@@ -429,7 +521,7 @@ server.tool(
     try {
       const v = await apiPost("/notes", { content, node_id: node_id ?? undefined });
       log("tool", "create_note done", { duration_ms: Date.now() - start, result: "created" });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "create_note error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -450,7 +542,7 @@ server.tool(
     try {
       const v = await apiGet("/graph_summary");
       log("tool", "get_graph_summary done", { duration_ms: Date.now() - start, result: "ok" });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_graph_summary error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -470,7 +562,7 @@ server.tool(
       const v = await apiGet("/entity_type_counts");
       const summaryStr = summarizeResult("get_entity_type_counts", v);
       log("tool", "get_entity_type_counts done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_entity_type_counts error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -490,7 +582,7 @@ server.tool(
       const v = await apiGet("/temporal_heatmap", undefined, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("get_temporal_heatmap", v);
       log("tool", "get_temporal_heatmap done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_temporal_heatmap error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -510,7 +602,7 @@ server.tool(
       const v = await apiGet("/subnet_analysis", undefined, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("get_subnet_analysis", v);
       log("tool", "get_subnet_analysis done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_subnet_analysis error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -524,7 +616,7 @@ server.tool(
   "enrich_ip",
   "Enrich a public/external IP address with GeoIP data: country, city, ASN, ISP/organization. Only works for public IPs (returns error for private/internal IPs). The enrichment data is persisted on the entity's metadata, so subsequent get_node_details calls will include it. Use to identify where external connections go (country, ISP) for threat analysis.",
   {
-    ip: z.string().describe("Public IP address to enrich (e.g. '8.8.8.8')"),
+    ip: z.string().max(45).describe("Public IP address to enrich (e.g. '8.8.8.8')"),
   },
   async ({ ip }) => {
     const start = Date.now();
@@ -532,7 +624,7 @@ server.tool(
     try {
       const v = await apiPost("/enrich_ip", { ip });
       log("tool", "enrich_ip done", { duration_ms: Date.now() - start, result: "ok" });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "enrich_ip error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -552,7 +644,7 @@ server.tool(
       const v = await apiGet("/catalog");
       const summaryStr = summarizeResult("get_catalog", v);
       log("tool", "get_catalog done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_catalog error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -572,7 +664,7 @@ server.tool(
       const v = await apiGet("/datasets");
       const summaryStr = summarizeResult("list_datasets", v);
       log("tool", "list_datasets done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "list_datasets error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -592,7 +684,7 @@ server.tool(
       const v = await apiGet("/path_nodes");
       const summaryStr = summarizeResult("get_path_nodes", v);
       log("tool", "get_path_nodes done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_path_nodes error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -612,7 +704,7 @@ server.tool(
       const v = await apiGet("/notes/list");
       const summaryStr = summarizeResult("get_notes", v);
       log("tool", "get_notes done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_notes error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -626,7 +718,7 @@ server.tool(
   "export_subgraph",
   "Export the subgraph (nodes + edges) for given node IDs as JSON or CSV text. Use when you need the raw data for a set of entities — for example, to produce a detailed report of a suspicious path, or to analyze entity metadata in bulk.",
   {
-    node_ids: z.array(z.string()).describe("List of entity IDs to include in the export"),
+    node_ids: z.array(z.string().max(500)).max(1000).describe("List of entity IDs to include in the export (max 1000)"),
     format: z.enum(["json", "csv"]).optional().default("json").describe("Export format: 'json' or 'csv'"),
   },
   async ({ node_ids, format }) => {
@@ -651,8 +743,8 @@ server.tool(
   "parse_dsl",
   "Validate a hunt hypothesis DSL pattern WITHOUT executing it. Returns whether the DSL is valid, the formatted version, and step count. Use BEFORE run_hunt to catch syntax errors cheaply. DSL syntax: 'EntityType -[RelationType]-> EntityType -[RelationType]-> EntityType'. Example: 'IP -[Connect]-> Host -[Auth]-> User -[Execute]-> Process'.",
   {
-    dsl: z.string().describe("DSL pattern to validate, e.g. 'IP -[Connect]-> Host -[Execute]-> Process'"),
-    name: z.string().optional().describe("Optional name for the hypothesis"),
+    dsl: z.string().max(2000).describe("DSL pattern to validate, e.g. 'IP -[Connect]-> Host -[Execute]-> Process'"),
+    name: z.string().max(200).optional().describe("Optional name for the hypothesis"),
   },
   async ({ dsl, name }) => {
     const start = Date.now();
@@ -661,7 +753,7 @@ server.tool(
       const v = await apiPost("/parse_dsl", { dsl, name });
       const result = v as { valid: boolean; formatted?: string; error?: string };
       log("tool", "parse_dsl done", { duration_ms: Date.now() - start, valid: result.valid });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "parse_dsl error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -675,10 +767,10 @@ server.tool(
   "get_events_paginated",
   "Get paginated and sortable events (relations/edges) for a node. Returns events where the node is source or target. Supports sort_by: 'timestamp' (chronological order), 'rel_type', 'source', 'target'. Returns total_count for pagination. Better than get_events_for_node when the node has many connections.",
   {
-    node_id: z.string().describe("Entity ID to get events for"),
-    page: z.number().optional().default(0).describe("Page index (0-based)"),
-    page_size: z.number().optional().default(50).describe("Events per page (default 50)"),
-    sort_by: z.string().optional().describe("Sort field: 'timestamp', 'rel_type', 'source', 'target'"),
+    node_id: z.string().max(500).describe("Entity ID to get events for"),
+    page: z.number().int().min(0).max(10000).optional().default(0).describe("Page index (0-based)"),
+    page_size: z.number().int().min(1).max(200).optional().default(50).describe("Events per page (default 50)"),
+    sort_by: z.enum(["timestamp", "rel_type", "source", "target"]).optional().describe("Sort field"),
   },
   async ({ node_id, page, page_size, sort_by }) => {
     const start = Date.now();
@@ -689,7 +781,7 @@ server.tool(
       const v = await apiGet("/events_paginated", params, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("get_events_paginated", v);
       log("tool", "get_events_paginated done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "get_events_paginated error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -703,9 +795,9 @@ server.tool(
   "expand_node_grouped",
   "Expand a node's neighborhood with edge GROUPING — collapses repeated edge types into summaries (e.g. '42 Connect edges to IPs' instead of 42 individual edges). Use for HIGH-DEGREE nodes where expand_node would return too much data or timeout. Returns grouped neighbor edges with counts, first/last timestamps per group.",
   {
-    node_id: z.string().describe("Entity ID to expand from"),
-    max_hops: z.number().optional().describe("Max hops (default 1)"),
-    max_nodes: z.number().optional().describe("Max nodes in result (default 50)"),
+    node_id: z.string().max(500).describe("Entity ID to expand from"),
+    max_hops: z.number().int().min(1).max(5).optional().describe("Max hops (default 1)"),
+    max_nodes: z.number().int().min(1).max(500).optional().describe("Max nodes in result (default 50)"),
   },
   async ({ node_id, max_hops, max_nodes }) => {
     const start = Date.now();
@@ -717,7 +809,7 @@ server.tool(
       const v = await apiGet("/expand_grouped", params, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("expand_node_grouped", v);
       log("tool", "expand_node_grouped done", { duration_ms: Date.now() - start, result: summaryStr });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "expand_node_grouped error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -758,7 +850,7 @@ server.tool(
     try {
       const v = await apiPost("/enable_anomaly_scoring", {});
       log("tool", "enable_anomaly_scoring done", { duration_ms: Date.now() - start, result: "ok" });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "enable_anomaly_scoring error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
@@ -777,7 +869,7 @@ server.tool(
     try {
       const v = await apiPost("/compute_scores", {}, HEAVY_TIMEOUT_MS);
       log("tool", "compute_scores done", { duration_ms: Date.now() - start, result: "ok" });
-      return textContent(JSON.stringify(v, null, 2));
+      return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "compute_scores error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });

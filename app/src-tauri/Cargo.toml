@@ -47,6 +47,7 @@ async-trait = "0.1"
 futures = "0.3"
 bytes = "1"
 tempfile = "3"
+subtle = "2"
 
 [features]
 # Opt-in: enable with --features simd. Runtime falls back to pure-Rust DFS when AVX2 is unavailable.

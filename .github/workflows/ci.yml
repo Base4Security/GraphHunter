@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Rust core crate ────────────────────────────────────────────────
+  core-tests:
+    name: Core (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: graph_hunter_core
+      - name: Run tests
+        run: cargo test --manifest-path graph_hunter_core/Cargo.toml
+      - name: Run tests (geoip feature)
+        run: cargo test --manifest-path graph_hunter_core/Cargo.toml --features geoip
+
+  # ── Tauri backend compile check ────────────────────────────────────
+  tauri-check:
+    name: Tauri (cargo check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system deps (Tauri v2 on Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libgtk-3-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - name: Cargo check
+        run: cargo check --manifest-path app/src-tauri/Cargo.toml
+
+  # ── Frontend (TypeScript + Vitest) ─────────────────────────────────
+  frontend:
+    name: Frontend (tsc + vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install deps
+        run: npm ci
+        working-directory: app
+      - name: Type check
+        run: npx tsc --noEmit
+        working-directory: app
+      - name: Unit tests
+        run: npm test
+        working-directory: app
+
+  # ── MCP server ─────────────────────────────────────────────────────
+  mcp:
+    name: MCP (tsc build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: graph-hunter-mcp/package-lock.json
+      - name: Install deps
+        run: npm ci
+        working-directory: graph-hunter-mcp
+      - name: Build
+        run: npm run build
+        working-directory: graph-hunter-mcp
+
+  # ── Clippy lint (core) ─────────────────────────────────────────────
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: graph_hunter_core
+      - name: Clippy (core)
+        run: cargo clippy --manifest-path graph_hunter_core/Cargo.toml -- -D warnings

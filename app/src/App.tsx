@@ -1,9 +1,10 @@
-import { lazy, Suspense, useCallback, useEffect, useRef } from "react";
+import { lazy, Suspense, useCallback, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke, errorMessage } from "./lib/tauri";
 // Eager: everything on the initial-render path. The Welcome page, the left-
 // side panels, the graph canvas and the Explorer bottom panel (default tab)
 // must be in the main bundle so the first paint has no flicker.
+import ErrorBoundary from "./components/ErrorBoundary";
 import AzureStreamingSmokeTest from "./components/AzureStreamingSmokeTest";
 import DatasetsLeftPanel from "./components/DatasetsLeftPanel";
 import ActivityLogContainer from "./components/ActivityLogContainer";
@@ -28,6 +29,9 @@ import { ChevronLeft, ChevronRight, Sparkles, Database, Activity, BarChart3, X, 
 import { useAppState, useAppDispatch } from "./context/AppStateContext";
 import { useLogDispatch, LogProvider } from "./context/LogContext";
 import { useNotifications } from "./hooks/useNotifications";
+import { useAiAnalysis } from "./hooks/useAiAnalysis";
+import { useMapNavigation } from "./hooks/useMapNavigation";
+import { usePanelResize } from "./hooks/usePanelResize";
 import type {
   GraphStats,
   HuntResults,
@@ -40,11 +44,8 @@ import type {
   SessionInfo,
   Note,
   AiProvider,
-  AiAnalysisResponse,
-  AiSuggestion,
-  ConversationMessage,
 } from "./types";
-import type { MapState, BottomTab } from "./context/AppStateContext";
+import type { BottomTab } from "./context/AppStateContext";
 import "./App.css";
 
 import { useState, type ReactNode } from "react";
@@ -90,27 +91,7 @@ function AppInner() {
     leftMenuOpen,
     notes,
     centerNodeId,
-    bottomPanelHeight,
-    mapPast,
-    mapFuture,
   } = state;
-
-  // AI state stays local (not part of core app state to keep context focused)
-  const [analyzeAiOpen, setAnalyzeAiOpen] = useState(false);
-  const [analyzeAiLoading, setAnalyzeAiLoading] = useState(false);
-  const [analyzeAiError, setAnalyzeAiError] = useState<string | null>(null);
-  const [analyzeAiQuestion, setAnalyzeAiQuestion] = useState("");
-  const [aiConversation, setAiConversation] = useState<ConversationMessage[]>([]);
-  const [aiLastSuggestions, setAiLastSuggestions] = useState<AiSuggestion[]>([]);
-  const [aiProvider, setAiProvider] = useState<AiProvider>("OpenAI");
-  const [aiApiKey, setAiApiKey] = useState("");
-  const [aiModel, setAiModel] = useState("");
-  const [aiBaseUrl, setAiBaseUrl] = useState("");
-  const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
-  const [helpPanelOpen, setHelpPanelOpen] = useState(false);
-  const aiChatEndRef = useRef<HTMLDivElement>(null);
-
-  const mapStateRef = useRef<MapState | null>(null);
 
   const addLog = useCallback(
     (entry: LogEntry) => {
@@ -118,6 +99,15 @@ function AppInner() {
     },
     [logDispatch]
   );
+
+  // AI state + handlers extracted to dedicated hook
+  const ai = useAiAnalysis(addLog);
+  // Map navigation (back/forward) extracted to dedicated hook
+  const nav = useMapNavigation(addLog);
+  // Bottom panel resize extracted to dedicated hook
+  const { bottomPanelHeight, handleResizeStart } = usePanelResize();
+
+  const [helpPanelOpen, setHelpPanelOpen] = useState(false);
 
   // Auto-save session after notes or path nodes change (no-op if no session).
   const handleAutoSave = useCallback(async () => {
@@ -201,19 +191,6 @@ function AppInner() {
     };
   }, [currentSession?.id, stats.entity_count, stats.relation_count, dispatch]);
 
-  // Keep ref in sync with current map state (for back/forward)
-  useEffect(() => {
-    mapStateRef.current = {
-      mode,
-      bottomTab,
-      subgraph,
-      highlightPaths,
-      neighborhood: explorerNeighborhood,
-      selectedNodeId,
-      nodeDetails,
-    };
-  }, [mode, bottomTab, subgraph, highlightPaths, explorerNeighborhood, selectedNodeId, nodeDetails]);
-
   // When MCP calls expand or subgraph, HTTP API emits mcp-view-update; update live map to show that view
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -265,36 +242,7 @@ function AppInner() {
     };
   }, [addLog, dispatch]);
 
-  const pushMapState = useCallback(() => {
-    const s = mapStateRef.current;
-    if (s) {
-      dispatch({ type: "PUSH_MAP_STATE", payload: s });
-    }
-  }, [dispatch]);
-
-  const restoreMapState = useCallback((s: MapState) => {
-    dispatch({ type: "RESTORE_MAP_STATE", payload: s });
-  }, [dispatch]);
-
-  const handleMapBack = useCallback(() => {
-    if (mapPast.length === 0) return;
-    const prev = mapPast[mapPast.length - 1];
-    dispatch({ type: "SET_MAP_PAST", payload: mapPast.slice(0, -1) });
-    const current = mapStateRef.current;
-    if (current) dispatch({ type: "SET_MAP_FUTURE", payload: [...mapFuture, current] });
-    restoreMapState(prev);
-    addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: "Navigation: Back", level: "info" });
-  }, [mapPast, mapFuture, restoreMapState, addLog, dispatch]);
-
-  const handleMapForward = useCallback(() => {
-    if (mapFuture.length === 0) return;
-    const next = mapFuture[mapFuture.length - 1];
-    dispatch({ type: "SET_MAP_FUTURE", payload: mapFuture.slice(0, -1) });
-    const current = mapStateRef.current;
-    if (current) dispatch({ type: "SET_MAP_PAST", payload: [...mapPast, current] });
-    restoreMapState(next);
-    addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: "Navigation: Forward", level: "info" });
-  }, [mapFuture, mapPast, restoreMapState, addLog, dispatch]);
+  const { pushMapState, handleMapBack, handleMapForward, mapPast, mapFuture } = nav;
 
   // ── Hunt mode handler ──
   const handleHuntResults = useCallback(
@@ -579,100 +527,6 @@ function AppInner() {
     [mode, handleExploreNode, addLog, dispatch]
   );
 
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startHeight = bottomPanelHeight;
-    const onMove = (e2: MouseEvent) => {
-      const delta = startY - e2.clientY;
-      dispatch({ type: "SET_BOTTOM_PANEL_HEIGHT", payload: Math.min(600, Math.max(120, startHeight + delta)) });
-    };
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.body.style.cursor = "ns-resize";
-    document.body.style.userSelect = "none";
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }, [bottomPanelHeight, dispatch]);
-
-  const sendAiMessage = useCallback(async (message: string) => {
-    // Show user message immediately + thinking indicator
-    const now = Math.floor(Date.now() / 1000);
-    setAiConversation((prev) => [
-      ...prev,
-      { role: "user", content: message, timestamp: now },
-    ]);
-    setAiLastSuggestions([]);
-    setAnalyzeAiLoading(true);
-    setAnalyzeAiError(null);
-    setAnalyzeAiQuestion("");
-    setTimeout(() => aiChatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
-    try {
-      const response = await invoke<AiAnalysisResponse>("cmd_ai_chat", {
-        userMessage: message,
-      });
-      const nowDone = Math.floor(Date.now() / 1000);
-      setAiConversation((prev) => [
-        ...prev,
-        { role: "assistant", content: response.text, timestamp: nowDone },
-      ]);
-      setAiLastSuggestions(response.suggestions || []);
-      setTimeout(() => aiChatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 100);
-    } catch (e) {
-      setAnalyzeAiError(errorMessage(e));
-    } finally {
-      setAnalyzeAiLoading(false);
-    }
-  }, []);
-
-  const runAnalyzeAi = useCallback(async () => {
-    const message = analyzeAiQuestion.trim() || "Analyze the graph for suspicious activity.";
-    sendAiMessage(message);
-  }, [analyzeAiQuestion, sendAiMessage]);
-
-  const clearAiConversation = useCallback(async () => {
-    try {
-      await invoke("cmd_ai_clear_conversation");
-    } catch { /* ignore */ }
-    setAiConversation([]);
-    setAiLastSuggestions([]);
-  }, []);
-
-  const saveAiProvider = useCallback(async () => {
-    try {
-      const detected = await invoke<string>("cmd_ai_set_provider", {
-        provider: aiProvider.toLowerCase(),
-        apiKey: aiApiKey,
-        model: aiModel || null,
-        baseUrl: aiBaseUrl || null,
-      });
-      if (detected && detected !== "none") {
-        setAiProvider(detected as AiProvider);
-      }
-      setAiSettingsOpen(false);
-      addLog({ time: new Date().toLocaleTimeString(), message: `AI provider set to ${detected || aiProvider}`, level: "success" });
-    } catch (e) {
-      setAnalyzeAiError(errorMessage(e));
-    }
-  }, [aiProvider, aiApiKey, aiModel, aiBaseUrl, addLog]);
-
-  const handleAiSuggestion = useCallback(async (suggestion: AiSuggestion) => {
-    // Feed all suggestions back through the agentic chat so the AI uses tools and shows results
-    const message =
-      suggestion.action === "expand_node"
-        ? `Expand node "${suggestion.target_id}" and analyze its connections.`
-        : suggestion.action === "run_hypothesis"
-        ? `Run this hunt hypothesis: ${suggestion.target_id}`
-        : suggestion.action === "search_entities"
-        ? `Search for entities matching "${suggestion.target_id}"`
-        : suggestion.label;
-    sendAiMessage(message);
-  }, [sendAiMessage]);
-
   const currentGraphSummary =
     mode === "hunt"
       ? subgraph
@@ -856,11 +710,11 @@ function AppInner() {
           </button>
           <button
             type="button"
-            className={`app-toolbar-btn ${analyzeAiOpen ? "active" : ""}`}
+            className={`app-toolbar-btn ${ai.analyzeAiOpen ? "active" : ""}`}
             onClick={() => {
-              setAnalyzeAiOpen((o) => !o);
-              if (!analyzeAiOpen) {
-                setAnalyzeAiError(null);
+              ai.setAnalyzeAiOpen(!ai.analyzeAiOpen);
+              if (!ai.analyzeAiOpen) {
+                // error is cleared internally by the hook on open
               }
             }}
             title="Analyze current graph with AI (malicious? next node to expand?)"
@@ -915,37 +769,39 @@ function AppInner() {
           />
         )}
       </div>
-      <GraphCanvas
-        subgraph={subgraph}
-        highlightPaths={highlightPaths}
-        explorerMode={mode === "explore"}
-        neighborhood={explorerNeighborhood}
-        selectedNodeId={selectedNodeId}
-        pathNodeIds={pathNodeIds}
-        centerNodeId={centerNodeId}
-        onCenterDone={() => dispatch({ type: "SET_CENTER_NODE_ID", payload: null })}
-        onNodeClick={handleNodeClick}
-        onNodeDoubleClick={handleNodeDoubleClick}
-        onNodeContextExpand={handleNodeContextExpandOrShow}
-        onNodeContextCenter={handleNodeContextExpandOrShow}
-        onNodeContextCopy={(nodeId) => {
-          navigator.clipboard.writeText(nodeId);
-        }}
-        onNodeContextShowNeighbours={handleNodeContextExpandOrShow}
-        entityTypesInGraph={entityTypesInGraph}
-        onNodeContextAddToPathNodes={handleAddToPathNodes}
-        onNodeContextRemoveFromPathNodes={handleRemoveFromPathNodes}
-      >
-        {showHuntTable && mode === "hunt" && (
-          <LazyBoundary>
-            <HuntResultsTable
-              totalPaths={huntPathCount}
-              onViewPath={handleViewPath}
-              onLog={addLog}
-            />
-          </LazyBoundary>
-        )}
-      </GraphCanvas>
+      <ErrorBoundary section="Graph Canvas">
+        <GraphCanvas
+          subgraph={subgraph}
+          highlightPaths={highlightPaths}
+          explorerMode={mode === "explore"}
+          neighborhood={explorerNeighborhood}
+          selectedNodeId={selectedNodeId}
+          pathNodeIds={pathNodeIds}
+          centerNodeId={centerNodeId}
+          onCenterDone={() => dispatch({ type: "SET_CENTER_NODE_ID", payload: null })}
+          onNodeClick={handleNodeClick}
+          onNodeDoubleClick={handleNodeDoubleClick}
+          onNodeContextExpand={handleNodeContextExpandOrShow}
+          onNodeContextCenter={handleNodeContextExpandOrShow}
+          onNodeContextCopy={(nodeId) => {
+            navigator.clipboard.writeText(nodeId);
+          }}
+          onNodeContextShowNeighbours={handleNodeContextExpandOrShow}
+          entityTypesInGraph={entityTypesInGraph}
+          onNodeContextAddToPathNodes={handleAddToPathNodes}
+          onNodeContextRemoveFromPathNodes={handleRemoveFromPathNodes}
+        >
+          {showHuntTable && mode === "hunt" && (
+            <LazyBoundary>
+              <HuntResultsTable
+                totalPaths={huntPathCount}
+                onViewPath={handleViewPath}
+                onLog={addLog}
+              />
+            </LazyBoundary>
+          )}
+        </GraphCanvas>
+      </ErrorBoundary>
 
       {/* Resize handle for bottom panel */}
       <div
@@ -956,6 +812,7 @@ function AppInner() {
       />
 
       {/* Bottom panel with mode tabs */}
+      <ErrorBoundary section="Bottom Panel">
       <div className="panel panel-bottom-container">
         <div className="mode-tabs">
           <button
@@ -1028,6 +885,7 @@ function AppInner() {
           </LazyBoundary>
         )}
       </div>
+      </ErrorBoundary>
 
       {/* Right menus (only one at a time: Path Nodes or Notes) */}
       <div className="app-right-menus" style={{ width: rightPanelCount === 0 ? 0 : rightPanelWidth }}>
@@ -1108,7 +966,7 @@ function AppInner() {
       )}
 
       {/* AI Analysis Panel (slide-out) */}
-      {analyzeAiOpen && (
+      {ai.analyzeAiOpen && (
         <div
           style={{
             position: "fixed",
@@ -1130,27 +988,27 @@ function AppInner() {
               <Sparkles size={16} /> AI Analysis
             </h3>
             <div style={{ display: "flex", gap: 6 }}>
-              <button type="button" className="btn btn-sm" onClick={() => setAiSettingsOpen((o) => !o)} title="AI Settings" style={{ fontSize: 11 }}>
+              <button type="button" className="btn btn-sm" onClick={() => ai.setAiSettingsOpen(!ai.aiSettingsOpen)} title="AI Settings" style={{ fontSize: 11 }}>
                 Settings
               </button>
-              <button type="button" className="btn btn-sm" onClick={clearAiConversation} title="Clear conversation" style={{ fontSize: 11 }}>
+              <button type="button" className="btn btn-sm" onClick={ai.clearAiConversation} title="Clear conversation" style={{ fontSize: 11 }}>
                 Clear
               </button>
-              <button type="button" className="btn btn-sm" onClick={() => setAnalyzeAiOpen(false)}>
+              <button type="button" className="btn btn-sm" onClick={() => ai.setAnalyzeAiOpen(false)}>
                 <X size={14} />
               </button>
             </div>
           </div>
 
           {/* Settings panel (collapsible) */}
-          {aiSettingsOpen && (
+          {ai.aiSettingsOpen && (
             <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-secondary)" }}>
               <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
                 <label style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1 }}>
                   Provider
                   <select
-                    value={aiProvider}
-                    onChange={(e) => setAiProvider(e.target.value as AiProvider)}
+                    value={ai.aiProvider}
+                    onChange={(e) => ai.setAiProvider(e.target.value as AiProvider)}
                     style={{ width: "100%", fontSize: 11, padding: "3px 4px", background: "var(--bg-primary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 3, marginTop: 2 }}
                   >
                     <option value="OpenAI">OpenAI</option>
@@ -1161,9 +1019,9 @@ function AppInner() {
                 <label style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1 }}>
                   Model (optional)
                   <input
-                    value={aiModel}
-                    onChange={(e) => setAiModel(e.target.value)}
-                    placeholder={aiProvider === "OpenAI" ? "gpt-4o" : aiProvider === "Anthropic" ? "claude-sonnet-4-20250514" : "gemini-2.0-flash"}
+                    value={ai.aiModel}
+                    onChange={(e) => ai.setAiModel(e.target.value)}
+                    placeholder={ai.aiProvider === "OpenAI" ? "gpt-4o" : ai.aiProvider === "Anthropic" ? "claude-sonnet-4-20250514" : "gemini-2.0-flash"}
                     style={{ width: "100%", fontSize: 11, padding: "3px 4px", background: "var(--bg-primary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 3, marginTop: 2, boxSizing: "border-box" }}
                   />
                 </label>
@@ -1172,14 +1030,14 @@ function AppInner() {
                 API Key
                 <input
                   type="password"
-                  value={aiApiKey}
+                  value={ai.aiApiKey}
                   onChange={(e) => {
                     const key = e.target.value;
-                    setAiApiKey(key);
+                    ai.setAiApiKey(key);
                     // Auto-detect provider from key format
-                    if (key.startsWith("sk-ant-")) setAiProvider("Anthropic");
-                    else if (key.startsWith("sk-")) setAiProvider("OpenAI");
-                    else if (key.startsWith("AI")) setAiProvider("Google");
+                    if (key.startsWith("sk-ant-")) ai.setAiProvider("Anthropic");
+                    else if (key.startsWith("sk-")) ai.setAiProvider("OpenAI");
+                    else if (key.startsWith("AI")) ai.setAiProvider("Google");
                   }}
                   placeholder="sk-..."
                   style={{ width: "100%", fontSize: 11, padding: "3px 4px", background: "var(--bg-primary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 3, marginTop: 2, boxSizing: "border-box" }}
@@ -1188,13 +1046,13 @@ function AppInner() {
               <label style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4, display: "block" }}>
                 Base URL (optional)
                 <input
-                  value={aiBaseUrl}
-                  onChange={(e) => setAiBaseUrl(e.target.value)}
+                  value={ai.aiBaseUrl}
+                  onChange={(e) => ai.setAiBaseUrl(e.target.value)}
                   placeholder="Leave empty for default"
                   style={{ width: "100%", fontSize: 11, padding: "3px 4px", background: "var(--bg-primary)", color: "var(--text-primary)", border: "1px solid var(--border)", borderRadius: 3, marginTop: 2, boxSizing: "border-box" }}
                 />
               </label>
-              <button type="button" className="btn btn-primary" onClick={saveAiProvider} style={{ marginTop: 8, fontSize: 11 }}>
+              <button type="button" className="btn btn-primary" onClick={ai.saveAiProvider} style={{ marginTop: 8, fontSize: 11 }}>
                 Save
               </button>
             </div>
@@ -1210,14 +1068,14 @@ function AppInner() {
 
           {/* Conversation messages */}
           <div style={{ flex: 1, overflow: "auto", padding: "8px 12px" }}>
-            {aiConversation.length === 0 && !analyzeAiError && (
+            {ai.aiConversation.length === 0 && !ai.analyzeAiError && (
               <p style={{ fontSize: 12, color: "var(--text-secondary)", textAlign: "center", marginTop: 40 }}>
                 {stats.entity_count > 0
                   ? "Ask a question about the graph — the AI will search it for you..."
                   : "Load data first, then ask questions about the graph."}
               </p>
             )}
-            {aiConversation.map((msg, i) => (
+            {ai.aiConversation.map((msg, i) => (
               <div
                 key={i}
                 style={{
@@ -1246,7 +1104,7 @@ function AppInner() {
               </div>
             ))}
             {/* Thinking indicator */}
-            {analyzeAiLoading && (
+            {ai.analyzeAiLoading && (
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
                 <span style={{ fontSize: 10, color: "var(--text-secondary)" }}>AI</span>
                 <div style={{
@@ -1267,14 +1125,14 @@ function AppInner() {
               </div>
             )}
             {/* Suggestion buttons after last AI message */}
-            {aiLastSuggestions.length > 0 && (
+            {ai.aiLastSuggestions.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-                {aiLastSuggestions.map((s, i) => (
+                {ai.aiLastSuggestions.map((s, i) => (
                   <button
                     key={i}
                     type="button"
                     className="btn btn-sm"
-                    onClick={() => handleAiSuggestion(s)}
+                    onClick={() => ai.handleAiSuggestion(s)}
                     style={{ fontSize: 11, display: "flex", alignItems: "center", gap: 4 }}
                     title={`${s.action}: ${s.target_id}`}
                   >
@@ -1284,21 +1142,21 @@ function AppInner() {
                 ))}
               </div>
             )}
-            {analyzeAiError && (
-              <div style={{ color: "var(--danger)", fontSize: 11, marginBottom: 8 }}>{analyzeAiError}</div>
+            {ai.analyzeAiError && (
+              <div style={{ color: "var(--danger)", fontSize: 11, marginBottom: 8 }}>{ai.analyzeAiError}</div>
             )}
-            <div ref={aiChatEndRef} />
+            <div ref={ai.aiChatEndRef} />
           </div>
 
           {/* Input area */}
           {stats.entity_count > 0 && (
             <div style={{ padding: "8px 12px", borderTop: "1px solid var(--border)", display: "flex", gap: 6 }}>
               <input
-                value={analyzeAiQuestion}
-                onChange={(e) => setAnalyzeAiQuestion(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && !analyzeAiLoading) runAnalyzeAi(); }}
+                value={ai.analyzeAiQuestion}
+                onChange={(e) => ai.setAnalyzeAiQuestion(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !ai.analyzeAiLoading) ai.runAnalyzeAi(); }}
                 placeholder="Ask about the graph..."
-                disabled={analyzeAiLoading}
+                disabled={ai.analyzeAiLoading}
                 style={{
                   flex: 1,
                   fontSize: 12,
@@ -1313,11 +1171,11 @@ function AppInner() {
               <button
                 type="button"
                 className="btn btn-primary"
-                onClick={runAnalyzeAi}
-                disabled={analyzeAiLoading}
+                onClick={ai.runAnalyzeAi}
+                disabled={ai.analyzeAiLoading}
                 style={{ fontSize: 12 }}
               >
-                {analyzeAiLoading ? "..." : "Send"}
+                {ai.analyzeAiLoading ? "..." : "Send"}
               </button>
             </div>
           )}

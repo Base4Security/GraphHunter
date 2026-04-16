@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
+use tower_http::cors::{CorsLayer, Any};
 
 use crate::{
     create_note_impl,
@@ -199,7 +201,11 @@ async fn auth_middleware(
         .and_then(|v| v.to_str().ok());
 
     match auth_header {
-        Some(val) if val.starts_with("Bearer ") && &val[7..] == expected => {
+        Some(val) if val.starts_with("Bearer ") && {
+            let token = val[7..].as_bytes();
+            let expect = expected.as_bytes();
+            token.len() == expect.len() && token.ct_eq(expect).into()
+        } => {
             next.run(request).await
         }
         _ => (
@@ -250,6 +256,10 @@ fn build_app(state: Arc<AppState>) -> Router {
         // or hostile. Without this, a POST with a 1 GB JSON body would OOM
         // the whole process before a handler ever runs.
         .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
+        .layer(CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any))
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
         .layer(axum::middleware::from_fn(log_requests))
         .with_state(state)
