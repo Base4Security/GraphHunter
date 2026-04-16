@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useRef } from "react";
-import { useAppState, useAppDispatch } from "../context/AppStateContext";
+import { useUIState, useGraphState, useAppDispatch } from "../context/AppStateContext";
 import type { MapState } from "../context/AppStateContext";
 import type { LogEntry } from "../types";
 
 export function useMapNavigation(addLog: (entry: LogEntry) => void) {
   const dispatch = useAppDispatch();
+  const { mode, bottomTab } = useUIState();
   const {
-    mode,
-    bottomTab,
     subgraph,
     highlightPaths,
     explorerNeighborhood,
@@ -15,7 +14,7 @@ export function useMapNavigation(addLog: (entry: LogEntry) => void) {
     nodeDetails,
     mapPast,
     mapFuture,
-  } = useAppState();
+  } = useGraphState();
 
   const mapStateRef = useRef<MapState | null>(null);
 

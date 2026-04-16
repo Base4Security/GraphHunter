@@ -1,4 +1,4 @@
-import { createContext, useContext, useReducer } from "react";
+import { createContext, useContext, useReducer, useMemo } from "react";
 import type { ReactNode, Dispatch } from "react";
 import type {
   GraphStats,
@@ -25,60 +25,50 @@ export interface MapState {
   nodeDetails: NodeDetails | null;
 }
 
-// ── AppState interface ──
+// ── Sliced state interfaces ──
+// Splitting the monolithic state into domain slices lets consumers subscribe
+// to only the fields they need, so a pixel-drag of the bottom panel handle
+// (UISlice.bottomPanelHeight) doesn't re-render the graph canvas or the
+// session selector.
 
-export interface AppState {
-  // Graph data
-  stats: GraphStats;
-  // NOTE: `log` used to live here but was extracted to LogContext in 2026-04-07
-  // because ADD_LOG is the highest-frequency dispatch in the app and was
-  // re-rendering the whole App tree on every entry. See context/LogContext.tsx.
-
-  // UI mode
+/** High-frequency UI state: panels, tabs, resize, viewport. */
+export interface UISlice {
   mode: AppMode;
   bottomTab: BottomTab;
+  rightMenuOpen: "pathNodes" | "notes" | null;
+  leftMenuOpen: "datasets" | "activity" | "metrics" | null;
+  centerNodeId: string | null;
+  bottomPanelHeight: number;
+  viewState: { zoom: number; pan: { x: number; y: number } } | null;
+}
 
-  // Session
+/** Session-scoped data: session identity, stats, notes, path nodes. */
+export interface SessionSlice {
   currentSession: SessionInfo | null;
   sessions: SessionInfo[];
   sessionError: string;
+  stats: GraphStats;
+  notes: Note[];
+  pathNodeIds: string[];
+  entityTypesInGraph: string[];
+}
 
-  // Hunt mode
+/** Graph view state: subgraph, hunt results, explorer, navigation history. */
+export interface GraphSlice {
   subgraph: Subgraph | null;
   highlightPaths: string[][] | null;
   huntPathCount: number;
   showHuntTable: boolean;
-
-  // Explorer mode
   selectedNodeId: string | null;
   nodeDetails: NodeDetails | null;
   explorerNeighborhood: Neighborhood | null;
-
-  // Path nodes & entity types
-  pathNodeIds: string[];
-  entityTypesInGraph: string[];
-
-  // Right/left menus
-  rightMenuOpen: "pathNodes" | "notes" | null;
-  leftMenuOpen: "datasets" | "activity" | "metrics" | null;
-
-  // Notes
-  notes: Note[];
-
-  // Center node (for panning the graph view)
-  centerNodeId: string | null;
-
-  // Bottom panel height
-  bottomPanelHeight: number;
-
-  // Map navigation history
   mapPast: MapState[];
   mapFuture: MapState[];
-
-  // Persisted graph viewport (zoom + pan), so view doesn't reset on mode
-  // switch or graph rebuild. Cleared by CLEAR_SESSION_STATE.
-  viewState: { zoom: number; pan: { x: number; y: number } } | null;
 }
+
+// ── Full AppState (union of slices) ──
+
+export interface AppState extends UISlice, SessionSlice, GraphSlice {}
 
 // ── Initial state ──
 
@@ -241,22 +231,104 @@ export function appReducer(state: AppState, action: AppAction): AppState {
   }
 }
 
-// ── Context ──
+// ── Contexts ──
+// One dispatch shared by all slices (actions go to the single reducer).
+// Three slice contexts so consumers only re-render when their slice changes.
 
-const AppStateContext = createContext<AppState | null>(null);
+const UIContext = createContext<UISlice | null>(null);
+const SessionContext = createContext<SessionSlice | null>(null);
+const GraphContext = createContext<GraphSlice | null>(null);
 const AppDispatchContext = createContext<Dispatch<AppAction> | null>(null);
+
+// Legacy full-state context — kept for backward compatibility; prefer the
+// slice hooks below in new code.
+const AppStateContext = createContext<AppState | null>(null);
 
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialAppState);
 
+  // Memoize each slice so the context value only changes when its fields do.
+  // React skips re-renders for consumers whose context value is referentially
+  // identical, so this is the key mechanism that prevents cascade re-renders.
+
+  const ui: UISlice = useMemo(() => ({
+    mode: state.mode,
+    bottomTab: state.bottomTab,
+    rightMenuOpen: state.rightMenuOpen,
+    leftMenuOpen: state.leftMenuOpen,
+    centerNodeId: state.centerNodeId,
+    bottomPanelHeight: state.bottomPanelHeight,
+    viewState: state.viewState,
+  }), [
+    state.mode, state.bottomTab, state.rightMenuOpen, state.leftMenuOpen,
+    state.centerNodeId, state.bottomPanelHeight, state.viewState,
+  ]);
+
+  const session: SessionSlice = useMemo(() => ({
+    currentSession: state.currentSession,
+    sessions: state.sessions,
+    sessionError: state.sessionError,
+    stats: state.stats,
+    notes: state.notes,
+    pathNodeIds: state.pathNodeIds,
+    entityTypesInGraph: state.entityTypesInGraph,
+  }), [
+    state.currentSession, state.sessions, state.sessionError, state.stats,
+    state.notes, state.pathNodeIds, state.entityTypesInGraph,
+  ]);
+
+  const graph: GraphSlice = useMemo(() => ({
+    subgraph: state.subgraph,
+    highlightPaths: state.highlightPaths,
+    huntPathCount: state.huntPathCount,
+    showHuntTable: state.showHuntTable,
+    selectedNodeId: state.selectedNodeId,
+    nodeDetails: state.nodeDetails,
+    explorerNeighborhood: state.explorerNeighborhood,
+    mapPast: state.mapPast,
+    mapFuture: state.mapFuture,
+  }), [
+    state.subgraph, state.highlightPaths, state.huntPathCount,
+    state.showHuntTable, state.selectedNodeId, state.nodeDetails,
+    state.explorerNeighborhood, state.mapPast, state.mapFuture,
+  ]);
+
   return (
-    <AppStateContext.Provider value={state}>
-      <AppDispatchContext.Provider value={dispatch}>
-        {children}
-      </AppDispatchContext.Provider>
-    </AppStateContext.Provider>
+    <AppDispatchContext.Provider value={dispatch}>
+      <AppStateContext.Provider value={state}>
+        <UIContext.Provider value={ui}>
+          <SessionContext.Provider value={session}>
+            <GraphContext.Provider value={graph}>
+              {children}
+            </GraphContext.Provider>
+          </SessionContext.Provider>
+        </UIContext.Provider>
+      </AppStateContext.Provider>
+    </AppDispatchContext.Provider>
   );
 }
+
+// ── Slice hooks (prefer these in new code) ──
+
+export function useUIState(): UISlice {
+  const ctx = useContext(UIContext);
+  if (!ctx) throw new Error("useUIState must be used within AppStateProvider");
+  return ctx;
+}
+
+export function useSessionState(): SessionSlice {
+  const ctx = useContext(SessionContext);
+  if (!ctx) throw new Error("useSessionState must be used within AppStateProvider");
+  return ctx;
+}
+
+export function useGraphState(): GraphSlice {
+  const ctx = useContext(GraphContext);
+  if (!ctx) throw new Error("useGraphState must be used within AppStateProvider");
+  return ctx;
+}
+
+// ── Legacy hooks (backward compatible) ──
 
 export function useAppState(): AppState {
   const ctx = useContext(AppStateContext);

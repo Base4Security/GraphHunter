@@ -1,9 +1,9 @@
 import { useCallback } from "react";
-import { useAppState, useAppDispatch } from "../context/AppStateContext";
+import { useUIState, useAppDispatch } from "../context/AppStateContext";
 
 export function usePanelResize() {
   const dispatch = useAppDispatch();
-  const { bottomPanelHeight } = useAppState();
+  const { bottomPanelHeight } = useUIState();
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();

@@ -7,7 +7,7 @@ import dagre from "cytoscape-dagre";
 import type { Subgraph, Neighborhood } from "../types";
 import { ENTITY_COLORS, type EntityType } from "../types";
 import NodeContextMenu from "./NodeContextMenu";
-import { useAppState, useAppDispatch } from "../context/AppStateContext";
+import { useUIState, useAppDispatch } from "../context/AppStateContext";
 
 // Register dagre layout
 cytoscape.use(dagre);
@@ -296,7 +296,7 @@ export default function GraphCanvas({
   // Cytoscape emits `viewport` events at 60+/sec during drag/wheel; debounce
   // saves so we only persist the resting position. `isRestoringRef` prevents
   // an echo loop where our own restore triggers a save of the same value.
-  const { viewState } = useAppState();
+  const { viewState } = useUIState();
   const dispatch = useAppDispatch();
   const viewStateRef = useRef(viewState);
   viewStateRef.current = viewState;
