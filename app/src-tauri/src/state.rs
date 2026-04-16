@@ -118,3 +118,87 @@ pub fn session_file_path(session_id: &str) -> Result<PathBuf, String> {
     validate_session_id(session_id)?;
     Ok(ensure_session_dir()?.join(format!("{}.json", session_id)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── validate_session_id ──
+
+    #[test]
+    fn valid_uuid_style() {
+        assert!(validate_session_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    }
+
+    #[test]
+    fn valid_alphanumeric_underscore() {
+        assert!(validate_session_id("my_session_01").is_ok());
+    }
+
+    #[test]
+    fn valid_single_char() {
+        assert!(validate_session_id("a").is_ok());
+    }
+
+    #[test]
+    fn valid_max_length() {
+        let id = "a".repeat(128);
+        assert!(validate_session_id(&id).is_ok());
+    }
+
+    #[test]
+    fn reject_empty() {
+        assert!(validate_session_id("").is_err());
+    }
+
+    #[test]
+    fn reject_too_long() {
+        let id = "a".repeat(129);
+        assert!(validate_session_id(&id).is_err());
+    }
+
+    #[test]
+    fn reject_path_traversal() {
+        assert!(validate_session_id("../../etc/passwd").is_err());
+        assert!(validate_session_id("..").is_err());
+    }
+
+    #[test]
+    fn reject_dots() {
+        assert!(validate_session_id("session.json").is_err());
+    }
+
+    #[test]
+    fn reject_spaces() {
+        assert!(validate_session_id("my session").is_err());
+    }
+
+    #[test]
+    fn reject_nul_byte() {
+        assert!(validate_session_id("session\0id").is_err());
+    }
+
+    #[test]
+    fn reject_slashes() {
+        assert!(validate_session_id("a/b").is_err());
+        assert!(validate_session_id("a\\b").is_err());
+    }
+
+    #[test]
+    fn reject_special_chars() {
+        assert!(validate_session_id("session;rm -rf").is_err());
+        assert!(validate_session_id("<script>").is_err());
+        assert!(validate_session_id("id&cmd").is_err());
+    }
+
+    #[test]
+    fn accept_hyphens_and_underscores() {
+        assert!(validate_session_id("a-b_c-d").is_ok());
+    }
+
+    #[test]
+    fn reject_unicode() {
+        assert!(validate_session_id("sesion_\u{00e9}").is_err()); // é
+        assert!(validate_session_id("\u{1F600}").is_err()); // emoji
+    }
+}

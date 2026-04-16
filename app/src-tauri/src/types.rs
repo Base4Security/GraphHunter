@@ -229,3 +229,100 @@ pub struct ConnectorStatusResponse {
     pub connector_id: Option<String>,
     pub status: Option<crate::sentinel_connector::ConnectorStatus>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ip_class_for ──
+
+    #[test]
+    fn ip_class_private_rfc1918() {
+        let result = ip_class_for("IP", "192.168.1.1");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "Private");
+    }
+
+    #[test]
+    fn ip_class_private_10() {
+        let result = ip_class_for("IP", "10.0.0.1");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "Private");
+    }
+
+    #[test]
+    fn ip_class_public() {
+        let result = ip_class_for("IP", "8.8.8.8");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "Public");
+    }
+
+    #[test]
+    fn ip_class_loopback() {
+        let result = ip_class_for("IP", "127.0.0.1");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "Loopback");
+    }
+
+    #[test]
+    fn ip_class_non_ip_entity() {
+        assert!(ip_class_for("Host", "webserver-01").is_none());
+        assert!(ip_class_for("User", "admin").is_none());
+        assert!(ip_class_for("Process", "cmd.exe").is_none());
+    }
+
+    #[test]
+    fn ip_class_invalid_ip_string() {
+        // Not a valid IP — classify_ip should return None
+        assert!(ip_class_for("IP", "not-an-ip").is_none());
+    }
+
+    // ── SubgraphNode::new ──
+
+    #[test]
+    fn node_new_auto_ip_class() {
+        let node = SubgraphNode::new(
+            "10.0.0.5".to_string(),
+            "IP".to_string(),
+            0.0,
+            HashMap::new(),
+        );
+        assert_eq!(node.ip_class.as_deref(), Some("Private"));
+    }
+
+    #[test]
+    fn node_new_public_ip() {
+        let node = SubgraphNode::new(
+            "1.2.3.4".to_string(),
+            "IP".to_string(),
+            50.0,
+            HashMap::new(),
+        );
+        assert_eq!(node.ip_class.as_deref(), Some("Public"));
+    }
+
+    #[test]
+    fn node_new_non_ip_no_class() {
+        let node = SubgraphNode::new(
+            "webserver".to_string(),
+            "Host".to_string(),
+            0.0,
+            HashMap::new(),
+        );
+        assert!(node.ip_class.is_none());
+    }
+
+    #[test]
+    fn node_preserves_metadata() {
+        let mut meta = HashMap::new();
+        meta.insert("key".to_string(), "value".to_string());
+        let node = SubgraphNode::new(
+            "10.0.0.1".to_string(),
+            "IP".to_string(),
+            99.5,
+            meta,
+        );
+        assert_eq!(node.score, 99.5);
+        assert_eq!(node.metadata.get("key").map(|s| s.as_str()), Some("value"));
+    }
+}

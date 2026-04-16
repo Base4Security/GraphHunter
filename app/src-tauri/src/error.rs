@@ -53,3 +53,39 @@ impl From<serde_json::Error> for CommandError {
         CommandError::ParseError(e.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serializes_with_kind_tag() {
+        let err = CommandError::SessionNotFound("sess-123".to_string());
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["kind"], "SessionNotFound");
+        assert_eq!(json["message"], "sess-123");
+    }
+
+    #[test]
+    fn from_string_maps_to_internal() {
+        let err: CommandError = "something broke".to_string().into();
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["kind"], "Internal");
+        assert_eq!(json["message"], "something broke");
+    }
+
+    #[test]
+    fn from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file gone");
+        let err: CommandError = io_err.into();
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["kind"], "IoError");
+        assert!(json["message"].as_str().unwrap().contains("file gone"));
+    }
+
+    #[test]
+    fn display_shows_message() {
+        let err = CommandError::GraphLocked("busy".to_string());
+        assert_eq!(format!("{}", err), "busy");
+    }
+}
