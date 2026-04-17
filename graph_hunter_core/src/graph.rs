@@ -10,13 +10,24 @@ use crate::errors::GraphError;
 use crate::hypothesis::Hypothesis;
 use crate::interner::{StrId, StringInterner};
 use crate::metadata_store::MetadataStore;
-use crate::relation::{CompactRelation, Relation};
+use crate::relation::{encode_ingested_at, CompactRelation, Relation};
 use crate::spill::SpillableEdgeStore;
 use crate::types::{EntityType, MergePolicy, RelationType, entity_type_matches, relation_type_matches};
 
 /// Result of a successful pattern match: an ordered list of entity IDs
 /// representing the attack path through the graph.
 pub type HuntResult = Vec<String>;
+
+/// Current wall-clock time in epoch seconds. Falls back to the
+/// [`crate::relation::INGEST_EPOCH_BASE`] if the system clock is
+/// somehow set before 1970 (paranoid; real systems won't hit this).
+fn now_seconds() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(crate::relation::INGEST_EPOCH_BASE)
+}
 
 /// Iterative DFS frame. Module-level so it can appear in the
 /// `dfs_match_iterative` signature (callers pass a reusable scratch stack).
@@ -252,6 +263,7 @@ impl GraphHunter {
             timestamp: relation.timestamp,
             metadata_offset: meta_offset,
             dataset_tag: ds_tag,
+            ingested_at_delta: encode_ingested_at(now_seconds()),
         };
 
         self.reverse_adj
@@ -1382,6 +1394,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
+                ingested_at_delta: 0,
             };
 
             // Always insert relation
@@ -1723,6 +1736,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
+                ingested_at_delta: 0,
             };
 
             self.reverse_adj
@@ -1833,6 +1847,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
+                ingested_at_delta: 0,
             };
 
             self.reverse_adj
@@ -2049,6 +2064,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
+                ingested_at_delta: 0,
             };
             self.reverse_adj
                 .entry(dst_sid)
