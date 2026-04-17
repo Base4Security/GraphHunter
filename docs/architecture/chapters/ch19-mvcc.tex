@@ -1,0 +1,56 @@
+\chapter{MVCC Edge-Level Stamping}
+\label{ch:mvcc}
+
+\begin{note}
+Stub. The P3 refactor introduced edge-level MVCC with zero memory
+overhead by reclaiming padding in \Compact{}
+(see Chapter~\ref{ch:compact-relation} for the layout and
+Chapter~\ref{ch:hunt-diff} for the snapshot-aware diff
+semantics). This chapter will eventually describe the ingest
+pipeline's stamping behaviour, the \code{search\_temporal\_pattern\_at}
+matcher extension, and the v1$\to$v2 session-file / spill-file
+migration.
+\end{note}
+
+\section{Current state}
+
+\begin{itemize}
+    \item \code{CompactRelation.ingested\_at\_delta: u32} is
+        stamped by \code{GraphHunter::add\_relation} to the
+        current wall-clock second at insert time. Legacy edges
+        (delta = 0) resolve to \code{INGEST\_EPOCH\_BASE}.
+    \item \code{encode\_ingested\_at(ts)} is the ingest-path helper
+        that clamps below the epoch base and saturates above
+        \code{u32::MAX}.
+    \item The 32-byte invariant on \Compact{} is CI-enforced
+        (\code{relation::tests::compact\_relation\_stays\_32\_bytes}).
+\end{itemize}
+
+\section{Follow-up work}
+
+\begin{itemize}
+    \item \textsc{Search-Temporal-Pattern-At}$(G, H, (t_0, t_1),
+        \iota)$ --- the matcher wrapper that filters edges by
+        \code{ingested\_at()} $\leq \iota$ in addition to the event
+        window. Expected 5--15 \% cost bump on snapshot queries;
+        transparent on current-view queries.
+    \item \code{IngestAdapter} $\to$ writer propagation: forward
+        \code{TripleBatch.fetched\_at} into \code{with\_ingested\_at}
+        so streaming sources get their upstream timestamp rather
+        than the local wall-clock. Deterministic for replay.
+    \item \code{diff\_by\_snapshot} analytics function
+        (Chapter~\ref{ch:hunt-diff}).
+    \item SessionFile schema\_version bump (v1$\to$v2): backfill
+        \code{ingested\_at} from \code{timestamp} for legacy edges,
+        surface a UI banner ``approximate snapshot''.
+    \item Spill \code{SPILL\_VERSION} bump and CLI migrator.
+\end{itemize}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/relation.rs:83} ---
+\Compact{} layout with MVCC field.\\
+\filepath{graph\_hunter\_core/src/graph.rs:227} ---
+\code{add\_relation} stamping today.\\
+\filepath{graph\_hunter\_core/tests/mvcc\_ingested\_at.rs} ---
+end-to-end MVCC contract pinning.
+\end{inthecode}

@@ -1,0 +1,68 @@
+\chapter{Parity Harness}
+\label{ch:parity-harness}
+
+\begin{note}
+Stub. The harness lives in
+\filepath{graph\_hunter\_api/tests/parity*.rs}. Two phases ship
+today (A: DTO shape; B: scenario); a third phase covering the
+HTTP + Tauri runtime is deferred.
+\end{note}
+
+\section{Phase A --- DTO shape}
+
+For every request/response DTO pair, the harness serialises a
+hand-crafted value to JSON and asserts the object's top-level keys
+match an expected set exactly. A missed field or a rename yields a
+clear failure at test time.
+
+The helper:
+
+\begin{lstlisting}[style=rust]
+fn assert_keys<T: Serialize>(value: &T, expected: &[&str]) {
+    let v = serde_json::to_value(value).unwrap();
+    let actual: BTreeSet<_> = v.as_object().unwrap()
+        .keys().map(|s| s.as_str()).collect();
+    let want: BTreeSet<_> = expected.iter().copied().collect();
+    assert_eq!(actual, want);
+}
+\end{lstlisting}
+
+\section{Phase B --- Scenario}
+
+End-to-end scenarios exercise ordered operation sequences against
+the façade directly (not through a transport). The harness builds
+a fixture session with a small seeded graph (Alice + Bob
+authenticating to web-01, web-01 executing cmd.exe), runs a
+sequence of API calls, and asserts observable state at each step.
+
+Fixtures:
+\begin{itemize}
+    \item \code{fresh\_api\_with\_session()} --- empty fresh API
+        plus a single session.
+    \item \code{fresh\_api\_with\_seeded\_session()} --- the seeded
+        4-entity / 3-edge graph.
+    \item \code{tag}, \code{note}, \code{parse} --- convenience
+        helpers so scenarios read at the operation level.
+\end{itemize}
+
+Sample assertions: \code{run\_hunt\_populates\_cache\_and\_pages\_back}
+(a full run $\to$ page-back round-trip matches), \code{diff\_hunts\_rejects\_inverted\_window} (the
+invariant from Chapter~\ref{ch:hunt-diff}),
+\code{export\_iocs\_sentinel\_watchlist\_csv\_contains\_tagged\_ips\_only}
+(the export format).
+
+\section{Deferred Phase C}
+
+A full HTTP + Tauri runtime harness (spin up axum in the test,
+wire a Tauri IPC mock) is flagged as follow-up. Phase A + B
+together catch the shape and semantic drifts that would have
+broken parity between transports; Phase C would add wire-level
+round-trips.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_api/tests/parity.rs} --- harness entry.\\
+\filepath{graph\_hunter\_api/tests/parity/fixture.rs} --- fixture
+builders.\\
+\filepath{graph\_hunter\_api/tests/parity/dto\_shapes.rs} --- Phase A.\\
+\filepath{graph\_hunter\_api/tests/parity/scenarios.rs} --- Phase B.
+\end{inthecode}

@@ -1,0 +1,116 @@
+\chapter{The In-Memory Graph}
+\label{ch:graph-hunter}
+
+The central struct is \Graph{} (aliased as \code{GraphHunter} for
+backward compatibility). It is the sole producer of
+\code{CompactRelation}, the sole owner of the \code{StringInterner}
+and \code{MetadataStore}, and the sole target of the DFS matcher.
+
+\section{Fields}
+
+\begin{lstlisting}[style=rust]
+pub struct InMemoryGraph {
+    // Forward storage.
+    pub(crate) entities:         HashMap<StrId, Entity>,
+    pub(crate) edge_store:       SpillableEdgeStore,
+    pub(crate) interner:         StringInterner,
+    pub(crate) meta_store:       MetadataStore,
+
+    // Indexes -- denormalised for query speed.
+    pub(crate) reverse_adj:      HashMap<StrId, Vec<StrId>>,
+    pub(crate) type_index:       HashMap<EntityType, HashSet<StrId>>,
+    pub(crate) entity_type_tags: Vec<u8>, // dense by StrId
+
+    // Dataset interner (Arc<str>, 16-bit tag).
+    pub(crate) dataset_tags:     Vec<Arc<str>>,
+    pub(crate) dataset_map:      HashMap<Arc<str>, u16>,
+}
+\end{lstlisting}
+
+The redundancy between \code{entities[...].entity_type} and
+\code{entity\_type\_tags[...]} is deliberate: the former is the
+canonical source but costs a HashMap lookup; the latter is an
+SoA array indexed by \code{StrId.0 as usize} --- a constant-time
+byte read that the matcher uses inside its inner loop to reject
+edges whose destination type doesn't match the hypothesis step.
+
+\begin{invariant}[Index coherence]
+For every \StrId{} $x$ produced by \code{interner.intern(\_)}:
+\code{entities.contains\_key(\&x)} iff the string has been added
+as an entity, and in that case \code{type\_index[et].contains(\&x)}
+where \code{et = entities[\&x].entity\_type}, and
+\code{entity\_type\_tags[x.0 as usize]} equals that entity type's
+numeric tag.
+\end{invariant}
+
+\section{Insertion algorithms}
+
+\begin{algorithm}
+\caption{\textsc{Add-Entity}}\label{alg:add-entity}
+\KwIn{graph $G$, entity $e = (\text{id}, \text{type})$}
+$x \gets \code{G.interner.intern(}\text{e.id}\code{)}$\;
+\If{$x \in G.\text{entities}$}{\Return \Comment*[r]{idempotent on dup}}
+\code{G.entities.insert(x, e)}\;
+\code{G.type\_index[\text{e.type}].insert(x)}\;
+\code{G.entity\_type\_tags.resize(max(len, x.0+1), \_)}\;
+\code{G.entity\_type\_tags[x.0] $\gets$ tag(\text{e.type})}\;
+\code{G.reverse\_adj.entry(x).or\_default()}\;
+\Return\;
+\end{algorithm}
+
+\begin{algorithm}
+\caption{\textsc{Add-Relation}}\label{alg:add-relation}
+\KwIn{graph $G$, relation $r = (\text{src}, \text{dst}, \text{rel}, \tau, M)$}
+$s \gets \code{G.interner.get(r.src)}$; $\code{fail if None}$\;
+$d \gets \code{G.interner.get(r.dst)}$; $\code{fail if None}$\;
+$o \gets \code{G.meta\_store.append(M)}$\;
+$t \gets $ \textsc{Encode-Ingested-At}(\textsc{Now-Seconds}())\;
+$c \gets $ \Compact{}($s, d, \text{rel}, \tau, o, \text{dsTag}, t$)\;
+\code{G.edge\_store.append(s, c)}\;
+\code{G.reverse\_adj[d].push(s)}\;
+\Return\;
+\end{algorithm}
+
+\begin{complexity}
+\textsc{Add-Entity}: $\Ord{1}$ amortized in the number of existing
+entities; the resize of \code{entity\_type\_tags} is amortized by
+the vector doubling strategy. \textsc{Add-Relation}: $\Ord{1}$
+amortized, dominated by \code{append} on the spillable store
+(Chapter~\ref{ch:spill}) and the interner lookup. Space per inserted
+edge is 32 bytes plus any metadata bytes appended to
+\code{MetadataStore}.
+\end{complexity}
+
+\section{Finalization}
+
+The adjacency lists inside \code{edge\_store} are not sorted by
+timestamp on insertion --- sorting on every \textsc{Add-Relation}
+would pay $\Ord{\log d}$ for every insert and we bulk-insert from
+streaming sources. Instead, after a batch, the caller invokes
+\code{sort\_edges\_by\_timestamp}, which is the external trigger for
+\code{SpillableEdgeStore::finalize}:
+
+\begin{algorithm}
+\caption{\textsc{Sort-Edges-By-Timestamp}}\label{alg:finalize-sort}
+\KwIn{graph $G$}
+\code{G.edge\_store.finalize()}\Comment*[r]{k-way merge, \S\ref{ch:spill}}
+\For{$s \in G.\text{entities.keys}$}{
+    sort \code{G.edge\_store.get\_edges(s)} in place by
+    \code{(timestamp, dest\_sid)} \Comment*[r]{\Ord{d(s) \log d(s)}}
+}
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{m \log \bar d}$ where $\bar d$ is the average out-degree, since
+each adjacency list of length $d(v)$ is sorted independently. If the
+store was in spill mode, \code{finalize} first does a $k$-way merge
+at $\Ord{m \log k}$ cost (Chapter~\ref{ch:spill}). Space grows only
+by the mergefile size during this step.
+\end{complexity}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/graph.rs:67} --- struct fields.\\
+\filepath{graph\_hunter\_core/src/graph.rs:211} --- \textsc{Add-Entity}.\\
+\filepath{graph\_hunter\_core/src/graph.rs:227} --- \textsc{Add-Relation}.\\
+\filepath{graph\_hunter\_core/src/graph.rs:437} --- \textsc{Sort-Edges-By-Timestamp}.
+\end{inthecode}

@@ -1,0 +1,101 @@
+\chapter{Hunt Diff}
+\label{ch:hunt-diff}
+
+\code{diff\_hunts} answers the question ``what changed between two
+points in time in the set of paths satisfying this hypothesis?''
+It is the foundation for the UI's ``what's new since my last
+check'' panel and for scheduled automation that flags freshly
+appeared attack chains.
+
+\section{Classical event-time variant}
+
+The baseline algorithm runs the hypothesis twice against the
+graph, bounding the time window at different upper-bound
+timestamps, and diffs the path sets.
+
+\begin{algorithm}
+\caption{\textsc{Diff-Hunts}}\label{alg:diff-hunts}
+\KwIn{graph $G$, hypothesis $H$, baseline timestamp $t_{\text{base}}$,
+      current timestamp $t_{\text{cur}}$ with $t_{\text{base}} < t_{\text{cur}}$}
+\KwOut{(added: $\mathrm{List}[\pi]$, removed: $\mathrm{List}[\pi]$)}
+$\Pi_{\text{base}} \gets $ \textsc{Search-Temporal-Pattern}($G, H, (0, t_{\text{base}}), \infty$)\;
+$\Pi_{\text{cur}} \gets $ \textsc{Search-Temporal-Pattern}($G, H, (0, t_{\text{cur}}), \infty$)\;
+$U_{\text{base}} \gets $ \textsc{Score-And-Paginate}($\Pi_{\text{base}}$, 0, $\infty$, None, ByPath).unique\;
+$U_{\text{cur}} \gets $ same for $\Pi_{\text{cur}}$\;
+$K_{\text{base}} \gets $ set of path-keys in $U_{\text{base}}$\;
+$K_{\text{cur}} \gets $ same for $U_{\text{cur}}$\;
+added $\gets U_{\text{cur}}$ filtered by key $\notin K_{\text{base}}$\;
+removed $\gets U_{\text{base}}$ filtered by key $\notin K_{\text{cur}}$\;
+\Return (added, removed)\;
+\end{algorithm}
+
+\begin{complexity}
+Two hunt executions plus a set-difference pass. If
+$T_{\text{match}}$ is the matcher cost and $P$ is the number of
+paths returned by either hunt, the total is
+$2 T_{\text{match}} + \Ord{P}$. Space is $\Ord{P}$ above the matcher's
+own scratch state.
+\end{complexity}
+
+\section{Semantic gotcha: late-arriving data}
+
+The classical variant diffs by \emph{event time}, not by
+\emph{knowledge time}: an edge whose event timestamp is in the past
+but that was ingested after $t_{\text{base}}$ will appear in both
+$\Pi_{\text{base}}$ and $\Pi_{\text{cur}}$, because the upper bound
+on the time window doesn't filter based on when the engine learned
+about the edge. This is the original motivation for the P3 MVCC
+work (Chapter~\ref{ch:mvcc}): an analyst who closed a ticket at
+$t_{\text{base}}$ may still want to know that a post-mortem ingest
+revealed new edges inside the window they already considered
+``done.''
+
+\section{The snapshot variant (deferred)}
+
+Once the P3 matcher extension (\textsc{Search-Temporal-Pattern-At})
+lands, \code{diff\_by\_snapshot} becomes the richer alternative:
+
+\begin{algorithm}
+\caption{\textsc{Diff-By-Snapshot} (deferred)}\label{alg:diff-snapshot}
+\KwIn{graph $G$, hypothesis $H$, event window $(t_0, t_1)$,
+      baseline snapshot $\iota_{\text{base}}$, current snapshot
+      $\iota_{\text{cur}}$}
+\KwOut{(added, removed) path lists}
+$\Pi_{\text{base}} \gets $ \textsc{Search-Temporal-Pattern-At}($G, H, (t_0, t_1), \iota_{\text{base}}$)\;
+$\Pi_{\text{cur}} \gets $ \textsc{Search-Temporal-Pattern-At}($G, H, (t_0, t_1), \iota_{\text{cur}}$)\;
+\ldots set-diff as in \textsc{Diff-Hunts} \ldots
+\end{algorithm}
+
+Key distinction: the event window $(t_0, t_1)$ is fixed, and it's
+the knowledge snapshot $\iota$ that varies. The engine answers
+``what new paths in this event window have I learned about between
+$\iota_{\text{base}}$ and $\iota_{\text{cur}}$?'' --- the proper
+audit semantic for late-arriving enrichment, VirusTotal detonations
+that return after the event was ingested, threat-intel overlays
+that landed later, et cetera.
+
+\begin{complexity}
+Same as the classical variant: $2 T_{\text{match}} + \Ord{P}$. The
+\emph{value} delta is semantic, not performance.
+\end{complexity}
+
+\section{Input validation}
+
+\begin{invariant}[Window ordering]
+\code{diff\_hunts} rejects $t_{\text{base}} > t_{\text{cur}}$ with
+\code{ApiError::InvalidInput}. A reversed window would produce
+an (added, removed) pair whose semantics are the user's responsibility
+to interpret; the engine prefers to fail loudly.
+\end{invariant}
+
+This invariant is exercised by the parity harness
+(\code{diff\_hunts\_rejects\_inverted\_window} in
+\filepath{graph\_hunter\_api/tests/parity/scenarios.rs}).
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/analytics.rs:1342} ---
+\code{diff\_hunts} (classical).\\
+\filepath{graph\_hunter\_core/src/relation.rs:83} --- the
+\code{ingested\_at\_delta} field that \code{diff\_by\_snapshot}
+will eventually consult.
+\end{inthecode}

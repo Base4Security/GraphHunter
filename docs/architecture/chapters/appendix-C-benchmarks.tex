@@ -1,0 +1,56 @@
+\chapter{Benchmarks}
+\label{app:bench}
+
+Two Criterion benchmark suites live in
+\filepath{graph\_hunter\_core/benches/}:
+
+\begin{itemize}
+    \item \filepath{hunt\_latency.rs} --- end-to-end
+        \code{search\_temporal\_pattern} timing on a synthetic
+        graph. Used as the "\,$\leq 5\%$ regression'' gate by the
+        P1/P2 refactor plans.
+    \item \filepath{dedup\_throughput.rs} ---
+        \code{SpillableEdgeStore} ingest timing. Validates the
+        k-way merge's $\Ord{k}$-RAM claim on a 2M-record sample
+        (0.23 MB delta vs the $\sim$92 MB of the old Vec-based
+        approach).
+\end{itemize}
+
+\section{Running}
+
+\begin{verbatim}
+cd graph_hunter_core
+cargo bench --bench hunt_latency
+cargo bench --bench dedup_throughput
+\end{verbatim}
+
+Criterion's default output lands under
+\filepath{graph\_hunter\_core/target/criterion/} as HTML reports.
+
+\section{Current baseline (illustrative)}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Benchmark} & \textbf{Result} & \textbf{Notes} \\
+\midrule
+\code{hunt\_latency} 2-step, 10K edges & $\sim$ 200~\textmu s & scalar Rust \\
+\code{hunt\_latency} 2-step, 10K edges, SIMD & $\sim$ 70~\textmu s & libgraphmatch \\
+\code{dedup\_throughput} 2M records & $\sim$ 1.5~s & spill mode \\
+\bottomrule
+\end{tabular}
+\caption{Illustrative benchmark numbers on a laptop-class CPU
+(AMD Ryzen 7 5800H). Re-run locally for up-to-date numbers;
+actual values drift per hardware and build flags.}
+\end{table}
+
+\section{Three-way SIMD comparison (planned)}
+
+The P2-D follow-up adds a third column to the hunt-latency table:
+pure-Rust \code{simd\_rust}. The comparison should show (a) scalar,
+(b) libgraphmatch FFI, (c) Rust intrinsics. The expectation is
+that Rust intrinsics reach $\sim$70--80 \% of libgraphmatch's
+peak, at which point the operational benefit of dropping the C++
+toolchain dominates.

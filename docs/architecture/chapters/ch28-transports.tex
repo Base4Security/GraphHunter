@@ -1,0 +1,84 @@
+\chapter{Transport Adapters}
+\label{ch:transports}
+
+\begin{note}
+Stub. Three transports delegate to \code{GraphHunterApi}: the Tauri
+desktop app, the axum-based HTTP server, and the TypeScript MCP
+server. All three are meant to be thin --- no logic beyond
+constructing a request DTO and rendering the response.
+\end{note}
+
+\section{Tauri}
+
+Commands live in \filepath{app/src-tauri/src/commands/*.rs}.
+Every command body is $\leq$ 10 LOC:
+
+\begin{lstlisting}[style=rust]
+#[tauri::command]
+pub fn cmd_run_hunt(
+    api: State<Arc<GraphHunterApi>>,
+    hypothesis: Hypothesis,
+    time_window: Option<(i64, i64)>,
+    max_results: Option<u32>,
+) -> Result<RunHuntResponse, CommandError> {
+    api.run_hunt(RunHuntRequest {
+        session: None,
+        hypothesis,
+        time_window,
+        max_results,
+    })
+    .map_err(CommandError::from)
+}
+\end{lstlisting}
+
+Commands are registered in \filepath{app/src-tauri/src/lib.rs} with
+the \code{tauri::Builder::invoke\_handler} macro.
+
+\section{HTTP}
+
+Handlers live in
+\filepath{app/src-tauri/src/http\_api.rs} and share the same
+\code{Arc<GraphHunterApi>} via axum's \code{State}. The HTTP port
+is chosen at startup (\code{util::resolve\_api\_port}) and written
+to the Tauri app's config directory so the MCP server and CLI can
+find it.
+
+Every handler is also $\leq$ 10 LOC:
+
+\begin{lstlisting}[style=rust]
+async fn handler_run_hunt(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<RunHuntRequest>,
+) -> Response {
+    match api.run_hunt(body) {
+        Ok(v)  => ok_json(v),
+        Err(e) => error_json(e),
+    }
+}
+\end{lstlisting}
+
+\section{MCP}
+
+\filepath{graph-hunter-mcp/src/index.ts} exposes $\sim$30 tools
+over the MCP protocol. Each tool handler HTTPs-calls the local
+engine via \code{http://127.0.0.1:<port>}; it does not link the
+Rust engine at all. This is the only transport that doesn't hold
+an \code{Arc<GraphHunterApi>} directly --- because it runs in a
+different process (Node.js) --- yet it sees the exact same
+semantics because the HTTP layer is a thin wrapper around the
+façade.
+
+\section{EventEmitter}
+
+Progress events (session load, ingest, Sentinel streaming) flow
+through an \code{Arc<dyn EventEmitter>} stored on \code{ApiState}.
+\code{TauriEventEmitter} bridges to \code{AppHandle::emit};
+\code{NoopEmitter} is used by HTTP, MCP, CLI, and tests.
+
+\begin{inthecode}
+\filepath{app/src-tauri/src/commands/} --- Tauri command modules.\\
+\filepath{app/src-tauri/src/http\_api.rs} --- HTTP handlers.\\
+\filepath{graph-hunter-mcp/src/index.ts} --- MCP tools.\\
+\filepath{graph\_hunter\_api/src/events.rs} (or similar) ---
+\code{EventEmitter} trait.
+\end{inthecode}

@@ -1,0 +1,53 @@
+\chapter{\code{IngestAdapter} Trait}
+\label{ch:ingest-adapter}
+
+\begin{note}
+Stub. The P2-E refactor introduced a higher-level wrapper around
+\code{LogSource} + \code{LogParser}: new source authors implement
+\code{IngestAdapter} in a child crate rather than editing core
+files.
+\end{note}
+
+\section{Contract}
+
+\begin{lstlisting}[style=rust]
+#[async_trait]
+pub trait IngestAdapter: Send + Sync {
+    fn adapter_id(&self) -> &str;
+    fn tables(&self) -> &[&'static str];
+    async fn stream_triples(
+        &self,
+        table: &str,
+        since: Watermark,
+        cancel: CancellationToken,
+    ) -> Result<TripleBatchStream, SourceError>;
+}
+
+pub struct TripleBatch {
+    pub triples:    Vec<ParsedTriple>,
+    pub watermark:  Watermark,
+    pub fetched_at: i64,
+}
+\end{lstlisting}
+
+\section{Generic implementation}
+
+\code{LogSourceAdapter} wraps any \code{LogSource} + \code{LogParser}
+into an \code{IngestAdapter}. The 4 existing sources (Log
+Analytics, Defender XDR, Data Lake, AAD export) can be exposed as
+adapters with zero source-code change; the orchestrator still holds
+them in concrete form today for backward compatibility, but the
+seam is open.
+
+\section{MVCC propagation}
+
+\code{TripleBatch.fetched\_at} carries the upstream fetch timestamp,
+which is exactly what the writer needs to call
+\code{CompactRelation::with\_ingested\_at} on each inserted edge ---
+the third leg of the P3 MVCC story (Chapter~\ref{ch:mvcc}).
+Wiring that plumbing end-to-end is a deferred follow-up.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/ingest\_adapter.rs} --- trait +
+\code{LogSourceAdapter}.
+\end{inthecode}

@@ -1,0 +1,146 @@
+% GraphHunter Architecture — LaTeX preamble
+%
+% Packages + theorem environments + macros + listings style.
+% Kept separate from the main file so each chapter can \input cleanly
+% and so the preamble is easy to review in isolation.
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\usepackage[a4paper,margin=2.4cm]{geometry}
+
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+
+% Pseudocode — algorithm2e is more flexible for CLRS-style than algpseudocode.
+% `ruled` = horizontal bars above and below; `linesnumbered` = 1. 2. ... gutter.
+\usepackage[ruled,linesnumbered,algochapter]{algorithm2e}
+\SetKwComment{Comment}{$\triangleright$ }{}
+\SetKwFor{For}{for}{do}{end}
+\SetKwFor{While}{while}{do}{end}
+\SetKwIF{If}{ElseIf}{Else}{if}{then}{else if}{else}{end}
+\SetKwRepeat{Repeat}{repeat}{until}
+% Control-flow keywords we use as bare verbs inside pseudocode.
+\SetKw{KwBreak}{break}
+\SetKw{KwContinue}{continue}
+\SetKw{KwTrue}{true}
+\SetKw{KwFalse}{false}
+% Aliases matching CLRS-ish capitalisation.
+\newcommand{\Break}{\KwBreak}
+\newcommand{\Continue}{\KwContinue}
+
+% Inline code + short snippets.
+\usepackage{listings}
+\usepackage{xcolor}
+\definecolor{rustcomment}{rgb}{0.35,0.45,0.45}
+\definecolor{rustkw}{rgb}{0.55,0.10,0.55}
+\definecolor{ruststr}{rgb}{0.10,0.45,0.10}
+\lstdefinelanguage{Rust}{
+    morekeywords={fn,let,mut,pub,struct,enum,impl,trait,where,if,else,for,while,
+                  loop,match,return,use,mod,const,static,self,Self,as,in,ref,move,
+                  async,await,dyn,unsafe,crate,super,extern,type,break,continue},
+    morecomment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    morestring=[b]",
+    morestring=[b]',
+}
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{rustkw}\bfseries,
+    commentstyle=\color{rustcomment}\itshape,
+    stringstyle=\color{ruststr},
+    showstringspaces=false,
+    frame=single,
+    numbers=none,
+    captionpos=b,
+    breaklines=true,
+    tabsize=4,
+}
+\lstdefinestyle{rust}{language=Rust}
+\lstdefinestyle{yaml}{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{rustkw}\bfseries,
+    commentstyle=\color{rustcomment}\itshape,
+    morekeywords={id,name,mitre_id,description,dsl_pattern,k_simplicity},
+    frame=single,
+}
+
+% Clickable refs + bookmark tree.
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    citecolor=black,
+    urlcolor=blue!50!black,
+    pdftitle={GraphHunter Architecture (CLRS-style Reference)},
+    pdfauthor={Lucas Sotomayor / Base4Security},
+    bookmarks=true,
+    bookmarksopen=true,
+    bookmarksnumbered=true,
+}
+\usepackage{bookmark}
+
+% Tables.
+\usepackage{booktabs}
+
+% Diagrams.
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, fit, backgrounds}
+
+% Theorem-like environments.
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}[chapter]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+
+\theoremstyle{remark}
+\newtheorem*{invariant}{Invariant}
+\newtheorem*{note}{Note}
+
+% Custom environment for complexity analysis — boxed, distinct visually.
+\newenvironment{complexity}{%
+    \par\vspace{0.4em}%
+    \noindent\textbf{Complexity.}\nopagebreak\par\nopagebreak\vspace{0.2em}%
+}{\par\vspace{0.4em}}
+
+% Custom environment for the "In the code" sidebar.
+\newenvironment{inthecode}{%
+    \par\vspace{0.4em}%
+    \noindent\textbf{In the code.}\nopagebreak\par\nopagebreak\vspace{0.2em}%
+}{\par\vspace{0.4em}}
+
+% Macros.
+\newcommand{\Ord}[1]{\ensuremath{O(#1)}}
+\newcommand{\Thet}[1]{\ensuremath{\Theta(#1)}}
+% Accept underscores, ampersands, and similar "special" characters
+% verbatim inside \filepath and \code. `\detokenize` reads the
+% argument as a token stream without expanding or evaluating math
+% mode, so \code{foo_bar} renders as expected.
+\newcommand{\filepath}[1]{\texttt{\small\detokenize{#1}}}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\StrId}{\ensuremath{\mathsf{StrId}}}
+\newcommand{\Compact}{\ensuremath{\mathsf{CompactRelation}}}
+\newcommand{\Graph}{\ensuremath{\mathsf{InMemoryGraph}}}
+\newcommand{\Scorer}{\ensuremath{\mathsf{AnomalyScorer}}}
+
+% Slightly looser Lines per algorithm environment so long pseudocode doesn't
+% overflow pages.
+\makeatletter
+\renewcommand{\@algocf@pre@ruled}{\hrule height.8pt depth0pt \kern2pt}
+\renewcommand{\@algocf@post@ruled}{\kern2pt\hrule height.8pt\relax}
+\makeatother
+
+% Part / chapter heading format tweaks — CLRS uses big Part pages.
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries}
+  {\chaptertitlename~\thechapter}
+  {20pt}
+  {\Huge}
+
+% Suppress a common listings+hyperref warning.
+\newcommand{\passthrough}[1]{#1}

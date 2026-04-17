@@ -1,0 +1,90 @@
+\chapter{The Metadata Store}
+\label{ch:metadata}
+
+Per-edge metadata (arbitrary \code{HashMap<String, String>}
+key-value pairs populated by parsers) is the most variable-size
+field associated with a relation. Inlining it into \Compact{}
+would force a variable-length record and destroy the 32-byte
+invariant (Chapter~\ref{ch:compact-relation}). The engine instead
+stores metadata externally in \code{MetadataStore} and keeps only
+a 64-bit offset in \Compact{}.
+
+\section{Structure}
+
+\code{MetadataStore} is an append-only byte buffer with a simple
+length-prefixed encoding:
+
+\begin{lstlisting}[style=rust]
+pub struct MetadataStore {
+    buf: Vec<u8>,   // append-only
+}
+// layout of one record at offset o:
+//   u32 num_entries
+//   repeated num_entries times:
+//     u16 key_len, key bytes, u16 value_len, value bytes
+\end{lstlisting}
+
+The first valid record offset is 1, so $\code{metadata\_offset} = 0$
+in \Compact{} is unambiguously ``no metadata.'' On \code{append},
+the store returns the offset at which it wrote the new record and
+that offset lives in \Compact{} for the remainder of the session.
+
+\section{Operations}
+
+\begin{algorithm}
+\caption{\textsc{Metadata-Append}}\label{alg:meta-append}
+\KwIn{store $M$, map $K : \{(k, v)\}$}
+\KwOut{offset $o \geq 1$, or 0 if $K$ is empty}
+\If{$K$ is empty}{\Return 0\;}
+$o \gets M.\text{buf.len()} + 1$\;
+write \code{u32(len($K$))} then each \code{(key, value)} pair with
+\code{u16} length prefixes into $M.\text{buf}$\;
+\Return $o$\;
+\end{algorithm}
+
+\begin{algorithm}
+\caption{\textsc{Metadata-Read}}\label{alg:meta-read}
+\KwIn{store $M$, offset $o$}
+\KwOut{\code{HashMap<String, String>}, or empty if $o = 0$}
+\If{$o = 0$}{\Return empty map\;}
+position cursor at $o - 1$ in $M.\text{buf}$\;
+read \code{u32 num}\;
+\For{$i \gets 0$ \KwTo $num-1$}{
+    read \code{u16 k\_len}, next \code{k\_len} bytes as UTF-8 $\to k$\;
+    read \code{u16 v\_len}, next \code{v\_len} bytes as UTF-8 $\to v$\;
+    insert $(k, v)$\;
+}
+\Return map\;
+\end{algorithm}
+
+\begin{complexity}
+\textsc{Metadata-Append}: $\Ord{|K| + \sum |k| + \sum |v|}$.
+\textsc{Metadata-Read}: same.  Space per edge is zero if the
+parser produced no metadata, otherwise the byte length of the
+encoded record. A typical Sysmon edge produces $\sim$60 bytes of
+metadata, compared with the 32 bytes of \Compact{} --- which is
+why the external store matters: the edges stay packed in the hot
+matcher path and metadata is paid for only when an analyst asks.
+\end{complexity}
+
+\section{Immutability}
+
+\begin{invariant}[Metadata append-only]
+Once a record has been written to \code{MetadataStore.buf}, no
+operation truncates or rewrites the preceding bytes. Offsets are
+therefore stable for the lifetime of the graph. In particular, the
+matcher can capture an offset into a \Compact{} at ingest time and
+read the metadata through it at hunt time without worrying about
+concurrent writer mutation.
+\end{invariant}
+
+When a session is persisted the entire \code{MetadataStore.buf} is
+serialised alongside the entity/relation lists; on load the store
+is reconstituted verbatim, preserving every offset.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/metadata\_store.rs} --- struct
+and append/read routines.\\
+\filepath{graph\_hunter\_core/src/graph.rs:246} --- where
+\textsc{Add-Relation} calls \code{meta\_store.append}.
+\end{inthecode}

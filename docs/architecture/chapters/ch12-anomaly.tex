@@ -1,0 +1,199 @@
+\chapter{Anomaly Scoring}
+\label{ch:anomaly}
+
+Path ranking is the second half of what the engine does: after the
+matcher returns all paths satisfying a hypothesis, the
+\Scorer{} assigns each path a composite score in $[0, 1]$ and
+optional per-component breakdown so the analyst can triage. The
+scorer is a weighted average of five dimensions
+(entity rarity, edge rarity, neighbourhood concentration, temporal
+novelty, and GNN threat), each computed as an average over the
+vertices of the path.
+
+\section{State and finalisation}
+
+\begin{lstlisting}[style=rust]
+pub struct AnomalyScorer {
+    entity_freq:       HashMap<String, u64>,
+    pair_freq:         HashMap<(String, String), u64>,
+    first_seen:        HashMap<String, i64>,
+    nc_cache:          HashMap<String, f64>,
+    gnn_cache:         HashMap<String, f64>,
+    log_max_freq:      f64,
+    log_max_pair_freq: f64,
+    tau_min:           i64,
+    tau_max:           i64,
+    weights:           ScoringWeights,
+    finalized:         bool,
+}
+\end{lstlisting}
+
+The scorer is populated incrementally during ingest
+(\code{observe\_entity}, \code{observe\_edge}); those are
+$\Ord{1}$ amortised and do not compute anything derived. After
+ingest, \code{finalize} converts the raw counts into the
+normalisation factors the per-path scoring needs.
+
+\begin{algorithm}
+\caption{\textsc{Anomaly-Finalize}}\label{alg:anomaly-finalize}
+\KwIn{scorer $S$, graph $G$}
+$S.\text{log\_max\_freq} \gets \ln(\max \text{entity\_freq.values})$\;
+$S.\text{log\_max\_pair\_freq} \gets \ln(\max \text{pair\_freq.values})$\;
+$(\tau_{\min}, \tau_{\max}) \gets (\min, \max)$ of the non-zero
+values of \code{first\_seen.values}\;
+$S.\text{nc\_cache} \gets \emptyset$\;
+\ForEach{$v \in G.\text{entities}$}{
+    $S.\text{nc\_cache}[v] \gets $ \textsc{Compute-NC}($v, G$)\;
+}
+$S.\text{finalized} \gets $ true\;
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{V + E + \sum_v d(v)} = \Ord{V + E}$ for the counters. The
+Shannon-entropy cache costs an additional
+$\Ord{\sum_v d(v)} = \Ord{E}$. Space is
+$\Ord{V}$ for the caches plus whatever the raw counters already
+consumed.
+\end{complexity}
+
+\section{Neighbourhood concentration}
+
+\begin{algorithm}
+\caption{\textsc{Compute-NC}}\label{alg:compute-nc}
+\KwIn{vertex $v$, graph $G$}
+\KwOut{neighbourhood concentration $\mathrm{NC}(v) \in [0, 1]$}
+$\mathrm{counts} \gets \emptyset$; $\mathrm{total} \gets 0$\;
+\ForEach{outgoing edge $(v, u) \in G$}{
+    $\mathrm{counts}[\ell_V(u)] \mathrel{+}= 1$;
+    $\mathrm{total} \mathrel{+}= 1$\;
+}
+\ForEach{incoming edge $(w, v) \in G$}{
+    $\mathrm{counts}[\ell_V(w)] \mathrel{+}= 1$;
+    $\mathrm{total} \mathrel{+}= 1$\;
+}
+$K \gets |\mathrm{counts}|$\;
+\If{$K \leq 1$}{\Return 1.0\;}
+$H \gets 0$\;
+\ForEach{$c \in \mathrm{counts.values}$}{
+    $p \gets c / \mathrm{total}$\;
+    $H \gets H - p \log_2 p$\;
+}
+$H_{\max} \gets \log_2 K$; $\mathrm{NC} \gets 1 - H / H_{\max}$\;
+\Return clamp($\mathrm{NC}$, 0, 1)\;
+\end{algorithm}
+
+$\mathrm{NC}$ is 1 when the neighbourhood is maximally homogeneous
+(a single entity-type family) and 0 when maximally diverse; the
+clamp guards floating-point drift near the extremes.
+
+\begin{complexity}
+$\Ord{d(v)}$ time, $\Ord{|\mathcal{T}_V|}$ space (neighbour
+type counts only; small constant).
+\end{complexity}
+
+\section{Scoring a path}
+
+Three of the four non-GNN components are simple averages over the
+path's vertices; the edge-rarity component averages over the path's
+edges.
+
+\begin{algorithm}
+\caption{\textsc{Score-Path}}\label{alg:score-path}
+\KwIn{path $\pi = (v_0, \ldots, v_\ell)$, scorer $S$}
+\KwOut{composite score $c$, breakdown $b$}
+\If{$\pi$ empty or $\neg S.\text{finalized}$}{\Return $(0, \mathbf{0})$\;}
+\tcp{Component 1: entity rarity}
+$\mathrm{ER} \gets \frac{1}{\ell+1} \sum_v \left(1 - \frac{\ln(\text{entity\_freq}[v])}{S.\text{log\_max\_freq}}\right)$\;
+\tcp{Component 2: edge rarity}
+$\mathrm{EdgeR} \gets \frac{1}{\ell} \sum_{i=1}^{\ell} \left(1 - \frac{\ln(\text{pair\_freq}[v_{i-1}, v_i])}{S.\text{log\_max\_pair\_freq}}\right)$\;
+\tcp{Component 3: NC average}
+$\mathrm{NC} \gets \frac{1}{\ell+1} \sum_v S.\text{nc\_cache}[v]$\;
+\tcp{Component 4: temporal novelty}
+$\mathrm{TN} \gets \frac{1}{\ell+1} \sum_v \frac{\text{first\_seen}[v] - \tau_{\min}}{\tau_{\max} - \tau_{\min}}$\;
+\tcp{Component 5: GNN threat}
+$\mathrm{GT} \gets \frac{1}{\ell+1} \sum_v S.\text{gnn\_cache}.\text{get}(v).\text{unwrap\_or}(0)$\;
+\tcp{composite via renormalised weights}
+$W \gets \sum \text{weights}$; $c \gets \frac{1}{W} \sum_i w_i \cdot \text{component}_i$\;
+\Return (clamp($c$, 0, 1), breakdown)\;
+\end{algorithm}
+
+Each component is individually clamped to $[0, 1]$ so that a stale
+cache entry (extremely rare, but possible during a re-finalize
+race) cannot make a component negative. The weight renormalisation
+means the caller can set weights in any absolute scale.
+
+\begin{complexity}
+$\Ord{\ell}$ time, $\Ord{1}$ auxiliary space. The expensive state
+was built by \textsc{Anomaly-Finalize}; per-path scoring is cheap.
+\end{complexity}
+
+\section{The trait seam (P2-A)}
+
+The refactored scoring module
+(\filepath{graph\_hunter\_core/src/scoring/}) makes each component a
+separate \code{impl ScoreComponent}:
+
+\begin{lstlisting}[style=rust]
+pub trait ScoreComponent: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn score_path(&self, ctx: &PathContext<'_>) -> f64;
+    fn explain(&self, value: f64, ctx: &PathContext<'_>) -> Option<String> {
+        None
+    }
+}
+\end{lstlisting}
+
+\code{CompositeScorer} holds a
+\code{Vec<Box<dyn ScoreComponent>>} plus matching weights and
+applies \textsc{Score-Path}-style aggregation. Adding a sixth
+component (Bayesian, learned model, etc.) is a new struct + one
+\code{vec!{}} push.
+
+\begin{theorem}[v1/v2 equivalence]
+For every weight vector $w$ and every path $\pi$,
+\code{AnomalyScorer::score\_path}$(w, \pi)$ and
+\code{AnomalyScorer::score\_path\_v2}$(w, \pi)$ agree to within
+$8 \cdot \varepsilon_{\text{f64}}$.
+\end{theorem}
+
+This is verified by \code{tests/scoring\_snapshot.rs}. The
+equivalence is the precondition for eventually retiring the hardcoded
+v1 path.
+
+\section{Node-level fast estimate}
+
+During smart-DFS pruning (Chapter~\ref{ch:matcher}), we need an
+$\Ord{1}$ estimate of a single vertex's anomaly so the running
+\code{path\_anomaly\_sum} can reject branches. That's
+\code{node\_anomaly\_estimate}:
+
+\begin{lstlisting}[style=rust]
+pub fn node_anomaly_estimate(&self, v: &str) -> f64 {
+    if !self.finalized { return 0.5; }
+    let er = /* Component 1 for a single vertex */;
+    let nc = self.nc_cache.get(v).copied().unwrap_or(1.0);
+    let tn = /* Component 4 for a single vertex */;
+    let gt = self.gnn_cache.get(v).copied().unwrap_or(0.0);
+    combine_with_weights(er, nc, tn, gt, &self.weights)
+}
+\end{lstlisting}
+
+Edge rarity isn't part of the estimate because the DFS hasn't yet
+chosen the next edge when it queries the bound. The estimate is
+therefore a loose upper bound on the node's contribution to the
+composite; it's admissible (never over-prunes) provided the weights
+are non-negative, which the engine enforces at config load time.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/anomaly.rs:148} ---
+\code{finalize}.\\
+\filepath{graph\_hunter\_core/src/anomaly.rs:191} ---
+\code{compute\_nc}.\\
+\filepath{graph\_hunter\_core/src/anomaly.rs:241} ---
+\code{score\_path} (v1).\\
+\filepath{graph\_hunter\_core/src/anomaly.rs:351} ---
+\code{node\_anomaly\_estimate}.\\
+\filepath{graph\_hunter\_core/src/scoring/} --- trait-based v2.\\
+\filepath{graph\_hunter\_core/tests/scoring\_snapshot.rs} ---
+v1/v2 equivalence pinning.
+\end{inthecode}

@@ -1,0 +1,151 @@
+\chapter{The Spillable Edge Store}
+\label{ch:spill}
+
+Ingesting a 28 GB EVTX dump on a laptop with 16 GB of RAM requires
+spilling in-memory structures to disk before the process is OOM-
+killed. \code{SpillableEdgeStore} implements that for the edge
+list: edges accumulate in an in-memory buffer until a watermark is
+crossed; past the watermark, the buffer is sorted and written to a
+sorted ``run'' file on disk, and a fresh buffer is started. At
+query time the store presents a single logical adjacency list by
+merging all runs on finalize.
+
+\section{Modes}
+
+\begin{definition}[Store mode]
+The store is either \emph{in-memory} (no runs on disk) or
+\emph{spilled} (one or more runs on disk). A third ``finalized''
+state is reached after \code{finalize} has merged all runs into a
+single mmap-backed file; once finalized, the store is read-only.
+\end{definition}
+
+Fields:
+
+\begin{lstlisting}[style=rust]
+struct SpillableEdgeStore {
+    buffer:       Vec<CompactRelation>,
+    buffer_index: HashMap<StrId, Vec<u32>>, // positions in buffer
+    runs:         Vec<SpillRunHandle>,      // on-disk sorted runs
+    merged_mmap:  Option<MmapFile>,         // finalized state
+    finalized:    bool,
+    spill_limit:  usize,                    // edges before flush
+}
+\end{lstlisting}
+
+\code{buffer\_index[s]} carries the \emph{positions} (u32 indexes)
+of source \code{s}'s edges inside the current buffer, not the edges
+themselves. This is what makes \code{get\_edges(s)} cheap in
+in-memory mode: the caller gets a slice sliced by those positions,
+without a HashMap-of-Vecs copy.
+
+\section{Append}
+
+\begin{algorithm}
+\caption{\textsc{Spill-Append}}\label{alg:spill-append}
+\KwIn{store $S$, source $s$, compact $c$}
+\If{$S.\text{buffer.len()} \geq S.\text{spill\_limit}$}{
+    \textsc{Flush-Buffer-To-Run}($S$)\Comment*[r]{see below}
+}
+$p \gets S.\text{buffer.len()}$\;
+\code{S.buffer.push($c$)}\;
+\code{S.buffer\_index[$s$].push($p$)}\;
+\end{algorithm}
+
+\begin{algorithm}
+\caption{\textsc{Flush-Buffer-To-Run}}\label{alg:spill-flush}
+\KwIn{store $S$}
+sort $S.\text{buffer}$ lexicographically by $(\text{source\_sid},
+\text{timestamp}, \text{dest\_sid})$\;
+write the sorted buffer to a temp file $f$ as raw bytes (headered
+with count and version)\;
+$S.\text{runs}.\text{push}(\text{handle}(f))$\;
+clear $S.\text{buffer}$ and $S.\text{buffer\_index}$\;
+\end{algorithm}
+
+\begin{complexity}
+\textsc{Spill-Append} is $\Ord{1}$ amortized. Every
+\code{spill\_limit} appends triggers a \textsc{Flush} of cost
+$\Ord{L \log L}$ where $L$ = \code{spill\_limit}, distributed across
+the ingest stream. The total spill-mode cost to ingest $N$ edges is
+$\Ord{N \log L + N/L \cdot L} = \Ord{N \log L}$ --- logarithmic in
+the flush size, linear in $N$.
+\end{complexity}
+
+\section{Finalization via $k$-way merge}
+
+After all appends are done, \code{finalize} produces a single on-disk
+sorted stream. If no flushes occurred the path is trivial: sort the
+in-memory buffer, done. Otherwise the engine opens cursors on every
+run plus a cursor over the sorted in-memory buffer and merges them
+with a min-heap:
+
+\begin{algorithm}
+\caption{\textsc{K-Way-Merge}}\label{alg:kway-merge}
+\KwIn{cursors $[c_0, \ldots, c_{k-1}]$, output file $f$}
+Build a binary min-heap $H$ over the cursors, keyed by their head
+element (source\_sid, timestamp, dest\_sid)\;
+\While{$H \neq \emptyset$}{
+    $c \gets$ \code{H.pop\_min()}\;
+    write $c$'s head element to $f$\;
+    \code{c.advance()}\;
+    \If{$c$ is non-empty}{\code{H.push($c$)}}
+}
+\end{algorithm}
+
+\begin{complexity}
+Each of the $N$ elements is popped and pushed from the heap exactly
+once, paying $\Ord{\log k}$ per operation, for a total of
+$\Ord{N \log k}$ time. The heap holds at most $k$ cursors at any
+moment, so RAM usage is $\Ord{k}$ regardless of $N$ --- this is the
+property that lets the engine process a 28 GB stream in 16 GB of
+RAM. The merged output is memory-mapped into the process for
+subsequent reads, so \code{get\_edges(s)} remains $\Ord{d(s)}$.
+\end{complexity}
+
+\begin{theorem}[Spill memory bound]
+At any point during ingestion the memory footprint of
+\code{SpillableEdgeStore} is at most \code{spill\_limit} $\cdot$
+$\code{size\_of::<CompactRelation>}$ plus a few KB of bookkeeping.
+\end{theorem}
+
+\begin{proof}
+\textsc{Spill-Append} flushes the buffer whenever its length reaches
+\code{spill\_limit}; between flushes the buffer holds at most
+\code{spill\_limit} elements, each 32 B, plus the index
+\code{HashMap<StrId, Vec<u32>>} which totals $\Ord{L}$ entries. The
+on-disk runs do not occupy RAM until merged. The merge itself only
+holds $k$ heap cursors, bounded by the number of flushes; each
+cursor pre-buffers a small IO block (a few KB).\qed
+\end{proof}
+
+\section{Reads}
+
+\begin{algorithm}
+\caption{\textsc{Get-Edges}}\label{alg:spill-get-edges}
+\KwIn{store $S$, source $s$}
+\KwOut{slice of \Compact{} for $s$, empty if unknown}
+\If{$S.\text{finalized}$ and $S.\text{merged\_mmap}$ is \code{Some}}{
+    locate $s$'s start offset via the on-disk index
+    \Comment*[r]{bsearch \Ord{\log n}}
+    \Return slice of length \code{count} from the mmap \;
+}
+\If{$\neg S.\text{finalized}$}{
+    \Return positions from \code{S.buffer\_index[$s$]} materialized
+    from \code{S.buffer} \Comment*[r]{\Ord{d(s)}}
+}
+\end{algorithm}
+
+\begin{complexity}
+\Ord{\log n + d(s)} in the finalized case, \Ord{d(s)} in the
+non-finalized case (plus any work to copy positions into a slice).
+\end{complexity}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/spill.rs} --- struct + all
+algorithms.\\
+\filepath{graph\_hunter\_core/src/spill.rs:327} --- \code{finalize}
+entry point.\\
+\filepath{graph\_hunter\_core/src/spill.rs:524} --- \code{get\_edges}.\\
+\filepath{graph\_hunter\_core/benches/dedup\_throughput.rs} ---
+spill ingest benchmark.
+\end{inthecode}

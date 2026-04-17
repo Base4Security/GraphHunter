@@ -1,0 +1,163 @@
+\chapter{The \Compact{} Encoding}
+\label{ch:compact-relation}
+
+The single densest data structure in the engine is the in-memory
+edge representation. A graph of 200 M edges at $\sim$200 bytes each
+(the full \code{Relation} struct with metadata, strings, et cetera)
+would be 40 GB --- so the engine stores every edge twice: once as a
+rich \code{Relation} used only while the edge is being added, and
+then as a 32-byte \Compact{} that lives in the adjacency list for
+the remainder of the session.
+
+\section{Layout}
+
+\Compact{} is \code{\#[repr(C)]}, fields ordered largest-alignment
+first to avoid any interior padding. Figure~\ref{fig:compact-layout}
+shows the byte layout.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    byte/.style={draw, minimum width=0.42cm, minimum height=0.7cm,
+                 font=\scriptsize, inner sep=1pt},
+    label/.style={font=\scriptsize},
+    x=0.42cm,
+]
+% Row 0: timestamp (i64, 8 bytes).
+\foreach \i in {0,...,7} {
+    \node[byte, fill=blue!12] at (\i, 0) (ts\i) {};
+}
+\node[label, above=0pt of ts3.north]{\code{timestamp}: \code{i64}};
+\node[label, below=0pt of ts0.south]{offset 0};
+
+% Row 1: metadata_offset (u64, 8 bytes).
+\foreach \i in {0,...,7} {
+    \node[byte, fill=orange!18] at (\i, -1) (mo\i) {};
+}
+\node[label, above=0pt of mo3.north]{\code{metadata\_offset}: \code{u64}};
+\node[label, below=0pt of mo0.south]{offset 8};
+
+% Row 2: source_sid (4 bytes) + dest_sid (4 bytes).
+\foreach \i in {0,...,3} {
+    \node[byte, fill=green!18] at (\i, -2) (ssid\i) {};
+}
+\foreach \i [evaluate=\i as \j using int(\i+4)] in {0,...,3} {
+    \node[byte, fill=green!28] at (\j, -2) (dsid\i) {};
+}
+\node[label, above=0pt of ssid1.north]{\code{source\_sid}};
+\node[label, above=0pt of dsid1.north]{\code{dest\_sid}};
+\node[label, below=0pt of ssid0.south]{offset 16};
+\node[label, below=0pt of dsid0.south]{offset 20};
+
+% Row 3: ingested_at_delta (4 bytes) + dataset_tag (2 bytes) + rel_type_tag (1 byte) + pad (1 byte).
+\foreach \i in {0,...,3} {
+    \node[byte, fill=red!18] at (\i, -3) (ia\i) {};
+}
+\foreach \i [evaluate=\i as \j using int(\i+4)] in {0,...,1} {
+    \node[byte, fill=purple!18] at (\j, -3) (dt\i) {};
+}
+\node[byte, fill=yellow!28] at (6, -3) (rt) {};
+\node[byte, fill=gray!25] at (7, -3) (pad) {};
+\node[label, above=0pt of ia1.north]{\code{ingested\_at\_delta}};
+\node[label, above=0pt of dt0.north]{\code{dataset}};
+\node[label, above=0pt of rt.north]{\code{rel}};
+\node[label, above=0pt of pad.north]{pad};
+\node[label, below=0pt of ia0.south]{offset 24};
+\node[label, below=0pt of dt0.south]{offset 28};
+\node[label, below=0pt of rt.south]{offset 30};
+\node[label, below=0pt of pad.south]{offset 31};
+
+\end{tikzpicture}
+\caption{Memory layout of \Compact{} (32 bytes). The \code{u32}
+\code{ingested\_at\_delta} (P3) reclaims 4 of the 5 bytes of
+trailing padding in the pre-P3 layout.}
+\label{fig:compact-layout}
+\end{figure}
+
+Semantically:
+\begin{itemize}
+    \item \code{timestamp}: event time of the edge, epoch seconds.
+    \item \code{metadata\_offset}: offset into the external
+        \code{MetadataStore} (Chapter~\ref{ch:metadata}); zero
+        means ``no metadata.''
+    \item \code{source\_sid}, \code{dest\_sid}: 32-bit handles into
+        the \code{StringInterner} (Chapter~\ref{ch:interner}).
+    \item \code{ingested\_at\_delta}: seconds since the MVCC epoch
+        base (see below); zero on legacy edges.
+    \item \code{dataset\_tag}: 16-bit handle into the per-graph
+        \code{Arc<str>} dataset identifier table; zero means ``no
+        dataset.''
+    \item \code{rel\_type\_tag}: 8-bit enum tag for the relation
+        type.
+\end{itemize}
+
+The \code{rel\_type\_tag} is deliberately \code{u8} so the matcher
+can do branchless SIMD comparisons (Chapter~\ref{ch:simd}).
+
+\section{MVCC encoding}
+
+\begin{invariant}[MVCC size]
+\code{size\_of::<CompactRelation>() == 32}. This is asserted in
+\code{tests/relation\_schema.rs}. Violating it costs $\sim$20\% of
+the in-memory graph footprint, so the assertion is load-bearing.
+\end{invariant}
+
+The MVCC delta is measured against
+\code{INGEST\_EPOCH\_BASE} = 1\,704\,067\,200 seconds (2024-01-01
+UTC). A \code{u32} covers $\approx 2^{32}$ seconds, or about 136
+years; the engine saturates at \code{u32::MAX} on ingest beyond
+$\sim$2160.  Legacy edges loaded from a pre-P3 session file
+resolve to the epoch base itself, which is a defined if imprecise
+moment.
+
+Algorithm~\ref{alg:encode-ingested-at} shows the encoder. Decoding
+is the trivial \code{INGEST\_EPOCH\_BASE + delta as i64}.
+
+\begin{algorithm}
+\caption{\textsc{Encode-Ingested-At}}\label{alg:encode-ingested-at}
+\KwIn{absolute epoch-second timestamp $t$}
+\KwOut{\code{u32} delta to store in \Compact{}}
+\If{$t \leq $ \code{INGEST\_EPOCH\_BASE}}{
+    \Return 0\;
+}
+$\delta \gets t - $ \code{INGEST\_EPOCH\_BASE}\;
+\If{$\delta > $ \code{u32::MAX}}{
+    \Return \code{u32::MAX} \Comment*[r]{saturate}
+}
+\Return $\delta$ as \code{u32}\;
+\end{algorithm}
+
+\begin{complexity}
+Constant time and space. Storage per edge is 32 bytes, giving
+$\Thet{32 m}$ for the edge list of a graph with $m$ edges.
+\end{complexity}
+
+\section{Why not \code{\#[repr(C, packed)]}?}
+
+A packed layout would shave another 5 bytes by eliminating the
+trailing alignment pad, reaching 27 bytes per edge ($\sim$16\%
+additional saving). The engine does not use it because:
+
+\begin{enumerate}
+    \item Every load of a packed field requires a byte-wise copy to
+        aligned storage to satisfy the reference-alignment
+        invariant in Rust. The DFS matcher reads \code{source\_sid}
+        and \code{dest\_sid} millions of times per hunt; the copy
+        overhead would dominate any memory saving.
+    \item The 32-byte alignment matches the AVX2 load unit, so SIMD
+        scans of the edge list stay cache-line-friendly.
+\end{enumerate}
+
+The trailing pad therefore stays as future real estate for further
+MVCC extensions (e.g., confidence score, source-tag bit flags).
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/relation.rs:83} --- struct
+definition.\\
+\filepath{graph\_hunter\_core/src/relation.rs:151} ---
+\code{encode\_ingested\_at} helper.\\
+\filepath{graph\_hunter\_core/tests/mvcc\_ingested\_at.rs} ---
+MVCC round-trip tests.\\
+\filepath{graph\_hunter\_core/src/relation.rs} module tests ---
+32-byte size invariant.
+\end{inthecode}

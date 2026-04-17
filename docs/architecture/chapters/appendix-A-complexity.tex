@@ -1,0 +1,47 @@
+\chapter{Complexity Summary}
+\label{app:complexity}
+
+One-page reference of the dominant operations across the engine,
+with time and space complexity. Chapter references point at the
+full derivation.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lllll@{}}
+\toprule
+\textbf{Operation} & \textbf{Time} & \textbf{Space} & \textbf{Ch.} & \textbf{File pointer} \\
+\midrule
+\textsc{Intern} & $\Ord{1}$ am. & $\Ord{|s|}$ miss & \ref{ch:interner} & \filepath{interner.rs:60} \\
+\textsc{Resolve} & $\Ord{1}$ & --- & \ref{ch:interner} & \filepath{interner.rs:74} \\
+\textsc{Add-Entity} & $\Ord{1}$ am. & $\Ord{1}$ & \ref{ch:graph-hunter} & \filepath{graph.rs:211} \\
+\textsc{Add-Relation} & $\Ord{1}$ am. & $\Ord{32})$ & \ref{ch:graph-hunter} & \filepath{graph.rs:227} \\
+\textsc{Sort-Edges-By-Ts} & $\Ord{m \log \bar d})$ & $\Ord{1}$ & \ref{ch:graph-hunter} & \filepath{graph.rs:437} \\
+\textsc{Spill-Append} & $\Ord{1}$ am. & $\Ord{L}$ & \ref{ch:spill} & \filepath{spill.rs} \\
+\textsc{K-Way-Merge} & $\Ord{n \log k}$ & $\Ord{k}$ & \ref{ch:spill} & \filepath{spill.rs:327} \\
+\textsc{Metadata-Append} & $\Ord{|K|}$ & $\Ord{|K|}$ & \ref{ch:metadata} & \filepath{metadata\_store.rs} \\
+\textsc{Parse-Dsl} & $\Ord{|src|}$ & $\Ord{|src|}$ & \ref{ch:dsl} & \filepath{dsl.rs:47} \\
+\textsc{Dfs-Match-Iterative} & $\Ord{n_s \bar b^\ell \ell}$ & $\Ord{W\ell k}$ & \ref{ch:matcher} & \filepath{graph.rs:1121} \\
+\textsc{Merge-Into-TopK} & $\Ord{(|a|+|b|) \log K}$ & $\Ord{K}$ & \ref{ch:matcher} & \filepath{graph.rs:782} \\
+\textsc{Intersect-Sorted-U32} & $\Ord{|S| |L|/8}$ & $\Ord{1}$ & \ref{ch:simd} & \filepath{simd\_rust.rs} \\
+\textsc{Anomaly-Finalize} & $\Ord{V + E}$ & $\Ord{V}$ & \ref{ch:anomaly} & \filepath{anomaly.rs:148} \\
+\textsc{Compute-NC} & $\Ord{d(v)}$ & $\Ord{|\mathcal{T}_V|}$ & \ref{ch:anomaly} & \filepath{anomaly.rs:191} \\
+\textsc{Score-Path} & $\Ord{\ell}$ & $\Ord{1}$ & \ref{ch:anomaly} & \filepath{anomaly.rs:241} \\
+\textsc{Compute-Betweenness} & $\Ord{S(V+E)}$ & $\Ord{V+E}$ & \ref{ch:analytics} & \filepath{analytics.rs:641} \\
+\textsc{Temporal-PageRank} & $\Ord{I(V+E)}$ & $\Ord{V}$ & \ref{ch:analytics} & \filepath{analytics.rs:746} \\
+\textsc{Get-Relation-Schema} & $\Ord{E + T \log T}$ & $\Ord{T}$ & \ref{ch:analytics} & \filepath{analytics.rs:1289} \\
+\textsc{Score-And-Paginate} & $\Ord{P\ell + U \log U}$ & $\Ord{U}$ & \ref{ch:dedup-pagination} & \filepath{analytics.rs:1096} \\
+\textsc{Diff-Hunts} & $\Ord{2 T_{\text{match}} + P}$ & $\Ord{P}$ & \ref{ch:hunt-diff} & \filepath{analytics.rs:1342} \\
+\textsc{Encode-Ingested-At} & $\Ord{1}$ & $\Ord{1}$ & \ref{ch:compact-relation} & \filepath{relation.rs:151} \\
+\textsc{Check-Step-Compat} & $\Ord{|\Sigma|}$ & $\Ord{1}$ & \ref{ch:hypothesis} & \filepath{catalog/mod.rs:105} \\
+\bottomrule
+\end{tabular}
+\caption{Complexity summary. $n$ = vertices, $m$ = edges,
+$\bar d$ = avg degree, $d(v)$ = degree of $v$,
+$\ell$ = hypothesis step count, $k$ = $k$-simplicity,
+$n_s$ = number of candidate start vertices, $\bar b$ = avg
+candidate branching factor, $W$ = rayon worker count,
+$K$ = top-$K$ cap, $L$ = spill limit, $S$ = sampled sources,
+$I$ = iteration count, $P$ = paths pre-dedup, $U$ = paths
+post-dedup, $T$ = unique (src, rel, dst) triples.}
+\end{table}
