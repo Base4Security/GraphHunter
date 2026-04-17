@@ -27,6 +27,7 @@ pub mod parser;
 pub mod preview;
 pub mod relation;
 pub mod ingest;
+pub mod ingest_adapter;
 pub mod scoring;
 pub mod sentinel;
 pub mod service_classifier;
@@ -72,6 +73,7 @@ pub use forti_analyzer::{
 pub use iis_w3c::{IisW3cParser, looks_like_iis_w3c, extract_fields_header};
 pub use graph::{CompactionStats, GraphHunter};
 pub use backend::{GraphRead, GraphWrite};
+pub use ingest_adapter::{IngestAdapter, LogSourceAdapter, TripleBatch, TripleBatchStream};
 /// Forward-compatibility alias: the plan (P2-B) eventually renames
 /// `GraphHunter` → `InMemoryGraph` once every call site has migrated
 /// to the trait-based API. Until then, this alias lets new code opt
