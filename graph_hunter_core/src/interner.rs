@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt};
+use serde::{Deserialize, Serialize};
 
 /// A compact handle representing an interned string.
 /// Copy-friendly 4-byte identifier instead of heap-allocated String.
@@ -104,11 +105,92 @@ impl StringInterner {
         self.map.reserve(additional);
         self.strings.reserve(additional);
     }
+
+    /// Snapshot of interner memory usage (unique strings + approx
+    /// byte total). Callers that hold a concrete `StringInterner`
+    /// can read this without importing
+    /// [`StringInternerBackend`]; the inherent method delegates to
+    /// the trait impl.
+    pub fn metrics(&self) -> InternerMetrics {
+        <Self as StringInternerBackend>::metrics(self)
+    }
 }
 
 impl Default for StringInterner {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Snapshot of interner memory / capacity used — surfaced via
+/// [`StringInternerBackend::metrics`] so operators can decide when to
+/// switch to a different impl (generational or partitioned) per the
+/// P2-F plan. Keep the fields additive — adding a new one is a minor
+/// release, removing one is a major one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InternerMetrics {
+    /// Number of unique strings currently interned.
+    pub unique_strings: usize,
+    /// Approximate total bytes held by the string content (sum of
+    /// `Arc<str>` lengths). Excludes allocator overhead and the
+    /// hashmap index, which would roughly double this figure — as a
+    /// trigger metric it's close enough to the real RAM impact.
+    pub approx_bytes: usize,
+}
+
+/// The seam (P2-F foundation).
+///
+/// `StringInterner` is currently the only impl; when production
+/// workload evidence justifies it, [`Generational`](#future-impls)
+/// and partitioned variants drop in behind this trait without
+/// touching the 121+ `&StringInterner` references scattered across
+/// the engine.
+///
+/// # Future impls
+///
+/// * **Generational** — hot strings in RAM, cold strings on disk;
+///   re-hydrate on `resolve`. Trigger: long-running streaming
+///   session where unique_strings > 10M.
+/// * **Partitioned** — one interner per session/tenant; cross-tenant
+///   lookups explicit. Trigger: MSSP multi-tenant deployment.
+pub trait StringInternerBackend {
+    fn intern(&mut self, s: &str) -> StrId;
+    fn resolve(&self, id: StrId) -> &str;
+    fn try_resolve(&self, id: StrId) -> Option<&str>;
+    fn get(&self, s: &str) -> Option<StrId>;
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool;
+    fn reserve(&mut self, additional: usize);
+    fn metrics(&self) -> InternerMetrics;
+}
+
+impl StringInternerBackend for StringInterner {
+    fn intern(&mut self, s: &str) -> StrId {
+        StringInterner::intern(self, s)
+    }
+    fn resolve(&self, id: StrId) -> &str {
+        StringInterner::resolve(self, id)
+    }
+    fn try_resolve(&self, id: StrId) -> Option<&str> {
+        StringInterner::try_resolve(self, id)
+    }
+    fn get(&self, s: &str) -> Option<StrId> {
+        StringInterner::get(self, s)
+    }
+    fn len(&self) -> usize {
+        StringInterner::len(self)
+    }
+    fn is_empty(&self) -> bool {
+        StringInterner::is_empty(self)
+    }
+    fn reserve(&mut self, additional: usize) {
+        StringInterner::reserve(self, additional)
+    }
+    fn metrics(&self) -> InternerMetrics {
+        InternerMetrics {
+            unique_strings: self.strings.len(),
+            approx_bytes: self.strings.iter().map(|s| s.len()).sum(),
+        }
     }
 }
 
@@ -144,5 +226,40 @@ mod tests {
         let id = StrId(42);
         let id2 = id; // Copy
         assert_eq!(id, id2);
+    }
+
+    #[test]
+    fn metrics_track_unique_strings_and_bytes() {
+        let mut interner = StringInterner::new();
+        assert_eq!(
+            interner.metrics(),
+            InternerMetrics {
+                unique_strings: 0,
+                approx_bytes: 0,
+            }
+        );
+        interner.intern("hello");
+        interner.intern("world");
+        interner.intern("hello"); // dup — must not double-count bytes
+        let m = interner.metrics();
+        assert_eq!(m.unique_strings, 2);
+        assert_eq!(m.approx_bytes, 5 + 5);
+    }
+
+    #[test]
+    fn trait_methods_delegate_to_concrete_impl() {
+        // Callers that hold a `&mut dyn StringInternerBackend` (e.g.
+        // a future swappable interner) must see the same semantics as
+        // the concrete struct. If this test fails, the trait impl
+        // drifted away from the inherent methods.
+        let mut concrete = StringInterner::new();
+        let id_concrete = concrete.intern("foo");
+        let direct_resolve = concrete.resolve(id_concrete).to_string();
+
+        let dyn_ref: &dyn StringInternerBackend = &concrete;
+        assert_eq!(dyn_ref.resolve(id_concrete), direct_resolve);
+        assert_eq!(dyn_ref.get("foo"), Some(id_concrete));
+        assert_eq!(dyn_ref.len(), 1);
+        assert_eq!(dyn_ref.metrics().unique_strings, 1);
     }
 }

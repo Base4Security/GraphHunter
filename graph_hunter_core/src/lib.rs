@@ -78,7 +78,7 @@ pub use backend::{GraphRead, GraphWrite};
 /// into the target name without touching the 121+ existing
 /// references.
 pub type InMemoryGraph = graph::GraphHunter;
-pub use interner::{StrId, StringInterner};
+pub use interner::{InternerMetrics, StrId, StringInterner, StringInternerBackend};
 pub use hypothesis::{AggClause, AggColumn, Hypothesis, HypothesisStep, Predicate};
 pub use parser::{LogParser, ParsedTriple};
 pub use preview::{preview_generic_from_keys, preview_sentinel, preview_sysmon};
