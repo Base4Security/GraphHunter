@@ -26,6 +26,7 @@ pub mod parser;
 pub mod preview;
 pub mod relation;
 pub mod ingest;
+pub mod scoring;
 pub mod sentinel;
 pub mod service_classifier;
 pub mod simd_matcher;
@@ -46,6 +47,10 @@ pub use catalog::{
     check_catalog_compatibility, get_catalog, get_catalog_snapshot,
 };
 pub use anomaly::{AnomalyScorer, ScoreBreakdown, ScoringWeights, ThreatClass};
+pub use scoring::{
+    CompositeScorer, EdgeRarity, EntityRarity, GnnThreat, NeighborhoodConcentration, PathContext,
+    ScoreComponent, ScoreOutcome, ScoringCaches, TemporalNovelty,
+};
 pub use gnn_bridge::{SubgraphFeatures, SubgraphFeaturesV2, extract_subgraph_features, extract_subgraph_features_v2, extract_batch_features, K_MAX, D_NODE, D_NODE_V2, GNN_INPUT_DIM, GNN_INPUT_DIM_V2};
 pub use npu_scorer::scorer::{NpuScorer, NpuError};
 pub use cognito::{CognitoParser, looks_like_cognito};

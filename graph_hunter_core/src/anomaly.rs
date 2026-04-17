@@ -30,7 +30,7 @@ impl Default for ScoringWeights {
 }
 
 /// Breakdown of the five anomaly scoring components for a single path.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScoreBreakdown {
     pub entity_rarity: f64,
     pub edge_rarity: f64,
@@ -424,5 +424,64 @@ impl AnomalyScorer {
     /// Get the current GNN threat score cache.
     pub fn gnn_scores(&self) -> &HashMap<String, f64> {
         &self.gnn_cache
+    }
+
+    /// Borrow the scoring caches as a [`crate::ScoringCaches`] view.
+    ///
+    /// Used by [`crate::CompositeScorer`] so the trait-based score
+    /// path doesn't duplicate any data from the scorer. Stable across
+    /// finalize calls as long as the scorer is finalized; with a
+    /// non-finalized scorer, the caches just contain whatever
+    /// partially-accumulated data ingestion has produced so far, which
+    /// is valid but semantically meaningless.
+    pub fn caches(&self) -> crate::scoring::ScoringCaches<'_> {
+        crate::scoring::ScoringCaches {
+            entity_freq: &self.entity_freq,
+            pair_freq: &self.pair_freq,
+            first_seen: &self.first_seen,
+            nc_cache: &self.nc_cache,
+            gnn_cache: &self.gnn_cache,
+            log_max_freq: self.log_max_freq,
+            log_max_pair_freq: self.log_max_pair_freq,
+            tau_min: self.tau_min,
+            tau_max: self.tau_max,
+        }
+    }
+
+    /// Trait-based alternative to [`Self::score_path`].
+    ///
+    /// Produces the same `(composite, breakdown)` tuple — this is the
+    /// v2 code path that runs every scoring dimension through a
+    /// [`crate::ScoreComponent`]. Semantically equivalent within
+    /// `f64::EPSILON * 8`, snapshotted in `tests/scoring_snapshot.rs`.
+    ///
+    /// Use this when you want the trait-based orchestration (e.g. to
+    /// add a custom component). Everyone else keeps calling
+    /// `score_path` — a future release flips the default.
+    pub fn score_path_v2(
+        &self,
+        path: &[String],
+        _graph: &GraphHunter,
+    ) -> (f64, ScoreBreakdown) {
+        if path.is_empty() || !self.finalized {
+            return (0.0, ScoreBreakdown::default());
+        }
+        let caches = self.caches();
+        let ctx = crate::scoring::PathContext {
+            path,
+            caches: &caches,
+        };
+        let scorer = crate::scoring::CompositeScorer::from_weights(&self.weights);
+        let outcome = scorer.score_path(&ctx);
+        let breakdown = ScoreBreakdown {
+            entity_rarity: outcome.get("entity_rarity").unwrap_or(0.0),
+            edge_rarity: outcome.get("edge_rarity").unwrap_or(0.0),
+            neighborhood_concentration: outcome
+                .get("neighborhood_concentration")
+                .unwrap_or(0.0),
+            temporal_novelty: outcome.get("temporal_novelty").unwrap_or(0.0),
+            gnn_threat: outcome.get("gnn_threat").unwrap_or(0.0),
+        };
+        (outcome.composite, breakdown)
     }
 }
