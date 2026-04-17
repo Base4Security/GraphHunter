@@ -1,0 +1,6 @@
+id: cat-007
+name: Scheduled Task
+mitre_id: T1053.005
+description: "Process writes a file and spawns a child process (scheduled task pattern)."
+dsl_pattern: "Process -[Write]-> File -[Execute]-> Process"
+k_simplicity: 1

@@ -36,12 +36,17 @@ pub mod watermark_store;
 
 // Re-export core types at crate root for ergonomic imports.
 pub use analytics::{
-    GraphSummary, GroupedNeighborEdge, GroupedNeighborhood, Neighborhood,
+    AUTO_GROUPED_THRESHOLD, DedupMode, ExplainedPeer, ExplainedScore, GraphSummary,
+    GroupedNeighborEdge, GroupedNeighborhood, HuntDiagnostic, HuntDiff, Neighborhood,
     NeighborhoodFilter, NeighborNode, NeighborEdge,
-    NodeDetails, ScoredPath, SearchResult, TopAnomaly, TypeDistribution,
+    NodeDetails, RelSchemaEntry, ScoredPath, SearchResult, TopAnomaly, TypeDistribution,
+};
+pub use catalog::{
+    CatalogEntry, CatalogEntryWithStatus, CatalogLoadError, CatalogSnapshot, CatalogSource,
+    check_catalog_compatibility, get_catalog, get_catalog_snapshot,
 };
 pub use anomaly::{AnomalyScorer, ScoreBreakdown, ScoringWeights, ThreatClass};
-pub use gnn_bridge::{SubgraphFeatures, extract_subgraph_features, extract_batch_features, K_MAX, D_NODE, GNN_INPUT_DIM};
+pub use gnn_bridge::{SubgraphFeatures, SubgraphFeaturesV2, extract_subgraph_features, extract_subgraph_features_v2, extract_batch_features, K_MAX, D_NODE, D_NODE_V2, GNN_INPUT_DIM, GNN_INPUT_DIM_V2};
 pub use npu_scorer::scorer::{NpuScorer, NpuError};
 pub use cognito::{CognitoParser, looks_like_cognito};
 pub use csv_parser::CsvParser;
@@ -60,7 +65,7 @@ pub use forti_analyzer::{
 pub use iis_w3c::{IisW3cParser, looks_like_iis_w3c, extract_fields_header};
 pub use graph::{CompactionStats, GraphHunter};
 pub use interner::{StrId, StringInterner};
-pub use hypothesis::{Hypothesis, HypothesisStep};
+pub use hypothesis::{AggClause, AggColumn, Hypothesis, HypothesisStep, Predicate};
 pub use parser::{LogParser, ParsedTriple};
 pub use preview::{preview_generic_from_keys, preview_sentinel, preview_sysmon};
 pub use metadata_store::MetadataStore;
@@ -99,7 +104,6 @@ pub use watermark_store::{
     WatermarkKey, WatermarkStore,
 };
 pub use sysmon::SysmonJsonParser;
-pub use catalog::{CatalogEntry, get_catalog};
 pub use dsl::{DslError, DslParseResult, parse_dsl, format_hypothesis};
 pub use types::{EntityType, MergePolicy, RelationType, entity_type_matches, relation_type_matches};
 pub use benchmark::{
@@ -2991,7 +2995,7 @@ mod tests {
             None,
         ).unwrap();
 
-        let (scored, total) = g.score_and_paginate_paths(&paths, 0, 50, None);
+        let (scored, total) = g.score_and_paginate_paths(&paths, 0, 50, None, DedupMode::None);
         assert_eq!(total, 1);
         assert_eq!(scored.len(), 1);
         assert!(scored[0].max_score > 0.0, "Scored path should have non-zero max_score");
@@ -3014,7 +3018,7 @@ mod tests {
             "payload.dll".to_string(),
         ]];
 
-        let (scored, _) = g.score_and_paginate_paths(&paths, 0, 50, None);
+        let (scored, _) = g.score_and_paginate_paths(&paths, 0, 50, None, DedupMode::None);
         assert_eq!(scored.len(), 1);
         assert!(scored[0].time_start > 0, "time_start should be set from edge timestamps");
         assert!(scored[0].time_end >= scored[0].time_start, "time_end >= time_start");
@@ -3031,12 +3035,12 @@ mod tests {
         ];
 
         // With a very high threshold, should filter out everything
-        let (scored, total) = g.score_and_paginate_paths(&paths, 0, 50, Some(999.0));
+        let (scored, total) = g.score_and_paginate_paths(&paths, 0, 50, Some(999.0), DedupMode::None);
         assert_eq!(total, 0);
         assert!(scored.is_empty());
 
         // With threshold 0, should keep everything
-        let (scored_all, total_all) = g.score_and_paginate_paths(&paths, 0, 50, Some(0.0));
+        let (scored_all, total_all) = g.score_and_paginate_paths(&paths, 0, 50, Some(0.0), DedupMode::None);
         assert_eq!(total_all, 2);
         assert_eq!(scored_all.len(), 2);
     }
@@ -3059,20 +3063,20 @@ mod tests {
             .collect();
 
         // Page 0, size 3
-        let (page0, total) = g.score_and_paginate_paths(&paths, 0, 3, None);
+        let (page0, total) = g.score_and_paginate_paths(&paths, 0, 3, None, DedupMode::None);
         assert_eq!(total, 10);
         assert_eq!(page0.len(), 3);
 
         // Page 1, size 3
-        let (page1, _) = g.score_and_paginate_paths(&paths, 1, 3, None);
+        let (page1, _) = g.score_and_paginate_paths(&paths, 1, 3, None, DedupMode::None);
         assert_eq!(page1.len(), 3);
 
         // Page 3 (last partial), size 3
-        let (page3, _) = g.score_and_paginate_paths(&paths, 3, 3, None);
+        let (page3, _) = g.score_and_paginate_paths(&paths, 3, 3, None, DedupMode::None);
         assert_eq!(page3.len(), 1);
 
         // Page 4 (out of range)
-        let (page4, _) = g.score_and_paginate_paths(&paths, 4, 3, None);
+        let (page4, _) = g.score_and_paginate_paths(&paths, 4, 3, None, DedupMode::None);
         assert!(page4.is_empty());
     }
 
@@ -3091,7 +3095,7 @@ mod tests {
             vec!["mid".to_string(), "high".to_string()],  // max_score = 90
         ];
 
-        let (scored, _) = g.score_and_paginate_paths(&paths, 0, 50, None);
+        let (scored, _) = g.score_and_paginate_paths(&paths, 0, 50, None, DedupMode::None);
         assert_eq!(scored.len(), 2);
         assert!(scored[0].max_score >= scored[1].max_score, "Should be sorted by max_score DESC");
         assert_eq!(scored[0].max_score, 90.0);
@@ -3631,7 +3635,7 @@ mod tests {
     fn catalog_entries_parse_as_valid_dsl() {
         let catalog = get_catalog();
         for entry in catalog {
-            let result = parse_dsl(entry.dsl_pattern, Some(entry.name));
+            let result = parse_dsl(&entry.dsl_pattern, Some(&entry.name));
             assert!(result.is_ok(), "Catalog entry '{}' ({}): DSL parse failed: {:?}",
                 entry.name, entry.mitre_id, result.err());
         }
@@ -3947,10 +3951,10 @@ mod tests {
     fn catalog_existing_entries_have_k_1() {
         let catalog = get_catalog();
         // cat-001 through cat-012 should all have k=1
-        let original_ids: Vec<&str> = (1..=12).map(|i| {
+        let original_ids: Vec<String> = (1..=12).filter_map(|i| {
             // Match cat-001..cat-012
-            catalog.iter().find(|e| e.id == format!("cat-{:03}", i)).map(|e| e.id)
-        }).flatten().collect();
+            catalog.iter().find(|e| e.id == format!("cat-{:03}", i)).map(|e| e.id.clone())
+        }).collect();
         for id in &original_ids {
             let entry = catalog.iter().find(|e| e.id == *id).unwrap();
             assert_eq!(entry.k_simplicity, 1, "Entry {} should have k=1", entry.id);
@@ -3972,7 +3976,7 @@ mod tests {
         // Load cat-013 pattern
         let catalog = get_catalog();
         let entry = catalog.iter().find(|e| e.id == "cat-013").unwrap();
-        let parsed = parse_dsl(entry.dsl_pattern, Some(entry.name)).unwrap();
+        let parsed = parse_dsl(&entry.dsl_pattern, Some(&entry.name)).unwrap();
         let mut hypothesis = parsed.hypothesis;
         hypothesis.k_simplicity = entry.k_simplicity;
 
@@ -3985,7 +3989,7 @@ mod tests {
     fn catalog_cyclic_entries_parse_as_valid_dsl() {
         let catalog = get_catalog();
         for entry in catalog.iter().filter(|e| e.k_simplicity > 1) {
-            let result = parse_dsl(entry.dsl_pattern, Some(entry.name));
+            let result = parse_dsl(&entry.dsl_pattern, Some(&entry.name));
             assert!(result.is_ok(), "Failed to parse cyclic entry {}: {:?}", entry.id, result.err());
             let h = result.unwrap().hypothesis;
             assert_eq!(h.k_simplicity, entry.k_simplicity,

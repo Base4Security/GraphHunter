@@ -1,0 +1,6 @@
+id: cat-004
+name: Credential Dumping
+mitre_id: T1003
+description: "Process reads sensitive files (e.g., SAM, NTDS.dit, credential stores)."
+dsl_pattern: "User -[Execute]-> Process -[Read]-> File"
+k_simplicity: 1

@@ -327,6 +327,7 @@ pub trait LogSource: Send + Sync {
 }
 
 // Submodules.
+pub mod aad_training_export;
 pub mod backoff;
 pub mod data_lake;
 pub mod defender_xdr;

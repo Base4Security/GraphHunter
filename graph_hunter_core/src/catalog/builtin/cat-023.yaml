@@ -1,0 +1,6 @@
+id: cat-023
+name: Service Principal Creation
+mitre_id: T1098.003
+description: "User creates a Service Principal — baseline activity for admins but a red flag from a compromised user account."
+dsl_pattern: "User -[Create]-> ServicePrincipal"
+k_simplicity: 1

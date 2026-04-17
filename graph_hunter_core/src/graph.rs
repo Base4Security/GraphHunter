@@ -566,7 +566,118 @@ impl GraphHunter {
         };
 
         let truncated = result_count.load(Ordering::Relaxed) >= cap;
+        let results = self.apply_aggregation(results, hypothesis);
         Ok((results, truncated))
+    }
+
+    /// Apply `HAVING` and `WITHIN` clauses to the raw result set. A no-op
+    /// when the hypothesis has neither — callers don't need to guard.
+    ///
+    /// `WITHIN N` drops any individual path whose edge-timestamp span
+    /// exceeds `N` seconds. `HAVING count(distinct col) >= N` groups the
+    /// remaining paths by their first node and keeps only groups meeting
+    /// the threshold. This is where Graph Hunter earns the right to call
+    /// itself a behavior analyzer, not just a pattern matcher.
+    pub fn apply_aggregation(
+        &self,
+        paths: Vec<crate::graph::HuntResult>,
+        hypothesis: &Hypothesis,
+    ) -> Vec<crate::graph::HuntResult> {
+        if hypothesis.window_seconds.is_none() && hypothesis.aggregations.is_empty() {
+            return paths;
+        }
+
+        // Phase 1: filter individual paths by WITHIN.
+        let filtered: Vec<crate::graph::HuntResult> = if let Some(window) = hypothesis.window_seconds {
+            paths
+                .into_iter()
+                .filter(|p| {
+                    let span = self.path_time_span(p);
+                    span <= window
+                })
+                .collect()
+        } else {
+            paths
+        };
+
+        if hypothesis.aggregations.is_empty() {
+            return filtered;
+        }
+
+        // Phase 2: group by first node, apply each HAVING clause.
+        use std::collections::HashMap;
+        let mut groups: HashMap<String, Vec<crate::graph::HuntResult>> = HashMap::new();
+        for p in filtered {
+            if p.is_empty() {
+                continue;
+            }
+            groups.entry(p[0].clone()).or_default().push(p);
+        }
+        // Resolve `Named(x)` bindings to a path index ONCE before the
+        // hot loop. For each binding, walk hypothesis.steps finding the
+        // first `origin_binding` or `dest_binding` match; the index in
+        // the chain is path[index_in_chain] — origin_binding on step k
+        // refers to path[k], dest_binding on step k refers to path[k+1].
+        let resolve_named_index = |binding: &str| -> Option<usize> {
+            for (k, step) in hypothesis.steps.iter().enumerate() {
+                if step.origin_binding.as_deref() == Some(binding) {
+                    return Some(k);
+                }
+                if step.dest_binding.as_deref() == Some(binding) {
+                    return Some(k + 1);
+                }
+            }
+            None
+        };
+
+        let mut out = Vec::new();
+        for (_anchor, group) in groups {
+            let keep = hypothesis.aggregations.iter().all(|agg| {
+                let distinct: std::collections::HashSet<&str> = match &agg.column {
+                    crate::hypothesis::AggColumn::First => {
+                        group.iter().filter_map(|p| p.first().map(|s| s.as_str())).collect()
+                    }
+                    crate::hypothesis::AggColumn::Last => {
+                        group.iter().filter_map(|p| p.last().map(|s| s.as_str())).collect()
+                    }
+                    crate::hypothesis::AggColumn::Named(name) => {
+                        match resolve_named_index(name) {
+                            Some(idx) => group.iter().filter_map(|p| p.get(idx).map(|s| s.as_str())).collect(),
+                            // Binding declared nowhere — treat the agg as
+                            // always-failing rather than silently matching.
+                            None => std::collections::HashSet::new(),
+                        }
+                    }
+                };
+                distinct.len() >= agg.min_distinct
+            });
+            if keep {
+                out.extend(group);
+            }
+        }
+        out
+    }
+
+    /// Compute the time span (max_ts - min_ts) across all edges used by a path.
+    /// 0 if the path has no edges or timestamps are missing. Used only by
+    /// the aggregation path, so the per-path scan is acceptable cost.
+    fn path_time_span(&self, path: &crate::graph::HuntResult) -> i64 {
+        let mut min_ts = i64::MAX;
+        let mut max_ts = i64::MIN;
+        for i in 0..path.len().saturating_sub(1) {
+            let dest_sid = self.interner.get(&path[i + 1]);
+            for compact in self.get_compact_relations(&path[i]) {
+                if Some(compact.dest_sid) == dest_sid && compact.timestamp != 0 {
+                    if compact.timestamp < min_ts { min_ts = compact.timestamp; }
+                    if compact.timestamp > max_ts { max_ts = compact.timestamp; }
+                }
+            }
+        }
+        if min_ts == i64::MAX || max_ts == i64::MIN {
+            0
+        } else {
+            max_ts - min_ts
+        }
     }
 
     /// SIMD-accelerated temporal pattern search via the C++ libgraphmatch backend.
@@ -587,8 +698,18 @@ impl GraphHunter {
 
         let cap = max_results.unwrap_or(10_000);
 
+        let has_predicates = hypothesis
+            .steps
+            .iter()
+            .any(|s| !s.edge_predicates.is_empty() || !s.dest_predicates.is_empty());
+
         let isa = crate::simd_matcher::ffi::simd_isa_name();
-        if matches!(isa, "scalar" | "none" | "unknown") {
+        // Fall back to the non-SIMD DFS when either the platform has no
+        // AVX2+ SIMD OR the hypothesis carries metadata predicates — the
+        // C++ matcher does not evaluate predicates yet (3.A scope), so
+        // running it would silently ignore the filter and return wrong
+        // results.
+        if matches!(isa, "scalar" | "none" | "unknown") || has_predicates {
             let scorer_ready = self
                 .anomaly_scorer
                 .as_ref()
@@ -601,6 +722,9 @@ impl GraphHunter {
             };
         }
 
+        // Extra fall-back: if the hypothesis carries HAVING/WITHIN, the
+        // SIMD path can technically run the base pattern — but to keep
+        // the result consistent we still apply aggregation after.
         let cached = crate::simd_matcher::ffi::build_gm_graph(self);
         let results = crate::simd_matcher::ffi::run_simd_search(
             &cached,
@@ -610,6 +734,7 @@ impl GraphHunter {
             max_results,
         );
         let truncated = results.len() >= cap;
+        let results = self.apply_aggregation(results, hypothesis);
         Ok((results, truncated))
     }
 
@@ -782,6 +907,7 @@ impl GraphHunter {
         scored.reverse(); // highest score first
 
         let results: Vec<HuntResult> = scored.into_iter().map(|(_, path)| path).collect();
+        let results = self.apply_aggregation(results, hypothesis);
         Ok((results, false))
     }
 
@@ -884,6 +1010,29 @@ impl GraphHunter {
                 let dest_sid = edge.dest_sid;
                 if !self.fast_type_matches(&step.dest_type, dest_sid) {
                     continue;
+                }
+
+                // Metadata predicates (3.A, smart-pruned DFS path).
+                if !step.edge_predicates.is_empty() {
+                    let metadata = if edge.metadata_offset != 0 {
+                        self.meta_store.get(edge.metadata_offset)
+                    } else {
+                        std::collections::HashMap::new()
+                    };
+                    if !crate::hypothesis::all_predicates_match(&step.edge_predicates, &metadata) {
+                        continue;
+                    }
+                }
+
+                // Destination-node predicates (B.2 — e.g. `Process {name~"certutil"}`).
+                if !step.dest_predicates.is_empty() {
+                    let entity = match self.entities.get(&dest_sid) {
+                        Some(e) => e,
+                        None => continue,
+                    };
+                    if !crate::hypothesis::all_predicates_match(&step.dest_predicates, &entity.metadata) {
+                        continue;
+                    }
                 }
 
                 let count = visit_count.get(&dest_sid).copied().unwrap_or(0);
@@ -1030,6 +1179,29 @@ impl GraphHunter {
                 let dest_sid = edge.dest_sid;
                 if !self.fast_type_matches(&step.dest_type, dest_sid) {
                     continue;
+                }
+
+                // Metadata predicates (3.A, iterative DFS path).
+                if !step.edge_predicates.is_empty() {
+                    let metadata = if edge.metadata_offset != 0 {
+                        self.meta_store.get(edge.metadata_offset)
+                    } else {
+                        std::collections::HashMap::new()
+                    };
+                    if !crate::hypothesis::all_predicates_match(&step.edge_predicates, &metadata) {
+                        continue;
+                    }
+                }
+
+                // Destination-node predicates (B.2).
+                if !step.dest_predicates.is_empty() {
+                    let entity = match self.entities.get(&dest_sid) {
+                        Some(e) => e,
+                        None => continue,
+                    };
+                    if !crate::hypothesis::all_predicates_match(&step.dest_predicates, &entity.metadata) {
+                        continue;
+                    }
                 }
 
                 let count = visit_count.get(&dest_sid).copied().unwrap_or(0);
@@ -1728,26 +1900,54 @@ impl GraphHunter {
         scored_count
     }
 
-    /// Returns hourly-bucketed relation counts grouped by relation type.
-    pub fn temporal_heatmap(&self) -> Vec<(String, Vec<(i64, usize)>)> {
+    /// Returns bucketed relation counts grouped by relation type.
+    ///
+    /// `bucket_size_seconds` controls the bucket width (default 3600 = 1h).
+    /// The output is **densified**: for each relation type, every bucket
+    /// between that type's first and last event is emitted, including
+    /// zero-count ones, so callers can distinguish "no events in this
+    /// window" from "window truncated" without guessing from gaps.
+    pub fn temporal_heatmap(
+        &self,
+        bucket_size_seconds: Option<i64>,
+    ) -> Vec<(String, Vec<(i64, usize)>, i64)> {
         use std::collections::BTreeMap;
-        let mut by_type: HashMap<String, BTreeMap<i64, usize>> = HashMap::new();
 
+        // Clamp: 60s minimum (avoid pathological per-second bucketing),
+        // 86400s maximum (> 1 day per bucket defeats the purpose).
+        let bucket = bucket_size_seconds.unwrap_or(3600).clamp(60, 86_400);
+
+        let mut by_type: HashMap<String, BTreeMap<i64, usize>> = HashMap::new();
         for compact in self.edge_store.iter_all() {
             let type_name = format!("{}", compact.rel_type());
-            let hour = compact.timestamp - (compact.timestamp % 3600);
+            let bkt = compact.timestamp - (compact.timestamp % bucket);
             *by_type
                 .entry(type_name)
                 .or_default()
-                .entry(hour)
+                .entry(bkt)
                 .or_insert(0) += 1;
         }
 
-        let mut result: Vec<(String, Vec<(i64, usize)>)> = by_type
+        let mut result: Vec<(String, Vec<(i64, usize)>, i64)> = by_type
             .into_iter()
             .map(|(type_name, bins)| {
-                let bins_vec: Vec<(i64, usize)> = bins.into_iter().collect();
-                (type_name, bins_vec)
+                // Densify: fill zero buckets between min_key and max_key
+                // so the UI sees the full timeline contour, not a sparse
+                // BTreeMap that gets misread as "truncated output".
+                let bins_vec: Vec<(i64, usize)> = if let (Some(&first), Some(&last)) =
+                    (bins.keys().next(), bins.keys().last())
+                {
+                    let mut out = Vec::new();
+                    let mut t = first;
+                    while t <= last {
+                        out.push((t, bins.get(&t).copied().unwrap_or(0)));
+                        t += bucket;
+                    }
+                    out
+                } else {
+                    Vec::new()
+                };
+                (type_name, bins_vec, bucket)
             })
             .collect();
         result.sort_by(|a, b| a.0.cmp(&b.0));

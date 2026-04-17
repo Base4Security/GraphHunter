@@ -1,0 +1,6 @@
+id: cat-014
+name: Persistence Cycle
+mitre_id: T1547.001
+description: "Process modifies registry for persistence, registry triggers execution of the same or similar process."
+dsl_pattern: "Process -[Modify]-> Registry -[Execute]-> Process {k=2}"
+k_simplicity: 2

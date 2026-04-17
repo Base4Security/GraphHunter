@@ -1,0 +1,6 @@
+id: cat-026
+name: LOLBAS Execution Chain
+mitre_id: T1218
+description: "A process spawns a LOLBAS binary (certutil / bitsadmin / mshta / regsvr32) — living-off-the-land signature."
+dsl_pattern: 'Process -[Spawn]-> Process {name~"certutil"}'
+k_simplicity: 1

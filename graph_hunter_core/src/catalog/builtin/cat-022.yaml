@@ -1,0 +1,6 @@
+id: cat-022
+name: Illicit OAuth Consent Grant
+mitre_id: T1528
+description: "A user grants consent to an attacker-controlled OAuth app — often the initial foothold for AAD application-based persistence."
+dsl_pattern: "User -[Consent]-> OAuthApp"
+k_simplicity: 1

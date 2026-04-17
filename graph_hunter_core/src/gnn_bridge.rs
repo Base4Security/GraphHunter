@@ -222,6 +222,158 @@ pub fn extract_batch_features(
     results
 }
 
+// ══════════════════════════════════════════════════════════════════
+// D.1 — GNN v2: cloud-identity feature extension
+// ══════════════════════════════════════════════════════════════════
+//
+// v1 (D_NODE=16) was trained on endpoint corpora (DARPA OpTC). During
+// the re-hunt the v1 model scored a confirmed attacker IP at
+// gnn_threat=0, proving its feature vector has no signal for cloud
+// identity. v2 adds 8 dims covering the Auth/app/geo surface:
+//
+//   dims 16        : is_cloud_auth (1.0 if node participates in Auth
+//                    rel with `app` metadata populated)
+//   dims 17..=22   : auth_app_bucket one-hot (6 classes: Browser,
+//                    PowerShell, MobileApp, AuthAgent, DeviceCode,
+//                    Other)
+//   dim 23         : geo_country_hash — stable hash of geo_country /
+//                    location metadata bucketed to [0,1], 0 if missing
+//
+// The v2 extractor produces SubgraphFeaturesV2 and v1 is untouched so
+// the existing model stays runnable until v2 graduates.
+
+/// Node feature dim for v2 (v1 had 16).
+pub const D_NODE_V2: usize = 24;
+
+/// Total v2 GNN input: same adjacency but wider node features.
+pub const GNN_INPUT_DIM_V2: usize = K_MAX * D_NODE_V2 + K_MAX * K_MAX;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubgraphFeaturesV2 {
+    pub node_features: Vec<f32>,
+    pub adjacency: Vec<f32>,
+    pub num_nodes: usize,
+    pub node_ids: Vec<String>,
+}
+
+impl SubgraphFeaturesV2 {
+    pub fn to_input_tensor(&self) -> Vec<f32> {
+        let mut t = Vec::with_capacity(GNN_INPUT_DIM_V2);
+        t.extend_from_slice(&self.node_features);
+        t.extend_from_slice(&self.adjacency);
+        debug_assert_eq!(t.len(), GNN_INPUT_DIM_V2);
+        t
+    }
+}
+
+/// App-family one-hot index used by v2 feature extraction.
+/// Bucketing keeps cardinality bounded — any app not in these classes
+/// lands in `Other` (index 5).
+fn app_bucket_index(app: &str) -> usize {
+    let a = app.to_ascii_lowercase();
+    if a.contains("browser") || a.contains("chrome") || a.contains("edge") {
+        0
+    } else if a.contains("powershell") || a.contains("aad powershell") || a.contains("azure cli") {
+        1
+    } else if a.contains("mobile") || a.contains("ios") || a.contains("android") || a.contains("outlook") {
+        2
+    } else if a.contains("authenticator") || a.contains("auth agent") || a.contains("sso") {
+        3
+    } else if a.contains("device code") || a.contains("msol") {
+        4
+    } else {
+        5
+    }
+}
+
+/// Stable hash of a geo-country / location string into [0.0, 1.0].
+/// Collisions are fine — the model only needs a group signal, not
+/// identity. Missing metadata returns 0.0.
+fn geo_country_hash(meta: &std::collections::HashMap<String, String>) -> f32 {
+    let s = meta
+        .get("geo_country")
+        .or_else(|| meta.get("country"))
+        .or_else(|| meta.get("location"))
+        .cloned()
+        .unwrap_or_default();
+    if s.is_empty() {
+        return 0.0;
+    }
+    let mut hash: u32 = 0x811c_9dc5;
+    for b in s.bytes() {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    (hash as f32) / (u32::MAX as f32)
+}
+
+/// Extract v2 subgraph features with the cloud-identity dims layered on
+/// top of v1's 16. Delegates to the v1 extractor for the structural
+/// features then patches in the new dims.
+pub fn extract_subgraph_features_v2(
+    graph: &GraphHunter,
+    center: &str,
+    k_hops: usize,
+) -> Option<SubgraphFeaturesV2> {
+    let v1 = extract_subgraph_features(graph, center, k_hops)?;
+    let mut node_features = vec![0.0f32; K_MAX * D_NODE_V2];
+
+    // Copy the v1 [K_MAX x D_NODE] block into the first 16 columns of
+    // the v2 [K_MAX x D_NODE_V2] matrix. Zero-pad the rest.
+    for i in 0..K_MAX {
+        let src_off = i * D_NODE;
+        let dst_off = i * D_NODE_V2;
+        node_features[dst_off..dst_off + D_NODE]
+            .copy_from_slice(&v1.node_features[src_off..src_off + D_NODE]);
+    }
+
+    // Now layer the 8 new dims per real node.
+    for (i, id) in v1.node_ids.iter().enumerate() {
+        let entity = match graph.get_entity(id) {
+            Some(e) => e,
+            None => continue,
+        };
+        let dst_off = i * D_NODE_V2;
+
+        // Find the `app` metadata value on ANY Auth edge touching this
+        // node, if any. First match wins — we only care about the
+        // family-of-app signal, not cardinality.
+        let mut is_cloud_auth: f32 = 0.0;
+        let mut app_bucket: Option<usize> = None;
+        if let Some(sid) = graph.interner.get(id) {
+            for compact in graph.edge_store.get_edges(sid) {
+                if compact.rel_type_tag != 0 /* Auth */ {
+                    continue;
+                }
+                if compact.metadata_offset == 0 {
+                    continue;
+                }
+                let meta = graph.meta_store.get(compact.metadata_offset);
+                if let Some(app) = meta.get("app") {
+                    is_cloud_auth = 1.0;
+                    app_bucket = Some(app_bucket_index(app));
+                    break;
+                }
+            }
+        }
+        node_features[dst_off + 16] = is_cloud_auth;
+        if let Some(b) = app_bucket {
+            // Six one-hot dims at [17..=22].
+            if b < 6 {
+                node_features[dst_off + 17 + b] = 1.0;
+            }
+        }
+        node_features[dst_off + 23] = geo_country_hash(&entity.metadata);
+    }
+
+    Some(SubgraphFeaturesV2 {
+        node_features,
+        adjacency: v1.adjacency,
+        num_nodes: v1.num_nodes,
+        node_ids: v1.node_ids,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

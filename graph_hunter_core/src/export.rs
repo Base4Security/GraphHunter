@@ -67,16 +67,17 @@ pub fn export_hunt_results_csv(
     paths: &[ScoredPath],
     writer: &mut impl Write,
 ) -> Result<(), GraphError> {
-    write_all(writer, b"index,chain_summary,max_score,total_score,time_start,time_end,anomaly_score,path\n")?;
+    write_all(writer, b"index,chain_summary,edge_count,max_score,total_score,time_start,time_end,anomaly_score,path\n")?;
     for (i, sp) in paths.iter().enumerate() {
         let anomaly = sp.anomaly_score.map(|s| format!("{:.4}", s)).unwrap_or_default();
         let path_joined = sp.path.join(" -> ");
         write_all(
             writer,
             format!(
-                "{},{},{:.2},{:.2},{},{},{},{}\n",
+                "{},{},{},{:.2},{:.2},{},{},{},{}\n",
                 i + 1,
                 csv_escape(&sp.chain_summary),
+                sp.edge_count,
                 sp.max_score,
                 sp.total_score,
                 sp.time_start,
@@ -180,11 +181,12 @@ mod tests {
             chain_summary: "A -> B".into(),
             anomaly_score: Some(0.75),
             anomaly_breakdown: None,
+            edge_count: 1,
         }];
         let mut buf = Vec::new();
         export_hunt_results_csv(&paths, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("index,chain_summary"));
+        assert!(output.contains("index,chain_summary,edge_count"));
         assert!(output.contains("A -> B"));
         assert!(output.contains("0.7500"));
     }
@@ -200,6 +202,7 @@ mod tests {
             chain_summary: "X".into(),
             anomaly_score: None,
             anomaly_breakdown: None,
+            edge_count: 1,
         }];
         let mut buf = Vec::new();
         export_hunt_results_json(&paths, &mut buf).unwrap();

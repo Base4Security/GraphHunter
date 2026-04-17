@@ -1,0 +1,6 @@
+id: cat-010
+name: Malware Drop and Execute
+mitre_id: T1204.002
+description: Process writes a file, then that file is executed as a new process.
+dsl_pattern: "Process -[Write]-> File -[Execute]-> Process"
+k_simplicity: 1

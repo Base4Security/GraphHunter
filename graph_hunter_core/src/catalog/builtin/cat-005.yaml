@@ -1,0 +1,6 @@
+id: cat-005
+name: "Application Layer Protocol — C2"
+mitre_id: T1071
+description: "Process resolves a domain via DNS, then connects to an external IP."
+dsl_pattern: "Process -[DNS]-> Domain -[Connect]-> IP"
+k_simplicity: 1

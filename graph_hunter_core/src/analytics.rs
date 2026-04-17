@@ -8,6 +8,13 @@ use crate::graph::GraphHunter;
 use crate::interner::StrId;
 use crate::types::{EntityType, RelationType};
 
+/// Combined in_degree + out_degree above which a plain `expand_node` call
+/// would produce an unwieldy response (and, at extreme degrees, timeout).
+/// Callers above this threshold should either switch to `get_neighborhood_grouped`
+/// or, in the command layer, silently auto-fall-back to grouped expansion
+/// and flag the response.
+pub const AUTO_GROUPED_THRESHOLD: usize = 200;
+
 // ── Serializable structs ──
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -42,6 +49,15 @@ pub struct Neighborhood {
     pub nodes: Vec<NeighborNode>,
     pub edges: Vec<NeighborEdge>,
     pub truncated: bool,
+    /// Set when the command layer auto-routed this expansion through
+    /// `get_neighborhood_grouped` because the node's degree exceeded
+    /// `AUTO_GROUPED_THRESHOLD`. When true, each edge in `edges` represents
+    /// a collapsed group — see the edge metadata keys `edge_count`,
+    /// `first_ts`, `last_ts` — and `auto_group_reason` explains why.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_grouped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_group_reason: Option<String>,
 }
 
 /// A grouped edge that collapses N edges of the same (source, target, rel_type)
@@ -96,6 +112,51 @@ pub struct NodeDetails {
     pub neighbor_types: HashMap<String, usize>,
     /// Neighbour node IDs and types for the lateral panel.
     pub neighbors: Vec<NeighborSummary>,
+    /// True when `in_degree + out_degree > AUTO_GROUPED_THRESHOLD`. Surfaces
+    /// to the UI as a hint that plain `expand_node` will return an unwieldy
+    /// fanout; `expand_node_grouped` is the better call for this node.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommend_grouped_expansion: bool,
+    /// Four-dimension anomaly breakdown (entity rarity / edge rarity /
+    /// neighborhood concentration / temporal novelty). Populated only when
+    /// anomaly scoring is enabled and finalized — `None` otherwise.
+    ///
+    /// The feedback pointed out that the scoring doc promises this breakdown
+    /// but `get_node_details` never returned it. This closes the gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anomaly_breakdown: Option<ScoreBreakdown>,
+}
+
+/// Detailed score explanation for a single node. Returned by `explain_score`.
+#[derive(Serialize, Clone, Debug)]
+pub struct ExplainedScore {
+    pub id: String,
+    pub entity_type: String,
+    pub composite_score: f64,
+    pub degree_score: f64,
+    pub pagerank_score: f64,
+    pub betweenness: f64,
+    /// Four-dimension anomaly breakdown if anomaly scoring is active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anomaly_breakdown: Option<ScoreBreakdown>,
+    /// Percentile rank (0-100) of `composite_score` against all entities in
+    /// the graph. 100 = tied for top; 0 = bottom of the pack.
+    pub composite_percentile: f64,
+    /// Percentile rank of `degree_score` across all entities.
+    pub degree_percentile: f64,
+    /// Top-5 peers (by composite score) of the same entity type, so the
+    /// analyst can see whether this node is a legitimate outlier or a
+    /// member of a cohort that all scored high (the `/usr/bin/grep` case
+    /// — "high degree is structural, not anomalous").
+    pub peers: Vec<ExplainedPeer>,
+    /// Narrative sentence combining the above for quick consumption.
+    pub narrative: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct ExplainedPeer {
+    pub id: String,
+    pub composite_score: f64,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -120,6 +181,60 @@ pub struct GraphSummary {
     pub top_anomalies: Vec<TopAnomaly>,
 }
 
+/// One row of the relation schema: a distinct (rel_type, source_type, target_type)
+/// triple observed in the graph, with its edge count and the union of metadata keys
+/// seen on any edge in the group.
+#[derive(Serialize, Clone, Debug)]
+pub struct RelSchemaEntry {
+    pub rel_type: String,
+    pub source_type: String,
+    pub target_type: String,
+    pub edge_count: usize,
+    pub metadata_keys: Vec<String>,
+}
+
+/// Result of `diff_hunts` — compare the hunt result set at two points in
+/// time and return what appeared / disappeared. "Snapshot" here is
+/// purely a time-bound on the existing graph; no separate session file
+/// is required. Paths are identified by their node sequence.
+#[derive(Serialize, Clone, Debug)]
+pub struct HuntDiff {
+    /// Upper time bound for the baseline hunt (inclusive).
+    pub baseline_ts: i64,
+    /// Upper time bound for the current hunt (inclusive).
+    pub current_ts: i64,
+    /// Total deduped path count in the baseline.
+    pub baseline_count: usize,
+    /// Total deduped path count in the current snapshot.
+    pub current_count: usize,
+    /// Paths present in `current` but not in `baseline` — the newly-
+    /// surfaced activity between the two timestamps.
+    pub added: Vec<ScoredPath>,
+    /// Paths present in `baseline` but not in `current`. Usually empty
+    /// for monotonic append-only ingest; non-empty when an upstream
+    /// truncation happened between the two bounds.
+    pub removed: Vec<ScoredPath>,
+}
+
+/// Why a hunt returned zero paths — returned from `hunt_diagnostic` and
+/// attached to the `HuntResults` response so the analyst doesn't have to
+/// guess whether the pattern was impossible, direction-inverted, or just
+/// temporally filtered out.
+#[derive(Serialize, Clone, Debug)]
+pub struct HuntDiagnostic {
+    /// Index of the step where the DFS would run out of matches.
+    pub failed_step_index: usize,
+    /// Human-readable reason.
+    pub reason: String,
+    /// If set, the analyst can almost certainly fix the hunt by copy-pasting this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
+    /// How many candidate starts would have matched the *first* step alone.
+    /// Zero here means the hypothesis asks for entity/rel types that the
+    /// dataset simply doesn't contain.
+    pub first_step_matches: usize,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct ScoredPath {
     pub path: Vec<String>,
@@ -132,12 +247,92 @@ pub struct ScoredPath {
     pub anomaly_score: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anomaly_breakdown: Option<ScoreBreakdown>,
+    /// How many raw paths collapsed into this row when dedup was active.
+    /// 1 for DedupMode::None. Matters because 1835 identical paths that
+    /// all scored 100 used to drown out the single genuinely interesting
+    /// path at page 91 — dedup surfaces the interesting one at page 1
+    /// and records the 1835 as a count here.
+    pub edge_count: usize,
+}
+
+/// How `score_and_paginate_paths` collapses identical or related paths.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DedupMode {
+    /// Every raw path shows up as its own row. Old behavior; use only when
+    /// you genuinely need to inspect duplicates.
+    None,
+    /// Group by the full node sequence — 1835 `(root, /usr/bin/grep)` paths
+    /// collapse to one row with `edge_count=1835`.
+    #[default]
+    ByPath,
+    /// Group by `(first, last)` only. Useful for long chains where the
+    /// intermediate hops differ slightly but the endpoints are what the
+    /// analyst actually cares about.
+    ByEndpoints,
+}
+
+// ── Standalone helpers for explain_score ──
+
+/// Percentile of `x` in the population `xs`. 100 = top, 0 = bottom.
+/// Uses "percent of values strictly less than x" + half of ties, which
+/// matches the semantics most analysts expect.
+fn percentile_of(xs: &[f64], x: f64) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    let n = xs.len() as f64;
+    let below = xs.iter().filter(|&&v| v < x).count() as f64;
+    let equal = xs.iter().filter(|&&v| v == x).count() as f64;
+    (100.0 * (below + equal / 2.0) / n).clamp(0.0, 100.0)
+}
+
+fn build_narrative(
+    composite: f64,
+    composite_pct: f64,
+    degree_pct: f64,
+    pagerank: f64,
+    breakdown: Option<&ScoreBreakdown>,
+    peer_ids: String,
+) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "Composite score {:.1} (percentile {:.1} of all entities).",
+        composite, composite_pct
+    ));
+    parts.push(format!("Degree centrality percentile {:.1}.", degree_pct));
+    if pagerank > 10.0 {
+        parts.push(format!("PageRank {:.2} indicates this node is structurally central.", pagerank));
+    }
+    if let Some(b) = breakdown {
+        // Distinguish "structural centrality" from "genuine anomaly" — exactly
+        // what the feedback said was missing. Low temporal_novelty + high
+        // score means the node was common throughout the window.
+        if b.temporal_novelty < 0.1 && composite_pct > 90.0 {
+            parts.push(
+                "Temporal novelty is near zero — this node was present throughout the window, so the high score is centrality, not anomaly.".into(),
+            );
+        } else if b.entity_rarity > 0.7 || b.edge_rarity > 0.7 {
+            parts.push(format!(
+                "High anomaly contribution: entity_rarity={:.2}, edge_rarity={:.2}, temporal_novelty={:.2}.",
+                b.entity_rarity, b.edge_rarity, b.temporal_novelty
+            ));
+        }
+    }
+    if !peer_ids.is_empty() {
+        parts.push(format!("Top peers of the same type: {}.", peer_ids));
+    }
+    parts.join(" ")
 }
 
 // ── Implementations on GraphHunter ──
 
 impl GraphHunter {
     /// Searches entities by substring match on ID (case-insensitive).
+    ///
+    /// When `query` is empty, acts as a list-mode: returns the top-N entities
+    /// (filtered by `type_filter` if given) ordered by score descending. This
+    /// lets analysts enumerate a small entity type without inventing a dummy
+    /// query like `"."`, which used to be the only workaround.
     pub fn search_entities(
         &self,
         query: &str,
@@ -145,7 +340,7 @@ impl GraphHunter {
         limit: usize,
     ) -> Vec<SearchResult> {
         let query_lower = query.to_lowercase();
-        let mut results = Vec::new();
+        let list_mode = query.is_empty();
 
         // If type_filter is specified, use type_index for fast lookup
         let candidate_sids: Vec<StrId> = match type_filter {
@@ -153,35 +348,51 @@ impl GraphHunter {
                 if let Some(ids) = self.type_index.get(et) {
                     ids.iter().copied().collect()
                 } else {
-                    return results;
+                    return Vec::new();
                 }
             }
             None => self.entities.keys().copied().collect(),
         };
 
+        // Collect matching results without the `limit` cap first; apply
+        // the cap after sorting so list-mode returns the *top* N by score,
+        // not an arbitrary N by HashMap iteration order.
+        let mut results: Vec<SearchResult> = Vec::new();
         for sid in candidate_sids {
-            if results.len() >= limit {
-                break;
+            let matches = list_mode || {
+                let id_str = self.interner.resolve(sid);
+                id_str.to_lowercase().contains(&query_lower)
+            };
+            if !matches {
+                continue;
             }
-            let id_str = self.interner.resolve(sid);
-            if id_str.to_lowercase().contains(&query_lower) {
-                if let Some(entity) = self.entities.get(&sid) {
-                    let out_degree = self.edge_store.get_edges(sid).len();
-                    let in_degree = self
-                        .reverse_adj
-                        .get(&sid)
-                        .map(|v| v.len())
-                        .unwrap_or(0);
-                    results.push(SearchResult {
-                        id: entity.id.clone(),
-                        entity_type: format!("{}", entity.entity_type),
-                        score: entity.score,
-                        connections: out_degree + in_degree,
-                    });
-                }
+            if let Some(entity) = self.entities.get(&sid) {
+                let out_degree = self.edge_store.get_edges(sid).len();
+                let in_degree = self
+                    .reverse_adj
+                    .get(&sid)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                results.push(SearchResult {
+                    id: entity.id.clone(),
+                    entity_type: format!("{}", entity.entity_type),
+                    score: entity.score,
+                    connections: out_degree + in_degree,
+                });
             }
         }
 
+        if list_mode {
+            // Sort by score desc, tiebreak on connections desc so the most
+            // central nodes surface first in an enumeration.
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(b.connections.cmp(&a.connections))
+            });
+        }
+        results.truncate(limit);
         results
     }
 
@@ -339,6 +550,8 @@ impl GraphHunter {
             nodes,
             edges,
             truncated,
+            auto_grouped: false,
+            auto_group_reason: None,
         })
     }
 
@@ -723,6 +936,16 @@ impl GraphHunter {
             }
         }
 
+        let anomaly_breakdown = self
+            .anomaly_scorer
+            .as_ref()
+            .filter(|s| s.is_finalized())
+            .map(|s| {
+                // Scorer averages over path; a single-node path gives back
+                // exactly this node's per-dimension contributions.
+                s.score_path(std::slice::from_ref(&entity.id), self).1
+            });
+
         Some(NodeDetails {
             id: entity.id.clone(),
             entity_type: format!("{}", entity.entity_type),
@@ -740,6 +963,73 @@ impl GraphHunter {
             },
             neighbor_types,
             neighbors,
+            recommend_grouped_expansion: in_degree + out_degree > AUTO_GROUPED_THRESHOLD,
+            anomaly_breakdown,
+        })
+    }
+
+    /// Detailed explanation for why a node has its score: the four-dimension
+    /// breakdown, percentiles against the whole graph, and a peers list so
+    /// the analyst can see whether they're looking at an outlier or a
+    /// legitimate centrality pillar like `/usr/bin/grep` under MDE agent.
+    pub fn explain_score(&self, node_id: &str) -> Option<ExplainedScore> {
+        let sid = self.interner.get(node_id)?;
+        let entity = self.entities.get(&sid)?.clone();
+
+        // Percentiles
+        let all_scores: Vec<f64> = self.entities.values().map(|e| e.score).collect();
+        let all_degrees: Vec<f64> = self.entities.values().map(|e| e.degree_score).collect();
+        let composite_percentile = percentile_of(&all_scores, entity.score);
+        let degree_percentile = percentile_of(&all_degrees, entity.degree_score);
+
+        // Peers: top 5 of the same type by composite score (excluding self).
+        let mut same_type: Vec<(&str, f64)> = self
+            .type_index
+            .get(&entity.entity_type)
+            .map(|ids| {
+                ids.iter()
+                    .filter(|&&p| p != sid)
+                    .filter_map(|&p| self.entities.get(&p).map(|e| (e.id.as_str(), e.score)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        same_type.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let peers: Vec<ExplainedPeer> = same_type
+            .into_iter()
+            .take(5)
+            .map(|(id, score)| ExplainedPeer { id: id.to_string(), composite_score: score })
+            .collect();
+
+        let anomaly_breakdown = self
+            .anomaly_scorer
+            .as_ref()
+            .filter(|s| s.is_finalized())
+            .map(|s| s.score_path(std::slice::from_ref(&entity.id), self).1);
+
+        // Narrative: pick the dominant driver (degree vs anomaly vs pagerank)
+        // and word it the way the feedback asked — "score 100 because degree
+        // percentile 99.8, temporal novelty 0 (common, not rare)".
+        let narrative = build_narrative(
+            entity.score,
+            composite_percentile,
+            degree_percentile,
+            entity.pagerank_score,
+            anomaly_breakdown.as_ref(),
+            peers.iter().take(3).map(|p| p.id.as_str()).collect::<Vec<_>>().join(", "),
+        );
+
+        Some(ExplainedScore {
+            id: entity.id.clone(),
+            entity_type: format!("{}", entity.entity_type),
+            composite_score: entity.score,
+            degree_score: entity.degree_score,
+            pagerank_score: entity.pagerank_score,
+            betweenness: entity.betweenness,
+            anomaly_breakdown,
+            composite_percentile,
+            degree_percentile,
+            peers,
+            narrative,
         })
     }
 
@@ -798,13 +1088,64 @@ impl GraphHunter {
     }
 
     /// Scores, filters, sorts, and paginates hunt result paths.
+    ///
+    /// `dedup_mode` controls whether identical or endpoint-identical paths
+    /// collapse into a single row with an `edge_count` aggregate. Default
+    /// `DedupMode::ByPath` — callers that truly want raw output must opt
+    /// into `DedupMode::None` explicitly.
     pub fn score_and_paginate_paths(
         &self,
         paths: &[Vec<String>],
         page: usize,
         page_size: usize,
         min_score: Option<f64>,
+        dedup_mode: DedupMode,
     ) -> (Vec<ScoredPath>, usize) {
+        // Phase 0: dedup. Results are (representative_path, collapsed_count).
+        // For ByPath we keep insertion order by walking `paths` once; for
+        // ByEndpoints we also keep the first-seen representative so the
+        // chain_summary stays interpretable.
+        let deduped: Vec<(Vec<String>, usize)> = match dedup_mode {
+            DedupMode::None => paths.iter().map(|p| (p.clone(), 1usize)).collect(),
+            DedupMode::ByPath => {
+                let mut order: Vec<Vec<String>> = Vec::new();
+                let mut counts: HashMap<Vec<String>, usize> = HashMap::new();
+                for p in paths {
+                    match counts.entry(p.clone()) {
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            *e.get_mut() += 1;
+                        }
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(1);
+                            order.push(p.clone());
+                        }
+                    }
+                }
+                order.into_iter().map(|p| { let c = counts[&p]; (p, c) }).collect()
+            }
+            DedupMode::ByEndpoints => {
+                let mut order: Vec<(String, String)> = Vec::new();
+                let mut seen: HashMap<(String, String), (Vec<String>, usize)> = HashMap::new();
+                for p in paths {
+                    if p.is_empty() { continue; }
+                    let key = (p.first().unwrap().clone(), p.last().unwrap().clone());
+                    match seen.entry(key.clone()) {
+                        std::collections::hash_map::Entry::Occupied(mut e) => {
+                            e.get_mut().1 += 1;
+                        }
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert((p.clone(), 1));
+                            order.push(key);
+                        }
+                    }
+                }
+                order.into_iter().map(|k| { let (p, c) = seen[&k].clone(); (p, c) }).collect()
+            }
+        };
+
+        // Everything below operates on `deduped`; the old raw-path path is
+        // preserved behind DedupMode::None with one-to-one mapping.
+        let paths: &[(Vec<String>, usize)] = &deduped;
         let scorer = self.anomaly_scorer.as_ref().filter(|s| s.is_finalized());
         let has_anomaly = scorer.is_some();
 
@@ -812,7 +1153,7 @@ impl GraphHunter {
         let mut lightweight: Vec<(usize, f64, f64, f64)> = paths
             .iter()
             .enumerate()
-            .map(|(idx, path)| {
+            .map(|(idx, (path, _count))| {
                 let mut max_score: f64 = 0.0;
                 let mut total_score: f64 = 0.0;
                 for node_id in path {
@@ -867,17 +1208,22 @@ impl GraphHunter {
             lightweight[start..end]
                 .iter()
                 .map(|&(idx, max_score, total_score, _)| {
-                    let path = &paths[idx];
+                    let (path, edge_count) = &paths[idx];
+                    let edge_count = *edge_count;
                     let mut time_start = i64::MAX;
                     let mut time_end = i64::MIN;
                     let mut labels: Vec<String> = Vec::new();
 
                     for node_id in path {
                         if let Some(_entity) = self.get_entity(node_id) {
+                            // Only shorten Windows-style paths — take the
+                            // filename after the last backslash. Full IDs
+                            // (emails, FQDNs) used to get their FIRST char
+                            // silently dropped by a `len - 20..` slice;
+                            // the correct behavior is to keep the full ID
+                            // and let the UI ellipsize for display.
                             let short = if let Some(pos) = node_id.rfind('\\') {
                                 &node_id[pos + 1..]
-                            } else if node_id.len() > 20 {
-                                &node_id[node_id.len() - 20..]
                             } else {
                                 node_id.as_str()
                             };
@@ -920,11 +1266,370 @@ impl GraphHunter {
                         chain_summary: labels.join(" -> "),
                         anomaly_score,
                         anomaly_breakdown,
+                        edge_count,
                     }
                 })
                 .collect()
         };
 
         (page_items, filtered_count)
+    }
+
+    /// Computes the relation schema: one entry per distinct
+    /// (rel_type, source_type, target_type) triple observed in the graph.
+    ///
+    /// Intended as the first call after `get_graph_summary` when building a
+    /// hunt — the DSL requires edge direction to match the underlying data,
+    /// and this surfaces that direction explicitly instead of forcing users
+    /// to discover it through failed `run_hunt` calls.
+    ///
+    /// O(E) scan over `edge_store`; metadata keys come from `meta_store`
+    /// and are unioned per group. Results are sorted by edge_count
+    /// descending so the most common relationships appear first.
+    pub fn get_relation_schema(&self) -> Vec<RelSchemaEntry> {
+        // Resolve sid → EntityType via `entities.get`; Other(name) entries
+        // hash on their Display string so custom types stay distinct.
+        let mut groups: HashMap<(RelationType, EntityType, EntityType), (usize, HashSet<String>)> =
+            HashMap::new();
+
+        for compact in self.edge_store.iter_all() {
+            let rel = compact.rel_type();
+            let src_et = match self.entities.get(&compact.source_sid) {
+                Some(e) => e.entity_type.clone(),
+                None => continue,
+            };
+            let dst_et = match self.entities.get(&compact.dest_sid) {
+                Some(e) => e.entity_type.clone(),
+                None => continue,
+            };
+
+            let slot = groups.entry((rel, src_et, dst_et)).or_insert_with(|| (0, HashSet::new()));
+            slot.0 += 1;
+            if compact.metadata_offset != 0 {
+                let meta = self.meta_store.get(compact.metadata_offset);
+                for k in meta.keys() {
+                    slot.1.insert(k.clone());
+                }
+            }
+        }
+
+        let mut out: Vec<RelSchemaEntry> = groups
+            .into_iter()
+            .map(|((rel, src, dst), (count, keys))| {
+                let mut keys_vec: Vec<String> = keys.into_iter().collect();
+                keys_vec.sort();
+                RelSchemaEntry {
+                    rel_type: format!("{}", rel),
+                    source_type: format!("{}", src),
+                    target_type: format!("{}", dst),
+                    edge_count: count,
+                    metadata_keys: keys_vec,
+                }
+            })
+            .collect();
+
+        out.sort_by(|a, b| b.edge_count.cmp(&a.edge_count));
+        out
+    }
+
+    /// Run the same hypothesis at two upper time bounds and return what
+    /// appeared / disappeared between them. Uses the existing
+    /// `search_temporal_pattern` time_window parameter — no separate
+    /// snapshot storage needed. Paths are compared by full node
+    /// sequence; duplicates within a bound collapse first via
+    /// `DedupMode::ByPath` so only meaningfully-new paths surface in
+    /// `added`.
+    pub fn diff_hunts(
+        &self,
+        hypothesis: &crate::Hypothesis,
+        baseline_ts: i64,
+        current_ts: i64,
+    ) -> Result<HuntDiff, crate::errors::GraphError> {
+        // Time window (i64::MIN, ts) includes every event up to and including
+        // `ts`. Engine code already understands this interval shape.
+        let baseline_window = Some((i64::MIN, baseline_ts));
+        let current_window = Some((i64::MIN, current_ts));
+
+        let (baseline_raw, _) = self.search_temporal_pattern(hypothesis, baseline_window, None)?;
+        let (current_raw, _) = self.search_temporal_pattern(hypothesis, current_window, None)?;
+
+        // Dedup + score each side independently so the ScoredPath
+        // metadata (edge_count, time_start, time_end) travels with the
+        // diff. Large page_size = give us everything; we filter later.
+        let (baseline_scored, _) = self.score_and_paginate_paths(
+            &baseline_raw,
+            0,
+            usize::MAX.min(baseline_raw.len().max(1)),
+            None,
+            DedupMode::ByPath,
+        );
+        let (current_scored, _) = self.score_and_paginate_paths(
+            &current_raw,
+            0,
+            usize::MAX.min(current_raw.len().max(1)),
+            None,
+            DedupMode::ByPath,
+        );
+
+        // Index each side by path-sequence key for O(1) lookups.
+        use std::collections::HashMap;
+        let baseline_keys: HashMap<Vec<String>, &ScoredPath> = baseline_scored
+            .iter()
+            .map(|sp| (sp.path.clone(), sp))
+            .collect();
+        let current_keys: HashMap<Vec<String>, &ScoredPath> = current_scored
+            .iter()
+            .map(|sp| (sp.path.clone(), sp))
+            .collect();
+
+        let added: Vec<ScoredPath> = current_scored
+            .iter()
+            .filter(|sp| !baseline_keys.contains_key(&sp.path))
+            .cloned()
+            .collect();
+        let removed: Vec<ScoredPath> = baseline_scored
+            .iter()
+            .filter(|sp| !current_keys.contains_key(&sp.path))
+            .cloned()
+            .collect();
+
+        Ok(HuntDiff {
+            baseline_ts,
+            current_ts,
+            baseline_count: baseline_scored.len(),
+            current_count: current_scored.len(),
+            added,
+            removed,
+        })
+    }
+
+    /// Given a hypothesis that returned zero paths, explain why.
+    ///
+    /// Walks the steps and, for each one, counts how many edges of the
+    /// required `(source_type, rel_type, target_type)` triple exist at the
+    /// schema level. The first step with zero matches is the failure point.
+    /// If the same rel_type has edges in the reverse direction, the
+    /// suggestion proposes a direction inversion — which covered the
+    /// single most common cause of false-negative hunts in the post-hunt
+    /// feedback.
+    ///
+    /// This does **not** run DFS — it's a pure schema consult, O(E) at most
+    /// (dominated by `get_relation_schema`), and intended to run only when
+    /// the actual hunt returned nothing.
+    pub fn hunt_diagnostic(&self, hypothesis: &crate::Hypothesis) -> HuntDiagnostic {
+        let steps = &hypothesis.steps;
+        if steps.is_empty() {
+            return HuntDiagnostic {
+                failed_step_index: 0,
+                reason: "hypothesis has no steps".into(),
+                suggestion: None,
+                first_step_matches: 0,
+            };
+        }
+
+        let schema = self.get_relation_schema();
+
+        // Pre-compute: how many edges match each step's (src_type, rel, dst_type)
+        // triple. Wildcards (EntityType::Any, RelationType::Any) are treated as
+        // always-matching and count the union across all compatible schema rows.
+        let count_matches = |src: &EntityType, rel: &RelationType, dst: &EntityType| -> usize {
+            let src_str = format!("{src}");
+            let rel_str = format!("{rel}");
+            let dst_str = format!("{dst}");
+            schema
+                .iter()
+                .filter(|e| {
+                    (src_str == "*" || e.source_type == src_str)
+                        && (rel_str == "*" || e.rel_type == rel_str)
+                        && (dst_str == "*" || e.target_type == dst_str)
+                })
+                .map(|e| e.edge_count)
+                .sum()
+        };
+
+        // Count matches of the first step (the "first_step_matches" field
+        // the feedback explicitly asked for).
+        let first = &steps[0];
+        let first_matches = count_matches(&first.origin_type, &first.relation_type, &first.dest_type);
+
+        // Find the first step with zero schema matches.
+        for (i, step) in steps.iter().enumerate() {
+            let n = count_matches(&step.origin_type, &step.relation_type, &step.dest_type);
+            if n > 0 {
+                continue;
+            }
+
+            // Zero matches for this step. See if the reverse direction has any.
+            let reverse = count_matches(&step.dest_type, &step.relation_type, &step.origin_type);
+            let reason = format!(
+                "no edges of type '{}' from '{}' to '{}' exist in the loaded dataset",
+                step.relation_type, step.origin_type, step.dest_type
+            );
+            let suggestion = if reverse > 0 {
+                Some(format!(
+                    "Found {} edges going the other way — did you mean '{} -[{}]-> {}' (reversed)?",
+                    reverse, step.dest_type, step.relation_type, step.origin_type
+                ))
+            } else {
+                // No reverse either. Check if the rel_type exists at all for either direction.
+                let rel_anywhere: usize = schema
+                    .iter()
+                    .filter(|e| e.rel_type == format!("{}", step.relation_type))
+                    .map(|e| e.edge_count)
+                    .sum();
+                if rel_anywhere == 0 {
+                    Some(format!(
+                        "Relation type '{}' does not appear anywhere in the dataset — call `get_relation_schema` to list the relation types that actually exist here.",
+                        step.relation_type
+                    ))
+                } else {
+                    Some(format!(
+                        "Relation '{}' exists but not between ({}, {}). Call `get_relation_schema` and pick a triple that matches the data.",
+                        step.relation_type, step.origin_type, step.dest_type
+                    ))
+                }
+            };
+            return HuntDiagnostic {
+                failed_step_index: i,
+                reason,
+                suggestion,
+                first_step_matches: first_matches,
+            };
+        }
+
+        // Every step has schema-level (src, rel, dst) matches but DFS still
+        // returned zero. Before blaming temporal ordering, check whether any
+        // step carries edge predicates that rule out every edge — that is
+        // the common failure mode when the pattern assumes enrichment
+        // (e.g. `risk_tag="anonymizing"`) that the ingest pipeline never
+        // populates.
+        for (i, step) in steps.iter().enumerate() {
+            if step.edge_predicates.is_empty() {
+                continue;
+            }
+            // Look at the schema row(s) for this step's triple and see if
+            // any predicate key is missing from the observed metadata_keys
+            // union — a cheap signal that the field was never present.
+            let origin_s = format!("{}", step.origin_type);
+            let rel_s = format!("{}", step.relation_type);
+            let dest_s = format!("{}", step.dest_type);
+            let mut observed_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let mut edges_total: usize = 0;
+            for row in schema.iter().filter(|r| {
+                (origin_s == "*" || r.source_type == origin_s)
+                    && (rel_s == "*" || r.rel_type == rel_s)
+                    && (dest_s == "*" || r.target_type == dest_s)
+            }) {
+                edges_total += row.edge_count;
+                for k in &row.metadata_keys {
+                    observed_keys.insert(k.as_str());
+                }
+            }
+
+            // For each predicate, record the key it reads and whether that
+            // key was ever seen on any edge of this (src, rel, dst) group.
+            let missing_keys: Vec<&str> = step
+                .edge_predicates
+                .iter()
+                .filter_map(|p| match p {
+                    crate::hypothesis::Predicate::Eq { key, .. }
+                    | crate::hypothesis::Predicate::Match { key, .. }
+                    | crate::hypothesis::Predicate::In { key, .. } => {
+                        if observed_keys.contains(key.as_str()) { None } else { Some(key.as_str()) }
+                    }
+                    // Negative predicates (Neq, NotIn) match missing keys by
+                    // design, so their absence is not the cause.
+                    crate::hypothesis::Predicate::Neq { .. }
+                    | crate::hypothesis::Predicate::NotIn { .. } => None,
+                })
+                .collect();
+
+            if !missing_keys.is_empty() {
+                let keys_list = missing_keys.iter().collect::<Vec<_>>().iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ");
+                let reason = format!(
+                    "step {i} has a metadata predicate on {keys_list} but that field is not populated on any of the {edges_total} observed edges for this triple — the pattern requires upstream enrichment that is not present in this dataset"
+                );
+                let observed_list = if observed_keys.is_empty() {
+                    "none".to_string()
+                } else {
+                    let mut v: Vec<&str> = observed_keys.iter().copied().collect();
+                    v.sort();
+                    v.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ")
+                };
+                let suggestion = Some(format!(
+                    "Observed metadata keys on this edge group: {observed_list}. Either remove the predicate from the hypothesis, relax it (e.g. use a `~` substring match on a related field), or enable the ingest enrichment that would populate {keys_list}."
+                ));
+                return HuntDiagnostic {
+                    failed_step_index: i,
+                    reason,
+                    suggestion,
+                    first_step_matches: first_matches,
+                };
+            }
+
+            // Keys exist at the schema level, but the specific values may
+            // not. Run a cheap sample scan: walk up to N edges of this
+            // triple and record which predicates pass. Zero-pass = the
+            // value is absent even though the key is observed.
+            const SAMPLE_CAP: usize = 5_000;
+            let mut sampled: usize = 0;
+            let mut passed: usize = 0;
+            for compact in self.edge_store.iter_all() {
+                if sampled >= SAMPLE_CAP {
+                    break;
+                }
+                if format!("{}", compact.rel_type()) != rel_s && rel_s != "*" {
+                    continue;
+                }
+                let (src_et, dst_et) = match (
+                    self.entities.get(&compact.source_sid).map(|e| &e.entity_type),
+                    self.entities.get(&compact.dest_sid).map(|e| &e.entity_type),
+                ) {
+                    (Some(s), Some(d)) => (s, d),
+                    _ => continue,
+                };
+                if origin_s != "*" && format!("{src_et}") != origin_s {
+                    continue;
+                }
+                if dest_s != "*" && format!("{dst_et}") != dest_s {
+                    continue;
+                }
+                sampled += 1;
+                let metadata = if compact.metadata_offset != 0 {
+                    self.meta_store.get(compact.metadata_offset)
+                } else {
+                    std::collections::HashMap::new()
+                };
+                if crate::hypothesis::all_predicates_match(&step.edge_predicates, &metadata) {
+                    passed += 1;
+                }
+            }
+            if sampled > 0 && passed == 0 {
+                return HuntDiagnostic {
+                    failed_step_index: i,
+                    reason: format!(
+                        "step {i} has metadata predicates that match 0/{sampled} sampled edges of this triple — the keys exist but none carries a value matching the filter"
+                    ),
+                    suggestion: Some(
+                        "Try a wider predicate (e.g. `~` substring instead of `=`) or inspect values via `expand_node_grouped` on a representative source node."
+                            .into(),
+                    ),
+                    first_step_matches: first_matches,
+                };
+            }
+        }
+
+        // Every step has schema-level matches AND predicates are satisfiable
+        // — the failure is structural (temporal ordering, k-simplicity, or
+        // disconnected edges). Fall back to the generic advice.
+        HuntDiagnostic {
+            failed_step_index: steps.len().saturating_sub(1),
+            reason: "every step matches the schema individually, but no chain satisfies temporal ordering or k-simplicity (paths exist as isolated edges but not connected in the expected order)".into(),
+            suggestion: Some(
+                "Widen the time window with the `time_window` parameter, or inspect individual hops with `expand_node_grouped` on the expected intermediate nodes."
+                    .into(),
+            ),
+            first_step_matches: first_matches,
+        }
     }
 }

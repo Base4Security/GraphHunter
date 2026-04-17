@@ -11,6 +11,23 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+/// Which source a GeoIP result came from. Useful for the UI to surface a
+/// trust indicator — dataset-metadata enrichment is a weaker signal than
+/// a fresh MaxMind lookup, and the analyst deserves to know which one
+/// they're looking at.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GeoIpSource {
+    #[default]
+    Maxmind,
+    Http,
+    /// Pulled from the entity's pre-existing metadata (e.g. `location` fields
+    /// already present from the Sentinel ingest pipeline). Used as a fallback
+    /// when neither a MaxMind provider nor an HTTP provider is available —
+    /// the feedback called this "the enrichment was already there; just don't
+    /// lie about its source".
+    DatasetMetadata,
+}
+
 /// Result of a GeoIP/ASN lookup for a single IP address.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GeoIpResult {
@@ -21,6 +38,10 @@ pub struct GeoIpResult {
     pub as_org: Option<String>,
     pub isp: Option<String>,
     pub is_anonymous_proxy: Option<bool>,
+    /// Provenance of this result. Optional so old cached values deserialize
+    /// cleanly and so `Default::default()` still works without fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<GeoIpSource>,
 }
 
 /// Errors from the GeoIP subsystem.
@@ -140,6 +161,7 @@ pub mod maxmind {
             }
 
             if result.country_code.is_some() || result.asn.is_some() {
+                result.source = Some(GeoIpSource::Maxmind);
                 Some(result)
             } else {
                 None
@@ -247,12 +269,78 @@ pub mod http {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
                 is_anonymous_proxy: None,
+                source: Some(GeoIpSource::Http),
             })
         }
     }
 }
 
 /// Writes GeoIP enrichment result into an entity's metadata HashMap.
+/// Extract a GeoIpResult from pre-existing entity metadata (the ingest
+/// pipeline — e.g. Sentinel — sometimes already carries country/city/ASN
+/// fields). Returns `None` if none of the expected keys are present.
+///
+/// This is the fallback path when neither a MaxMind nor an HTTP provider
+/// is configured: instead of erroring out, we surface the enrichment that
+/// was already there, clearly marked as `GeoIpSource::DatasetMetadata`
+/// so the UI can display a distinct badge.
+pub fn geoip_from_metadata(
+    metadata: &std::collections::HashMap<String, String>,
+) -> Option<GeoIpResult> {
+    let get = |keys: &[&str]| -> Option<String> {
+        for k in keys {
+            if let Some(v) = metadata.get(*k) {
+                if !v.is_empty() {
+                    return Some(v.clone());
+                }
+            }
+        }
+        None
+    };
+
+    let country_code = get(&["geo_country_code", "country_code", "countryCode"]);
+    let country_name = get(&["geo_country", "country", "countryName"]);
+    let city = get(&["geo_city", "city"]);
+    let asn_str = get(&["geo_asn", "asn"]);
+    let as_org = get(&["geo_as_org", "as_org", "as_organization"]);
+    let isp = get(&["geo_isp", "isp"]);
+    let location = get(&["location"]);
+
+    // If the only signal is a composite `location` string, try to coerce
+    // it into country_name (common Sentinel shape: "US - California - ...").
+    let country_name = country_name.or_else(|| location.clone());
+
+    if country_code.is_none()
+        && country_name.is_none()
+        && city.is_none()
+        && asn_str.is_none()
+        && as_org.is_none()
+        && isp.is_none()
+    {
+        return None;
+    }
+
+    let asn: Option<u32> = asn_str
+        .and_then(|s| {
+            // Accept "AS15169" or "15169".
+            let s = s.trim().trim_start_matches(|c: char| !c.is_ascii_digit());
+            s.split(|c: char| !c.is_ascii_digit())
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+        });
+
+    Some(GeoIpResult {
+        country_code,
+        country_name,
+        city,
+        asn,
+        as_org,
+        isp,
+        is_anonymous_proxy: None,
+        source: Some(GeoIpSource::DatasetMetadata),
+    })
+}
+
 pub fn write_geoip_to_metadata(
     metadata: &mut std::collections::HashMap<String, String>,
     result: &GeoIpResult,
@@ -299,6 +387,7 @@ mod tests {
             as_org: Some("Google LLC".into()),
             isp: Some("Google LLC".into()),
             is_anonymous_proxy: Some(false),
+            source: Some(GeoIpSource::Maxmind),
         };
         write_geoip_to_metadata(&mut meta, &result);
         assert_eq!(meta.get("geo_country_code").unwrap(), "US");

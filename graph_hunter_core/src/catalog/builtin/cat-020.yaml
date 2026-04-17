@@ -1,0 +1,6 @@
+id: cat-020
+name: Successful Auth after Failures
+mitre_id: T1110.003
+description: "Same user shows both Success and Failure Auths — classic spray-confirm signature if the Success follows multiple Failures. Use alongside cat-017."
+dsl_pattern: 'User -[Auth {status="Success"}]-> IP HAVING count(distinct IP) >= 2'
+k_simplicity: 1

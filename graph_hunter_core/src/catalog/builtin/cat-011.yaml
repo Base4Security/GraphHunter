@@ -1,0 +1,6 @@
+id: cat-011
+name: Registry Persistence
+mitre_id: T1547.001
+description: Process modifies registry for persistence, then spawns new process.
+dsl_pattern: "Process -[Modify]-> Registry -[Execute]-> Process"
+k_simplicity: 1

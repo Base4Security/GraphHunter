@@ -1,0 +1,6 @@
+id: cat-006
+name: Service Execution
+mitre_id: T1569.002
+description: User executes a process that creates or modifies a service.
+dsl_pattern: "User -[Execute]-> Process -[Modify]-> Service"
+k_simplicity: 1

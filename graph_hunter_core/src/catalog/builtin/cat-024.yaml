@@ -1,0 +1,6 @@
+id: cat-024
+name: Role Assignment Escalation
+mitre_id: T1098.003
+description: "User grants a privileged role to another user — the `admin promoting admin` chain that often follows credential compromise."
+dsl_pattern: "User -[Assign]-> Role -[Grant]-> User"
+k_simplicity: 1

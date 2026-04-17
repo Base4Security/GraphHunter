@@ -72,6 +72,12 @@ pub enum RelationType {
     Delete,
     /// Wildcard: matches any relation type in DFS search.
     Any,
+    /// User-defined rel type (e.g. "Consent", "Assign", "Forward") used
+    /// by cloud-identity and post-compromise patterns. Tag 254 in FFI;
+    /// the actual name travels through the meta_store side-table at
+    /// insert time. DFS compares on Display strings so matching is
+    /// correct even across FFI round-trips.
+    Other(String),
 }
 
 impl fmt::Display for RelationType {
@@ -87,6 +93,7 @@ impl fmt::Display for RelationType {
             RelationType::Spawn => write!(f, "Spawn"),
             RelationType::Delete => write!(f, "Delete"),
             RelationType::Any => write!(f, "*"),
+            RelationType::Other(s) => write!(f, "{}", s),
         }
     }
 }
@@ -105,7 +112,8 @@ impl FromStr for RelationType {
             "Spawn" => Ok(RelationType::Spawn),
             "Delete" => Ok(RelationType::Delete),
             "*" => Ok(RelationType::Any),
-            other => Err(format!("Unknown relation type: '{}'", other)),
+            other if !other.is_empty() => Ok(RelationType::Other(other.to_string())),
+            _ => Err("Empty relation type".to_string()),
         }
     }
 }
@@ -123,6 +131,10 @@ impl RelationType {
             RelationType::Spawn => 7,
             RelationType::Delete => 8,
             RelationType::Any => 255,
+            // Sentinel for user-defined; disambiguated at use-site via the
+            // Display string (the `Other` name is hashed / compared
+            // separately by callers that keep a side-table).
+            RelationType::Other(_) => 254,
         }
     }
     pub fn from_u8(v: u8) -> Self {
@@ -136,6 +148,7 @@ impl RelationType {
             6 => RelationType::Modify,
             7 => RelationType::Spawn,
             8 => RelationType::Delete,
+            254 => RelationType::Other(String::new()),
             _ => RelationType::Any,
         }
     }

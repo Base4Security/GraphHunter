@@ -1,0 +1,6 @@
+id: cat-008
+name: Process Injection
+mitre_id: T1055
+description: Process spawns another process that then writes to memory/file.
+dsl_pattern: "Process -[Spawn]-> Process -[Write]-> File"
+k_simplicity: 1
