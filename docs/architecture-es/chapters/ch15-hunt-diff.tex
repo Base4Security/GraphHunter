@@ -1,0 +1,104 @@
+\chapter{Diff de hunts}
+\label{ch:hunt-diff}
+
+\code{diff\_hunts} responde a la pregunta ``¿qué cambió entre dos
+puntos en el tiempo en el conjunto de caminos que satisfacen
+esta hipótesis?'' Es la base del panel ``qué hay nuevo desde mi
+último chequeo'' en la UI y de la automatización programada que
+alerta sobre cadenas de ataque recién aparecidas.
+
+\section{Variante clásica por tiempo de evento}
+
+El algoritmo base corre la hipótesis dos veces contra el grafo,
+acotando la ventana temporal a distintos upper-bounds, y diffea
+los conjuntos de caminos.
+
+\begin{algorithm}
+\caption{\textsc{Diff-Hunts}}\label{alg:diff-hunts}
+\KwIn{grafo $G$, hipótesis $H$, timestamp baseline $t_{\text{base}}$,
+      timestamp actual $t_{\text{cur}}$ con $t_{\text{base}} < t_{\text{cur}}$}
+\KwOut{(agregados: $\mathrm{List}[\pi]$, quitados: $\mathrm{List}[\pi]$)}
+$\Pi_{\text{base}} \gets $ \textsc{Search-Temporal-Pattern}($G, H, (0, t_{\text{base}}), \infty$)\;
+$\Pi_{\text{cur}} \gets $ \textsc{Search-Temporal-Pattern}($G, H, (0, t_{\text{cur}}), \infty$)\;
+$U_{\text{base}} \gets $ \textsc{Score-And-Paginate}($\Pi_{\text{base}}$, 0, $\infty$, None, ByPath).únicos\;
+$U_{\text{cur}} \gets $ idem para $\Pi_{\text{cur}}$\;
+$K_{\text{base}} \gets $ conjunto de claves de camino en $U_{\text{base}}$\;
+$K_{\text{cur}} \gets $ idem para $U_{\text{cur}}$\;
+agregados $\gets U_{\text{cur}}$ filtrados por clave $\notin K_{\text{base}}$\;
+quitados $\gets U_{\text{base}}$ filtrados por clave $\notin K_{\text{cur}}$\;
+\Return (agregados, quitados)\;
+\end{algorithm}
+
+\begin{complexity}
+Dos ejecuciones de hunt más una pasada de diferencia de
+conjuntos. Si $T_{\text{match}}$ es el costo del matcher y $P$ es
+la cantidad de caminos devueltos por cualquiera de los hunts, el
+total es $2 T_{\text{match}} + \Ord{P}$. Espacio $\Ord{P}$ por
+encima del scratch propio del matcher.
+\end{complexity}
+
+\section{Trampa semántica: datos que llegan tarde}
+
+La variante clásica diffea por \emph{tiempo de evento}, no por
+\emph{tiempo de conocimiento}: una arista cuyo timestamp de
+evento es del pasado pero que fue ingerida después de
+$t_{\text{base}}$ aparecerá tanto en $\Pi_{\text{base}}$ como en
+$\Pi_{\text{cur}}$, porque el upper-bound de la ventana temporal
+no filtra basado en cuándo el motor se enteró de la arista. Esta
+es la motivación original del trabajo MVCC P3
+(Capítulo~\ref{ch:mvcc}): un analista que cerró un ticket en
+$t_{\text{base}}$ igual puede querer saber que una ingesta
+post-mortem reveló aristas nuevas dentro de la ventana que ya
+consideraba ``cerrada''.
+
+\section{La variante por snapshot (diferida)}
+
+Una vez que aterrice la extensión de matcher P3
+(\textsc{Search-Temporal-Pattern-At}), \code{diff\_by\_snapshot}
+se vuelve la alternativa más rica:
+
+\begin{algorithm}
+\caption{\textsc{Diff-By-Snapshot} (diferida)}\label{alg:diff-snapshot}
+\KwIn{grafo $G$, hipótesis $H$, ventana de evento $(t_0, t_1)$,
+      snapshot baseline $\iota_{\text{base}}$, snapshot actual
+      $\iota_{\text{cur}}$}
+\KwOut{listas de caminos (agregados, quitados)}
+$\Pi_{\text{base}} \gets $ \textsc{Search-Temporal-Pattern-At}($G, H, (t_0, t_1), \iota_{\text{base}}$)\;
+$\Pi_{\text{cur}} \gets $ \textsc{Search-Temporal-Pattern-At}($G, H, (t_0, t_1), \iota_{\text{cur}}$)\;
+\ldots set-diff como en \textsc{Diff-Hunts} \ldots
+\end{algorithm}
+
+Distinción clave: la ventana de evento $(t_0, t_1)$ es fija, y lo
+que varía es el snapshot de conocimiento $\iota$. El motor
+responde ``¿qué caminos nuevos en esta ventana de evento me
+enteré entre $\iota_{\text{base}}$ y $\iota_{\text{cur}}$?'' ---
+la semántica apropiada de auditoría para enriquecimiento que
+llega tarde, detonaciones VirusTotal que vuelven después de
+ingerido el evento, overlays de threat intel que llegaron más
+tarde, etc.
+
+\begin{complexity}
+Igual que la variante clásica: $2 T_{\text{match}} + \Ord{P}$.
+El delta de \emph{valor} es semántico, no de performance.
+\end{complexity}
+
+\section{Validación de entrada}
+
+\begin{invariant}[Orden de la ventana]
+\code{diff\_hunts} rechaza $t_{\text{base}} > t_{\text{cur}}$ con
+\code{ApiError::InvalidInput}. Una ventana invertida produciría
+un par (agregados, quitados) cuya semántica es responsabilidad
+del usuario de interpretar; el motor prefiere fallar ruidosamente.
+\end{invariant}
+
+Este invariante lo ejercita el arnés de paridad
+(\code{diff\_hunts\_rejects\_inverted\_window} en
+\filepath{graph\_hunter\_api/tests/parity/scenarios.rs}).
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/analytics.rs:1342} ---
+\code{diff\_hunts} (clásico).\\
+\filepath{graph\_hunter\_core/src/relation.rs:83} --- el campo
+\code{ingested\_at\_delta} que \code{diff\_by\_snapshot}
+eventualmente consultará.
+\end{inthecode}

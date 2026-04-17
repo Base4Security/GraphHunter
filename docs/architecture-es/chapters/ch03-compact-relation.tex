@@ -1,0 +1,167 @@
+\chapter{La codificación de \Compact{}}
+\label{ch:compact-relation}
+
+La estructura de datos más densa del motor es la representación
+en memoria de las aristas. Un grafo de 200~M aristas a $\sim$200
+bytes cada una (el \code{Relation} completo con metadatos, strings,
+etc.) ocuparía 40~GB --- por eso el motor guarda cada arista dos
+veces: una como \code{Relation} rica, usada sólo mientras la
+arista se está insertando, y de ahí en más como \Compact{} de 32
+bytes, que vive en la lista de adyacencia el resto de la sesión.
+
+\section{Layout}
+
+\Compact{} es \code{\#[repr(C)]}, con los campos ordenados por
+mayor a menor alineación para evitar padding interior. La
+Figura~\ref{fig:compact-layout} muestra el layout byte a byte.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+    byte/.style={draw, minimum width=0.42cm, minimum height=0.7cm,
+                 font=\scriptsize, inner sep=1pt},
+    label/.style={font=\scriptsize},
+    x=0.42cm,
+]
+\foreach \i in {0,...,7} {
+    \node[byte, fill=blue!12] at (\i, 0) (ts\i) {};
+}
+\node[label, above=0pt of ts3.north]{\code{timestamp}: \code{i64}};
+\node[label, below=0pt of ts0.south]{offset 0};
+
+\foreach \i in {0,...,7} {
+    \node[byte, fill=orange!18] at (\i, -1) (mo\i) {};
+}
+\node[label, above=0pt of mo3.north]{\code{metadata\_offset}: \code{u64}};
+\node[label, below=0pt of mo0.south]{offset 8};
+
+\foreach \i in {0,...,3} {
+    \node[byte, fill=green!18] at (\i, -2) (ssid\i) {};
+}
+\foreach \i [evaluate=\i as \j using int(\i+4)] in {0,...,3} {
+    \node[byte, fill=green!28] at (\j, -2) (dsid\i) {};
+}
+\node[label, above=0pt of ssid1.north]{\code{source\_sid}};
+\node[label, above=0pt of dsid1.north]{\code{dest\_sid}};
+\node[label, below=0pt of ssid0.south]{offset 16};
+\node[label, below=0pt of dsid0.south]{offset 20};
+
+\foreach \i in {0,...,3} {
+    \node[byte, fill=red!18] at (\i, -3) (ia\i) {};
+}
+\foreach \i [evaluate=\i as \j using int(\i+4)] in {0,...,1} {
+    \node[byte, fill=purple!18] at (\j, -3) (dt\i) {};
+}
+\node[byte, fill=yellow!28] at (6, -3) (rt) {};
+\node[byte, fill=gray!25] at (7, -3) (pad) {};
+\node[label, above=0pt of ia1.north]{\code{ingested\_at\_delta}};
+\node[label, above=0pt of dt0.north]{\code{dataset}};
+\node[label, above=0pt of rt.north]{\code{rel}};
+\node[label, above=0pt of pad.north]{pad};
+\node[label, below=0pt of ia0.south]{offset 24};
+\node[label, below=0pt of dt0.south]{offset 28};
+\node[label, below=0pt of rt.south]{offset 30};
+\node[label, below=0pt of pad.south]{offset 31};
+\end{tikzpicture}
+\caption{Layout de memoria de \Compact{} (32 bytes). El \code{u32}
+\code{ingested\_at\_delta} (P3) recupera 4 de los 5 bytes de
+padding final del layout pre-P3.}
+\label{fig:compact-layout}
+\end{figure}
+
+Semánticamente:
+\begin{itemize}
+    \item \code{timestamp}: tiempo de evento de la arista, en
+        segundos epoch.
+    \item \code{metadata\_offset}: offset dentro del
+        \code{MetadataStore} externo (Capítulo~\ref{ch:metadata});
+        cero significa ``sin metadatos''.
+    \item \code{source\_sid}, \code{dest\_sid}: manejadores de
+        32~bits al \code{StringInterner}
+        (Capítulo~\ref{ch:interner}).
+    \item \code{ingested\_at\_delta}: segundos desde el epoch MVCC
+        base (ver abajo); cero en aristas heredadas.
+    \item \code{dataset\_tag}: manejador de 16~bits a la tabla
+        \code{Arc<str>} de identificadores de dataset por grafo;
+        cero significa ``sin dataset''.
+    \item \code{rel\_type\_tag}: enum tag de 8~bits para el tipo
+        de relación.
+\end{itemize}
+
+El \code{rel\_type\_tag} es deliberadamente \code{u8} para que el
+matcher pueda hacer comparaciones SIMD sin ramas
+(Capítulo~\ref{ch:simd}).
+
+\section{Codificación MVCC}
+
+\begin{invariant}[Tamaño MVCC]
+\code{size\_of::<CompactRelation>() == 32}. Esto se asevera en
+\code{tests/relation\_schema.rs}. Violarlo cuesta $\sim$20\% del
+footprint del grafo en memoria, así que es una aserción cargada
+de peso.
+\end{invariant}
+
+El delta MVCC se mide contra
+\code{INGEST\_EPOCH\_BASE} = 1\,704\,067\,200 segundos (2024-01-01
+UTC). Un \code{u32} cubre $\approx 2^{32}$ segundos, unos 136
+años; el motor satura en \code{u32::MAX} para ingestas más allá
+de $\sim$2160. Las aristas heredadas cargadas desde un archivo de
+sesión pre-P3 resuelven al propio epoch base, que es un instante
+definido aunque impreciso.
+
+El Algoritmo~\ref{alg:encode-ingested-at} muestra el codificador.
+La decodificación es el trivial \code{INGEST\_EPOCH\_BASE + delta
+as i64}.
+
+\begin{algorithm}
+\caption{\textsc{Codificar-Ingested-At}}\label{alg:encode-ingested-at}
+\KwIn{timestamp absoluto en segundos epoch, $t$}
+\KwOut{delta \code{u32} a guardar en \Compact{}}
+\If{$t \leq $ \code{INGEST\_EPOCH\_BASE}}{
+    \Return 0\;
+}
+$\delta \gets t - $ \code{INGEST\_EPOCH\_BASE}\;
+\If{$\delta > $ \code{u32::MAX}}{
+    \Return \code{u32::MAX} \Comment*[r]{saturar}
+}
+\Return $\delta$ como \code{u32}\;
+\end{algorithm}
+
+\begin{complexity}
+Tiempo y espacio constantes. El almacenamiento por arista es de
+32 bytes, dando $\Thet{32 m}$ para la lista de aristas de un
+grafo con $m$ aristas.
+\end{complexity}
+
+\section{¿Por qué no \code{\#[repr(C, packed)]}?}
+
+Un layout empaquetado ahorraría otros 5 bytes eliminando el pad
+final, llegando a 27 bytes por arista ($\sim$16\% adicional). El
+motor no lo usa porque:
+
+\begin{enumerate}
+    \item Cada lectura de un campo empaquetado requiere una copia
+        byte a byte hacia storage alineado para satisfacer el
+        invariante de alineación de referencias en Rust. El
+        matcher DFS lee \code{source\_sid} y \code{dest\_sid}
+        millones de veces por hunt; ese overhead de copia
+        dominaría cualquier ahorro de memoria.
+    \item La alineación a 32~bytes coincide con la unidad de load
+        AVX2, así que los barridos SIMD de la lista de aristas se
+        mantienen amigables a la línea de caché.
+\end{enumerate}
+
+Por eso el pad final queda como espacio futuro para más
+extensiones MVCC (p.~ej.\ un puntaje de confianza o un bit flag
+de tag de fuente).
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/relation.rs:83} --- definición
+del struct.\\
+\filepath{graph\_hunter\_core/src/relation.rs:151} --- helper
+\code{encode\_ingested\_at}.\\
+\filepath{graph\_hunter\_core/tests/mvcc\_ingested\_at.rs} ---
+tests de round-trip MVCC.\\
+Tests de módulo en \filepath{graph\_hunter\_core/src/relation.rs}
+--- invariante de 32 bytes.
+\end{inthecode}

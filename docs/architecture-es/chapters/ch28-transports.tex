@@ -1,0 +1,89 @@
+\chapter{Adaptadores de transporte}
+\label{ch:transports}
+
+\begin{note}
+Stub. Tres transports delegan en \code{GraphHunterApi}: la app
+desktop Tauri, el servidor HTTP basado en axum, y el servidor
+MCP en TypeScript. Los tres están pensados para ser delgados
+--- nada de lógica más allá de construir un request DTO y
+renderizar la respuesta.
+\end{note}
+
+\section{Tauri}
+
+Los comandos viven en
+\filepath{app/src-tauri/src/commands/*.rs}. Cada cuerpo de
+comando es $\leq$ 10 LOC:
+
+\begin{lstlisting}[style=rust]
+#[tauri::command]
+pub fn cmd_run_hunt(
+    api: State<Arc<GraphHunterApi>>,
+    hypothesis: Hypothesis,
+    time_window: Option<(i64, i64)>,
+    max_results: Option<u32>,
+) -> Result<RunHuntResponse, CommandError> {
+    api.run_hunt(RunHuntRequest {
+        session: None,
+        hypothesis,
+        time_window,
+        max_results,
+    })
+    .map_err(CommandError::from)
+}
+\end{lstlisting}
+
+Los comandos se registran en \filepath{app/src-tauri/src/lib.rs}
+con la macro \code{tauri::Builder::invoke\_handler}.
+
+\section{HTTP}
+
+Los handlers viven en
+\filepath{app/src-tauri/src/http\_api.rs} y comparten el mismo
+\code{Arc<GraphHunterApi>} vía el trait \code{FromRef} de axum.
+El puerto HTTP se elige al arrancar
+(\code{util::resolve\_api\_port}) y se escribe al directorio de
+config de la app Tauri para que el servidor MCP y la CLI puedan
+encontrarlo.
+
+Cada handler también es $\leq$ 10 LOC:
+
+\begin{lstlisting}[style=rust]
+async fn handler_run_hunt(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<RunHuntRequest>,
+) -> Response {
+    match api.run_hunt(body) {
+        Ok(v)  => ok_json(v),
+        Err(e) => error_json(e),
+    }
+}
+\end{lstlisting}
+
+\section{MCP}
+
+\filepath{graph-hunter-mcp/src/index.ts} expone $\sim$30
+herramientas sobre el protocolo MCP. Cada handler de tool hace
+una llamada HTTP al motor local vía
+\code{http://127.0.0.1:<port>}; no enlaza el motor Rust en
+absoluto. Este es el único transport que no sostiene un
+\code{Arc<GraphHunterApi>} directo --- porque corre en otro
+proceso (Node.js) --- pero ve exactamente la misma semántica
+porque la capa HTTP es un wrapper delgado de la fachada.
+
+\section{EventEmitter}
+
+Los eventos de progreso (carga de sesión, ingesta, streaming
+Sentinel) fluyen por un \code{Arc<dyn EventEmitter>} guardado en
+\code{ApiState}. \code{TauriEventEmitter} puentea a
+\code{AppHandle::emit}; \code{NoopEmitter} lo usan HTTP, MCP,
+CLI y tests.
+
+\begin{inthecode}
+\filepath{app/src-tauri/src/commands/} --- módulos de comandos
+Tauri.\\
+\filepath{app/src-tauri/src/http\_api.rs} --- handlers HTTP.\\
+\filepath{graph-hunter-mcp/src/index.ts} --- tools MCP.\\
+\filepath{graph\_hunter\_api/src/events.rs} (o similar) ---
+trait \code{EventEmitter}.
+\end{inthecode}

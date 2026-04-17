@@ -1,0 +1,108 @@
+\chapter{El AST de hipótesis}
+\label{ch:hypothesis}
+
+Cada hunt es guiado por un valor \code{Hypothesis} parseado. El
+AST es deliberadamente chico --- un vector plano de pasos con
+listas de predicados por paso, más cláusulas opcionales de
+agregación y ventana temporal adosadas a la cadena completa.
+
+\section{Tipos}
+
+\begin{lstlisting}[style=rust]
+pub struct Hypothesis {
+    pub name:           String,
+    pub steps:          Vec<HypothesisStep>,
+    pub k_simplicity:   usize,            // default 1
+    pub aggregations:   Vec<AggClause>,   // clausulas HAVING
+    pub window_seconds: Option<u64>,      // clausula WITHIN
+}
+
+pub struct HypothesisStep {
+    pub origin_type:     EntityType,
+    pub relation_type:   RelationType,
+    pub dest_type:       EntityType,
+    pub edge_predicates: Vec<Predicate>,  // sobre metadata de arista
+    pub dest_predicates: Vec<Predicate>,  // sobre metadata de destino
+    pub origin_binding:  Option<String>,  // `(User u)` para HAVING
+    pub dest_binding:    Option<String>,
+}
+
+pub enum Predicate {
+    Eq      { key: String, value: String },
+    Substr  { key: String, pattern: String },
+    Regex   { key: String, pattern: String },
+    In      { key: String, values: Vec<String> },
+}
+
+pub struct AggClause {
+    pub op:     AggOp,         // Count, CountDistinct, Min, Max, Sum, Avg
+    pub column: AggColumn,     // nombre binding o indice de paso
+    pub cmp:    AggComparison, // >=, <=, >, <, ==
+    pub value:  f64,
+}
+\end{lstlisting}
+
+\section{Invariantes}
+
+\begin{invariant}[Cantidad de pasos $\geq 1$]
+Una hipótesis debe tener al menos un paso; el parser del DSL
+rechaza input vacío con \code{ApiError::InvalidInput}. Esto
+libera al matcher de tratar el caso de cero aristas como una rama
+especial.
+\end{invariant}
+
+\begin{invariant}[$k$-simplicidad positiva]
+$k_{\text{simplicity}} \geq 1$. Cero admitiría sólo el camino
+vacío y violaría el sentido de ``máximo de visitas por vértice''.
+\end{invariant}
+
+\begin{invariant}[Unicidad de bindings]
+Si \code{origin\_binding} o \code{dest\_binding} es \code{Some(b)}
+en algún paso, $b$ no se repite en ninguna otra posición de
+binding dentro de la hipótesis. El parser lo hace cumplir en
+parse time así el matcher puede resolver bindings por nombre
+durante la agregación sin desambiguación.
+\end{invariant}
+
+\section{Chequeo estático de compatibilidad}
+
+Antes de correr un hunt, el motor puede cruzar la hipótesis
+contra el schema de relaciones del grafo para ver si algún paso
+es estructuralmente imposible sobre el dataset cargado --- p.~ej.\
+un paso \code{User -[Auth]-> Host} contra un grafo puramente de
+identidad cloud donde no existen entidades \code{Host}. Esto es
+\textsc{Check-Catalog-Compatibility}
+(Capítulo~\ref{ch:catalog-yaml}), que devuelve un
+\code{CatalogEntryWithStatus} marcando los tipos de entidad o
+relación faltantes por paso.
+
+\begin{algorithm}
+\caption{\textsc{Check-Step-Compatibility}}\label{alg:check-step}
+\KwIn{schema $\Sigma$ (multiconjunto de triples $(\text{source}, \text{rel},
+\text{target})$), paso $s$}
+\KwOut{\code{bool} compatible, conjunto de ejes faltantes}
+\For{cada $(\text{src}, r, \text{dst}) \in \Sigma$}{
+    \If{$(\text{src} = s.\text{origin\_type} \vee s.\text{origin\_type} = *)$
+       $\wedge (r = s.\text{relation\_type} \vee s.\text{relation\_type} = *)$
+       $\wedge (\text{dst} = s.\text{dest\_type} \vee s.\text{dest\_type} = *)$}{
+        \Return $(\mathrm{true}, \emptyset)$\;
+    }
+}
+$\text{faltantes} \gets $ conjunto de ejes ausentes en todo triple de $\Sigma$\;
+\Return $(\mathrm{false}, \text{faltantes})$\;
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{|\Sigma|}$ por paso, $\Ord{|\Sigma| \cdot \ell}$ por
+hipótesis, donde $\ell$ es la cantidad de pasos. $|\Sigma|$ está
+acotado en la práctica por $|\mathcal{T}_V|^2 \cdot
+|\mathcal{T}_E|$ (hay pocas decenas de tipos de entidad/relación),
+así que el chequeo es efectivamente constante.
+\end{complexity}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/hypothesis.rs} --- \code{Hypothesis},
+\code{HypothesisStep}, \code{Predicate}.\\
+\filepath{graph\_hunter\_core/src/catalog/mod.rs:105} ---
+\code{check\_catalog\_compatibility}.
+\end{inthecode}

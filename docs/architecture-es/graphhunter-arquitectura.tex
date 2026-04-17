@@ -1,0 +1,90 @@
+\documentclass[11pt,openany]{book}
+\input{preamble}
+
+\title{\Huge GraphHunter\\
+    \Large Referencia de arquitectura al estilo CLRS}
+\author{Lucas Sotomayor \\ \small Base4Security}
+\date{\today}
+
+\begin{document}
+
+\frontmatter
+\maketitle
+
+\tableofcontents
+
+\chapter*{Prefacio}
+\addcontentsline{toc}{chapter}{Prefacio}
+
+Este documento describe la arquitectura y los algoritmos de
+GraphHunter, un motor de \emph{threat hunting} sobre grafos
+temporales. El estilo está modelado sobre \emph{Introduction to
+Algorithms} (Cormen, Leiserson, Rivest, Stein --- ``CLRS''): cada
+algoritmo se presenta como pseudocódigo formal con líneas numeradas,
+seguido de la derivación de su complejidad temporal y espacial y,
+donde los invariantes no son obvios, un argumento de corrección.
+
+La referencia es interna: su propósito es que un futuro mantenedor
+(o el autor, dentro de seis meses) pueda entender \emph{por qué} el
+motor tiene la forma que tiene sin leer cada archivo fuente. Cada
+capítulo termina con un bloque \emph{En el código} que da punteros
+\texttt{archivo:línea} hacia la implementación Rust, para bajar a la
+fuente en cualquier punto de interés.
+
+Las Partes I--III están desarrolladas en esta revisión. Las Partes
+IV--VI (pipeline de ingesta, puntos de extensión, capa de
+transporte) se entregan como \emph{stubs} con estructuras y
+referencias de archivo pero sin pseudocódigo completo; la intención
+es expandirlas capítulo por capítulo en revisiones posteriores.
+
+\mainmatter
+
+\part{Preliminares}
+\input{chapters/ch01-introduccion}
+\input{chapters/ch02-notacion}
+
+\part{Estructuras de datos principales}
+\input{chapters/ch03-compact-relation}
+\input{chapters/ch04-interner}
+\input{chapters/ch05-graph-hunter}
+\input{chapters/ch06-spill}
+\input{chapters/ch07-metadata}
+\input{chapters/ch08-hypothesis}
+
+\part{Algoritmos principales}
+\input{chapters/ch09-dsl}
+\input{chapters/ch10-matcher}
+\input{chapters/ch11-simd}
+\input{chapters/ch12-anomaly}
+\input{chapters/ch13-analytics}
+\input{chapters/ch14-dedup-pagination}
+\input{chapters/ch15-hunt-diff}
+
+\part{Pipeline de ingesta}
+\input{chapters/ch16-logsource}
+\input{chapters/ch17-parsers}
+\input{chapters/ch18-writer}
+\input{chapters/ch19-mvcc}
+\input{chapters/ch20-overflow}
+
+\part{Puntos de extensión}
+\input{chapters/ch21-graph-traits}
+\input{chapters/ch22-scorer-traits}
+\input{chapters/ch23-interner-trait}
+\input{chapters/ch24-ingest-adapter}
+\input{chapters/ch25-catalog-yaml}
+
+\part{Capa de transporte}
+\input{chapters/ch26-api-facade}
+\input{chapters/ch27-dtos}
+\input{chapters/ch28-transports}
+\input{chapters/ch29-parity-harness}
+\input{chapters/ch30-persistence}
+
+\appendix
+\input{chapters/apendice-A-complejidad}
+\input{chapters/apendice-B-catalogo}
+\input{chapters/apendice-C-benchmarks}
+\input{chapters/apendice-D-indice-fuente}
+
+\end{document}

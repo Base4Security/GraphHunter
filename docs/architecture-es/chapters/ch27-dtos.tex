@@ -1,0 +1,55 @@
+\chapter{DTOs}
+\label{ch:dtos}
+
+\begin{note}
+Stub. Cada operación entre un transport y la fachada usa un par
+DTO (\code{*Request} + \code{*Response}) que vive en
+\filepath{graph\_hunter\_api/src/dto/}. Los DTOs son el contrato
+a nivel wire: si un campo se renombra acá, el output serde de
+cada transport cambia igual, y el arnés de paridad
+(Capítulo~\ref{ch:parity-harness}) atrapa el drift en tiempo de
+test.
+\end{note}
+
+\section{Layout del módulo}
+
+Un archivo por categoría de operación, espejando
+\filepath{operations/}: \code{ai.rs}, \code{analytics.rs},
+\code{anomaly.rs}, \code{dataset.rs}, \code{dsl.rs},
+\code{enrichment.rs}, \code{entity.rs}, \code{export.rs},
+\code{geoip.rs}, \code{graph\_ops.rs}, \code{hunt.rs},
+\code{ingestion.rs}, \code{sentinel.rs}, \code{session.rs},
+\code{sigma.rs}, \code{ticket.rs}.
+
+\section{Patrones comunes}
+
+\begin{itemize}
+    \item Cada request DTO que toca estado de sesión lleva
+        \code{session: Option<SessionHandle>}. La fachada
+        resuelve \code{None} a la sesión actual.
+    \item Los errores fluyen vía \code{Result<T, ApiError>} (ver
+        \filepath{graph\_hunter\_api/src/error.rs}), que cada
+        transport mapea a su propio envelope (HTTP 400/404/500,
+        Tauri \code{CommandError}, texto de error MCP).
+    \item Las variantes de enum usan \code{\#[serde(tag =
+        "kind")]} para variantes struct; las variantes newtype
+        se serializan como su string Display plano (una
+        limitación de serde que documentamos en el test de
+        roundtrip de errores del
+        Capítulo~\ref{ch:parity-harness}).
+\end{itemize}
+
+\section{Invariantes de forma}
+
+La \emph{Fase A} del arnés de paridad fija el conjunto de
+claves de cada DTO: un rename cambia silenciosamente el JSON
+enviado al wire, y dos transports construidos sobre la misma
+fachada seguirían en desacuerdo si uno hubiera cacheado una
+copia vieja del DTO.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_api/src/dto/*.rs} --- todos los DTOs.\\
+\filepath{graph\_hunter\_api/src/error.rs} --- \code{ApiError}.\\
+\filepath{graph\_hunter\_api/tests/parity/dto\_shapes.rs} ---
+fijación de forma Fase A.
+\end{inthecode}

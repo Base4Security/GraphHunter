@@ -1,0 +1,60 @@
+\chapter{Estampado MVCC a nivel arista}
+\label{ch:mvcc}
+
+\begin{note}
+Stub. El refactor P3 introdujo MVCC a nivel arista con overhead
+de memoria cero, recuperando padding en \Compact{}
+(ver Capítulo~\ref{ch:compact-relation} para el layout y
+Capítulo~\ref{ch:hunt-diff} para la semántica de diff con
+snapshots). Este capítulo eventualmente describirá el
+comportamiento de estampado del pipeline de ingesta, la
+extensión de matcher \code{search\_temporal\_pattern\_at}, y la
+migración de archivo de sesión / archivo de spill v1$\to$v2.
+\end{note}
+
+\section{Estado actual}
+
+\begin{itemize}
+    \item \code{CompactRelation.ingested\_at\_delta: u32} lo
+        estampa \code{GraphHunter::add\_relation} con el segundo
+        wall-clock actual al momento de insertar. Las aristas
+        heredadas (delta = 0) resuelven al
+        \code{INGEST\_EPOCH\_BASE}.
+    \item \code{encode\_ingested\_at(ts)} es el helper del path
+        de ingesta que clampa por debajo del epoch base y satura
+        por encima de \code{u32::MAX}.
+    \item El invariante de 32 bytes sobre \Compact{} es
+        verificado por CI
+        (\code{relation::tests::compact\_relation\_stays\_32\_bytes}).
+\end{itemize}
+
+\section{Trabajo pendiente}
+
+\begin{itemize}
+    \item \textsc{Search-Temporal-Pattern-At}$(G, H, (t_0, t_1),
+        \iota)$ --- el wrapper de matcher que filtra aristas por
+        \code{ingested\_at()} $\leq \iota$ además de la ventana
+        de evento. Bump de costo esperado: 5--15\,\% en queries
+        con snapshot; transparente sobre queries de vista
+        actual.
+    \item Propagación \code{IngestAdapter} $\to$ writer: pasar
+        \code{TripleBatch.fetched\_at} a \code{with\_ingested\_at}
+        así las fuentes streaming reciben el timestamp upstream
+        en vez del wall-clock local. Determinista para replay.
+    \item Función analítica \code{diff\_by\_snapshot}
+        (Capítulo~\ref{ch:hunt-diff}).
+    \item Bump de schema\_version del SessionFile (v1$\to$v2):
+        backfill de \code{ingested\_at} desde \code{timestamp}
+        para aristas heredadas, mostrar banner UI ``snapshot
+        aproximado''.
+    \item Bump de \code{SPILL\_VERSION} y migrador CLI.
+\end{itemize}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/relation.rs:83} --- layout de
+\Compact{} con campo MVCC.\\
+\filepath{graph\_hunter\_core/src/graph.rs:227} --- estampado de
+\code{add\_relation} hoy.\\
+\filepath{graph\_hunter\_core/tests/mvcc\_ingested\_at.rs} ---
+fijación del contrato MVCC end-to-end.
+\end{inthecode}

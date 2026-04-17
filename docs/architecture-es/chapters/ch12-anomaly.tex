@@ -1,0 +1,202 @@
+\chapter{Scoring de anomalía}
+\label{ch:anomaly}
+
+El ranking de caminos es la segunda mitad de lo que hace el
+motor: tras matchear los caminos que satisfacen una hipótesis, el
+\Scorer{} asigna a cada uno un puntaje compuesto en $[0, 1]$ y
+un desglose opcional por componente para que el analista pueda
+triagear. El scorer es un promedio ponderado de cinco dimensiones
+(rareza de entidad, rareza de arista, concentración de vecindad,
+novedad temporal y amenaza GNN), cada una computada como promedio
+sobre los vértices del camino.
+
+\section{Estado y finalización}
+
+\begin{lstlisting}[style=rust]
+pub struct AnomalyScorer {
+    entity_freq:       HashMap<String, u64>,
+    pair_freq:         HashMap<(String, String), u64>,
+    first_seen:        HashMap<String, i64>,
+    nc_cache:          HashMap<String, f64>,
+    gnn_cache:         HashMap<String, f64>,
+    log_max_freq:      f64,
+    log_max_pair_freq: f64,
+    tau_min:           i64,
+    tau_max:           i64,
+    weights:           ScoringWeights,
+    finalized:         bool,
+}
+\end{lstlisting}
+
+El scorer se puebla incrementalmente durante la ingesta
+(\code{observe\_entity}, \code{observe\_edge}); son $\Ord{1}$
+amortizado y no computan nada derivado. Después de la ingesta,
+\code{finalize} convierte los conteos crudos en los factores de
+normalización que el scoring por camino necesita.
+
+\begin{algorithm}
+\caption{\textsc{Anomaly-Finalize}}\label{alg:anomaly-finalize}
+\KwIn{scorer $S$, grafo $G$}
+$S.\text{log\_max\_freq} \gets \ln(\max \text{entity\_freq.values})$\;
+$S.\text{log\_max\_pair\_freq} \gets \ln(\max \text{pair\_freq.values})$\;
+$(\tau_{\min}, \tau_{\max}) \gets (\min, \max)$ de los valores no
+cero de \code{first\_seen.values}\;
+$S.\text{nc\_cache} \gets \emptyset$\;
+\ForEach{$v \in G.\text{entities}$}{
+    $S.\text{nc\_cache}[v] \gets $ \textsc{Compute-NC}($v, G$)\;
+}
+$S.\text{finalized} \gets $ verdadero\;
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{V + E + \sum_v d(v)} = \Ord{V + E}$ para los contadores. El
+cache de entropía de Shannon cuesta un adicional
+$\Ord{\sum_v d(v)} = \Ord{E}$. El espacio es $\Ord{V}$ para los
+caches más lo que ya consumieron los contadores crudos.
+\end{complexity}
+
+\section{Concentración de vecindad}
+
+\begin{algorithm}
+\caption{\textsc{Compute-NC}}\label{alg:compute-nc}
+\KwIn{vértice $v$, grafo $G$}
+\KwOut{concentración de vecindad $\mathrm{NC}(v) \in [0, 1]$}
+$\mathrm{counts} \gets \emptyset$; $\mathrm{total} \gets 0$\;
+\ForEach{arista saliente $(v, u) \in G$}{
+    $\mathrm{counts}[\ell_V(u)] \mathrel{+}= 1$;
+    $\mathrm{total} \mathrel{+}= 1$\;
+}
+\ForEach{arista entrante $(w, v) \in G$}{
+    $\mathrm{counts}[\ell_V(w)] \mathrel{+}= 1$;
+    $\mathrm{total} \mathrel{+}= 1$\;
+}
+$K \gets |\mathrm{counts}|$\;
+\If{$K \leq 1$}{\Return 1.0\;}
+$H \gets 0$\;
+\ForEach{$c \in \mathrm{counts.values}$}{
+    $p \gets c / \mathrm{total}$\;
+    $H \gets H - p \log_2 p$\;
+}
+$H_{\max} \gets \log_2 K$; $\mathrm{NC} \gets 1 - H / H_{\max}$\;
+\Return clamp($\mathrm{NC}$, 0, 1)\;
+\end{algorithm}
+
+$\mathrm{NC}$ es 1 cuando la vecindad es maximamente homogénea
+(una sola familia de tipo de entidad) y 0 cuando es maximamente
+diversa; el clamp protege contra \emph{drift} de punto flotante
+cerca de los extremos.
+
+\begin{complexity}
+$\Ord{d(v)}$ en tiempo, $\Ord{|\mathcal{T}_V|}$ en espacio (sólo
+conteos por tipo de vecino; constante chica).
+\end{complexity}
+
+\section{Puntuar un camino}
+
+Tres de las cuatro componentes no-GNN son promedios simples sobre
+los vértices del camino; la componente de rareza de arista
+promedia sobre las aristas del camino.
+
+\begin{algorithm}
+\caption{\textsc{Score-Path}}\label{alg:score-path}
+\KwIn{camino $\pi = (v_0, \ldots, v_\ell)$, scorer $S$}
+\KwOut{puntaje compuesto $c$, desglose $b$}
+\If{$\pi$ vacío or $\neg S.\text{finalized}$}{\Return $(0, \mathbf{0})$\;}
+\tcp{Componente 1: rareza de entidad}
+$\mathrm{ER} \gets \frac{1}{\ell+1} \sum_v \left(1 - \frac{\ln(\text{entity\_freq}[v])}{S.\text{log\_max\_freq}}\right)$\;
+\tcp{Componente 2: rareza de arista}
+$\mathrm{EdgeR} \gets \frac{1}{\ell} \sum_{i=1}^{\ell} \left(1 - \frac{\ln(\text{pair\_freq}[v_{i-1}, v_i])}{S.\text{log\_max\_pair\_freq}}\right)$\;
+\tcp{Componente 3: promedio NC}
+$\mathrm{NC} \gets \frac{1}{\ell+1} \sum_v S.\text{nc\_cache}[v]$\;
+\tcp{Componente 4: novedad temporal}
+$\mathrm{TN} \gets \frac{1}{\ell+1} \sum_v \frac{\text{first\_seen}[v] - \tau_{\min}}{\tau_{\max} - \tau_{\min}}$\;
+\tcp{Componente 5: amenaza GNN}
+$\mathrm{GT} \gets \frac{1}{\ell+1} \sum_v S.\text{gnn\_cache}.\text{get}(v).\text{unwrap\_or}(0)$\;
+\tcp{compuesto vía renormalización de pesos}
+$W \gets \sum \text{weights}$; $c \gets \frac{1}{W} \sum_i w_i \cdot \text{componente}_i$\;
+\Return (clamp($c$, 0, 1), desglose)\;
+\end{algorithm}
+
+Cada componente se clampa individualmente a $[0, 1]$ para que
+una entrada de cache desactualizada (extremadamente rara, pero
+posible durante un race de re-finalize) no pueda volver
+negativo a un componente. La renormalización de pesos significa
+que el llamador puede setearlos en cualquier escala absoluta.
+
+\begin{complexity}
+$\Ord{\ell}$ en tiempo, $\Ord{1}$ en espacio auxiliar. El estado
+caro lo construyó \textsc{Anomaly-Finalize}; el scoring por
+camino es barato.
+\end{complexity}
+
+\section{El \emph{seam} de trait (P2-A)}
+
+El módulo de scoring refactorizado
+(\filepath{graph\_hunter\_core/src/scoring/}) hace que cada
+componente sea una \code{impl ScoreComponent} separada:
+
+\begin{lstlisting}[style=rust]
+pub trait ScoreComponent: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn score_path(&self, ctx: &PathContext<'_>) -> f64;
+    fn explain(&self, value: f64, ctx: &PathContext<'_>) -> Option<String> {
+        None
+    }
+}
+\end{lstlisting}
+
+\code{CompositeScorer} sostiene un
+\code{Vec<Box<dyn ScoreComponent>>} más pesos coincidentes y
+aplica una agregación estilo \textsc{Score-Path}. Agregar un
+sexto componente (bayesiano, modelo aprendido, etc.) es un
+struct nuevo más un \code{vec!{}} push.
+
+\begin{theorem}[Equivalencia v1/v2]
+Para todo vector de pesos $w$ y todo camino $\pi$,
+\code{AnomalyScorer::score\_path}$(w, \pi)$ y
+\code{AnomalyScorer::score\_path\_v2}$(w, \pi)$ coinciden dentro
+de $8 \cdot \varepsilon_{\text{f64}}$.
+\end{theorem}
+
+Esto lo verifica \code{tests/scoring\_snapshot.rs}. La
+equivalencia es la precondición para eventualmente retirar el v1
+hardcodeado.
+
+\section{Estimación rápida a nivel nodo}
+
+Durante el podado del DFS smart (Capítulo~\ref{ch:matcher})
+necesitamos una estimación $\Ord{1}$ de la anomalía de un vértice
+solo para que la \code{path\_anomaly\_sum} corriente pueda
+rechazar ramas. Esa es \code{node\_anomaly\_estimate}:
+
+\begin{lstlisting}[style=rust]
+pub fn node_anomaly_estimate(&self, v: &str) -> f64 {
+    if !self.finalized { return 0.5; }
+    let er = /* Componente 1 para un solo vertice */;
+    let nc = self.nc_cache.get(v).copied().unwrap_or(1.0);
+    let tn = /* Componente 4 para un solo vertice */;
+    let gt = self.gnn_cache.get(v).copied().unwrap_or(0.0);
+    combine_with_weights(er, nc, tn, gt, &self.weights)
+}
+\end{lstlisting}
+
+La rareza de arista no es parte de la estimación porque el DFS
+todavía no eligió la arista siguiente cuando consulta la cota.
+La estimación es entonces una cota superior suelta de la
+contribución del nodo al compuesto; es admisible (nunca
+sobrepoda) siempre y cuando los pesos sean no-negativos, cosa
+que el motor impone al cargar la config.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/anomaly.rs:148} ---
+\code{finalize}.\\
+\filepath{graph\_hunter\_core/src/anomaly.rs:191} ---
+\code{compute\_nc}.\\
+\filepath{graph\_hunter\_core/src/anomaly.rs:241} ---
+\code{score\_path} (v1).\\
+\filepath{graph\_hunter\_core/src/anomaly.rs:351} ---
+\code{node\_anomaly\_estimate}.\\
+\filepath{graph\_hunter\_core/src/scoring/} --- v2 basado en trait.\\
+\filepath{graph\_hunter\_core/tests/scoring\_snapshot.rs} ---
+fijación de equivalencia v1/v2.
+\end{inthecode}

@@ -1,0 +1,67 @@
+\chapter{Traits \code{GraphRead} / \code{GraphWrite}}
+\label{ch:graph-traits}
+
+\begin{note}
+Stub. El refactor P2-B extrajo estos traits para que los
+consumidores del motor (scorer de anomalía, extractor de
+features GNN, writer de ingesta) puedan depender de una API
+semántica en vez del struct concreto \code{GraphHunter}. El
+objetivo eventual es poder enchufar backends remotos (Neo4j, un
+store MVCC streaming) sin editar el scorer, el matcher ni el
+writer --- con tal de que existan las impls del trait.
+\end{note}
+
+\section{Traits}
+
+\begin{lstlisting}[style=rust]
+pub trait GraphRead {
+    fn entity_count(&self) -> usize;
+    fn relation_count(&self) -> usize;
+    fn get_entity(&self, id: &str) -> Option<&Entity>;
+    fn get_compact_relations(&self, src: &str)
+        -> Cow<'_, [CompactRelation]>;
+    fn get_reverse_source_ids(&self, id: &str) -> Vec<String>;
+    fn entity_ids_for_type(&self, et: &EntityType) -> Option<Vec<String>>;
+    fn entity_types_in_graph(&self) -> Vec<String>;
+    fn materialize_relation(&self, c: &CompactRelation) -> Relation;
+    fn supports_simd(&self) -> bool { false }
+}
+
+pub trait GraphWrite: GraphRead {
+    fn add_entity(&mut self, e: Entity)   -> Result<(), GraphError>;
+    fn add_relation(&mut self, r: Relation) -> Result<(), GraphError>;
+}
+\end{lstlisting}
+
+El retorno \code{Cow<'\_, [CompactRelation]>} es la clave que
+permite coexistencia de backends remotos:
+\code{InMemoryGraph} devuelve \code{Cow::Borrowed(\&slice)} con
+costo cero; una impl remota devuelve \code{Cow::Owned(vec)}
+cuando tiene que sintetizar la lista.
+
+\section{Qué va en el trait y qué no}
+
+\textbf{Va:} lectura y escritura semánticas, las operaciones que
+un hipotético backend remoto necesitaría reimplementar.
+
+\textbf{No va:} el matcher en sí (\code{search\_temporal\_pattern}),
+el despacho SIMD, los analíticos (\code{pagerank},
+\code{betweenness}). Son específicos del motor; un backend Neo4j
+traería su propio motor de patrones en vez de implementar el DFS
+de Rust contra un \code{\&dyn GraphRead}.
+
+\section{Contrato dual-impl}
+
+\filepath{graph\_hunter\_core/tests/backend\_dual\_impl.rs} corre
+un arnés genérico \code{validate\_backend<B: GraphWrite>(b)} que
+ejercita cada método del trait contra \code{GraphHunter}. Cuando
+aterrice una segunda impl, el mismo arnés la cubre gratis.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/backend/mod.rs} --- definiciones
+del trait.\\
+\filepath{graph\_hunter\_core/src/backend/in\_memory.rs} ---
+\code{impl GraphRead + GraphWrite for GraphHunter}.\\
+\filepath{graph\_hunter\_core/tests/backend\_dual\_impl.rs} ---
+validación dual-impl.
+\end{inthecode}

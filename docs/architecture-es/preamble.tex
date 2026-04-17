@@ -1,0 +1,134 @@
+% GraphHunter --- arquitectura (preambulo en español).
+%
+% Hereda la estructura del preambulo ingles pero localiza las etiquetas
+% de environments (teorema/lema/demostracion/...) y los kw de algorithm2e
+% (para/mientras/si/entonces/...). Macros propias (`\Ord`, `\filepath`,
+% etc.) se mantienen con el mismo nombre.
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish,es-nodecimaldot]{babel}
+\usepackage{lmodern}
+
+\usepackage[a4paper,margin=2.4cm]{geometry}
+
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+
+% Pseudocodigo.
+\usepackage[ruled,linesnumbered,algochapter]{algorithm2e}
+\SetKwInput{KwIn}{Entrada}
+\SetKwInput{KwOut}{Salida}
+\SetKwComment{Comment}{$\triangleright$ }{}
+\SetKwFor{For}{para}{hacer}{fin}
+\SetKwFor{While}{mientras}{hacer}{fin}
+\SetKwFor{ForEach}{para cada}{hacer}{fin}
+\SetKwIF{If}{ElseIf}{Else}{si}{entonces}{sino si}{sino}{fin}
+\SetKwRepeat{Repeat}{repetir}{hasta}
+\SetKwSwitch{Switch}{Case}{Other}{segun}{hacer}{caso}{en otro caso}{fin caso}{fin segun}
+\SetKw{KwTo}{a}
+\SetKw{KwBreak}{romper}
+\SetKw{KwContinue}{continuar}
+\SetKw{KwTrue}{verdadero}
+\SetKw{KwFalse}{falso}
+\newcommand{\Break}{\KwBreak}
+\newcommand{\Continue}{\KwContinue}
+\renewcommand{\Return}{\KwRet}  % mantiene "\Return" pero imprime "devolver"
+\SetKw{KwRet}{devolver}
+
+% Listings para snippets Rust (iguales al EN).
+\usepackage{listings}
+\usepackage{xcolor}
+\definecolor{rustcomment}{rgb}{0.35,0.45,0.45}
+\definecolor{rustkw}{rgb}{0.55,0.10,0.55}
+\definecolor{ruststr}{rgb}{0.10,0.45,0.10}
+\lstdefinelanguage{Rust}{
+    morekeywords={fn,let,mut,pub,struct,enum,impl,trait,where,if,else,for,while,
+                  loop,match,return,use,mod,const,static,self,Self,as,in,ref,move,
+                  async,await,dyn,unsafe,crate,super,extern,type,break,continue},
+    morecomment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    morestring=[b]",
+    morestring=[b]',
+}
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{rustkw}\bfseries,
+    commentstyle=\color{rustcomment}\itshape,
+    stringstyle=\color{ruststr},
+    showstringspaces=false,
+    frame=single,
+    numbers=none,
+    captionpos=b,
+    breaklines=true,
+    tabsize=4,
+}
+\lstdefinestyle{rust}{language=Rust}
+
+% Hyperref + bookmarks.
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    citecolor=black,
+    urlcolor=blue!50!black,
+    pdftitle={GraphHunter: arquitectura (referencia estilo CLRS)},
+    pdfauthor={Lucas Sotomayor / Base4Security},
+    bookmarks=true,
+    bookmarksopen=true,
+    bookmarksnumbered=true,
+}
+\usepackage{bookmark}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, fit, backgrounds}
+
+% Entornos teorema (etiquetas en español).
+\theoremstyle{plain}
+\newtheorem{theorem}{Teorema}[chapter]
+\newtheorem{lemma}[theorem]{Lema}
+\newtheorem{corollary}[theorem]{Corolario}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definición}
+
+\theoremstyle{remark}
+\newtheorem*{invariant}{Invariante}
+\newtheorem*{note}{Nota}
+
+% "Demostración" en vez de "Proof".
+\renewcommand{\proofname}{\textit{Demostración}}
+
+\newenvironment{complexity}{%
+    \par\vspace{0.4em}%
+    \noindent\textbf{Complejidad.}\nopagebreak\par\nopagebreak\vspace{0.2em}%
+}{\par\vspace{0.4em}}
+
+\newenvironment{inthecode}{%
+    \par\vspace{0.4em}%
+    \noindent\textbf{En el código.}\nopagebreak\par\nopagebreak\vspace{0.2em}%
+}{\par\vspace{0.4em}}
+
+% Macros (mismas que EN).
+\newcommand{\Ord}[1]{\ensuremath{O(#1)}}
+\newcommand{\Thet}[1]{\ensuremath{\Theta(#1)}}
+\newcommand{\filepath}[1]{\texttt{\small\detokenize{#1}}}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\StrId}{\ensuremath{\mathsf{StrId}}}
+\newcommand{\Compact}{\ensuremath{\mathsf{CompactRelation}}}
+\newcommand{\Graph}{\ensuremath{\mathsf{InMemoryGraph}}}
+\newcommand{\Scorer}{\ensuremath{\mathsf{AnomalyScorer}}}
+
+\makeatletter
+\renewcommand{\@algocf@pre@ruled}{\hrule height.8pt depth0pt \kern2pt}
+\renewcommand{\@algocf@post@ruled}{\kern2pt\hrule height.8pt\relax}
+\makeatother
+
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries}
+  {\chaptertitlename~\thechapter}
+  {20pt}
+  {\Huge}
+
+\newcommand{\passthrough}[1]{#1}

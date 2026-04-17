@@ -1,0 +1,182 @@
+\chapter{Aceleración SIMD}
+\label{ch:simd}
+
+El trabajo inner del matcher DFS está dominado por el filtrado
+de aristas: chequear \code{rel\_type\_tag},
+\code{entity\_type\_tags[dst]}, inclusión de timestamp y
+evaluación de predicados para millones de aristas candidatas por
+hunt. Tres de esos cuatro chequeos son comparaciones a nivel byte
+que vectorizan limpiamente. GraphHunter tiene dos caminos SIMD:
+
+\begin{enumerate}
+    \item \textbf{libgraphmatch} --- una biblioteca C++ enlazada
+        por FFI cuando se compila el feature \code{simd} y el CPU
+        host reporta soporte AVX2. El throughput peak es
+        aproximadamente 3$\times$ el del matcher Rust escalar.
+    \item \textbf{\code{simd\_rust} puro-Rust} (P2-D) --- una
+        implementación \code{std::arch::x86\_64} que usa
+        intrínsecos AVX2 sin salir del toolchain Rust. Hoy
+        implementa una sola primitiva,
+        \textsc{Intersect-Sorted-U32}, con más en camino.
+\end{enumerate}
+
+\section{Puente FFI de libgraphmatch}
+
+\begin{lstlisting}[style=rust]
+// graph_hunter_core/src/simd_matcher.rs (abreviado)
+unsafe extern "C" {
+    fn gm_graph_new() -> *mut c_void;
+    fn gm_graph_add_node(g: *mut c_void, id: u32, et: u8);
+    fn gm_graph_add_edge(g: *mut c_void, src: u32, dst: u32, rt: u8, ts: i64);
+    fn gm_graph_finalize(g: *mut c_void);
+    fn gm_matcher_run(m: *mut c_void, max_results: u32, min_score: f64)
+         -> *mut c_void;
+    fn gm_results_free(r: *mut c_void);
+    fn gm_graph_free(g: *mut c_void);
+}
+\end{lstlisting}
+
+El lado Rust envuelve los handles \code{*mut c\_void} en
+\code{GmGraph} (RAII, drop llama a \code{gm\_graph\_free}) y
+cachea el grafo resultante junto con un
+\code{HashMap<String, u32>} que mapea string IDs a los índices
+de nodo C++ (ver \code{CachedSimdGraph} en
+\filepath{simd\_matcher.rs}). El caché sobrevive a los hunts en
+la misma sesión; se invalida al mutar el grafo.
+
+\textsc{Search-Temporal-Pattern-Simd} es entonces una función
+corta:
+
+\begin{algorithm}
+\caption{\textsc{Search-Temporal-Pattern-Simd}}\label{alg:search-simd}
+\KwIn{grafo $G$, hipótesis $H$, cap $\mathrm{max}$}
+\If{AVX2 no detectado en runtime or $H$ tiene predicados}{
+    \Return \textsc{Search-Temporal-Pattern-Smart}($G, H, \ldots$)
+    \Comment*[r]{fallback}
+}
+$C \gets $ \code{G.cached\_simd\_graph()}
+\Comment*[r]{construir una vez, reusar}
+$r \gets $ \code{gm\_matcher\_run($C$, max, 0.0)}\;
+\Return \code{translate\_node\_ids($r$, $C$.\text{string\_map})}\;
+\end{algorithm}
+
+El fallback al matcher smart en Rust es inevitable porque
+libgraphmatch no evalúa predicados de metadata
+(\code{\{key="val"\}}) --- éstos requieren acceso al
+\code{MetadataStore}, que el lado C++ no puede hacer sin enviar
+los bytes crudos por FFI.
+
+\section{Intersección AVX2 puro-Rust}
+
+El refactor P2-D empezó a reemplazar libgraphmatch una primitiva
+a la vez. La primera que se entregó es
+\code{simd\_rust::intersect\_sorted\_u32\_count}: dados dos
+slices \code{\&[u32]} ascendentes deduplicados, retorna la
+cantidad de elementos en común. Esta es la primitiva que
+libgraphmatch usa para intersectar vecindades durante la
+expansión SIMD del patrón, y es la primitiva más barata de probar
+segura en aislamiento.
+
+\begin{algorithm}
+\caption{\textsc{Intersect-Sorted-U32-Count}}\label{alg:intersect}
+\KwIn{slices ordenados $A$, $B$ de \code{u32}, ambos ascendentes
+      y deduplicados}
+\KwOut{cantidad de elementos comunes}
+\If{$|A| < 32$ or $|B| < 32$}{\Return \textsc{Scalar-Merge}($A, B$)\;}
+\If{AVX2 no detectado en runtime}{\Return \textsc{Scalar-Merge}($A, B$)\;}
+\tcp{lado corto es $S$, lado largo es $L$}
+\lIf{$|A| \leq |B|$}{$(S, L) \gets (A, B)$}\lElse{$(S, L) \gets (B, A)$}
+$j \gets 0$; $\mathrm{count} \gets 0$\;
+\ForEach{$s \in S$}{
+    \While{$j + 8 \leq |L|$}{
+        $\mathrm{chunk} \gets $ AVX2 load $L[j..j+8]$\;
+        $\mathrm{needle} \gets $ AVX2 broadcast $s$ a 8 lanes\;
+        $\mathrm{cmp} \gets $ \code{\_mm256\_cmpeq\_epi32}(chunk, needle)\;
+        $\mathrm{mask} \gets $ \code{\_mm256\_movemask\_epi8}(cmp)\;
+        \If{$\mathrm{mask} \neq 0$}{
+            $\mathrm{count} \gets \mathrm{count} + 1$;
+            \Break loop interno\;
+        }
+        \tcp{avanzar $j$ si todos los lanes del chunk son $< s$}
+        \If{$L[j+7] < s$}{$j \gets j + 8$; \Continue\;}
+        \Break loop interno\;
+    }
+    \textsc{Scan-Tail}($L, j, s, \mathrm{count}$)
+    \Comment*[r]{scan escalar para $< 8$ restantes}
+}
+\Return $\mathrm{count}$\;
+\end{algorithm}
+
+El algoritmo es el esquema clásico ``broadcast-and-compare''
+usado en la literatura de intersección SIMD. Su corrección se
+desprende del invariante de que $j$ sólo incrementa
+monotónicamente después de que la ventana completa $L[j..j+8]$
+fue descartada (todos los elementos estrictamente menores que el
+$s$ actual); como $S$ y $L$ están ordenados, ningún $s$ posterior
+puede matchear en ningún índice $< j$.
+
+\begin{theorem}[Complejidad de la intersección]
+Sobre inputs de tamaños $|A|$ y $|B|$ con $|S| = \min(|A|, |B|)$,
+$|L| = \max(|A|, |B|)$:
+\begin{itemize}
+    \item Tiempo: $\Ord{|S| \cdot (|L| / 8 + 1)}$ en el peor
+        caso. El factor $/8$ es el ancho de lane AVX2. En la
+        práctica la iteración por el lado corto amortiza cerca
+        de $\Ord{|S| + |L| / 8}$ porque $j$ avanza
+        monotónicamente.
+    \item Espacio: $\Ord{1}$ auxiliar (el estado de registros).
+\end{itemize}
+\end{theorem}
+
+\begin{theorem}[Seguridad en runtime]
+\textsc{Intersect-Sorted-U32-Count} no invoca comportamiento
+indefinido aun cuando se compile sin AVX2, porque el cuerpo
+unsafe del intrínseco sólo se llama a través de
+\code{is\_x86\_feature\_detected!("avx2")} en runtime. El gate
+\code{\#[target\_feature(enable = "avx2")]} en compile time sólo
+habilita el cuerpo del intrínseco dentro de una función que el
+path escalar no llama.
+\end{theorem}
+
+\begin{proof}[Demostración (esbozo)]
+El wrapper público es safe. Chequea
+\code{is\_x86\_feature\_detected!("avx2")} primero; sólo en hit
+invoca al cuerpo unsafe. Cuando AVX2 no se reporta, se llama al
+merge escalar y no se ejecutan instrucciones AVX2. El gate
+\code{target\_feature} significa que el cuerpo unsafe mismo se
+compila con codegen AVX2 de todos modos, pero eso está bien
+porque sólo se llama cuando el CPU lo soporta. \qed
+\end{proof}
+
+\section{Roadmap}
+
+Primitivas restantes por portar de libgraphmatch a
+\code{simd\_rust}:
+\begin{itemize}
+    \item \code{count\_edges\_by\_rel\_type}: barrer un
+        \code{\&[CompactRelation]} buscando entradas que
+        matcheen un \code{rel\_type\_tag} dado. Trivial
+        ($\texttt{\_mm256\_cmpeq\_epi8}$ sobre el array de tags
+        empaquetado).
+    \item \code{timestamp\_range\_filter}: marcar aristas cuyo
+        \code{timestamp} cae en $[t_0, t_1]$. Requiere
+        comparaciones de 64 bits --- una instrucción extra por
+        lane.
+    \item \code{intersect\_sorted\_u32\_out}: la variante que
+        materializa output de la primitiva actual sólo-count.
+\end{itemize}
+
+Cuando aterricen las tres, el path libgraphmatch de
+\textsc{Search-Temporal-Pattern-Simd} puede reemplazarse por un
+despacho puro-Rust, retirando la dependencia C++.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/simd\_matcher.rs} --- puente
+FFI.\\
+\filepath{graph\_hunter\_core/src/simd\_rust.rs} ---
+\textsc{Intersect-Sorted-U32-Count}.\\
+\filepath{libgraphmatch/src/simd\_intersect.cpp} --- implementación
+C++ de referencia.\\
+\filepath{graph\_hunter\_core/src/graph.rs:689} ---
+\textsc{Search-Temporal-Pattern-Simd}.
+\end{inthecode}

@@ -1,0 +1,131 @@
+\chapter{El internador de strings}
+\label{ch:interner}
+
+Los identificadores de entidad en los logs ingeridos son largos y
+enormemente repetitivos --- una sola tabla \code{SecurityEvent} en
+Sentinel menciona el mismo nombre de host cientos de miles de
+veces. Guardarlos como \code{String} propios dentro de
+\code{CompactRelation} haría estallar la lista de aristas. El
+motor esquiva esto con un internador bidireccional que mapea cada
+string único a un handle de 32~bits \StrId{}.
+
+\section{Estructura}
+
+\begin{figure}[h]
+\centering
+\begin{lstlisting}[style=rust]
+pub struct StrId(u32);
+
+pub struct StringInterner {
+    map:     HashMap<Arc<str>, StrId>,  // lookup inverso
+    strings: Vec<Arc<str>>,             // lookup por indice
+}
+\end{lstlisting}
+\end{figure}
+
+Ambos contenedores guardan \code{Arc<str>} apuntando al mismo
+slice en heap, de modo que cada intern cuesta exactamente una
+alocación (el \code{Arc::from(\&str)} del camino \code{intern})
+más dos incrementos de refcount. La alternativa --- \code{String}
+en el map, \code{String} o una segunda copia en el vector ---
+duplicaría la presión al allocator.
+
+\begin{invariant}[Biyección del internador]
+Para todo índice $i \in [0, \code{strings.len()})$ se cumple que
+\code{map[strings[i]] == StrId(i as u32)}. Ambos contenedores se
+llenan atómicamente dentro de \code{intern}; un panic en medio de
+la inserción no puede dejarlos desincronizados porque una entrada
+a medio insertar no es visible a búsquedas posteriores (el
+\code{map.insert} es la última acción del happy path).
+\end{invariant}
+
+\section{Algoritmos}
+
+\begin{algorithm}
+\caption{\textsc{Intern}}\label{alg:intern}
+\KwIn{internador $I$, string $s$}
+\KwOut{\StrId{} asignado a $s$}
+\If{$s \in I.\text{map}$}{\Return $I.\text{map}[s]$\;}
+$\text{id} \gets I.\text{strings.len()}$ como \code{u32}\;
+$\text{arc} \gets \code{Arc::from}(s)$\Comment*[r]{1 alloc heap}
+\code{I.strings.push(arc.clone())}\Comment*[r]{refcount++}
+\code{I.map.insert(arc, StrId(id))}\Comment*[r]{refcount++}
+\Return \code{StrId(id)}\;
+\end{algorithm}
+
+\begin{algorithm}
+\caption{\textsc{Resolve}}\label{alg:resolve}
+\KwIn{internador $I$, \StrId{} $x$}
+\KwOut{$\&$\code{str} para $x$, o $\bot$ si está fuera de rango}
+\If{$x.0 \geq I.\text{strings.len()}$}{\Return $\bot$\;}
+\Return $\&* I.\text{strings}[x.0]$\;
+\end{algorithm}
+
+\begin{complexity}
+\textsc{Intern} es $\Ord{1}$ amortizado; el \code{HashMap} usa
+ahash, que pega muy pocas colisiones sobre IDs reales de
+entidad, y el \code{Vec::push} amortiza. La alocación de heap
+ocurre sólo en el camino de miss. \textsc{Resolve} es $\Thet{1}$:
+un bounds check y una desreferencia de puntero. El consumo de
+espacio es
+\[
+    \Thet{\sum_{s \in \mathcal{U}} |s|} + \Thet{|\mathcal{U}|}
+\]
+donde $\mathcal{U}$ es el conjunto de strings únicos --- el
+primer término es el contenido heap, el segundo es el overhead
+$\Ord{1}$ por entrada de los dos contenedores.
+\end{complexity}
+
+\section{Métricas}
+
+El motor expone el uso de memoria del internador vía
+\code{StringInterner::metrics()}:
+
+\begin{lstlisting}[style=rust]
+pub struct InternerMetrics {
+    pub unique_strings: usize,
+    pub approx_bytes:   usize,   // suma de Arc<str>.len()
+}
+\end{lstlisting}
+
+Éstas son las métricas gatillo para los backends diferidos
+\emph{generacional} o \emph{particionado}
+(Capítulo~\ref{ch:interner-trait}): cuando \code{unique\_strings}
+cruza $\sim$$10^7$, o cuando una sesión \emph{streaming} de larga
+vida crece monotónicamente por encima de unos cientos de MB en
+\code{approx\_bytes}, el operador sabe que es momento de
+cambiar.
+
+\section{El punto de costura (\emph{seam}) de trait}
+
+El refactor P2-F introdujo \code{StringInternerBackend} como
+punto de intercambio:
+
+\begin{lstlisting}[style=rust]
+pub trait StringInternerBackend {
+    fn intern(&mut self, s: &str) -> StrId;
+    fn resolve(&self, id: StrId) -> &str;
+    fn try_resolve(&self, id: StrId) -> Option<&str>;
+    fn get(&self, s: &str) -> Option<StrId>;
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool;
+    fn reserve(&mut self, additional: usize);
+    fn metrics(&self) -> InternerMetrics;
+}
+\end{lstlisting}
+
+\code{StringInterner} es la única implementación hoy. Cuando el
+motor reúna evidencia de que la hipótesis del internador global
+se quiebra (proceso multi-tenant, streaming 24$\times$7 con más
+de $10^7$ strings únicos), un \code{GenerationalInterner} o
+\code{PartitionedInterner} encaja detrás del mismo trait; los 121+
+call sites existentes siguen compilando porque mantienen un
+\code{StringInterner} concreto y el \code{metrics()} inherent
+delega en el cuerpo del trait.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/interner.rs:1} --- struct,
+trait y métricas.\\
+\filepath{graph\_hunter\_core/src/interner.rs:115} --- tests
+unitarios que fijan la biyección.
+\end{inthecode}

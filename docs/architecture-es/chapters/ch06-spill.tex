@@ -1,0 +1,159 @@
+\chapter{El Spillable Edge Store}
+\label{ch:spill}
+
+Ingestar un dump EVTX de 28~GB en una laptop con 16~GB de RAM
+requiere volcar (\emph{spill}) las estructuras en memoria a disco
+antes de que el proceso sea liquidado por OOM.
+\code{SpillableEdgeStore} lo implementa para la lista de aristas:
+las aristas se acumulan en un buffer en memoria hasta cruzar un
+umbral; pasado el umbral, el buffer se ordena y se escribe como un
+archivo ``run'' ordenado en disco, y se arranca un buffer nuevo.
+En query time, el store presenta una única lista de adyacencia
+lógica haciendo merge de todos los runs en \code{finalize}.
+
+\section{Modos}
+
+\begin{definition}[Modo del store]
+El store está \emph{en memoria} (sin runs en disco) o
+\emph{spilled} (uno o más runs en disco). Un tercer estado
+``finalizado'' se alcanza después de que \code{finalize} unificó
+todos los runs en un único archivo mmap; una vez finalizado, el
+store es de sólo lectura.
+\end{definition}
+
+Campos:
+
+\begin{lstlisting}[style=rust]
+struct SpillableEdgeStore {
+    buffer:       Vec<CompactRelation>,
+    buffer_index: HashMap<StrId, Vec<u32>>, // posiciones en buffer
+    runs:         Vec<SpillRunHandle>,      // runs ordenados en disco
+    merged_mmap:  Option<MmapFile>,         // estado finalizado
+    finalized:    bool,
+    spill_limit:  usize,                    // aristas antes de flush
+}
+\end{lstlisting}
+
+\code{buffer\_index[s]} guarda las \emph{posiciones} (índices u32)
+de las aristas de la source \code{s} dentro del buffer actual, no
+las aristas mismas. Esto hace barato a \code{get\_edges(s)} en
+modo en memoria: el llamador obtiene un slice cortado por esas
+posiciones, sin una copia HashMap-of-Vecs.
+
+\section{Append}
+
+\begin{algorithm}
+\caption{\textsc{Spill-Append}}\label{alg:spill-append}
+\KwIn{store $S$, source $s$, compact $c$}
+\If{$S.\text{buffer.len()} \geq S.\text{spill\_limit}$}{
+    \textsc{Flush-Buffer-To-Run}($S$)\Comment*[r]{ver abajo}
+}
+$p \gets S.\text{buffer.len()}$\;
+\code{S.buffer.push($c$)}\;
+\code{S.buffer\_index[$s$].push($p$)}\;
+\end{algorithm}
+
+\begin{algorithm}
+\caption{\textsc{Flush-Buffer-To-Run}}\label{alg:spill-flush}
+\KwIn{store $S$}
+ordenar $S.\text{buffer}$ lexicográficamente por $(\text{source\_sid},
+\text{timestamp}, \text{dest\_sid})$\;
+escribir el buffer ordenado en un archivo temp $f$ como bytes
+crudos (con header que lleva count y versión)\;
+$S.\text{runs}.\text{push}(\text{handle}(f))$\;
+vaciar $S.\text{buffer}$ y $S.\text{buffer\_index}$\;
+\end{algorithm}
+
+\begin{complexity}
+\textsc{Spill-Append} es $\Ord{1}$ amortizado. Cada
+\code{spill\_limit} appends dispara un \textsc{Flush} de costo
+$\Ord{L \log L}$ donde $L$ = \code{spill\_limit}, distribuido a lo
+largo del stream de ingesta. El costo total en modo spill para
+ingerir $N$ aristas es
+$\Ord{N \log L + N/L \cdot L} = \Ord{N \log L}$ --- logarítmico
+en el tamaño del flush, lineal en $N$.
+\end{complexity}
+
+\section{Finalización vía merge $k$-way}
+
+Después de terminar todos los appends, \code{finalize} produce un
+único stream ordenado en disco. Si no hubo flushes el camino es
+trivial: ordenar el buffer en memoria, listo. Si no, el motor abre
+cursores sobre cada run más un cursor sobre el buffer en memoria
+ordenado, y los mergea con un min-heap:
+
+\begin{algorithm}
+\caption{\textsc{K-Way-Merge}}\label{alg:kway-merge}
+\KwIn{cursores $[c_0, \ldots, c_{k-1}]$, archivo de salida $f$}
+construir un min-heap binario $H$ sobre los cursores, clavado en
+su elemento cabecera (source\_sid, timestamp, dest\_sid)\;
+\While{$H \neq \emptyset$}{
+    $c \gets$ \code{H.pop\_min()}\;
+    escribir el elemento cabecera de $c$ en $f$\;
+    \code{c.advance()}\;
+    \If{$c$ no está vacío}{\code{H.push($c$)}}
+}
+\end{algorithm}
+
+\begin{complexity}
+Cada uno de los $N$ elementos se popea y pushea exactamente una
+vez del heap, pagando $\Ord{\log k}$ por operación, con total
+$\Ord{N \log k}$ en tiempo. El heap tiene a lo sumo $k$ cursores
+en cualquier instante, así que el uso de RAM es $\Ord{k}$
+independiente de $N$ --- esta es la propiedad que permite al
+motor procesar un stream de 28~GB en 16~GB de RAM. El output
+mergeado se mapea en memoria (mmap) para lecturas posteriores,
+así que \code{get\_edges(s)} sigue siendo $\Ord{d(s)}$.
+\end{complexity}
+
+\begin{theorem}[Cota de memoria del spill]
+En cualquier momento durante la ingesta el footprint en memoria
+de \code{SpillableEdgeStore} es a lo sumo \code{spill\_limit}
+$\cdot$ $\code{size\_of::<CompactRelation>}$ más unos pocos KB de
+bookkeeping.
+\end{theorem}
+
+\begin{proof}
+\textsc{Spill-Append} flushea el buffer cuando su longitud
+alcanza \code{spill\_limit}; entre flushes el buffer guarda a lo
+sumo \code{spill\_limit} elementos, cada uno de 32~B, más el
+índice \code{HashMap<StrId, Vec<u32>>} que suma $\Ord{L}$
+entradas. Los runs en disco no ocupan RAM hasta mergearse. El
+merge propiamente dicho sólo mantiene $k$ cursores en el heap,
+acotados por la cantidad de flushes; cada cursor pre-bufferea un
+bloque IO chico (unos KB).\qed
+\end{proof}
+
+\section{Lecturas}
+
+\begin{algorithm}
+\caption{\textsc{Get-Edges}}\label{alg:spill-get-edges}
+\KwIn{store $S$, source $s$}
+\KwOut{slice de \Compact{} para $s$, vacío si desconocido}
+\If{$S.\text{finalized}$ and $S.\text{merged\_mmap}$ es \code{Some}}{
+    localizar el offset inicial de $s$ vía el índice en disco
+    \Comment*[r]{bsearch \Ord{\log n}}
+    \Return slice de largo \code{count} desde el mmap\;
+}
+\If{$\neg S.\text{finalized}$}{
+    \Return posiciones de \code{S.buffer\_index[$s$]}
+    materializadas desde \code{S.buffer}
+    \Comment*[r]{\Ord{d(s)}}
+}
+\end{algorithm}
+
+\begin{complexity}
+\Ord{\log n + d(s)} en el caso finalizado, \Ord{d(s)} en el no
+finalizado (más el trabajo de copiar posiciones en un slice).
+\end{complexity}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/spill.rs} --- struct y todos
+los algoritmos.\\
+\filepath{graph\_hunter\_core/src/spill.rs:327} --- entry point
+de \code{finalize}.\\
+\filepath{graph\_hunter\_core/src/spill.rs:524} ---
+\code{get\_edges}.\\
+\filepath{graph\_hunter\_core/benches/dedup\_throughput.rs} ---
+bench de ingesta con spill.
+\end{inthecode}
