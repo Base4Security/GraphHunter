@@ -159,6 +159,14 @@ pub struct OverflowReport {
 // The Tauri command entry point
 // ---------------------------------------------------------------------------
 
+/// Phase 5-9 core primitive smoke test. Kept per the file's own
+/// "additive and safe to delete once real Tauri commands land"
+/// note — real commands have landed (see `sentinel.rs`,
+/// `ingestion.rs`), so this command is now cosmetic. It does not
+/// delegate through the canonical API because it exercises core
+/// primitives directly; migrating it would defeat its purpose as a
+/// cross-crate integration check.
+#[deprecated(note = "Intended for one-shot smoke testing during Phase 5-9 integration. Real Tauri commands cover production workflows; this command can be removed when the Phase 5-9 audit trail is no longer useful.")]
 #[tauri::command]
 pub async fn cmd_azure_streaming_smoke_test() -> Result<SmokeTestReport, String> {
     let start = std::time::Instant::now();

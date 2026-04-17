@@ -16,6 +16,14 @@ interface EntityTypeCount {
   count: number;
 }
 
+interface RelSchemaEntry {
+  rel_type: string;
+  source_type: string;
+  target_type: string;
+  edge_count: number;
+  metadata_keys: string[];
+}
+
 interface GraphMetricsLeftPanelProps {
   currentSessionId: string | null;
   stats: GraphStats;
@@ -58,6 +66,10 @@ export default function GraphMetricsLeftPanel({
   const [entitiesTotalCount, setEntitiesTotalCount] = useState(0);
   const [entitiesLoadingMore, setEntitiesLoadingMore] = useState(false);
 
+  const [relSchema, setRelSchema] = useState<RelSchemaEntry[]>([]);
+  const [relSchemaLoading, setRelSchemaLoading] = useState(false);
+  const [showRelationSchema, setShowRelationSchema] = useState(true);
+
   // Anomaly scoring state
   const [showAnomaly, setShowAnomaly] = useState(false);
   const [anomalyEnabled, setAnomalyEnabled] = useState(false);
@@ -93,6 +105,17 @@ export default function GraphMetricsLeftPanel({
       })
       .finally(() => {
         if (!cancelled) setTypeCountsLoading(false);
+      });
+    setRelSchemaLoading(true);
+    invoke<RelSchemaEntry[]>("cmd_get_relation_schema")
+      .then((list) => {
+        if (!cancelled) setRelSchema(list);
+      })
+      .catch(() => {
+        if (!cancelled) setRelSchema([]);
+      })
+      .finally(() => {
+        if (!cancelled) setRelSchemaLoading(false);
       });
     // Check anomaly config
     invoke<ScoringWeights | null>("cmd_get_anomaly_config")
@@ -665,6 +688,49 @@ export default function GraphMetricsLeftPanel({
                         )}
                       </div>
                     )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        <hr className="section-divider" />
+
+        <button
+          type="button"
+          className="panel-left-section-toggle"
+          onClick={() => setShowRelationSchema((v) => !v)}
+          aria-expanded={showRelationSchema}
+          title="Directed relation triples actually present in the graph — use these to author DSL patterns with the correct edge direction."
+        >
+          {showRelationSchema ? "▼" : "▶"}
+          <ArrowRight size={14} />
+          <span>Relations Available</span>
+        </button>
+        {showRelationSchema && (
+          <div className="panel-left-section">
+            {relSchemaLoading ? (
+              <div className="types-available-loading">Loading…</div>
+            ) : relSchema.length === 0 ? (
+              <div className="types-available-empty">No relations in graph yet.</div>
+            ) : (
+              <div className="legend">
+                {relSchema.map((row, idx) => (
+                  <div
+                    key={`${row.rel_type}-${row.source_type}-${row.target_type}-${idx}`}
+                    className="legend-item"
+                    style={{ cursor: "default", fontSize: 11 }}
+                    title={
+                      row.metadata_keys.length > 0
+                        ? `metadata keys: ${row.metadata_keys.join(", ")}`
+                        : "no metadata keys observed"
+                    }
+                  >
+                    <span className="legend-label" style={{ fontFamily: "monospace" }}>
+                      {row.source_type} -[{row.rel_type}]→ {row.target_type}
+                    </span>
+                    <span className="legend-count">({row.edge_count.toLocaleString()})</span>
                   </div>
                 ))}
               </div>

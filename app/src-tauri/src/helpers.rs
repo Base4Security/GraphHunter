@@ -1,9 +1,10 @@
-use graph_hunter_core::{EntityType, GraphHunter, NeighborhoodFilter};
-use uuid::Uuid;
+use graph_hunter_core::{EntityType, NeighborhoodFilter};
 
-use crate::error::CommandError;
-use crate::state::{AppState, Note, SessionState};
 use crate::types::ExpandFilter;
+
+// `CreatedNote` moved to `graph_hunter_api::dto::entity`. Re-exported here
+// so call sites that `use crate::helpers::CreatedNote` keep compiling.
+pub use graph_hunter_api::dto::entity::CreatedNote;
 
 /// Extract a JSON string value from a partial JSON prefix (e.g. first 4KB).
 pub fn extract_json_string(text: &str, key: &str) -> Option<String> {
@@ -142,110 +143,20 @@ pub fn to_core_filter(f: &ExpandFilter) -> NeighborhoodFilter {
     }
 }
 
-/// Helper: run a closure with the current session (no graph lock).
-pub fn with_current_session<T, F>(state: &AppState, f: F) -> Result<T, CommandError>
-where
-    F: FnOnce(&SessionState) -> Result<T, CommandError>,
-{
-    let current_id = state
-        .current_session_id
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
-        .clone();
-    let id = current_id.as_ref().ok_or_else(|| CommandError::SessionNotFound("No session selected".into()))?;
-    let sessions = state
-        .sessions
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-    let session = sessions.get(id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?;
-    f(session)
+// `with_current_session`, `with_current_session_and_graph`,
+// `with_current_graph`, `with_current_graph_mut` all removed in P1
+// Fase 2. Every command now goes through `Arc<GraphHunterApi>` and
+// uses `api.sessions().current_session()` / the per-operation helpers
+// `api.with_graph_read` / `api.with_graph_write`. The AppState-backed
+// helpers are therefore dead code.
+
+/// Resolve the HTTP API port the same way the server binding does.
+/// Matches the logic in `lib.rs` and `cmd_test_http_api`. Forwards to the
+/// canonical implementation in `graph_hunter_api::util` to avoid drift.
+pub fn resolve_api_port() -> u16 {
+    graph_hunter_api::util::resolve_api_port()
 }
 
-/// Helper: run a closure with the current session and its graph (both read).
-pub fn with_current_session_and_graph<T, F>(state: &AppState, f: F) -> Result<T, CommandError>
-where
-    F: FnOnce(&SessionState, &GraphHunter) -> Result<T, CommandError>,
-{
-    let current_id = state
-        .current_session_id
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
-        .clone();
-    let id = current_id.as_ref().ok_or_else(|| CommandError::SessionNotFound("No session selected".into()))?;
-    let sessions = state
-        .sessions
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-    let session = sessions.get(id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?;
-    let graph = session
-        .graph
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-    f(session, &graph)
-}
-
-/// Helper: run a closure with a read guard on the current session's graph.
-pub fn with_current_graph<T, F>(state: &AppState, f: F) -> Result<T, CommandError>
-where
-    F: FnOnce(&GraphHunter) -> Result<T, CommandError>,
-{
-    with_current_session_and_graph(state, |_, graph| f(graph))
-}
-
-/// Helper: run a closure with a write guard on the current session's graph.
-pub fn with_current_graph_mut<T, F>(state: &AppState, f: F) -> Result<T, CommandError>
-where
-    F: FnOnce(&mut GraphHunter) -> Result<T, CommandError>,
-{
-    let current_id = state
-        .current_session_id
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
-        .clone();
-    let id = current_id.as_ref().ok_or_else(|| CommandError::SessionNotFound("No session selected".into()))?;
-    let sessions = state
-        .sessions
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-    let session = sessions.get(id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?;
-    let mut graph = session
-        .graph
-        .write()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-    f(&mut graph)
-}
-
-/// Shared implementation for creating a note in the current session (used by Tauri command and HTTP API).
-pub fn create_note_impl(
-    state: &AppState,
-    content: String,
-    node_id: Option<String>,
-) -> Result<Note, CommandError> {
-    let current_id = state
-        .current_session_id
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
-        .clone();
-    let id = current_id.as_ref().ok_or_else(|| CommandError::SessionNotFound("No session selected".into()))?;
-    let sessions = state
-        .sessions
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-    let session = sessions.get(id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?;
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| CommandError::Internal(e.to_string()))?
-        .as_secs() as i64;
-    let note = Note {
-        id: Uuid::new_v4().to_string(),
-        content,
-        node_id,
-        created_at,
-    };
-    let mut notes = session
-        .notes
-        .write()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-    notes.push(note.clone());
-    Ok(note)
-}
+// `create_note_impl` removed — call sites now delegate through
+// `GraphHunterApi::create_note` (see `commands/entity.rs` and
+// `http_api.rs::handler_create_note`).

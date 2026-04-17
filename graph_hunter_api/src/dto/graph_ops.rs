@@ -1,0 +1,164 @@
+//! DTOs for graph operation commands (reads, runs, etc.).
+//!
+//! Fase 1 migrates the simpler read-only ops first. Hunt and ingest
+//! operations land in Fase 2.
+
+use std::collections::HashMap;
+
+use crate::state::SessionHandle;
+use serde::{Deserialize, Serialize};
+
+// ── Subgraph wire shape ─────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubgraphNode {
+    pub id: String,
+    pub entity_type: String,
+    pub score: f64,
+    pub metadata: HashMap<String, String>,
+    /// Per analyst feedback (2026-04-10): for IP entities carry a pre-
+    /// computed Private/Public/Loopback/… classification so the UI never
+    /// has to re-parse IPs per render. `None` for non-IP entities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_class: Option<String>,
+}
+
+impl SubgraphNode {
+    pub fn new(
+        id: String,
+        entity_type: String,
+        score: f64,
+        metadata: HashMap<String, String>,
+    ) -> Self {
+        let ip_class = crate::util::ip_class_for(&entity_type, &id);
+        Self {
+            id,
+            entity_type,
+            score,
+            metadata,
+            ip_class,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubgraphEdge {
+    pub source: String,
+    pub target: String,
+    pub rel_type: String,
+    pub timestamp: i64,
+    pub metadata: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Subgraph {
+    pub nodes: Vec<SubgraphNode>,
+    pub edges: Vec<SubgraphEdge>,
+}
+
+/// Paginated events response for the Event View panel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginatedEvents {
+    pub events: Vec<SubgraphEdge>,
+    pub total_count: usize,
+    pub page: usize,
+    pub page_size: usize,
+}
+
+/// Filter struct received from the frontend for neighborhood expansion.
+/// `Deserialize` only — this is pure input, never rendered.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ExpandFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_types: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation_types: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_end: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_score: Option<f64>,
+}
+
+// ── Request DTOs ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventsForNodeRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    pub node_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventsPaginatedRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    pub node_id: String,
+    pub page: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubgraphRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    pub node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchEntitiesRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_filter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpandNodeRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_hops: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_nodes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<ExpandFilter>,
+}
+
+/// Node and edge counts for the resolved session's graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphStats {
+    pub entity_count: usize,
+    pub relation_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewFieldsRequest {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_size: Option<usize>,
+}
+
+/// Runtime capability info not tied to any session (SIMD ISA, build
+/// features). Served from `runtime_info()` — replaces the ad-hoc
+/// `cmd_get_simd_isa` and future `cmd_test_http_api` payloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeInfo {
+    pub simd_isa: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ComputeScoresRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+}

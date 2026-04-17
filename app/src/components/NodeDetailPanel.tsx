@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { X, Expand, Crosshair, Copy, MapPin, Globe } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import type { NodeDetails, EntityType } from "../types";
+import type { NodeDetails, EntityType, ExplainedScore } from "../types";
 import { ENTITY_COLORS } from "../types";
+import { formatTimestamp } from "../utils/time";
 
 interface NodeDetailPanelProps {
   details: NodeDetails;
@@ -30,6 +31,22 @@ export default function NodeDetailPanel({
   const color =
     ENTITY_COLORS[details.entity_type as EntityType] || "#94a3b8";
   const [enriching, setEnriching] = useState(false);
+  const [explanation, setExplanation] = useState<ExplainedScore | null>(null);
+  const [explaining, setExplaining] = useState(false);
+
+  const loadExplanation = async () => {
+    setExplaining(true);
+    try {
+      const exp = await invoke<ExplainedScore>("cmd_explain_score", {
+        nodeId: details.id,
+      });
+      setExplanation(exp);
+    } catch {
+      setExplanation(null);
+    } finally {
+      setExplaining(false);
+    }
+  };
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(details.id);
@@ -58,9 +75,7 @@ export default function NodeDetailPanel({
   // Remaining metadata keys (not rendered as badges)
   const regularMeta = Object.entries(meta).filter(([k]) => !ENRICHMENT_KEYS.has(k));
 
-  const formatTimestamp = (ts: number) => {
-    return new Date(ts * 1000).toISOString().replace("T", " ").slice(0, 19);
-  };
+  const formatTs = (ts: number) => formatTimestamp(ts, "iso_space");
 
   return (
     <div className="node-detail-panel">
@@ -150,6 +165,23 @@ export default function NodeDetailPanel({
         </div>
       </div>
 
+      {details.recommend_grouped_expansion && (
+        <div
+          className="detail-hint"
+          style={{
+            marginTop: 6,
+            padding: "4px 8px",
+            fontSize: 11,
+            background: "var(--surface-alt, rgba(255, 200, 80, 0.08))",
+            border: "1px solid var(--warn-border, rgba(255, 200, 80, 0.3))",
+            borderRadius: 4,
+          }}
+          title="Plain expand_node will silently route this node through grouped expansion to avoid unwieldy output. You can also call cmd_expand_node_grouped directly."
+        >
+          High-degree node — expansion will auto-group parallel edges.
+        </div>
+      )}
+
       {/* Score Breakdown */}
       {(details.degree_score > 0 || details.pagerank_score > 0 || details.betweenness > 0) && (
         <div className="detail-section">
@@ -175,13 +207,66 @@ export default function NodeDetailPanel({
         </div>
       )}
 
+      {/* Anomaly breakdown (only when anomaly scoring is enabled) */}
+      {details.anomaly_breakdown && (
+        <div className="detail-section">
+          <div className="detail-section-title">Anomaly Breakdown</div>
+          <div className="detail-degrees">
+            <div className="degree-item">
+              <span className="degree-value">{details.anomaly_breakdown.entity_rarity.toFixed(2)}</span>
+              <span className="degree-label">Entity Rarity</span>
+            </div>
+            <div className="degree-item">
+              <span className="degree-value">{details.anomaly_breakdown.edge_rarity.toFixed(2)}</span>
+              <span className="degree-label">Edge Rarity</span>
+            </div>
+            <div className="degree-item">
+              <span className="degree-value">{details.anomaly_breakdown.neighborhood_concentration.toFixed(2)}</span>
+              <span className="degree-label">Neighborhood</span>
+            </div>
+            <div className="degree-item">
+              <span className="degree-value">{details.anomaly_breakdown.temporal_novelty.toFixed(2)}</span>
+              <span className="degree-label">Temporal Novelty</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn btn-sm"
+            style={{ marginTop: 6, width: "100%" }}
+            onClick={loadExplanation}
+            disabled={explaining}
+          >
+            {explaining ? "Explaining…" : explanation ? "Refresh explanation" : "Explain this score"}
+          </button>
+          {explanation && (
+            <div
+              style={{
+                marginTop: 6,
+                padding: "6px 8px",
+                fontSize: 11,
+                lineHeight: 1.4,
+                background: "var(--surface-alt, rgba(0,0,0,0.04))",
+                borderRadius: 4,
+              }}
+            >
+              <div>{explanation.narrative}</div>
+              {explanation.peers.length > 0 && (
+                <div style={{ marginTop: 4, opacity: 0.8 }}>
+                  Composite pctl: {explanation.composite_percentile.toFixed(1)} · Degree pctl: {explanation.degree_percentile.toFixed(1)}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Time range */}
       {details.time_range && (
         <div className="detail-section">
           <div className="detail-section-title">Time Range</div>
           <div className="detail-time">
-            {formatTimestamp(details.time_range[0])} &mdash;{" "}
-            {formatTimestamp(details.time_range[1])}
+            {formatTs(details.time_range[0])} &mdash;{" "}
+            {formatTs(details.time_range[1])}
           </div>
         </div>
       )}

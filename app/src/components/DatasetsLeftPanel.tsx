@@ -31,14 +31,21 @@ import type {
   IngestCompleteEvent,
   IngestErrorEvent,
   SentinelConnectedEvent,
-  SentinelDataEvent,
-  SentinelErrorEvent,
-  ConnectorStatusResponse,
   SentinelEnvStatus,
+  KqlResult,
 } from "../types";
 import FieldSelector from "./FieldSelector";
 import { FileUploadSection, SentinelConnectForm, ElasticConnectForm } from "./ingest";
 import { DatasetList } from "./datasets";
+
+interface SentinelProps {
+  sentinelStreaming: boolean;
+  sentinelStatus: string;
+  sentinelLiveStats: { entities: number; relations: number };
+  setStreaming: (v: boolean) => void;
+  setStatus: (v: string) => void;
+  resetLiveStats: () => void;
+}
 
 interface DatasetsLeftPanelProps {
   currentSessionId: string | null;
@@ -49,6 +56,7 @@ interface DatasetsLeftPanelProps {
   onClose: () => void;
   onShowTypeOnMap?: (nodeIds: string[]) => void;
   onShowNodeOnMap?: (nodeId: string) => void;
+  sentinel: SentinelProps;
 }
 
 function now(): string {
@@ -64,6 +72,7 @@ export default function DatasetsLeftPanel({
   onClose,
   onShowTypeOnMap: _onShowTypeOnMap,
   onShowNodeOnMap: _onShowNodeOnMap,
+  sentinel,
 }: DatasetsLeftPanelProps) {
   const [filePaths, setFilePaths] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -85,15 +94,11 @@ export default function DatasetsLeftPanel({
   const [azureResourceGroup, setAzureResourceGroup] = useState("");
   const [azureWorkspaceName, setAzureWorkspaceName] = useState("");
 
-  // Sentinel real-time state
-  const [sentinelStreaming, setSentinelStreaming] = useState(false);
-  const [, setSentinelConnectorId] = useState<string | null>(null);
-  const [sentinelStatus, setSentinelStatus] = useState<string>("disconnected");
-  const [sentinelLiveStats, setSentinelLiveStats] = useState<{ entities: number; relations: number }>({ entities: 0, relations: 0 });
+  // Sentinel real-time state (lifted to App.tsx via useSentinelEvents hook)
+  const { sentinelStreaming, sentinelStatus, sentinelLiveStats, setStreaming, setStatus, resetLiveStats } = sentinel;
   const [sentinelPollInterval, setSentinelPollInterval] = useState(30);
-  const sentinelUnlistenRef = useRef<(() => void) | null>(null);
-  const statsRef = useRef(stats);
-  statsRef.current = stats;
+  const [adhocKql, setAdhocKql] = useState("");
+  const [adhocLoading, setAdhocLoading] = useState(false);
 
   const [ingestProgress, setIngestProgress] = useState<{
     processed: number;
@@ -245,71 +250,18 @@ export default function DatasetsLeftPanel({
   useEffect(() => {
     if (!isTauri()) return;
     invoke<SentinelEnvStatus>("cmd_sentinel_check_env").then((env) => {
-      if (env.azure_workspace_name) setAzureWorkspaceName(env.azure_workspace_name);
-      // Fields are loaded from .env server-side; show placeholder hints
-    }).catch(() => {});
-    // Check if connector is already running
-    invoke<ConnectorStatusResponse>("cmd_sentinel_status").then((st) => {
-      if (st.connected) {
-        setSentinelStreaming(true);
-        setSentinelConnectorId(st.connector_id);
-        setSentinelStatus(st.status?.state ?? "connected");
-      }
+      if (env.azure_tenant_id && !azureTenantId) setAzureTenantId(env.azure_tenant_id);
+      if (env.azure_client_id && !azureClientId) setAzureClientId(env.azure_client_id);
+      if (env.azure_workspace_id && !siemWorkspaceId) setSiemWorkspaceId(env.azure_workspace_id);
+      if (env.azure_subscription_id && !azureSubscriptionId) setAzureSubscriptionId(env.azure_subscription_id);
+      if (env.azure_resource_group && !azureResourceGroup) setAzureResourceGroup(env.azure_resource_group);
+      if (env.azure_workspace_name && !azureWorkspaceName) setAzureWorkspaceName(env.azure_workspace_name);
+      // Client secret is not auto-filled for security — env_or fallback handles it on the backend
     }).catch(() => {});
   }, []);
 
-  // Sentinel real-time event listeners
-  useEffect(() => {
-    if (!sentinelStreaming || !isTauri()) return;
-    let unData: (() => void) | null = null;
-    let unError: (() => void) | null = null;
-    let unDisconnected: (() => void) | null = null;
-
-    (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
-      unData = await listen<SentinelDataEvent>("sentinel-data", (event) => {
-        const d = event.payload;
-        setSentinelLiveStats((prev) => ({
-          entities: prev.entities + d.new_entities,
-          relations: prev.relations + d.new_relations,
-        }));
-        setSentinelStatus("connected");
-        onStatsUpdate({
-          entity_count: statsRef.current.entity_count + d.new_entities,
-          relation_count: statsRef.current.relation_count + d.new_relations,
-        });
-      });
-
-      unError = await listen<SentinelErrorEvent>("sentinel-error", (event) => {
-        const e = event.payload;
-        setSentinelStatus("error");
-        onLog({ time: now(), message: `Sentinel: ${e.error}`, level: "error" });
-        if (!e.will_retry) {
-          setSentinelStreaming(false);
-          setSentinelConnectorId(null);
-        }
-      });
-
-      unDisconnected = await listen("sentinel-disconnected", () => {
-        setSentinelStreaming(false);
-        setSentinelConnectorId(null);
-        setSentinelStatus("disconnected");
-        setSentinelLiveStats({ entities: 0, relations: 0 });
-        onLog({ time: now(), message: "Sentinel: Disconnected", level: "info" });
-      });
-
-      sentinelUnlistenRef.current = () => {
-        unData?.();
-        unError?.();
-        unDisconnected?.();
-      };
-    })();
-
-    return () => {
-      sentinelUnlistenRef.current?.();
-      sentinelUnlistenRef.current = null;
-    };
-  }, [sentinelStreaming]);
+  // Sentinel event listeners are now in useSentinelEvents hook (App.tsx level)
+  // so they persist even when this panel is closed.
 
   async function startSentinelStream() {
     try {
@@ -325,10 +277,9 @@ export default function DatasetsLeftPanel({
           batch_size: 0,
         },
       });
-      setSentinelStreaming(true);
-      setSentinelConnectorId(result.connector_id);
-      setSentinelStatus("connected");
-      setSentinelLiveStats({ entities: 0, relations: 0 });
+      setStreaming(true);
+      setStatus("connected");
+      resetLiveStats();
       onLog({
         time: now(),
         message: `Sentinel: Connected (polling every ${result.poll_interval_secs}s, ${result.tables.length} tables)`,
@@ -345,14 +296,46 @@ export default function DatasetsLeftPanel({
     try {
       setLoading(true);
       await invoke("cmd_sentinel_disconnect");
-      setSentinelStreaming(false);
-      setSentinelConnectorId(null);
-      setSentinelStatus("disconnected");
+      setStreaming(false);
       onLog({ time: now(), message: "Sentinel: Disconnected, full scoring completed", level: "info" });
     } catch (e) {
       onLog({ time: now(), message: `Sentinel disconnect failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function runAdhocKql() {
+    if (!adhocKql.trim()) return;
+    setAdhocLoading(true);
+    onLog({ time: now(), message: "Running ad-hoc KQL query...", level: "info" });
+    try {
+      const result = await invoke<KqlResult>("cmd_run_kql", {
+        params: {
+          kql: adhocKql.trim(),
+          workspace_id: siemWorkspaceId.trim(),
+          azure_tenant_id: azureTenantId.trim(),
+          azure_client_id: azureClientId.trim(),
+          azure_client_secret: azureClientSecret.trim(),
+        },
+      });
+      onStatsUpdate({
+        entity_count: result.total_entities,
+        relation_count: result.total_relations,
+      });
+      onLog({
+        time: now(),
+        message: `Ad-hoc KQL: ${result.row_count} rows → +${result.new_entities}E +${result.new_relations}R`,
+        level: "success",
+        kql: result.kql_executed,
+        kqlSource: "adhoc",
+        kqlTarget: "custom",
+        kqlRowCount: result.row_count,
+      });
+    } catch (e) {
+      onLog({ time: now(), message: `Ad-hoc KQL failed: ${errorMessage(e)}`, level: "error" });
+    } finally {
+      setAdhocLoading(false);
     }
   }
 
@@ -882,6 +865,10 @@ export default function DatasetsLeftPanel({
                   sentinelLiveStats,
                   onStartStream: startSentinelStream,
                   onStopStream: stopSentinelStream,
+                  adhocKql,
+                  setAdhocKql,
+                  adhocLoading,
+                  onRunKql: runAdhocKql,
                 }}
               />
             )}

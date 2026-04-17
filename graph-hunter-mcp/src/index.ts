@@ -278,7 +278,7 @@ function safeJsonContent(data: unknown) {
 
 const server = new McpServer({
   name: "graph-hunter-mcp",
-  version: "1.2.0",
+  version: "1.3.0",
 });
 
 // check_connection – verify app is running and optionally if a session is loaded (no session required)
@@ -571,15 +571,26 @@ server.tool(
   }
 );
 
-// get_temporal_heatmap – hourly activity patterns by relation type
+// get_temporal_heatmap – bucketed activity patterns by relation type
 server.tool(
   "get_temporal_heatmap",
-  "Get hourly activity patterns showing when events occur by relation type (Auth, Connect, Execute, etc.). Returns bucketed counts. Use to identify spikes, off-hours activity, or unusual temporal patterns that may indicate compromise.",
-  async () => {
+  "Get bucketed activity patterns per relation type. Default bucket is 1h; pass `bucket_size_seconds` (60..86400) to rebucket. Output now densifies zero-count buckets between first and last event so gaps are explicit rather than silently skipped.",
+  {
+    bucket_size_seconds: z
+      .number()
+      .int()
+      .min(60)
+      .max(86_400)
+      .optional()
+      .describe("Bucket width in seconds, default 3600"),
+  },
+  async ({ bucket_size_seconds }) => {
     const start = Date.now();
-    log("tool", "get_temporal_heatmap", {});
+    log("tool", "get_temporal_heatmap", { bucket_size_seconds });
     try {
-      const v = await apiGet("/temporal_heatmap", undefined, HEAVY_TIMEOUT_MS);
+      const params: Record<string, string> = {};
+      if (bucket_size_seconds != null) params.bucket_size_seconds = String(bucket_size_seconds);
+      const v = await apiGet("/temporal_heatmap", params, HEAVY_TIMEOUT_MS);
       const summaryStr = summarizeResult("get_temporal_heatmap", v);
       log("tool", "get_temporal_heatmap done", { duration_ms: Date.now() - start, result: summaryStr });
       return safeJsonContent(v);
@@ -821,15 +832,22 @@ server.tool(
 // export_hunt_results – export last hunt results as text
 server.tool(
   "export_hunt_results",
-  "Export the results of the last run_hunt as JSON or CSV text. Includes full scoring for all paths (max_score, total_score, anomaly_score, chain_summary, time range). Use to produce a detailed threat report after hunting. Call run_hunt first.",
+  "Export the results of the last run_hunt as JSON or CSV text. When `aggregate=true` (recommended for large result sets) identical paths collapse into one row with an edge_count column — drops the response size ~10x for spray-style hunts. `page`/`page_size` stream the deduped export.",
   {
     format: z.enum(["json", "csv"]).optional().default("json").describe("Export format"),
+    page: z.number().int().min(0).max(10000).optional().describe("Page index (0-based, default 0)."),
+    page_size: z.number().int().min(1).max(10000).optional().describe("Page size (default = whole result set)."),
+    aggregate: z.boolean().optional().describe("When true, collapse identical paths with an edge_count aggregate."),
   },
-  async ({ format }) => {
+  async ({ format, page, page_size, aggregate }) => {
     const start = Date.now();
-    log("tool", "export_hunt_results", { format });
+    log("tool", "export_hunt_results", { format, page, page_size, aggregate });
     try {
-      const v = await apiPost("/export_hunt_results", { format }, HEAVY_TIMEOUT_MS) as { data: string; format: string };
+      const body: Record<string, unknown> = { format };
+      if (page != null) body.page = page;
+      if (page_size != null) body.page_size = page_size;
+      if (aggregate != null) body.aggregate = aggregate;
+      const v = await apiPost("/export_hunt_results", body, HEAVY_TIMEOUT_MS) as { data: string; format: string };
       log("tool", "export_hunt_results done", { duration_ms: Date.now() - start, result: `format=${v.format} len=${v.data.length}` });
       return textContent(v.data);
     } catch (e) {
@@ -873,6 +891,309 @@ server.tool(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "compute_scores error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// save_hypothesis_as_sigma (C.3) – convert a DSL hypothesis to a Sigma rule
+server.tool(
+  "save_hypothesis_as_sigma",
+  "Convert a DSL hypothesis (with optional IoC set) to a Sigma rule YAML ready for `sigmac` compilation. Maps (rel_type, dest_type) pairs to canonical Sigma logsources (User -[Auth]-> IP → azure signinlogs; Process -[Spawn]-> Process → process_creation; etc.). Metadata predicates become selection fields; HAVING count aggregations become Sigma count() conditions with timeframe. Response: {yaml, title, fully_mapped}. When fully_mapped=false the rule contains a comment block marking the gap the analyst needs to fill.",
+  {
+    hypothesis_dsl: z.string().min(1).max(10_000),
+    title: z.string().min(1).max(200),
+    tag_prefix: z.string().max(100).optional().describe("Filter IoC seed by tag prefix (default `ioc:`)"),
+    level: z.enum(["low", "medium", "high", "critical"]).optional().describe("Sigma severity level (default medium)"),
+  },
+  async ({ hypothesis_dsl, title, tag_prefix, level }) => {
+    const start = Date.now();
+    log("tool", "save_hypothesis_as_sigma", { title, tag_prefix: tag_prefix ?? "ioc:" });
+    try {
+      const body: Record<string, unknown> = { hypothesis_dsl, title };
+      if (tag_prefix != null) body.tag_prefix = tag_prefix;
+      if (level != null) body.level = level;
+      const v = await apiPost("/save_hypothesis_as_sigma", body, HEAVY_TIMEOUT_MS);
+      log("tool", "save_hypothesis_as_sigma done", { duration_ms: Date.now() - start, result: "ok" });
+      return safeJsonContent(v);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "save_hypothesis_as_sigma error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// file_ticket (C.4) – push an incident to Jira Cloud or ServiceNow
+server.tool(
+  "file_ticket",
+  "Create a ticket in Jira Cloud or ServiceNow with the hunt context. Gated by env GRAPHHUNTER_TICKET_PUBLISH_ENABLED=1, `confirm:true` per call, or `dry_run:true` to preview. Jira requires env JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_PROJECT_KEY (optional JIRA_ISSUE_TYPE, default `Task`). ServiceNow requires SERVICENOW_INSTANCE, SERVICENOW_USERNAME, SERVICENOW_PASSWORD (optional SERVICENOW_TABLE, default `incident`). Response includes extracted `ticket_id` (Jira key or SN number).",
+  {
+    system: z.enum(["jira", "servicenow"]),
+    title: z.string().min(1).max(500),
+    body: z.string().min(1).max(50_000),
+    priority: z.string().max(50).optional(),
+    assignee: z.string().max(200).optional().describe("Jira: accountId. ServiceNow: username."),
+    dry_run: z.boolean().optional(),
+    confirm: z.boolean().optional(),
+  },
+  async ({ system, title, body, priority, assignee, dry_run, confirm }) => {
+    const start = Date.now();
+    log("tool", "file_ticket", { system, dry_run: !!dry_run, confirm: !!confirm });
+    try {
+      const requestBody: Record<string, unknown> = { system, title, body };
+      if (priority != null) requestBody.priority = priority;
+      if (assignee != null) requestBody.assignee = assignee;
+      if (dry_run != null) requestBody.dry_run = dry_run;
+      if (confirm != null) requestBody.confirm = confirm;
+      const v = await apiPost("/file_ticket", requestBody, HEAVY_TIMEOUT_MS);
+      log("tool", "file_ticket done", { duration_ms: Date.now() - start, result: "ok" });
+      return safeJsonContent(v);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "file_ticket error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// publish_iocs_to_sentinel (C.2) – push tagged IoCs to an Azure Sentinel Watchlist
+server.tool(
+  "publish_iocs_to_sentinel",
+  "Publish the session's tagged IoCs as an Azure Sentinel Watchlist. Mutates the Sentinel tenant — requires three gates: (1) env GRAPHHUNTER_IOC_PUBLISH_ENABLED=1 on the GraphHunter process, (2) `confirm: true` in this call, (3) at least one entity tagged with the `tag_prefix` (default `ioc:`). Use `dry_run: true` first to preview the payload + target URL without posting. Required env vars: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, AZURE_WORKSPACE_NAME. The service principal needs `Microsoft Sentinel Contributor` role on the workspace. Response includes `http_status`, `payload` (always), and `azure_response_body` when posted.",
+  {
+    watchlist_name: z.string().min(1).max(200).describe("Human-readable watchlist name; will be normalized to an ARM alias (lowercased, spaces → _)"),
+    display_name: z.string().max(200).optional().describe("Optional Sentinel displayName (defaults to watchlist_name)"),
+    description: z.string().max(2000).optional().describe("Optional Sentinel description"),
+    tag_prefix: z.string().max(100).optional().describe("Tag prefix filter (default `ioc:`)"),
+    dry_run: z.boolean().optional().describe("When true, return payload + target URL without posting"),
+    confirm: z.boolean().optional().describe("Must be true to actually POST (safety gate)"),
+  },
+  async ({ watchlist_name, display_name, description, tag_prefix, dry_run, confirm }) => {
+    const start = Date.now();
+    log("tool", "publish_iocs_to_sentinel", { watchlist_name, dry_run: !!dry_run, confirm: !!confirm });
+    try {
+      const body: Record<string, unknown> = { watchlist_name };
+      if (display_name != null) body.display_name = display_name;
+      if (description != null) body.description = description;
+      if (tag_prefix != null) body.tag_prefix = tag_prefix;
+      if (dry_run != null) body.dry_run = dry_run;
+      if (confirm != null) body.confirm = confirm;
+      const v = await apiPost("/publish_iocs_to_sentinel", body, HEAVY_TIMEOUT_MS);
+      log("tool", "publish_iocs_to_sentinel done", { duration_ms: Date.now() - start, result: "ok" });
+      return safeJsonContent(v);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "publish_iocs_to_sentinel error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// diff_hunts (C.1) – compare hunt results at two points in time
+server.tool(
+  "diff_hunts",
+  "Run the same DSL hypothesis at two upper time bounds (baseline_ts, current_ts) and return what was added/removed between them. Killer tool for tracking attack progression: pass a cat-017 pattern with `baseline_ts=<T-6h>` and `current_ts=<now>` — the response tells you exactly which IPs/users were added to the spray in the last 6 hours. Paths compared by node-sequence equality after DedupMode::ByPath. Response shape: {baseline_count, current_count, added: ScoredPath[], removed: ScoredPath[]}.",
+  {
+    hypothesis_dsl: z.string().min(1).max(10_000).describe("Hunt pattern in DSL form"),
+    baseline_ts: z.number().int().describe("Upper bound of the baseline snapshot (Unix seconds)"),
+    current_ts: z.number().int().describe("Upper bound of the current snapshot (Unix seconds); must be >= baseline_ts"),
+  },
+  async ({ hypothesis_dsl, baseline_ts, current_ts }) => {
+    const start = Date.now();
+    log("tool", "diff_hunts", { baseline_ts, current_ts });
+    try {
+      const v = await apiPost(
+        "/diff_hunts",
+        { hypothesis_dsl, baseline_ts, current_ts },
+        HEAVY_TIMEOUT_MS,
+      );
+      log("tool", "diff_hunts done", { duration_ms: Date.now() - start, result: "ok" });
+      return safeJsonContent(v);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "diff_hunts error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// ─── v1.3 MCP tools (post-hunt feedback) ──────────────────────────
+
+// get_relation_schema – enumerate (rel_type, source_type, target_type) triples
+server.tool(
+  "get_relation_schema",
+  "List every (rel_type, source_type, target_type) triple actually present in the loaded graph, with edge counts and observed metadata keys. Call this BEFORE writing a run_hunt DSL — it's the cheapest way to confirm edge direction and discover which metadata keys can be used in filter predicates. Replaces trial-and-error hunt authoring with zero-result feedback.",
+  async () => {
+    const start = Date.now();
+    log("tool", "get_relation_schema", {});
+    try {
+      const v = await apiGet("/relation_schema");
+      const summaryStr = summarizeResult("get_relation_schema", v);
+      log("tool", "get_relation_schema done", { duration_ms: Date.now() - start, result: summaryStr });
+      return safeJsonContent(v);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "get_relation_schema error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// get_catalog_with_status – catalog + per-entry compatibility
+server.tool(
+  "get_catalog_with_status",
+  "Return the ATT&CK hypothesis catalog with per-entry compatibility checked against the current graph. Each entry has `compatible:bool` plus `missing_entity_types`/`missing_rel_types` when the dataset can't support the pattern. Use this instead of `get_catalog` to avoid running patterns that were never going to match (e.g. DARPA-style Process patterns against a cloud-identity dataset).",
+  async () => {
+    const start = Date.now();
+    log("tool", "get_catalog_with_status", {});
+    try {
+      const v = await apiGet("/catalog/status");
+      const summaryStr = summarizeResult("get_catalog_with_status", v);
+      log("tool", "get_catalog_with_status done", { duration_ms: Date.now() - start, result: summaryStr });
+      return safeJsonContent(v);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "get_catalog_with_status error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// get_catalog_diagnostics – YAML load errors collected at startup
+server.tool(
+  "get_catalog_diagnostics",
+  "Return any diagnostics the catalog loader collected at startup. Empty array means every built-in YAML and every user-supplied YAML under $GRAPHHUNTER_CATALOG_DIR parsed + validated cleanly. Non-empty entries carry `source_path`, `entry_id`, and `message` — use to surface to the analyst that their custom catalog YAMLs were silently skipped.",
+  async () => {
+    const start = Date.now();
+    log("tool", "get_catalog_diagnostics", {});
+    try {
+      const v = await apiGet("/catalog/diagnostics");
+      const summaryStr = summarizeResult("get_catalog_diagnostics", v);
+      log("tool", "get_catalog_diagnostics done", { duration_ms: Date.now() - start, result: summaryStr });
+      return safeJsonContent(v);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "get_catalog_diagnostics error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// explain_score – 4-dim breakdown + percentiles + peers for a node
+server.tool(
+  "explain_score",
+  "Explain why a node has the score it has: the four-dimension anomaly breakdown (entity rarity, edge rarity, neighborhood concentration, temporal novelty), composite and degree percentiles against the whole graph, top-5 same-type peers, and a plain-English narrative. Use to distinguish structural centrality (e.g. /usr/bin/grep under MDE) from genuine anomalies before triaging a top_anomalies hit.",
+  {
+    node_id: z.string().max(500).describe("Entity ID to explain"),
+  },
+  async ({ node_id }) => {
+    const start = Date.now();
+    log("tool", "explain_score", { node_id: truncate(node_id, 50) });
+    try {
+      const v = await apiGet("/explain_score", { node_id });
+      log("tool", "explain_score done", { duration_ms: Date.now() - start, result: "ok" });
+      return safeJsonContent(v);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "explain_score error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// tag_entity – mark a node as IoC / benign / investigated
+server.tool(
+  "tag_entity",
+  "Apply a tag to an entity (e.g. `ioc:malicious`, `benign:confirmed`, `investigated:fp`). Tags persist with the session and are queryable via list_tagged / exportable via export_iocs. Use to build an IoC list during a hunt instead of copy-pasting node IDs into external notes.",
+  {
+    node_id: z.string().max(500).describe("Entity ID to tag"),
+    tag: z.string().min(1).max(100).describe("Tag label (convention: `ioc:malicious`, `benign:confirmed`, `investigated:fp`)"),
+    reason: z.string().max(2000).optional().describe("Optional human-readable rationale"),
+  },
+  async ({ node_id, tag, reason }) => {
+    const start = Date.now();
+    log("tool", "tag_entity", { node_id: truncate(node_id, 50), tag });
+    try {
+      const v = await apiPost("/tag", { node_id, tag, reason: reason ?? undefined });
+      log("tool", "tag_entity done", { duration_ms: Date.now() - start, result: "ok" });
+      return safeJsonContent(v);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "tag_entity error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// untag_entity – remove a previously-applied tag
+server.tool(
+  "untag_entity",
+  "Remove a tag previously applied with tag_entity. No-op if the (node_id, tag) pair was not tagged.",
+  {
+    node_id: z.string().max(500),
+    tag: z.string().min(1).max(100),
+  },
+  async ({ node_id, tag }) => {
+    const start = Date.now();
+    log("tool", "untag_entity", { node_id: truncate(node_id, 50), tag });
+    try {
+      const v = await apiPost("/untag", { node_id, tag });
+      log("tool", "untag_entity done", { duration_ms: Date.now() - start, result: "ok" });
+      return safeJsonContent(v);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "untag_entity error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// list_tagged – filter session tags by prefix
+server.tool(
+  "list_tagged",
+  "List all entity tags in the current session, optionally filtered by prefix (e.g. `ioc:` to list IoCs only). Returns `{node_id, tag, reason?, created_at}` entries.",
+  {
+    tag_prefix: z.string().max(100).optional().describe("Optional prefix filter (e.g. `ioc:`)"),
+  },
+  async ({ tag_prefix }) => {
+    const start = Date.now();
+    log("tool", "list_tagged", { tag_prefix: tag_prefix ?? "-" });
+    try {
+      const params: Record<string, string> = {};
+      if (tag_prefix) params.tag_prefix = tag_prefix;
+      const v = await apiGet("/tags", params);
+      const summaryStr = summarizeResult("list_tagged", v);
+      log("tool", "list_tagged done", { duration_ms: Date.now() - start, result: summaryStr });
+      return safeJsonContent(v);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "list_tagged error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// export_iocs – emit a consumable IoC feed in one of four formats
+server.tool(
+  "export_iocs",
+  "Export the session's tagged entities as a consumable IoC feed. Formats: `stix21` (STIX 2.1 bundle for MISP/ThreatStream), `misp_csv` (MISP import), `kql_ioc_set` (a `let IoC_IPs = datatable(...)` block ready to paste into Azure Sentinel hunting), `sigma_stub` (a Sigma rule seeded with the IoC set). `tag_prefix` defaults to `ioc:` so the common CSIRT workflow needs no args.",
+  {
+    format: z.enum(["stix21", "misp_csv", "kql_ioc_set", "sigma_stub"]).describe("Output format"),
+    tag_prefix: z.string().max(100).optional().describe("Tag prefix filter (default `ioc:`)"),
+  },
+  async ({ format, tag_prefix }) => {
+    const start = Date.now();
+    log("tool", "export_iocs", { format, tag_prefix: tag_prefix ?? "ioc:" });
+    try {
+      const body: Record<string, unknown> = { format };
+      if (tag_prefix != null) body.tag_prefix = tag_prefix;
+      const v = await apiPost("/export_iocs", body, HEAVY_TIMEOUT_MS) as string;
+      log("tool", "export_iocs done", { duration_ms: Date.now() - start, result: `format=${format} len=${typeof v === "string" ? v.length : "?"}` });
+      return textContent(typeof v === "string" ? v : JSON.stringify(v));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "export_iocs error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
       return textContent(msg);
     }
   }

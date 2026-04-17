@@ -1,185 +1,252 @@
-use std::collections::HashSet;
+//! Entity / path-node / note / tag commands.
+//!
+//! All 18 commands delegate to the canonical [`graph_hunter_api`]. Each
+//! Tauri command is a one-liner adapter: construct the request DTO from
+//! positional params and return the API's response. The command layer
+//! contains no business logic.
+
 use std::sync::Arc;
 
 use tauri::State;
 
-use crate::error::CommandError;
-use crate::helpers::{
-    create_note_impl, parse_entity_type, parse_relation_type,
-    with_current_graph, with_current_session,
+use graph_hunter_api::dto::entity::{
+    CreateNoteRequest, CreatedNote, DeleteNoteRequest, EntitiesByTypeRequest, EntityTypeCount,
+    ListTaggedRequest, NodeIdsByRelationRequest, NodeScopedRequest, PaginatedEntities,
+    PaginatedEntitiesByTypeRequest, PathNodeMutateRequest, SessionOnly, TagEntityRequest,
+    UntagEntityRequest, UpdateNoteRequest,
 };
-use crate::state::{AppState, Note};
-use crate::types::EntityTypeCount;
-use crate::types::PaginatedEntities;
+use graph_hunter_api::GraphHunterApi;
+use graph_hunter_core::{ExplainedScore, RelSchemaEntry};
 
-/// Get entity type names that exist in the current session's graph.
+use crate::error::CommandError;
+use crate::state::{EntityTag, Note};
+
+// ── Graph reads ──────────────────────────────────────────────────────────
+
 #[tauri::command]
-pub fn cmd_get_entity_types_in_graph(state: State<Arc<AppState>>) -> Result<Vec<String>, CommandError> {
-    with_current_graph(state.as_ref(), |graph| Ok(graph.entity_types_in_graph()))
+pub fn cmd_get_entity_types_in_graph(
+    api: State<Arc<GraphHunterApi>>,
+) -> Result<Vec<String>, CommandError> {
+    api.get_entity_types_in_graph(SessionOnly::default())
+        .map_err(CommandError::from)
 }
 
-/// Get entity type names that are neighbours of the given node.
+/// Get the relation schema: distinct (rel_type, source_type, target_type)
+/// triples observed in the graph with edge counts and metadata key union.
+/// Call this immediately after `cmd_get_graph_summary` when authoring a
+/// hunt — it tells you the allowed edge directions and the metadata keys
+/// available for filtering, which otherwise have to be discovered through
+/// failed `cmd_run_hunt` calls.
+#[tauri::command]
+pub fn cmd_get_relation_schema(
+    api: State<Arc<GraphHunterApi>>,
+) -> Result<Vec<RelSchemaEntry>, CommandError> {
+    api.get_relation_schema(SessionOnly::default())
+        .map_err(CommandError::from)
+}
+
+/// Explain why a node has the score it has: four-dimension breakdown,
+/// composite + degree percentiles, and peers of the same entity type.
+#[tauri::command]
+pub fn cmd_explain_score(
+    api: State<Arc<GraphHunterApi>>,
+    node_id: String,
+) -> Result<ExplainedScore, CommandError> {
+    api.explain_score(NodeScopedRequest {
+        session: None,
+        node_id,
+    })
+    .map_err(CommandError::from)
+}
+
 #[tauri::command]
 pub fn cmd_get_entity_types_for_node_neighbours(
-    state: State<Arc<AppState>>,
+    api: State<Arc<GraphHunterApi>>,
     node_id: String,
 ) -> Result<Vec<String>, CommandError> {
-    with_current_graph(state.as_ref(), |graph| Ok(graph.entity_types_of_neighbours(&node_id)))
-}
-
-/// Get (entity_type, count) for each type present in the graph.
-#[tauri::command]
-pub fn cmd_get_entity_type_counts(state: State<Arc<AppState>>) -> Result<Vec<EntityTypeCount>, CommandError> {
-    with_current_graph(state.as_ref(), |graph| {
-        Ok(graph
-            .entity_type_counts()
-            .into_iter()
-            .map(|(entity_type, count)| EntityTypeCount { entity_type, count })
-            .collect())
+    api.get_entity_types_for_node_neighbours(NodeScopedRequest {
+        session: None,
+        node_id,
     })
+    .map_err(CommandError::from)
 }
 
-/// Get all entity IDs of a given type.
+#[tauri::command]
+pub fn cmd_get_entity_type_counts(
+    api: State<Arc<GraphHunterApi>>,
+) -> Result<Vec<EntityTypeCount>, CommandError> {
+    api.get_entity_type_counts(SessionOnly::default())
+        .map_err(CommandError::from)
+}
+
 #[tauri::command]
 pub fn cmd_get_entities_by_type(
-    state: State<Arc<AppState>>,
+    api: State<Arc<GraphHunterApi>>,
     type_name: String,
 ) -> Result<Vec<String>, CommandError> {
-    with_current_graph(state.as_ref(), |graph| {
-        let et = parse_entity_type(&type_name).ok_or_else(|| CommandError::InvalidInput(format!("Unknown type: {}", type_name)))?;
-        graph
-            .entity_ids_for_type(&et)
-            .ok_or_else(|| CommandError::InvalidInput(format!("No entities for type: {}", type_name)))
+    api.get_entities_by_type(EntitiesByTypeRequest {
+        session: None,
+        type_name,
     })
+    .map_err(CommandError::from)
 }
 
-/// Get entity IDs of a given type with pagination (offset + limit).
 #[tauri::command]
 pub fn cmd_get_entities_by_type_paginated(
-    state: State<Arc<AppState>>,
+    api: State<Arc<GraphHunterApi>>,
     type_name: String,
     offset: usize,
     limit: usize,
 ) -> Result<PaginatedEntities, CommandError> {
-    with_current_graph(state.as_ref(), |graph| {
-        let et = parse_entity_type(&type_name).ok_or_else(|| CommandError::InvalidInput(format!("Unknown type: {}", type_name)))?;
-        let all = graph
-            .entity_ids_for_type(&et)
-            .ok_or_else(|| CommandError::InvalidInput(format!("No entities for type: {}", type_name)))?;
-        let total_count = all.len();
-        let entities = all.into_iter().skip(offset).take(limit).collect();
-        Ok(PaginatedEntities { entities, total_count })
+    api.get_entities_by_type_paginated(PaginatedEntitiesByTypeRequest {
+        session: None,
+        type_name,
+        offset,
+        limit,
     })
+    .map_err(CommandError::from)
 }
 
-/// Get all node IDs that participate in at least one relation of the given type.
 #[tauri::command]
 pub fn cmd_get_node_ids_by_relation_type(
-    state: State<Arc<AppState>>,
+    api: State<Arc<GraphHunterApi>>,
     relation_type: String,
 ) -> Result<Vec<String>, CommandError> {
-    with_current_graph(state.as_ref(), |graph| {
-        let rt = parse_relation_type(&relation_type)
-            .ok_or_else(|| CommandError::InvalidInput(format!("Unknown relation type: {}", relation_type)))?;
-        let mut node_ids = HashSet::new();
-        for compact in graph.edge_store.iter_all() {
-            if compact.rel_type() == rt {
-                node_ids.insert(graph.interner.resolve(compact.source_sid).to_string());
-                node_ids.insert(graph.interner.resolve(compact.dest_sid).to_string());
-            }
-        }
-        Ok(node_ids.into_iter().collect())
+    api.get_node_ids_by_relation_type(NodeIdsByRelationRequest {
+        session: None,
+        relation_type,
     })
+    .map_err(CommandError::from)
 }
 
-/// Get path node IDs (pinned nodes) for the current session.
+// ── Path nodes ───────────────────────────────────────────────────────────
+
 #[tauri::command]
-pub fn cmd_get_path_nodes(state: State<Arc<AppState>>) -> Result<Vec<String>, CommandError> {
-    with_current_session(state.as_ref(), |session| {
-        let path_node_ids = session
-            .path_node_ids
-            .read()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        Ok(path_node_ids.clone())
-    })
+pub fn cmd_get_path_nodes(
+    api: State<Arc<GraphHunterApi>>,
+) -> Result<Vec<String>, CommandError> {
+    api.get_path_nodes(SessionOnly::default())
+        .map_err(CommandError::from)
 }
 
-/// Add a node to path nodes (pin in graph) for the current session.
 #[tauri::command]
-pub fn cmd_add_path_node(state: State<Arc<AppState>>, node_id: String) -> Result<(), CommandError> {
-    with_current_session(state.as_ref(), |session| {
-        let mut path_node_ids = session
-            .path_node_ids
-            .write()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        if !path_node_ids.contains(&node_id) {
-            path_node_ids.push(node_id);
-        }
-        Ok(())
+pub fn cmd_add_path_node(
+    api: State<Arc<GraphHunterApi>>,
+    node_id: String,
+) -> Result<(), CommandError> {
+    api.add_path_node(PathNodeMutateRequest {
+        session: None,
+        node_id,
     })
+    .map_err(CommandError::from)
 }
 
-/// Remove a node from path nodes for the current session.
 #[tauri::command]
-pub fn cmd_remove_path_node(state: State<Arc<AppState>>, node_id: String) -> Result<(), CommandError> {
-    with_current_session(state.as_ref(), |session| {
-        let mut path_node_ids = session
-            .path_node_ids
-            .write()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        path_node_ids.retain(|n| n != &node_id);
-        Ok(())
+pub fn cmd_remove_path_node(
+    api: State<Arc<GraphHunterApi>>,
+    node_id: String,
+) -> Result<(), CommandError> {
+    api.remove_path_node(PathNodeMutateRequest {
+        session: None,
+        node_id,
     })
+    .map_err(CommandError::from)
 }
 
-/// Get all notes for the current session.
+// ── Notes ────────────────────────────────────────────────────────────────
+
 #[tauri::command]
-pub fn cmd_get_notes(state: State<Arc<AppState>>) -> Result<Vec<Note>, CommandError> {
-    with_current_session(state.as_ref(), |session| {
-        let notes = session
-            .notes
-            .read()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        Ok(notes.clone())
-    })
+pub fn cmd_get_notes(api: State<Arc<GraphHunterApi>>) -> Result<Vec<Note>, CommandError> {
+    api.get_notes(SessionOnly::default())
+        .map_err(CommandError::from)
 }
 
-/// Create a note (optionally linked to a node). Returns the created note.
+/// Create a note (optionally linked to a node). Returns the created note
+/// and an `url` pointing to the HTTP `/notes/:id` endpoint so external
+/// ticketing systems can reference it directly.
 #[tauri::command]
 pub fn cmd_create_note(
-    state: State<Arc<AppState>>,
+    api: State<Arc<GraphHunterApi>>,
     content: String,
     node_id: Option<String>,
-) -> Result<Note, CommandError> {
-    create_note_impl(state.as_ref(), content, node_id)
+) -> Result<CreatedNote, CommandError> {
+    api.create_note(CreateNoteRequest {
+        session: None,
+        content,
+        node_id,
+    })
+    .map_err(CommandError::from)
 }
 
-/// Update a note's content by id.
 #[tauri::command]
-pub fn cmd_update_note(state: State<Arc<AppState>>, note_id: String, content: String) -> Result<(), CommandError> {
-    with_current_session(state.as_ref(), |session| {
-        let mut notes = session
-            .notes
-            .write()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        if let Some(n) = notes.iter_mut().find(|n| n.id == note_id) {
-            n.content = content;
-            Ok(())
-        } else {
-            Err(CommandError::InvalidInput("Note not found".into()))
-        }
+pub fn cmd_update_note(
+    api: State<Arc<GraphHunterApi>>,
+    note_id: String,
+    content: String,
+) -> Result<(), CommandError> {
+    api.update_note(UpdateNoteRequest {
+        session: None,
+        note_id,
+        content,
     })
+    .map_err(CommandError::from)
 }
 
-/// Delete a note by id.
 #[tauri::command]
-pub fn cmd_delete_note(state: State<Arc<AppState>>, note_id: String) -> Result<(), CommandError> {
-    with_current_session(state.as_ref(), |session| {
-        let mut notes = session
-            .notes
-            .write()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        notes.retain(|n| n.id != note_id);
-        Ok(())
+pub fn cmd_delete_note(
+    api: State<Arc<GraphHunterApi>>,
+    note_id: String,
+) -> Result<(), CommandError> {
+    api.delete_note(DeleteNoteRequest {
+        session: None,
+        note_id,
     })
+    .map_err(CommandError::from)
+}
+
+// ── Tags ─────────────────────────────────────────────────────────────────
+
+/// Tag an entity with a label (e.g. `ioc:malicious`, `benign:confirmed`).
+/// Multiple tags per node are supported; repeating the same
+/// `(node_id, tag)` pair updates the reason in place — not a duplicate.
+#[tauri::command]
+pub fn cmd_tag_entity(
+    api: State<Arc<GraphHunterApi>>,
+    node_id: String,
+    tag: String,
+    reason: Option<String>,
+) -> Result<EntityTag, CommandError> {
+    api.tag_entity(TagEntityRequest {
+        session: None,
+        node_id,
+        tag,
+        reason,
+    })
+    .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn cmd_untag_entity(
+    api: State<Arc<GraphHunterApi>>,
+    node_id: String,
+    tag: String,
+) -> Result<(), CommandError> {
+    api.untag_entity(UntagEntityRequest {
+        session: None,
+        node_id,
+        tag,
+    })
+    .map_err(CommandError::from)
+}
+
+#[tauri::command]
+pub fn cmd_list_tagged(
+    api: State<Arc<GraphHunterApi>>,
+    tag_prefix: Option<String>,
+) -> Result<Vec<EntityTag>, CommandError> {
+    api.list_tagged(ListTaggedRequest {
+        session: None,
+        tag_prefix,
+    })
+    .map_err(CommandError::from)
 }

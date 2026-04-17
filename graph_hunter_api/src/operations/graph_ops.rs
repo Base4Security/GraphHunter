@@ -1,0 +1,426 @@
+//! Graph operations. Fase 1 migrates the read-only subset plus a few
+//! small mutations (`compute_scores`). Hunt execution, paging, and
+//! ingest land in Fase 2 (they touch the HuntCache service).
+
+use std::collections::HashSet;
+
+use graph_hunter_core::{
+    preview_fields, FieldInfo, NeighborEdge, NeighborNode, Neighborhood, NodeDetails, SearchResult,
+};
+
+use crate::dto::entity::{NodeScopedRequest, SessionOnly};
+use crate::dto::graph_ops::{
+    ComputeScoresRequest, EventsForNodeRequest, EventsPaginatedRequest, ExpandNodeRequest,
+    GraphStats, PaginatedEvents, PreviewFieldsRequest, RuntimeInfo, SearchEntitiesRequest,
+    Subgraph, SubgraphEdge, SubgraphNode, SubgraphRequest,
+};
+use crate::util::{parse_entity_type, to_core_filter};
+use crate::{ApiError, ApiResult, GraphHunterApi};
+
+impl GraphHunterApi {
+    /// Node + relation counts for the resolved session's graph.
+    pub fn get_graph_stats(&self, req: SessionOnly) -> ApiResult<GraphStats> {
+        self.with_graph_read(req.session.as_ref(), |g| {
+            Ok(GraphStats {
+                entity_count: g.entity_count(),
+                relation_count: g.relation_count(),
+            })
+        })
+    }
+
+    /// Detailed view of a node: core fields, neighbors by type, score
+    /// breakdown, etc.
+    pub fn get_node_details(&self, req: NodeScopedRequest) -> ApiResult<NodeDetails> {
+        self.with_graph_read(req.session.as_ref(), |g| {
+            g.get_node_details(&req.node_id)
+                .ok_or_else(|| ApiError::NotFound(format!("entity: {}", req.node_id)))
+        })
+    }
+
+    /// Trigger a full score recomputation over all entities. Write lock;
+    /// blocks reads for the duration.
+    pub fn compute_scores(&self, req: ComputeScoresRequest) -> ApiResult<()> {
+        self.with_graph_write(req.session.as_ref(), |g| {
+            g.compute_scores();
+            Ok(())
+        })
+    }
+
+    // ── Stateless ops ──────────────────────────────────────────────────
+
+    /// Preview field names in a log file by sampling the first N events.
+    /// No session required — reads from disk.
+    pub fn preview_fields(&self, req: PreviewFieldsRequest) -> ApiResult<Vec<FieldInfo>> {
+        let limit = req.sample_size.unwrap_or(500);
+        let file = std::fs::File::open(&req.path)
+            .map_err(|e| ApiError::Io(format!("open '{}': {e}", req.path)))?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut buf = vec![0u8; 10 * 1024 * 1024];
+        use std::io::Read;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| ApiError::Io(format!("read: {e}")))?;
+        buf.truncate(n);
+        let contents = String::from_utf8_lossy(&buf).to_string();
+        Ok(preview_fields(&contents, limit))
+    }
+
+    /// Runtime build/hardware capabilities. Stateless — safe to call
+    /// before any session exists. Replaces the legacy one-off
+    /// `cmd_get_simd_isa` with a generalized payload.
+    pub fn runtime_info(&self) -> RuntimeInfo {
+        RuntimeInfo {
+            simd_isa: graph_hunter_core::simd_matcher::ffi::simd_isa_name().to_string(),
+        }
+    }
+
+    // ── Events / subgraph / search / expand ─────────────────────────────
+
+    /// All relations (events) where the given node is source or target,
+    /// sorted by timestamp. Caps at 500 rows to keep the frontend
+    /// responsive; use [`Self::get_events_paginated`] for deeper browsing.
+    pub fn get_events_for_node(
+        &self,
+        req: EventsForNodeRequest,
+    ) -> ApiResult<Vec<SubgraphEdge>> {
+        const MAX_EVENTS: usize = 500;
+        self.with_graph_read(req.session.as_ref(), |graph| {
+            let mut edges: Vec<SubgraphEdge> = Vec::new();
+
+            for compact in graph.get_compact_relations(&req.node_id) {
+                if edges.len() >= MAX_EVENTS {
+                    break;
+                }
+                edges.push(subgraph_edge_from_compact(graph, compact));
+            }
+
+            let target_sid = graph.interner.get(&req.node_id);
+            for &source_sid in graph
+                .get_reverse_source_sids(&req.node_id)
+                .iter()
+                .take(MAX_EVENTS)
+            {
+                if edges.len() >= MAX_EVENTS {
+                    break;
+                }
+                for compact in graph.get_relations_by_sid(source_sid) {
+                    if Some(compact.dest_sid) == target_sid {
+                        edges.push(subgraph_edge_from_compact(graph, compact));
+                        break;
+                    }
+                }
+            }
+            edges.sort_by_key(|e| e.timestamp);
+            Ok(edges)
+        })
+    }
+
+    /// Paginated variant of [`Self::get_events_for_node`] with optional
+    /// `sort_by` key. Default sort is timestamp ascending.
+    pub fn get_events_paginated(
+        &self,
+        req: EventsPaginatedRequest,
+    ) -> ApiResult<PaginatedEvents> {
+        let page = req.page;
+        let page_size = req.page_size.unwrap_or(100);
+        let sort_by = req.sort_by.clone();
+        self.with_graph_read(req.session.as_ref(), |graph| {
+            let mut all_edges: Vec<SubgraphEdge> = Vec::new();
+
+            for compact in graph.get_compact_relations(&req.node_id) {
+                all_edges.push(subgraph_edge_from_compact(graph, compact));
+            }
+            let target_sid = graph.interner.get(&req.node_id);
+            for &source_sid in graph.get_reverse_source_sids(&req.node_id) {
+                for compact in graph.get_relations_by_sid(source_sid) {
+                    if Some(compact.dest_sid) == target_sid {
+                        all_edges.push(subgraph_edge_from_compact(graph, compact));
+                    }
+                }
+            }
+
+            match sort_by.as_deref() {
+                Some("rel_type") => all_edges.sort_by(|a, b| a.rel_type.cmp(&b.rel_type)),
+                Some("source") => all_edges.sort_by(|a, b| a.source.cmp(&b.source)),
+                Some("target") => all_edges.sort_by(|a, b| a.target.cmp(&b.target)),
+                _ => all_edges.sort_by_key(|e| e.timestamp),
+            }
+
+            let total_count = all_edges.len();
+            let start = (page * page_size).min(total_count);
+            let end = (start + page_size).min(total_count);
+            let events = all_edges[start..end].to_vec();
+            Ok(PaginatedEvents {
+                events,
+                total_count,
+                page,
+                page_size,
+            })
+        })
+    }
+
+    /// Build the complete subgraph (nodes + edges) induced by the given
+    /// set of node IDs. Caps at 5 000 edges to keep responses bounded.
+    pub fn get_subgraph(&self, req: SubgraphRequest) -> ApiResult<Subgraph> {
+        self.with_graph_read(req.session.as_ref(), |graph| {
+            let id_set: HashSet<&str> = req.node_ids.iter().map(|s| s.as_str()).collect();
+
+            let nodes: Vec<SubgraphNode> = req
+                .node_ids
+                .iter()
+                .filter_map(|id| graph.get_entity(id))
+                .map(|e| {
+                    SubgraphNode::new(
+                        e.id.clone(),
+                        format!("{}", e.entity_type),
+                        e.score,
+                        e.metadata.clone(),
+                    )
+                })
+                .collect();
+
+            const MAX_SUBGRAPH_EDGES: usize = 5000;
+            let mut edges: Vec<SubgraphEdge> = Vec::new();
+            'outer: for source_id in &req.node_ids {
+                for compact in graph.get_compact_relations(source_id) {
+                    if edges.len() >= MAX_SUBGRAPH_EDGES {
+                        break 'outer;
+                    }
+                    let dest_str = graph.interner.resolve(compact.dest_sid);
+                    if id_set.contains(dest_str) {
+                        edges.push(subgraph_edge_from_compact(graph, compact));
+                    }
+                }
+            }
+            Ok(Subgraph { nodes, edges })
+        })
+    }
+
+    /// Substring search over entity IDs with optional type filter. When
+    /// `query` is empty a `type_filter` is required — unbounded
+    /// enumeration of the whole graph is almost never what a caller
+    /// wants and produces poor UX.
+    pub fn search_entities(&self, req: SearchEntitiesRequest) -> ApiResult<Vec<SearchResult>> {
+        if req.query.is_empty()
+            && req
+                .type_filter
+                .as_deref()
+                .map(str::is_empty)
+                .unwrap_or(true)
+        {
+            return Err(ApiError::InvalidInput(
+                "query is required when no type_filter is provided (pass type_filter='Host' etc. to list entities of a single type)"
+                    .into(),
+            ));
+        }
+        self.with_graph_read(req.session.as_ref(), |graph| {
+            let et = req.type_filter.as_deref().and_then(parse_entity_type);
+            Ok(graph.search_entities(&req.query, et.as_ref(), req.limit.unwrap_or(50)))
+        })
+    }
+
+    /// Neighborhood expansion around `node_id`. High-degree nodes auto-
+    /// route to grouped mode: if `in_degree + out_degree` exceeds
+    /// `AUTO_GROUPED_THRESHOLD`, the neighborhood is built from
+    /// `get_neighborhood_grouped` and each edge represents a collapsed
+    /// group (see metadata keys `edge_count`, `first_ts`, `last_ts`).
+    /// Pinned path nodes from the session are merged into the result so
+    /// the analyst's workspace stays visible.
+    pub fn expand_node(&self, req: ExpandNodeRequest) -> ApiResult<Neighborhood> {
+        let session = self.resolve_session(req.session.as_ref())?;
+        let graph = session
+            .graph
+            .read()
+            .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+
+        let core_filter = req.filter.as_ref().map(to_core_filter);
+        let max_hops = req.max_hops.unwrap_or(1);
+        let max_nodes = req.max_nodes.unwrap_or(50);
+
+        let total_degree = match graph.interner.get(&req.node_id) {
+            Some(sid) => {
+                let out_d = graph.edge_store.get_edges(sid).len();
+                let in_d = graph.reverse_adj.get(&sid).map(|v| v.len()).unwrap_or(0);
+                out_d + in_d
+            }
+            None => 0,
+        };
+
+        let mut hood = if total_degree > graph_hunter_core::AUTO_GROUPED_THRESHOLD {
+            let grouped = graph
+                .get_neighborhood_grouped(&req.node_id, max_hops, max_nodes, core_filter.as_ref())
+                .ok_or_else(|| ApiError::NotFound(format!("entity: {}", req.node_id)))?;
+            let reason = format!(
+                "node has {} edges (threshold {}); expand_node auto-routed to grouped mode — each edge represents {} collapsed events (see metadata.edge_count)",
+                total_degree,
+                graph_hunter_core::AUTO_GROUPED_THRESHOLD,
+                grouped.total_edge_count,
+            );
+            let edges: Vec<NeighborEdge> = grouped
+                .edges
+                .into_iter()
+                .map(|g| {
+                    let mut metadata = std::collections::HashMap::new();
+                    metadata.insert("edge_count".to_string(), g.count.to_string());
+                    metadata.insert("first_ts".to_string(), g.first_ts.to_string());
+                    metadata.insert("last_ts".to_string(), g.last_ts.to_string());
+                    NeighborEdge {
+                        source: g.source,
+                        target: g.target,
+                        rel_type: g.rel_type,
+                        timestamp: g.last_ts,
+                        metadata,
+                    }
+                })
+                .collect();
+            Neighborhood {
+                center: grouped.center,
+                nodes: grouped.nodes,
+                edges,
+                truncated: grouped.truncated,
+                auto_grouped: true,
+                auto_group_reason: Some(reason),
+            }
+        } else {
+            graph
+                .get_neighborhood(&req.node_id, max_hops, max_nodes, core_filter.as_ref())
+                .ok_or_else(|| ApiError::NotFound(format!("entity: {}", req.node_id)))?
+        };
+
+        let path_ids: Vec<String> = session
+            .path_node_ids
+            .read()
+            .map_err(|e| ApiError::Internal(format!("path_node_ids poisoned: {e}")))?
+            .clone();
+        let mut in_hood: HashSet<String> = hood.nodes.iter().map(|n| n.id.clone()).collect();
+
+        for path_id in path_ids {
+            if in_hood.contains(&path_id) {
+                continue;
+            }
+            let Some(entity) = graph.get_entity(&path_id) else {
+                continue;
+            };
+            hood.nodes.push(NeighborNode {
+                id: entity.id.clone(),
+                entity_type: format!("{}", entity.entity_type),
+                score: entity.score,
+                metadata: entity.metadata.clone(),
+            });
+            in_hood.insert(path_id.clone());
+
+            for compact in graph.get_compact_relations(&path_id) {
+                let dest_str = graph.interner.resolve(compact.dest_sid);
+                if in_hood.contains(dest_str) {
+                    hood.edges.push(NeighborEdge {
+                        source: graph.interner.resolve(compact.source_sid).to_string(),
+                        target: dest_str.to_string(),
+                        rel_type: format!("{}", compact.rel_type()),
+                        timestamp: compact.timestamp,
+                        metadata: graph.meta_store.get(compact.metadata_offset),
+                    });
+                }
+            }
+            let target_sid = graph.interner.get(&path_id);
+            for &source_sid in graph.get_reverse_source_sids(&path_id) {
+                let source_str = graph.interner.resolve(source_sid);
+                if !in_hood.contains(source_str) {
+                    continue;
+                }
+                for compact in graph.get_relations_by_sid(source_sid) {
+                    if Some(compact.dest_sid) == target_sid {
+                        hood.edges.push(NeighborEdge {
+                            source: graph.interner.resolve(compact.source_sid).to_string(),
+                            target: graph.interner.resolve(compact.dest_sid).to_string(),
+                            rel_type: format!("{}", compact.rel_type()),
+                            timestamp: compact.timestamp,
+                            metadata: graph.meta_store.get(compact.metadata_offset),
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(hood)
+    }
+
+    /// Force-grouped expansion — always collapses parallel edges, even
+    /// for low-degree nodes. Useful when the analyst explicitly wants
+    /// the summary view.
+    pub fn expand_node_grouped(
+        &self,
+        req: ExpandNodeRequest,
+    ) -> ApiResult<graph_hunter_core::GroupedNeighborhood> {
+        self.with_graph_read(req.session.as_ref(), |graph| {
+            let core_filter = req.filter.as_ref().map(to_core_filter);
+            graph
+                .get_neighborhood_grouped(
+                    &req.node_id,
+                    req.max_hops.unwrap_or(1),
+                    req.max_nodes.unwrap_or(50),
+                    core_filter.as_ref(),
+                )
+                .ok_or_else(|| ApiError::NotFound(format!("entity: {}", req.node_id)))
+        })
+    }
+}
+
+/// Build a [`SubgraphEdge`] from a core [`graph_hunter_core::CompactRelation`]
+/// owned by `graph`. Small helper to avoid repeating the same 6-field
+/// materialization in every read path.
+fn subgraph_edge_from_compact(
+    graph: &graph_hunter_core::GraphHunter,
+    compact: &graph_hunter_core::CompactRelation,
+) -> SubgraphEdge {
+    SubgraphEdge {
+        source: graph.interner.resolve(compact.source_sid).to_string(),
+        target: graph.interner.resolve(compact.dest_sid).to_string(),
+        rel_type: format!("{}", compact.rel_type()),
+        timestamp: compact.timestamp,
+        metadata: graph.meta_store.get(compact.metadata_offset),
+        dataset_id: graph
+            .resolve_dataset_tag(compact.dataset_tag)
+            .map(|s| s.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::Session;
+    use graph_hunter_core::GraphHunter;
+    use std::sync::Arc;
+
+    #[test]
+    fn graph_stats_empty() {
+        let api = GraphHunterApi::new_noop();
+        let s = Arc::new(Session::new("s1", "t", GraphHunter::new(), 0));
+        api.sessions().insert(s);
+        api.sessions().set_current(Some("s1".into()));
+        let stats = api.get_graph_stats(SessionOnly::default()).unwrap();
+        assert_eq!(stats.entity_count, 0);
+        assert_eq!(stats.relation_count, 0);
+    }
+
+    #[test]
+    fn runtime_info_has_isa() {
+        let api = GraphHunterApi::new_noop();
+        let ri = api.runtime_info();
+        // Exact value depends on build; just assert it's non-empty so
+        // callers can trust the field is populated.
+        assert!(!ri.simd_isa.is_empty());
+    }
+
+    #[test]
+    fn preview_fields_missing_file_is_io() {
+        let api = GraphHunterApi::new_noop();
+        let err = api
+            .preview_fields(PreviewFieldsRequest {
+                path: "Z:/does/not/exist.ndjson".to_string(),
+                sample_size: None,
+            })
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Io(_)));
+    }
+}

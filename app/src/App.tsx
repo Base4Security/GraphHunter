@@ -32,6 +32,7 @@ import { useNotifications } from "./hooks/useNotifications";
 import { useAiAnalysis } from "./hooks/useAiAnalysis";
 import { useMapNavigation } from "./hooks/useMapNavigation";
 import { usePanelResize } from "./hooks/usePanelResize";
+import { useSentinelEvents } from "./hooks/useSentinelEvents";
 import type {
   GraphStats,
   HuntResults,
@@ -563,6 +564,10 @@ function AppInner() {
     [dispatch]
   );
 
+  // Sentinel event listeners — lives here (never unmounts) so polling
+  // continues even when the Datasets panel is closed.
+  const sentinel = useSentinelEvents(addLog, stats, setStats);
+
   // When no session is selected, show the welcome page (session selector + lateral guide)
   if (!currentSession) {
     return (
@@ -752,6 +757,7 @@ function AppInner() {
             onClose={() => dispatch({ type: "SET_LEFT_MENU", payload: null })}
             onShowTypeOnMap={handleShowTypeOnMap}
             onShowNodeOnMap={handleShowNodeOnMap}
+            sentinel={sentinel}
           />
         )}
         {leftMenuOpen === "activity" && (

@@ -39,6 +39,11 @@ export interface Note {
   created_at: number;
 }
 
+/** Response from `cmd_create_note` — Note plus a URL to GET /notes/:id */
+export interface CreatedNote extends Note {
+  url: string;
+}
+
 // ── Backend response types ──
 
 export interface GraphStats {
@@ -129,7 +134,12 @@ export interface ScoredPath {
   chain_summary: string;
   anomaly_score?: number;
   anomaly_breakdown?: ScoreBreakdown;
+  /** How many raw paths this row represents after dedup. 1 when dedup is off. */
+  edge_count: number;
 }
+
+/** Matches graph_hunter_core::DedupMode — "None" | "ByPath" | "ByEndpoints". */
+export type DedupMode = "None" | "ByPath" | "ByEndpoints";
 
 export interface PaginatedHuntResults {
   total_paths: number;
@@ -216,6 +226,14 @@ export interface Neighborhood {
   nodes: NeighborNode[];
   edges: NeighborEdge[];
   truncated: boolean;
+  /**
+   * True when the backend auto-routed the expansion through the grouped
+   * path because the node's degree exceeded the threshold. Each edge in
+   * `edges` represents a collapsed group; see metadata keys `edge_count`,
+   * `first_ts`, `last_ts`.
+   */
+  auto_grouped?: boolean;
+  auto_group_reason?: string | null;
 }
 
 export interface GroupedNeighborEdge {
@@ -261,6 +279,30 @@ export interface NodeDetails {
   neighbor_types: Record<string, number>;
   /** Neighbour nodes (id + type) for clickable list in lateral panel (optional for backward compat) */
   neighbors?: NeighborSummary[];
+  /** Hint from the backend: plain expand_node will silently auto-fall-back to grouped mode for this node. */
+  recommend_grouped_expansion?: boolean;
+  /** Four-dimension anomaly breakdown; only present when anomaly scoring is enabled and finalized. */
+  anomaly_breakdown?: ScoreBreakdown;
+}
+
+export interface ExplainedPeer {
+  id: string;
+  composite_score: number;
+}
+
+export interface ExplainedScore {
+  id: string;
+  entity_type: string;
+  composite_score: number;
+  degree_score: number;
+  pagerank_score: number;
+  betweenness: number;
+  anomaly_breakdown?: ScoreBreakdown;
+  composite_percentile: number;
+  degree_percentile: number;
+  peers: ExplainedPeer[];
+  /** One-paragraph explanation in English, assembled from the fields above. */
+  narrative: string;
 }
 
 export interface TypeDistribution {
@@ -319,6 +361,14 @@ export interface LogEntry {
   time: string;
   message: string;
   level: "info" | "success" | "error";
+  /** Full KQL text for audit trail (present only on KQL-related entries). */
+  kql?: string;
+  /** Origin of the KQL execution. */
+  kqlSource?: "polling" | "adhoc" | "one-shot";
+  /** Target table or "custom" for ad-hoc queries. */
+  kqlTarget?: string;
+  /** Number of rows returned by the KQL query. */
+  kqlRowCount?: number;
 }
 
 // ── DSL types ──
@@ -417,13 +467,34 @@ export interface ConnectorStatusResponse {
 }
 
 export interface SentinelEnvStatus {
-  azure_client_id: boolean;
-  azure_client_secret: boolean;
-  azure_tenant_id: boolean;
-  azure_subscription_id: boolean;
-  azure_resource_group: boolean;
-  azure_workspace_id: boolean;
+  azure_client_id: string | null;
+  azure_client_secret_set: boolean;
+  azure_client_secret_masked: string | null;
+  azure_tenant_id: string | null;
+  azure_subscription_id: string | null;
+  azure_resource_group: string | null;
+  azure_workspace_id: string | null;
   azure_workspace_name: string | null;
+}
+
+/** Emitted by the backend every time a KQL query executes (polling or ad-hoc). */
+export interface KqlQueryExecutedEvent {
+  kql: string;
+  source: string;
+  target: string;
+  row_count: number;
+  entities_created: number;
+  relations_created: number;
+}
+
+/** Result returned by cmd_run_kql for ad-hoc KQL execution. */
+export interface KqlResult {
+  new_entities: number;
+  new_relations: number;
+  total_entities: number;
+  total_relations: number;
+  kql_executed: string;
+  row_count: number;
 }
 
 // ── Temporal heatmap ──
@@ -431,6 +502,8 @@ export interface SentinelEnvStatus {
 export interface HeatmapRow {
   relation_type: string;
   bins: [number, number][];
+  /** Bucket width in seconds. Backend default 3600; zero-count buckets are emitted explicitly. */
+  bucket_size_seconds: number;
 }
 
 // ── Timeline sparkline ──

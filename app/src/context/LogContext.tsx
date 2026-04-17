@@ -19,7 +19,7 @@ import type { LogEntry } from "../types";
  * previous behaviour and keeping memory bounded for long-running sessions.
  */
 
-const LOG_MAX_ENTRIES = 100;
+const LOG_MAX_ENTRIES = 300;
 
 export type LogAction =
   | { type: "ADD_LOG"; payload: LogEntry }

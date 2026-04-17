@@ -9,26 +9,11 @@ use tauri::{Emitter, State};
 use uuid::Uuid;
 
 use crate::error::CommandError;
-use crate::evtx::{
-    evtx_ingest_streaming, evtx_preview_sample, evtx_to_sysmon_ndjson,
-    file_looks_like_evtx, path_is_evtx,
-};
-use crate::format_registry::{make_parser_for_format, preview_for_format, resolve_format};
-use crate::scoring::{run_full_scoring, run_scoring_adaptive};
+use crate::evtx::{evtx_ingest_streaming, file_looks_like_evtx, path_is_evtx};
+use crate::format_registry::{make_parser_for_format, resolve_format};
+use crate::scoring::run_scoring_adaptive;
 use crate::state::{AppState, DatasetInfo};
-use crate::types::{
-    DetectedField, IngestComplete, IngestError, IngestJobStarted,
-    LoadResult, PreviewIngestResult,
-};
-
-/// File size (bytes) above which only a preview sample is read for format detection.
-const LARGE_FILE_THRESHOLD: u64 = 10 * 1024 * 1024;
-
-/// Number of bytes read from a large file for format-detection preview.
-const PREVIEW_READ_SIZE: usize = 64 * 1024;
-
-/// Number of EVTX records to convert for preview sampling.
-const EVTX_PREVIEW_SAMPLE_SIZE: usize = 1000;
+use crate::types::{IngestComplete, IngestError, IngestJobStarted, LoadResult, PreviewIngestResult};
 
 /// Number of lines per batch during streaming line-based ingestion.
 const BATCH_LINES: usize = 50_000;
@@ -48,325 +33,57 @@ const MAX_PREALLOC_RELATIONS: usize = 4_000_000;
 /// Available physical memory (MB) below which ingestion stops to prevent a crash.
 const CRITICAL_MEMORY_MB: u64 = 256;
 
-/// Preview ingestion: detect format and proposed field -> entity type mapping (no ingest).
+/// Preview ingestion: detect format and proposed field → entity type mapping.
+/// Delegates to the canonical API.
 #[tauri::command]
-pub fn cmd_preview_ingest(path: String, format: String) -> Result<PreviewIngestResult, CommandError> {
-    let use_evtx = format.to_lowercase() == "evtx"
-        || path_is_evtx(&path)
-        || (format.to_lowercase() == "auto" && file_looks_like_evtx(&path));
-    let (contents, resolved) = if use_evtx {
-        let contents = evtx_preview_sample(&path, EVTX_PREVIEW_SAMPLE_SIZE).map_err(|e| CommandError::IoError(e))?;
-        (contents, "sysmon".to_string())
-    } else {
-        let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        let contents = if file_size > LARGE_FILE_THRESHOLD {
-            let mut file = std::fs::File::open(&path)
-                .map_err(|e| CommandError::IoError(format!("Failed to open file '{}': {}", path, e)))?;
-            let mut buf = vec![0u8; PREVIEW_READ_SIZE];
-            let n = std::io::Read::read(&mut file, &mut buf)
-                .map_err(|e| CommandError::IoError(format!("Failed to read file '{}': {}", path, e)))?;
-            String::from_utf8_lossy(&buf[..n]).to_string()
-        } else {
-            std::fs::read_to_string(&path)
-                .map_err(|e| CommandError::IoError(format!("Failed to read file '{}': {}", path, e)))?
-        };
-        let resolved = resolve_format(&contents, &format);
-        (contents, resolved)
-    };
-
-    let detected_fields: Vec<DetectedField> = preview_for_format(&resolved, &contents)
-        .into_iter()
-        .map(|(field_name, suggested_entity_type)| DetectedField {
-            field_name,
-            suggested_entity_type,
-        })
-        .collect();
-
-    Ok(PreviewIngestResult {
-        format: resolved,
-        detected_fields,
-    })
+pub fn cmd_preview_ingest(
+    api: State<Arc<graph_hunter_api::GraphHunterApi>>,
+    path: String,
+    format: String,
+) -> Result<PreviewIngestResult, CommandError> {
+    api.preview_ingest(graph_hunter_api::dto::ingestion::PreviewIngestRequest { path, format })
+        .map_err(CommandError::from)
 }
 
-/// Reads a file from disk and ingests its log events into the current session's graph.
-/// Tags all new entities/relations with a new dataset id for the datasets lateral menu.
-/// Auto-computes scores after loading.
+/// Reads a file from disk and ingests its log events into the
+/// current session's graph. Delegates to the canonical API.
 #[tauri::command]
 pub fn cmd_load_data(
-    state: State<Arc<AppState>>,
+    api: State<Arc<graph_hunter_api::GraphHunterApi>>,
     path: String,
     format: String,
 ) -> Result<LoadResult, CommandError> {
-    let use_evtx = format.to_lowercase() == "evtx"
-        || path_is_evtx(&path)
-        || (format.to_lowercase() == "auto" && file_looks_like_evtx(&path));
-    let (contents, format_for_parser) = if use_evtx {
-        let contents = evtx_to_sysmon_ndjson(&path).map_err(|e| CommandError::IoError(e))?;
-        (contents, "generic".to_string()) // Use generic parser so any EVTX event produces entities (Host, User, etc.)
-    } else {
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| CommandError::IoError(format!("Failed to read file '{}': {}", path, e)))?;
-        (contents, format)
-    };
-
-    let session_id = state
-        .current_session_id
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
-        .clone()
-        .ok_or_else(|| CommandError::SessionNotFound("No current session".into()))?;
-
-    let session = {
-        let sessions = state
-            .sessions
-            .read()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        Arc::clone(sessions.get(&session_id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?)
-    };
-
-    let dataset_id = Uuid::new_v4().to_string();
-    let name = std::path::Path::new(&path)
-        .file_name()
-        .and_then(|p| p.to_str())
-        .unwrap_or("ingest")
-        .to_string();
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| CommandError::Internal(e.to_string()))?
-        .as_secs() as i64;
-
-    {
-        let mut datasets = session
-            .datasets
-            .write()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        datasets.push(DatasetInfo {
-            id: dataset_id.clone(),
-            name: name.clone(),
-            path: Some(path.clone()),
-            created_at,
-            entity_count: 0,
-            relation_count: 0,
-        });
-    }
-
-    let (new_entities, new_relations) = {
-        let mut graph = session
-            .graph
-            .write()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        let resolved_format = resolve_format(&contents, &format_for_parser);
-        let parser = make_parser_for_format(&resolved_format).map_err(|e| CommandError::ParseError(e))?;
-        let triples = parser.parse(&contents);
-        let result = graph.insert_triples(triples, Some(dataset_id.as_str()))
-            .map_err(|e| e.to_string())?;
-        run_full_scoring(&mut graph);
-        result
-    };
-
-    {
-        let mut datasets = session
-            .datasets
-            .write()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        if let Some(last) = datasets.last_mut() {
-            last.entity_count = new_entities;
-            last.relation_count = new_relations;
-        }
-    }
-
-    let (total_entities, total_relations) = {
-        let graph = session
-            .graph
-            .read()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        (graph.entity_count(), graph.relation_count())
-    };
-
-    Ok(LoadResult {
-        new_entities,
-        new_relations,
-        total_entities,
-        total_relations,
+    api.load_data(graph_hunter_api::dto::ingestion::LoadDataRequest {
+        session: None,
+        path,
+        format,
     })
+    .map_err(CommandError::from)
 }
 
-/// SIEM ingest (Sentinel or Elastic): fetch via API then ingest into current session.
-/// Runs the API call in a blocking task to avoid blocking the UI.
+/// SIEM ingest (Sentinel or Elastic): fetch via CLI helper then
+/// ingest into current session. Delegates to the canonical API.
 #[tauri::command]
 pub async fn cmd_ingest_siem(
-    state: State<'_, Arc<AppState>>,
+    api: State<'_, Arc<graph_hunter_api::GraphHunterApi>>,
     params: serde_json::Value,
 ) -> Result<LoadResult, CommandError> {
-    let source = params
-        .get("source")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| CommandError::InvalidInput("missing param: source (sentinel | elastic)".into()))?;
-
-    let data = match source {
-        "sentinel" => {
-            let workspace_id = params
-                .get("workspace_id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| CommandError::InvalidInput("missing param: workspace_id".into()))?
-                .to_string();
-            let query = params
-                .get("query")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let auth = match (
-                params.get("azure_tenant_id").and_then(|v| v.as_str()),
-                params.get("azure_client_id").and_then(|v| v.as_str()),
-                params.get("azure_client_secret").and_then(|v| v.as_str()),
-            ) {
-                (Some(t), Some(c), Some(s)) => Some(graph_hunter_cli::siem::SentinelAuth {
-                    tenant_id: t.to_string(),
-                    client_id: c.to_string(),
-                    client_secret: s.to_string(),
-                }),
-                _ => None,
-            };
-            let res = tauri::async_runtime::spawn_blocking(move || {
-                graph_hunter_cli::siem::run_sentinel_query(&workspace_id, &query, auth)
-            })
-            .await
-            .map_err(|e| CommandError::Internal(format!("task join error: {}", e)))?
-            .map_err(|e| CommandError::SentinelError(e.to_string()))?;
-            res.data
-        }
-        "elastic" => {
-            let url = params
-                .get("url")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| CommandError::InvalidInput("missing param: url".into()))?
-                .to_string();
-            let index = params
-                .get("index")
-                .and_then(|v| v.as_str())
-                .unwrap_or("_all")
-                .to_string();
-            let query = params
-                .get("query")
-                .and_then(|v| v.as_str())
-                .unwrap_or("{}")
-                .to_string();
-            let size = params.get("size").and_then(|v| v.as_u64()).map(|n| n as u32);
-            let auth = match (
-                params.get("elastic_api_key").and_then(|v| v.as_str()),
-                params.get("elastic_user").and_then(|v| v.as_str()),
-                params.get("elastic_password").and_then(|v| v.as_str()),
-            ) {
-                (Some(k), _, _) if !k.is_empty() => Some(graph_hunter_cli::siem::ElasticAuth {
-                    api_key: Some(k.to_string()),
-                    user: None,
-                    password: None,
-                }),
-                (_, Some(u), p) if !u.is_empty() => Some(graph_hunter_cli::siem::ElasticAuth {
-                    api_key: None,
-                    user: Some(u.to_string()),
-                    password: p.map(|s| s.to_string()),
-                }),
-                _ => None,
-            };
-            let res = tauri::async_runtime::spawn_blocking(move || {
-                graph_hunter_cli::siem::run_elastic_query(&url, &index, &query, size, None, auth)
-            })
-            .await
-            .map_err(|e| CommandError::Internal(format!("task join error: {}", e)))?
-            .map_err(|e| CommandError::Internal(e.to_string()))?;
-            res.data
-        }
-        _ => return Err(CommandError::InvalidInput(format!("unsupported source: '{}'. Use 'sentinel' or 'elastic'.", source))),
-    };
-
-    let session_id = state
-        .current_session_id
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
-        .clone()
-        .ok_or_else(|| CommandError::SessionNotFound("No current session".into()))?;
-
-    let session = {
-        let sessions = state
-            .sessions
-            .read()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        Arc::clone(sessions.get(&session_id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?)
-    };
-
-    let dataset_id = Uuid::new_v4().to_string();
-    let name = match source {
-        "sentinel" => "Sentinel ingest",
-        _ => "Elasticsearch ingest",
-    }
-    .to_string();
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| CommandError::Internal(e.to_string()))?
-        .as_secs() as i64;
-
-    {
-        let mut datasets = session
-            .datasets
-            .write()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        datasets.push(DatasetInfo {
-            id: dataset_id.clone(),
-            name: name.clone(),
-            path: None,
-            created_at,
-            entity_count: 0,
-            relation_count: 0,
-        });
-    }
-
-    let (new_entities, new_relations) = {
-        let mut graph = session
-            .graph
-            .write()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        let parser = make_parser_for_format("sentinel").map_err(|e| CommandError::ParseError(e))?;
-        let triples = parser.parse(&data);
-        let (e, r) = graph.insert_triples(triples, Some(dataset_id.as_str()))
-            .map_err(|e| e.to_string())?;
-        run_full_scoring(&mut graph);
-        (e, r)
-    };
-
-    {
-        let mut datasets = session
-            .datasets
-            .write()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        if let Some(last) = datasets.last_mut() {
-            last.entity_count = new_entities;
-            last.relation_count = new_relations;
-        }
-    }
-
-    let (total_entities, total_relations) = {
-        let graph = session
-            .graph
-            .read()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        (graph.entity_count(), graph.relation_count())
-    };
-
-    Ok(LoadResult {
-        new_entities,
-        new_relations,
-        total_entities,
-        total_relations,
+    api.ingest_siem(graph_hunter_api::dto::ingestion::IngestSiemRequest {
+        session: None,
+        params,
     })
+    .await
+    .map_err(CommandError::from)
 }
+
 
 /// Starts file ingestion in the background and returns immediately.
 /// Progress is emitted via "ingest-progress" events.
 /// Completion is emitted via "ingest-complete" or "ingest-error" events.
 #[tauri::command]
 pub async fn cmd_load_data_streaming(
-    state: State<'_, Arc<AppState>>,
+    _state: State<'_, Arc<AppState>>,
+    api: State<'_, Arc<graph_hunter_api::GraphHunterApi>>,
     app: tauri::AppHandle,
     path: String,
     format: String,
@@ -374,23 +91,19 @@ pub async fn cmd_load_data_streaming(
     date_from: Option<String>,
     date_to: Option<String>,
 ) -> Result<IngestJobStarted, CommandError> {
+    // Canonical emitter: threaded into the background task so
+    // `evtx_ingest_streaming` (moved to the API crate) emits progress
+    // events through the same `Arc<dyn EventEmitter>` Tauri wires up
+    // at startup.
+    let emitter = api.emitter_arc();
     let job_id = Uuid::new_v4().to_string();
 
-    let session_id = state
-        .current_session_id
-        .read()
-        .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
-        .clone()
+    // Resolve session through the canonical API — no more
+    // `state.sessions.read()` direct access.
+    let session = api
+        .sessions()
+        .current_session()
         .ok_or_else(|| CommandError::SessionNotFound("No current session".into()))?;
-
-    // Clone the Arc<SessionState> under a brief read lock, then release
-    let session = {
-        let sessions = state
-            .sessions
-            .read()
-            .map_err(|e| CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?;
-        Arc::clone(sessions.get(&session_id).ok_or_else(|| CommandError::SessionNotFound("Session not found".into()))?)
-    };
 
     let dataset_id = Uuid::new_v4().to_string();
     let file_name = std::path::Path::new(&path)
@@ -442,6 +155,7 @@ pub async fn cmd_load_data_streaming(
     let bg_path = path.clone();
     let bg_format = format.clone();
     let bg_app = app.clone();
+    let bg_emitter = emitter.clone();
     let bg_session = Arc::clone(&session);
     let bg_config = config.clone();
     let bg_date_from = date_from.clone();
@@ -482,7 +196,7 @@ pub async fn cmd_load_data_streaming(
                 parser.as_ref(),
                 &bg_session,
                 &bg_dataset_id,
-                &bg_app,
+                &bg_emitter,
                 &bg_job_id,
             );
 

@@ -29,6 +29,7 @@ function pageWithResults(count: number): PaginatedHuntResults {
       time_start: 1700000000 + i * 60,
       time_end: 1700000060 + i * 60,
       chain_summary: `User-${i} -> Host-${i}`,
+      edge_count: 1,
     })),
   };
 }

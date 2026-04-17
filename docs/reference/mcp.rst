@@ -77,5 +77,6 @@ Troubleshooting
 - **Connection refused** — App not running, or wrong port/URL. Set ``GRAPHHUNTER_API_PORT`` for the app and ``GRAPHHUNTER_API_URL`` for the MCP server to match.
 - **Windows Firewall** — If the app logs "HTTP API listening" but connections fail, allow the app (e.g. ``graph-hunter-app.exe``) in Windows Defender Firewall for Private networks, or keep the API bound to 127.0.0.1 only (default).
 - **HTML instead of JSON** — Another service may be using the port; stop it so only Graph Hunter uses 37891. Prefer ``127.0.0.1`` over ``localhost`` in ``GRAPHHUNTER_API_URL`` on Windows.
+- **New tools don't appear after upgrading Graph Hunter** — The MCP client caches the tool list when it first connects. After rebuilding ``graph-hunter-mcp`` (``npm run build``) or updating the Graph Hunter app, **restart your MCP client** (Cursor / Claude Code / Desktop) so it picks up new tool registrations. A simple reload of the MCP connection is enough; no config change needed. Tools added in v1.3: ``get_relation_schema``, ``get_catalog_with_status``, ``explain_score``, ``tag_entity``, ``untag_entity``, ``list_tagged``, ``export_iocs``.
 
 For more detail and checklist, see **graph-hunter-mcp/README.md** in the repository.

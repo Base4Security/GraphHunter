@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Download } from "lucide-react";
 import { invoke, errorMessage } from "../lib/tauri";
 import type { PaginatedHuntResults, ScoredPath, LogEntry, ScoreBreakdown } from "../types";
+import { formatTimestamp } from "../utils/time";
 
 interface HuntResultsTableProps {
   totalPaths: number;
@@ -37,10 +38,7 @@ function formatBreakdown(bd: ScoreBreakdown): string {
   return s;
 }
 
-function formatTime(ts: number): string {
-  if (ts === 0) return "-";
-  return new Date(ts * 1000).toLocaleTimeString("en-US", { hour12: false });
-}
+const formatTime = (ts: number) => formatTimestamp(ts, "time");
 
 export default function HuntResultsTable({
   totalPaths,

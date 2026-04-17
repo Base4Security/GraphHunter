@@ -40,3 +40,5 @@ spikes/
 
 # Confidential incident reports — keep out of VCS
 CSIRT-Report-*.md
+
+latex/

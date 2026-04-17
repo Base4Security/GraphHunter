@@ -1,4 +1,4 @@
-mod ai;
+// `ai` module moved to `graph_hunter_api::ai` in P1 Fase 2.
 pub mod commands;
 pub mod error;
 pub mod evtx;
@@ -8,17 +8,17 @@ mod http_api;
 pub mod scoring;
 pub mod sentinel_connector;
 pub mod state;
+pub mod tauri_emitter;
 pub mod types;
 
-// Re-exports for backward compatibility (used by http_api.rs and external consumers).
-pub use helpers::{
-    create_note_impl, parse_entity_type, with_current_graph, with_current_graph_mut,
-    with_current_session, with_current_session_and_graph,
-};
+// Re-exports for backward compatibility. The `with_current_*` helpers
+// are no longer needed by any external consumer after P1 Fase 2 —
+// only `http_api.rs::build_subgraph_for_ids` still uses the
+// `with_current_graph` form internally, which it imports directly.
+pub use helpers::parse_entity_type;
 pub use state::AppState;
 pub use types::{PaginatedHuntResults, Subgraph, SubgraphEdge, SubgraphNode};
 
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
@@ -57,50 +57,64 @@ pub fn run() {
         "****".to_string()
     };
     tracing::debug!("GRAPHHUNTER_API_TOKEN={}", masked);
+    // Shared AppHandle slot: the Tauri `setup()` callback populates it;
+    // both `AppState` and the canonical `TauriEventEmitter` read from
+    // this same `Arc<RwLock<_>>`, so canonical API emissions reach the
+    // frontend through the same path as legacy `AppHandle::emit` calls.
+    let app_handle_slot: Arc<RwLock<Option<tauri::AppHandle>>> = Arc::new(RwLock::new(None));
+    let emitter: Arc<dyn graph_hunter_api::EventEmitter> = Arc::new(
+        tauri_emitter::TauriEventEmitter::new(app_handle_slot.clone()),
+    );
+    // Canonical API façade, shared across Tauri commands, the HTTP API,
+    // and (eventually) any other transport. AppState pulls its sessions
+    // / current / hunt_cache handles from the API so legacy helpers and
+    // the canonical operations see the exact same state.
+    let api = Arc::new(graph_hunter_api::GraphHunterApi::new(emitter));
+    // Populate the API's GeoIP slot at startup (MaxMind from disk).
+    // AppState no longer holds this handle directly — all GeoIP
+    // ops go through the canonical API.
+    {
+        let handle = api.geoip_provider_handle();
+        let provider = dirs::data_dir()
+            .map(|d| d.join("GraphHunter").join("geoip"))
+            .and_then(|dir| {
+                graph_hunter_core::geoip::maxmind::MaxMindProvider::from_directory(&dir).ok()
+            })
+            .filter(|p| p.is_available());
+        if provider.is_some() {
+            tracing::info!("MaxMind GeoIP databases loaded");
+        }
+        if let Ok(mut g) = handle.lock() {
+            *g = provider;
+        }
+    }
+
     let app_state = Arc::new(state::AppState {
-        sessions: RwLock::new(HashMap::new()),
-        current_session_id: RwLock::new(None),
-        cached_hunt_paths: RwLock::new(Vec::new()),
-        app_handle: RwLock::new(None),
+        sessions: api.sessions().map_handle(),
+        current_session_id: api.sessions().current_handle(),
+        app_handle: app_handle_slot.clone(),
         last_mcp_subgraph: RwLock::new(None),
-        ai_config: RwLock::new(None),
-        ai_conversation: RwLock::new(ai::AiConversation::new()),
         api_token,
-        npu_scorer: RwLock::new(None),
-        sentinel_connector: RwLock::new(None),
-        geoip_provider: {
-            // Try to load MaxMind databases from $APP_DATA/GraphHunter/geoip/
-            let provider = dirs::data_dir()
-                .map(|d| d.join("GraphHunter").join("geoip"))
-                .and_then(|dir| {
-                    graph_hunter_core::geoip::maxmind::MaxMindProvider::from_directory(&dir).ok()
-                })
-                .filter(|p| p.is_available());
-            if provider.is_some() {
-                tracing::info!("MaxMind GeoIP databases loaded");
-            }
-            std::sync::Mutex::new(provider)
-        },
-        http_geoip_client: std::sync::Mutex::new(None), // set up after reqwest client is available
     });
     let http_port = std::env::var("GRAPHHUNTER_API_PORT")
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(37891);
     let state_for_http = Arc::clone(&app_state);
+    let api_for_http = Arc::clone(&api);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(app_state)
+        .manage(api)
         .setup(move |app| {
-            use tauri::Manager;
-            if let Some(state) = app.try_state::<Arc<state::AppState>>() {
-                if let Ok(mut h) = state.app_handle.write() {
-                    *h = Some(app.handle().clone());
-                }
+            // Write the AppHandle once into the shared slot — visible
+            // to both `AppState.app_handle` and the `TauriEventEmitter`.
+            if let Ok(mut h) = app_handle_slot.write() {
+                *h = Some(app.handle().clone());
             }
             tracing::info!("GraphHunter HTTP API starting on Tauri async runtime (port {})", http_port);
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = http_api::run_async(state_for_http, http_port).await {
+                if let Err(e) = http_api::run_async(state_for_http, api_for_http, http_port).await {
                     tracing::error!("GraphHunter HTTP API error: {}", e);
                 } else {
                     tracing::info!("GraphHunter HTTP API exited (serve returned)");
@@ -120,6 +134,8 @@ pub fn run() {
             commands::entity::cmd_get_entity_types_in_graph,
             commands::entity::cmd_get_entity_types_for_node_neighbours,
             commands::entity::cmd_get_entity_type_counts,
+            commands::entity::cmd_get_relation_schema,
+            commands::entity::cmd_explain_score,
             commands::entity::cmd_get_entities_by_type,
             commands::entity::cmd_get_entities_by_type_paginated,
             commands::entity::cmd_get_node_ids_by_relation_type,
@@ -130,6 +146,9 @@ pub fn run() {
             commands::entity::cmd_create_note,
             commands::entity::cmd_update_note,
             commands::entity::cmd_delete_note,
+            commands::entity::cmd_tag_entity,
+            commands::entity::cmd_untag_entity,
+            commands::entity::cmd_list_tagged,
             // Ingestion commands
             commands::ingestion::cmd_preview_ingest,
             commands::ingestion::cmd_load_data,
@@ -146,6 +165,7 @@ pub fn run() {
             commands::graph_ops::cmd_get_graph_stats,
             commands::graph_ops::cmd_run_hunt,
             commands::graph_ops::cmd_get_hunt_page,
+            commands::graph_ops::cmd_diff_hunts,
             commands::graph_ops::cmd_get_subgraph,
             commands::graph_ops::cmd_search_entities,
             commands::graph_ops::cmd_expand_node,
@@ -159,6 +179,8 @@ pub fn run() {
             // DSL commands
             commands::dsl::cmd_parse_dsl,
             commands::dsl::cmd_get_catalog,
+            commands::dsl::cmd_get_catalog_with_status,
+            commands::dsl::cmd_get_catalog_diagnostics,
             commands::dsl::cmd_load_catalog_hypothesis,
             // AI commands
             commands::ai_commands::cmd_ai_check_config,
@@ -187,12 +209,18 @@ pub fn run() {
             // Export commands
             commands::export::cmd_export_subgraph,
             commands::export::cmd_export_hunt_results,
+            commands::export::cmd_export_iocs,
+            commands::sentinel_publish::cmd_publish_iocs_to_sentinel,
+            commands::sigma_save::cmd_save_hypothesis_as_sigma,
+            commands::ticket_file::cmd_file_ticket,
             // Sentinel real-time connector commands
             commands::sentinel::cmd_sentinel_connect,
             commands::sentinel::cmd_sentinel_disconnect,
             commands::sentinel::cmd_sentinel_status,
             commands::sentinel::cmd_sentinel_check_env,
+            commands::sentinel::cmd_run_kql,
             // Azure streaming plan smoke test (Phase 5-9 core validation)
+            #[allow(deprecated)]
             commands::azure_streaming_smoke::cmd_azure_streaming_smoke_test,
             // IP enrichment & subnet analysis
             commands::enrichment::cmd_enrich_ip,

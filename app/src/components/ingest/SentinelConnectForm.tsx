@@ -1,4 +1,4 @@
-import { Upload, Database, X } from "lucide-react";
+import { Upload, Database, X, Play } from "lucide-react";
 import IngestProgressBar from "./IngestProgress";
 import { inputStyle } from "./styles";
 
@@ -29,6 +29,10 @@ interface SentinelConnectFormProps {
     sentinelLiveStats: { entities: number; relations: number };
     onStartStream: () => void;
     onStopStream: () => void;
+    adhocKql: string;
+    setAdhocKql: (v: string) => void;
+    adhocLoading: boolean;
+    onRunKql: () => void;
   };
 }
 
@@ -172,6 +176,15 @@ export default function SentinelConnectForm({
           onStop={extended.onStopStream}
         />
       )}
+
+      {extended && (
+        <AdhocKqlSection
+          kql={extended.adhocKql}
+          setKql={extended.setAdhocKql}
+          loading={extended.adhocLoading}
+          onRun={extended.onRunKql}
+        />
+      )}
     </div>
   );
 }
@@ -306,6 +319,78 @@ function SentinelStreamingControls({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function AdhocKqlSection({
+  kql,
+  setKql,
+  loading,
+  onRun,
+}: {
+  kql: string;
+  setKql: (v: string) => void;
+  loading: boolean;
+  onRun: () => void;
+}) {
+  return (
+    <div
+      style={{
+        borderTop: "1px solid var(--border)",
+        paddingTop: 8,
+        marginTop: 4,
+      }}
+    >
+      <div
+        style={{
+          fontSize: 11,
+          fontWeight: 600,
+          color: "var(--text-primary)",
+          marginBottom: 6,
+        }}
+      >
+        Ad-hoc KQL Query
+      </div>
+      <div
+        style={{
+          fontSize: 10,
+          color: "var(--text-muted)",
+          marginBottom: 6,
+        }}
+      >
+        Run a custom KQL query and ingest results into the graph.
+        The query will appear in the Activity Log for reproducibility.
+      </div>
+      <textarea
+        value={kql}
+        onChange={(e) => setKql(e.target.value)}
+        placeholder={`SecurityEvent\n| where TimeGenerated > ago(24h)\n| where EventID == 4625\n| take 1000`}
+        disabled={loading}
+        style={{
+          width: "100%",
+          minHeight: 100,
+          padding: "8px 10px",
+          fontSize: 11,
+          fontFamily: "monospace",
+          background: "var(--bg-tertiary)",
+          color: "var(--text-primary)",
+          border: "1px solid var(--border)",
+          borderRadius: 4,
+          resize: "vertical",
+          lineHeight: 1.5,
+          boxSizing: "border-box",
+        }}
+      />
+      <button
+        className="btn btn-primary"
+        onClick={onRun}
+        disabled={loading || !kql.trim()}
+        style={{ width: "100%", marginTop: 6 }}
+      >
+        <Play size={14} />
+        {loading ? "Running KQL..." : "Run KQL"}
+      </button>
     </div>
   );
 }

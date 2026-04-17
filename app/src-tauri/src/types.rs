@@ -1,43 +1,25 @@
-use std::collections::HashMap;
-
 use graph_hunter_core::{Hypothesis, ScoredPath};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 // ── Serializable response types for the frontend ──
 
-#[derive(Serialize)]
-pub struct GraphStats {
-    pub entity_count: usize,
-    pub relation_count: usize,
-}
+// Moved to `graph_hunter_api::dto::graph_ops::GraphStats` in P1. Re-exported
+// here so existing call sites that `use crate::types::GraphStats` keep
+// compiling. JSON shape is unchanged.
+pub use graph_hunter_api::dto::graph_ops::GraphStats;
 
-#[derive(Clone, Serialize)]
-pub struct LoadResult {
-    pub new_entities: usize,
-    pub new_relations: usize,
-    pub total_entities: usize,
-    pub total_relations: usize,
-}
-
-/// One row in the preview: log field name and suggested node type (or "Skip").
-#[derive(Serialize)]
-pub struct DetectedField {
-    pub field_name: String,
-    pub suggested_entity_type: String,
-}
-
-/// Result of preview_ingest: detected format and proposed field -> entity type mapping.
-#[derive(Serialize)]
-pub struct PreviewIngestResult {
-    pub format: String,
-    pub detected_fields: Vec<DetectedField>,
-}
+// Moved to `graph_hunter_api::dto::ingestion` in P1 Fase 2.
+pub use graph_hunter_api::dto::ingestion::{DetectedField, LoadResult, PreviewIngestResult};
 
 #[derive(Serialize)]
 pub struct HuntResults {
     pub paths: Vec<Vec<String>>,
     pub path_count: usize,
     pub truncated: bool,
+    /// Populated only when `path_count == 0` — explains which step would
+    /// have failed and (when possible) suggests a fix. See `HuntDiagnostic`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<graph_hunter_core::HuntDiagnostic>,
 }
 
 #[derive(Serialize)]
@@ -49,103 +31,22 @@ pub struct PaginatedHuntResults {
     pub paths: Vec<ScoredPath>,
 }
 
-#[derive(Clone, Serialize)]
-pub struct SubgraphNode {
-    pub id: String,
-    pub entity_type: String,
-    pub score: f64,
-    pub metadata: HashMap<String, String>,
-    /// For `IP` entities: "Private" / "Public" / "Loopback" / etc. so the
-    /// frontend can badge internal vs external IPs without re-parsing the
-    /// address on every render. `None` for non-IP entities or unparseable
-    /// values. Per analyst feedback (2026-04-10), internal/external is the
-    /// very first question asked of any finding.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ip_class: Option<String>,
-}
+// Subgraph wire types and ExpandFilter moved to
+// `graph_hunter_api::dto::graph_ops` in P1. Re-exported here so existing
+// call sites keep compiling. `ip_class_for` also re-exported from
+// `graph_hunter_api::util` — same function, different owner.
+pub use graph_hunter_api::dto::graph_ops::{
+    ExpandFilter, PaginatedEvents, Subgraph, SubgraphEdge, SubgraphNode,
+};
+pub use graph_hunter_api::util::ip_class_for;
 
-/// Computes the IP class label for a node about to be serialized to the
-/// frontend. Returns `None` for non-IP entity types so the field is omitted.
-pub fn ip_class_for(entity_type: &str, id: &str) -> Option<String> {
-    if entity_type != "IP" {
-        return None;
-    }
-    graph_hunter_core::classify_ip(id).map(|c| format!("{:?}", c))
-}
+// Moved to `graph_hunter_api::dto::session::SessionInfo` in P1 Fase 2.
+pub use graph_hunter_api::dto::session::SessionInfo;
 
-impl SubgraphNode {
-    /// Builds a SubgraphNode and eagerly computes its `ip_class` via
-    /// [`ip_class_for`]. Callers should prefer this over struct-literal
-    /// construction so the frontend always sees the internal/external
-    /// classification for IP entities.
-    pub fn new(
-        id: String,
-        entity_type: String,
-        score: f64,
-        metadata: HashMap<String, String>,
-    ) -> Self {
-        let ip_class = ip_class_for(&entity_type, &id);
-        Self { id, entity_type, score, metadata, ip_class }
-    }
-}
-
-#[derive(Clone, Serialize)]
-pub struct SubgraphEdge {
-    pub source: String,
-    pub target: String,
-    pub rel_type: String,
-    pub timestamp: i64,
-    pub metadata: HashMap<String, String>,
-    /// Dataset this event came from (for UI tooltip in Events view).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dataset_id: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct Subgraph {
-    pub nodes: Vec<SubgraphNode>,
-    pub edges: Vec<SubgraphEdge>,
-}
-
-/// Paginated events response for the Event View panel.
-#[derive(Serialize)]
-pub struct PaginatedEvents {
-    pub events: Vec<SubgraphEdge>,
-    pub total_count: usize,
-    pub page: usize,
-    pub page_size: usize,
-}
-
-/// Filter struct received from the frontend for neighborhood expansion.
-#[derive(Deserialize, Default)]
-pub struct ExpandFilter {
-    pub entity_types: Option<Vec<String>>,
-    pub relation_types: Option<Vec<String>>,
-    pub time_start: Option<i64>,
-    pub time_end: Option<i64>,
-    pub min_score: Option<f64>,
-}
-
-#[derive(Serialize)]
-pub struct SessionInfo {
-    pub id: String,
-    pub name: String,
-    pub created_at: i64,
-}
-
-/// Response item for entity type counts.
-#[derive(Serialize)]
-pub struct EntityTypeCount {
-    pub entity_type: String,
-    pub count: usize,
-}
-
-/// Paginated response for entity lists.
-#[derive(Serialize)]
-pub struct PaginatedEntities {
-    pub entities: Vec<String>,
-    pub total_count: usize,
-}
+// Moved to `graph_hunter_api::dto::entity` in P1. Re-exported here so
+// existing call sites that `use crate::types::{EntityTypeCount, ...}`
+// keep compiling. Structural shape is unchanged (frontend JSON matches).
+pub use graph_hunter_api::dto::entity::{EntityTypeCount, PaginatedEntities};
 
 #[derive(Serialize)]
 pub struct DslResult {
@@ -153,52 +54,23 @@ pub struct DslResult {
     pub formatted: String,
 }
 
-/// Response returned immediately when ingestion starts.
-#[derive(Clone, Serialize)]
-pub struct IngestJobStarted {
-    pub job_id: String,
-    pub dataset_id: String,
-}
+// Moved to `graph_hunter_api::dto::ingestion` in P1 Fase 2. Re-
+// exported here so `cmd_load_data_streaming` + the frontend events
+// keep their shape.
+pub use graph_hunter_api::dto::ingestion::{IngestComplete, IngestError, IngestJobStarted};
 
-/// Emitted when background ingestion completes successfully.
-#[derive(Clone, Serialize)]
-pub struct IngestComplete {
-    pub job_id: String,
-    pub dataset_id: String,
-    pub result: LoadResult,
-}
+// Analytics row types moved to `graph_hunter_api::dto::analytics` in P1.
+pub use graph_hunter_api::dto::analytics::{HeatmapRow, TimelineRow};
 
-/// Emitted when background ingestion fails.
-#[derive(Clone, Serialize)]
-pub struct IngestError {
-    pub job_id: String,
-    pub dataset_id: String,
-    pub error: String,
-}
-
-#[derive(Serialize)]
-pub struct HeatmapRow {
-    pub relation_type: String,
-    pub bins: Vec<(i64, usize)>,
-}
-
-#[derive(Serialize)]
-pub struct TimelineRow {
-    pub entity_type: String,
-    pub min_time: i64,
-    pub max_time: i64,
-    pub bins: Vec<(i64, usize)>,
-}
-
-/// Result of testing the HTTP API health endpoint (for the "Test API" button).
-#[derive(Serialize)]
-pub struct ApiTestResult {
-    pub ok: bool,
-    pub status: Option<u16>,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-}
+/// Report of which on-demand enrichment backends are available to the
+/// current process. Surfaced alongside `ApiTestResult` so the UI (and MCP
+/// clients) can tell the analyst *up front* that e.g. GeoIP is off and
+/// they should rely on dataset metadata instead of calling `enrich_ip`
+/// only to be told mid-hunt that the provider is missing.
+// Moved to `graph_hunter_api::dto::geoip` in P1 Fase 2. Structural
+// shape is identical; re-exported here so existing call sites keep
+// compiling.
+pub use graph_hunter_api::dto::geoip::{ApiTestResult, Capabilities};
 
 // ── Sentinel real-time connector events ──
 
@@ -223,6 +95,29 @@ pub struct SentinelErrorEvent {
     pub will_retry: bool,
 }
 
+/// Emitted every time a KQL query is executed (polling or ad-hoc) so the
+/// frontend Activity Log can show the exact query for hunter reproducibility.
+#[derive(Clone, Serialize)]
+pub struct KqlQueryExecutedEvent {
+    pub kql: String,
+    pub source: String,
+    pub target: String,
+    pub row_count: usize,
+    pub entities_created: usize,
+    pub relations_created: usize,
+}
+
+/// Result of an ad-hoc KQL query execution, returned to the frontend.
+#[derive(Clone, Serialize)]
+pub struct KqlResult {
+    pub new_entities: usize,
+    pub new_relations: usize,
+    pub total_entities: usize,
+    pub total_relations: usize,
+    pub kql_executed: String,
+    pub row_count: usize,
+}
+
 #[derive(Clone, Serialize)]
 pub struct ConnectorStatusResponse {
     pub connected: bool,
@@ -232,6 +127,8 @@ pub struct ConnectorStatusResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     // ── ip_class_for ──

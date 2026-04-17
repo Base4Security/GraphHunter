@@ -8,13 +8,9 @@ interface EventsViewPanelProps {
   selectedNodeId: string | null;
 }
 
-const PAGE_SIZE = 100;
+import { formatTimestamp } from "../utils/time";
 
-function formatTimestamp(ts: number): string {
-  if (!ts) return "—";
-  const d = new Date(ts * 1000);
-  return d.toISOString();
-}
+const PAGE_SIZE = 100;
 
 export default function EventsViewPanel({ selectedNodeId }: EventsViewPanelProps) {
   const [events, setEvents] = useState<PaginatedEvents | null>(null);

@@ -1,7 +1,7 @@
 //! Minimal HTTP API for MCP / external tools. Bind to localhost; requires a loaded session.
 
 use axum::{
-    extract::{Request, Query, State},
+    extract::{FromRef, Path, Query, Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -16,13 +16,35 @@ use subtle::ConstantTimeEq;
 use tower_http::cors::{CorsLayer, Any};
 
 use crate::{
-    create_note_impl,
     PaginatedHuntResults, Subgraph, SubgraphEdge, SubgraphNode,
-    with_current_graph, with_current_session_and_graph,
     AppState,
 };
+// `with_current_graph` no longer imported — every handler in this
+// module now delegates through `Arc<GraphHunterApi>`.
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_core::{Hypothesis, Neighborhood};
 use tauri::Emitter;
+
+/// Combined axum state. Handlers extract `Arc<AppState>` or
+/// `Arc<GraphHunterApi>` (or both) via `FromRef` — no handler signature
+/// changes beyond replacing one for the other.
+#[derive(Clone)]
+pub struct HttpState {
+    pub app: Arc<AppState>,
+    pub api: Arc<GraphHunterApi>,
+}
+
+impl FromRef<HttpState> for Arc<AppState> {
+    fn from_ref(s: &HttpState) -> Self {
+        s.app.clone()
+    }
+}
+
+impl FromRef<HttpState> for Arc<GraphHunterApi> {
+    fn from_ref(s: &HttpState) -> Self {
+        s.api.clone()
+    }
+}
 
 /// Notify frontend that notes changed (e.g. after MCP create_note) so the UI refreshes the notes list.
 fn emit_notes_changed(state: &AppState) {
@@ -71,41 +93,19 @@ fn neighborhood_to_subgraph(hood: &Neighborhood) -> Subgraph {
     Subgraph { nodes, edges }
 }
 
-/// Build subgraph for the given node IDs and emit to frontend map (used after search, events, run_hunt).
-fn build_subgraph_for_ids(state: &AppState, node_ids: &[String]) -> Result<Subgraph, crate::error::CommandError> {
-    const MAX_SUBGRAPH_EDGES: usize = 5000;
-    let id_set: HashSet<&str> = node_ids.iter().map(|s| s.as_str()).collect();
-    with_current_graph(state, |graph| {
-        let nodes: Vec<SubgraphNode> = node_ids
-            .iter()
-            .filter_map(|id| graph.get_entity(id))
-            .map(|e| SubgraphNode::new(
-                e.id.clone(),
-                format!("{}", e.entity_type),
-                e.score,
-                e.metadata.clone(),
-            ))
-            .collect();
-        let mut edges: Vec<SubgraphEdge> = Vec::new();
-        'outer: for source_id in node_ids {
-            // Cap per-source iteration to avoid stalling on high-degree nodes (1M+ edges)
-            for compact in graph.get_compact_relations(source_id).iter().take(graph_hunter_core::config::MAX_SCAN_EDGES) {
-                if edges.len() >= MAX_SUBGRAPH_EDGES { break 'outer; }
-                let dest_str = graph.interner.resolve(compact.dest_sid);
-                if id_set.contains(dest_str) {
-                    edges.push(SubgraphEdge {
-                        source: graph.interner.resolve(compact.source_sid).to_string(),
-                        target: dest_str.to_string(),
-                        rel_type: format!("{}", compact.rel_type()),
-                        timestamp: compact.timestamp,
-                        metadata: graph.meta_store.get(compact.metadata_offset),
-                        dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
-                    });
-                }
-            }
-        }
-        Ok(Subgraph { nodes, edges })
+/// Build subgraph for the given node IDs and emit to frontend map
+/// (used after search, events, run_hunt). Delegates to the canonical
+/// `api.get_subgraph`. The `_state` param is kept so the existing
+/// call sites don't have to thread through a new `api` reference.
+fn build_subgraph_for_ids(
+    api: &GraphHunterApi,
+    node_ids: &[String],
+) -> Result<Subgraph, crate::error::CommandError> {
+    api.get_subgraph(graph_hunter_api::dto::graph_ops::SubgraphRequest {
+        session: None,
+        node_ids: node_ids.to_vec(),
     })
+    .map_err(crate::error::CommandError::from)
 }
 
 fn ok_json<T: Serialize>(v: T) -> Response {
@@ -120,6 +120,20 @@ fn err_json(e: impl std::fmt::Display) -> Response {
         .into_response()
 }
 
+/// Convert an `ApiResult<T>` to an axum `Response`. Success → 200 with
+/// the JSON body; failure → status from [`graph_hunter_api::ApiError::status_code`]
+/// with `{ "error": <message> }`. Keeps migrated handlers to one line.
+fn api_response<T: Serialize>(result: graph_hunter_api::ApiResult<T>) -> Response {
+    match result {
+        Ok(v) => ok_json(v),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
 async fn handler_api_root() -> Response {
     ok_json(serde_json::json!({
         "service": "GraphHunter HTTP API",
@@ -128,21 +142,14 @@ async fn handler_api_root() -> Response {
     }))
 }
 
-async fn handler_health(State(state): State<Arc<AppState>>) -> Response {
+async fn handler_health(State(api): State<Arc<GraphHunterApi>>) -> Response {
     tracing::debug!("HTTP API: /health request received");
-    // Run state read in spawn_blocking with a short timeout so we never hang the handler.
-    // If the lock is contended or the blocking pool is starved, we return after 500ms.
-    let state = state.clone();
+    // Short timeout so /health never blocks on a contended session
+    // store (the canonical API uses the same std RwLock internally).
+    let api = api.clone();
     let session_loaded = tokio::time::timeout(
         Duration::from_millis(500),
-        tokio::task::spawn_blocking(move || {
-            state
-                .current_session_id
-                .try_read()
-                .ok()
-                .and_then(|g| g.clone())
-                .is_some()
-        }),
+        tokio::task::spawn_blocking(move || api.sessions().current_id().is_some()),
     )
     .await
     .unwrap_or(Ok(false))
@@ -218,11 +225,14 @@ async fn auth_middleware(
 
 /// Build the API router (shared by run and run_async).
 /// POST routes are also registered with trailing slash so /notes/ and /notes both work.
-fn build_app(state: Arc<AppState>) -> Router {
+fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
+    let state = HttpState { app: app_state, api };
     Router::new()
         .route("/", get(handler_api_root))
         .route("/health", get(handler_health))
         .route("/entity_types", get(handler_entity_types))
+        .route("/relation_schema", get(handler_relation_schema))
+        .route("/explain_score", get(handler_explain_score))
         .route("/search", get(handler_search))
         .route("/expand", get(handler_expand))
         .route("/node_details", get(handler_node_details))
@@ -232,15 +242,26 @@ fn build_app(state: Arc<AppState>) -> Router {
         .route("/run_hunt", post(handler_run_hunt))
         .route("/run_hunt/", post(handler_run_hunt))
         .route("/hunt_results", get(handler_hunt_results))
+        .route("/diff_hunts", post(handler_diff_hunts))
         .route("/notes", post(handler_create_note))
         .route("/notes/", post(handler_create_note))
         .route("/notes/list", get(handler_list_notes))
+        .route("/notes/:id", get(handler_get_note_by_id))
         .route("/graph_summary", get(handler_graph_summary))
         .route("/entity_type_counts", get(handler_entity_type_counts))
         .route("/temporal_heatmap", get(handler_temporal_heatmap))
         .route("/subnet_analysis", get(handler_subnet_analysis))
         .route("/enrich_ip", post(handler_enrich_ip))
         .route("/catalog", get(handler_catalog))
+        .route("/catalog/status", get(handler_catalog_with_status))
+        .route("/catalog/diagnostics", get(handler_catalog_diagnostics))
+        .route("/tag", post(handler_tag_entity))
+        .route("/untag", post(handler_untag_entity))
+        .route("/tags", get(handler_list_tagged))
+        .route("/export_iocs", post(handler_export_iocs))
+        .route("/publish_iocs_to_sentinel", post(handler_publish_iocs_to_sentinel))
+        .route("/save_hypothesis_as_sigma", post(handler_save_hypothesis_as_sigma))
+        .route("/file_ticket", post(handler_file_ticket))
         .route("/datasets", get(handler_list_datasets))
         .route("/path_nodes", get(handler_path_nodes))
         .route("/export_subgraph", post(handler_export_subgraph))
@@ -250,6 +271,9 @@ fn build_app(state: Arc<AppState>) -> Router {
         .route("/export_hunt_results", post(handler_export_hunt_results))
         .route("/enable_anomaly_scoring", post(handler_enable_anomaly_scoring))
         .route("/compute_scores", post(handler_compute_scores))
+        .route("/kql", post(handler_run_kql))
+        .route("/kql/", post(handler_run_kql))
+        .route("/sentinel_status", get(handler_sentinel_status))
         .fallback(fallback_404)
         // 10 MB cap on request bodies. Hunt payloads are small (a DSL string
         // plus maybe a note); anything larger is almost certainly malformed
@@ -260,15 +284,15 @@ fn build_app(state: Arc<AppState>) -> Router {
             .allow_origin(Any)
             .allow_methods(Any)
             .allow_headers(Any))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
+        .layer(axum::middleware::from_fn_with_state(state.app.clone(), auth_middleware))
         .layer(axum::middleware::from_fn(log_requests))
         .with_state(state)
 }
 
 /// Run the HTTP API on Tauri's async runtime. Use this from lib.rs via
-/// `tauri::async_runtime::spawn(async move { http_api::run_async(state, port).await })`
+/// `tauri::async_runtime::spawn(async move { http_api::run_async(state, api, port).await })`
 /// so the server shares Tauri's executor and avoids cross-runtime lock contention.
-pub async fn run_async(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn run_async(state: Arc<AppState>, api: Arc<GraphHunterApi>, port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let host = std::env::var("GRAPHHUNTER_API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = format!("{}:{}", host, port);
     tracing::info!("GraphHunter HTTP API: binding to {} ...", addr);
@@ -283,7 +307,7 @@ pub async fn run_async(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn st
         tracing::info!("Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)", port);
     }
 
-    let app = build_app(state);
+    let app = build_app(state, api);
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -291,7 +315,7 @@ pub async fn run_async(state: Arc<AppState>, port: u16) -> Result<(), Box<dyn st
 /// Legacy: run the HTTP API in a dedicated thread with its own Tokio runtime.
 /// Prefer run_async on Tauri's runtime to avoid cross-runtime lock issues.
 #[allow(dead_code)]
-pub fn run(state: Arc<AppState>, port: u16) {
+pub fn run(state: Arc<AppState>, api: Arc<GraphHunterApi>, port: u16) {
     let host = std::env::var("GRAPHHUNTER_API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     tracing::info!("GraphHunter HTTP API: binding to {}:{} ...", host, port);
     let addr = (host.as_str(), port);
@@ -300,7 +324,7 @@ pub fn run(state: Arc<AppState>, port: u16) {
         std::process::exit(1);
     });
     tracing::info!("GraphHunter HTTP API: bind OK, building router ...");
-    let app = build_app(state);
+    let app = build_app(state, api);
     tracing::info!("GraphHunter HTTP API: creating tokio runtime (multi_thread, 8 workers) ...");
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)
@@ -321,16 +345,41 @@ pub fn run(state: Arc<AppState>, port: u16) {
     });
 }
 
-async fn handler_entity_types(State(state): State<Arc<AppState>>) -> Response {
-    match with_current_graph(state.as_ref(), |g| Ok(g.entity_types_in_graph())) {
-        Ok(v) => ok_json(v),
-        Err(e) => err_json(e),
-    }
+async fn handler_entity_types(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    api_response(api.get_entity_types_in_graph(
+        graph_hunter_api::dto::entity::SessionOnly::default(),
+    ))
+}
+
+async fn handler_relation_schema(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    api_response(api.get_relation_schema(
+        graph_hunter_api::dto::entity::SessionOnly::default(),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct ExplainScoreQuery {
+    node_id: String,
+}
+
+async fn handler_explain_score(
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<ExplainScoreQuery>,
+) -> Response {
+    api_response(api.explain_score(graph_hunter_api::dto::entity::NodeScopedRequest {
+        session: None,
+        node_id: q.node_id,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
 struct SearchQuery {
-    q: String,
+    // `q` is optional on the wire so a missing param produces our own
+    // structured 400 JSON instead of axum's plain-text "failed to
+    // deserialize query string" response — which the MCP client
+    // surfaces as "did not return JSON" and looks like a transport break.
+    #[serde(default)]
+    q: Option<String>,
     #[serde(rename = "type")]
     type_filter: Option<String>,
     limit: Option<usize>,
@@ -338,22 +387,29 @@ struct SearchQuery {
 
 async fn handler_search(
     State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<SearchQuery>,
 ) -> Response {
-    let et = q.type_filter.as_deref().and_then(crate::parse_entity_type);
-    match with_current_graph(state.as_ref(), |graph| {
-        Ok(graph.search_entities(&q.q, et.as_ref(), q.limit.unwrap_or(50)))
+    match api.search_entities(graph_hunter_api::dto::graph_ops::SearchEntitiesRequest {
+        session: None,
+        query: q.q.unwrap_or_default(),
+        type_filter: q.type_filter,
+        limit: q.limit,
     }) {
         Ok(v) => {
             let node_ids: Vec<String> = v.iter().map(|r| r.id.clone()).collect();
             if !node_ids.is_empty() {
-                if let Ok(sg) = build_subgraph_for_ids(state.as_ref(), &node_ids) {
+                if let Ok(sg) = build_subgraph_for_ids(api.as_ref(), &node_ids) {
                     mcp_emit_view(state.as_ref(), sg);
                 }
             }
             ok_json(v)
         }
-        Err(e) => err_json(e),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
     }
 }
 
@@ -366,60 +422,19 @@ struct ExpandQuery {
 
 async fn handler_expand(
     State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<ExpandQuery>,
 ) -> Response {
-    let state_clone = state.clone();
+    let api_clone = api.clone();
     let result = tokio::time::timeout(
         Duration::from_secs(60),
         tokio::task::spawn_blocking(move || {
-            with_current_session_and_graph(state_clone.as_ref(), |session, graph| {
-                let mut hood = graph
-                    .get_neighborhood(
-                        &q.node_id,
-                        q.max_hops.unwrap_or(1),
-                        q.max_nodes.unwrap_or(50),
-                        None,
-                    )
-                    .ok_or_else(|| crate::error::CommandError::InvalidInput(format!("Entity not found: {}", q.node_id)))?;
-                let path_ids: Vec<String> = session
-                    .path_node_ids
-                    .read()
-                    .map_err(|e: std::sync::PoisonError<_>| crate::error::CommandError::GraphLocked(format!("Lock poisoned: {}", e)))?
-                    .clone();
-                // Use HashSet for O(1) lookups instead of O(n) linear scan per edge
-                let mut hood_node_set: HashSet<String> = hood.nodes.iter().map(|n| n.id.clone()).collect();
-                for path_id in path_ids {
-                    if hood_node_set.contains(&path_id) {
-                        continue;
-                    }
-                    let Some(entity) = graph.get_entity(&path_id) else {
-                        continue;
-                    };
-                    hood.nodes.push(graph_hunter_core::NeighborNode {
-                        id: entity.id.clone(),
-                        entity_type: format!("{}", entity.entity_type),
-                        score: entity.score,
-                        metadata: entity.metadata.clone(),
-                    });
-                    hood_node_set.insert(path_id.clone());
-                    // Cap per-path-node edge iteration to avoid stalling on 1M+ edge nodes
-                    for compact in graph.get_compact_relations(&path_id)
-                        .iter()
-                        .take(graph_hunter_core::config::MAX_SCAN_EDGES)
-                    {
-                        let dest_str = graph.interner.resolve(compact.dest_sid);
-                        if hood_node_set.contains(dest_str) {
-                            hood.edges.push(graph_hunter_core::NeighborEdge {
-                                source: graph.interner.resolve(compact.source_sid).to_string(),
-                                target: dest_str.to_string(),
-                                rel_type: format!("{}", compact.rel_type()),
-                                timestamp: compact.timestamp,
-                                metadata: graph.meta_store.get(compact.metadata_offset),
-                            });
-                        }
-                    }
-                }
-                Ok(hood)
+            api_clone.expand_node(graph_hunter_api::dto::graph_ops::ExpandNodeRequest {
+                session: None,
+                node_id: q.node_id,
+                max_hops: q.max_hops,
+                max_nodes: q.max_nodes,
+                filter: None,
             })
         }),
     )
@@ -430,7 +445,11 @@ async fn handler_expand(
             mcp_emit_view(state.as_ref(), sg);
             ok_json(hood)
         }
-        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
         Err(_) => err_json("Expand timed out after 60 seconds"),
     }
@@ -442,24 +461,28 @@ struct NodeDetailsQuery {
 }
 
 async fn handler_node_details(
-    State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<NodeDetailsQuery>,
 ) -> Response {
-    let state_clone = state.clone();
+    let api_clone = api.clone();
+    let node_id = q.node_id.clone();
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::task::spawn_blocking(move || {
-            with_current_graph(state_clone.as_ref(), |graph| {
-                graph
-                    .get_node_details(&q.node_id)
-                    .ok_or_else(|| crate::error::CommandError::InvalidInput(format!("Entity not found: {}", q.node_id)))
+            api_clone.get_node_details(graph_hunter_api::dto::entity::NodeScopedRequest {
+                session: None,
+                node_id,
             })
         }),
     )
     .await;
     match result {
         Ok(Ok(Ok(v))) => ok_json(v),
-        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        },
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
         Err(_) => err_json("Node details timed out after 30 seconds"),
     }
@@ -472,45 +495,16 @@ struct SubgraphBody {
 
 async fn handler_subgraph(
     State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Json(body): Json<SubgraphBody>,
 ) -> Response {
-    let state_clone = state.clone();
+    let api_clone = api.clone();
     let result = tokio::time::timeout(
         Duration::from_secs(60),
         tokio::task::spawn_blocking(move || {
-            const MAX_SUBGRAPH_EDGES: usize = 5000;
-            let node_ids = body.node_ids;
-            let id_set: HashSet<String> = node_ids.iter().cloned().collect();
-            with_current_graph(state_clone.as_ref(), |graph| {
-                let nodes: Vec<SubgraphNode> = node_ids
-                    .iter()
-                    .filter_map(|id| graph.get_entity(id))
-                    .map(|e| SubgraphNode::new(
-                        e.id.clone(),
-                        format!("{}", e.entity_type),
-                        e.score,
-                        e.metadata.clone(),
-                    ))
-                    .collect();
-                let mut edges: Vec<SubgraphEdge> = Vec::new();
-                'outer: for source_id in &node_ids {
-                    // Cap per-source iteration to avoid stalling on high-degree nodes (1M+ edges)
-                    for compact in graph.get_compact_relations(source_id).iter().take(graph_hunter_core::config::MAX_SCAN_EDGES) {
-                        if edges.len() >= MAX_SUBGRAPH_EDGES { break 'outer; }
-                        let dest_str = graph.interner.resolve(compact.dest_sid);
-                        if id_set.contains(dest_str) {
-                            edges.push(SubgraphEdge {
-                                source: graph.interner.resolve(compact.source_sid).to_string(),
-                                target: dest_str.to_string(),
-                                rel_type: format!("{}", compact.rel_type()),
-                                timestamp: compact.timestamp,
-                                metadata: graph.meta_store.get(compact.metadata_offset),
-                                dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
-                            });
-                        }
-                    }
-                }
-                Ok(Subgraph { nodes, edges })
+            api_clone.get_subgraph(graph_hunter_api::dto::graph_ops::SubgraphRequest {
+                session: None,
+                node_ids: body.node_ids,
             })
         }),
     )
@@ -520,7 +514,11 @@ async fn handler_subgraph(
             mcp_emit_view(state.as_ref(), sg.clone());
             ok_json(sg)
         }
-        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
         Err(_) => err_json("Subgraph query timed out after 60 seconds"),
     }
@@ -533,46 +531,20 @@ struct EventsQuery {
 
 async fn handler_events_for_node(
     State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<EventsQuery>,
 ) -> Response {
-    let state_clone = state.clone();
+    let api_clone = api.clone();
     let node_id = q.node_id.clone();
     let result = tokio::time::timeout(
         Duration::from_secs(60),
         tokio::task::spawn_blocking(move || {
-            let edges = with_current_graph(state_clone.as_ref(), |graph| {
-                const MAX_EVENTS: usize = 500;
-                let mut edges: Vec<SubgraphEdge> = Vec::new();
-                for compact in graph.get_compact_relations(&node_id) {
-                    if edges.len() >= MAX_EVENTS { break; }
-                    edges.push(SubgraphEdge {
-                        source: graph.interner.resolve(compact.source_sid).to_string(),
-                        target: graph.interner.resolve(compact.dest_sid).to_string(),
-                        rel_type: format!("{}", compact.rel_type()),
-                        timestamp: compact.timestamp,
-                        metadata: graph.meta_store.get(compact.metadata_offset),
-                        dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
-                    });
-                }
-                for &source_sid in graph.get_reverse_source_sids(&node_id).iter().take(MAX_EVENTS) {
-                    if edges.len() >= MAX_EVENTS { break; }
-                    let source_str = graph.interner.resolve(source_sid);
-                    for compact in graph.get_compact_relations(source_str) {
-                        if compact.dest_sid == graph.interner.get(&node_id).unwrap_or(compact.dest_sid) {
-                            edges.push(SubgraphEdge {
-                                source: graph.interner.resolve(compact.source_sid).to_string(),
-                                target: graph.interner.resolve(compact.dest_sid).to_string(),
-                                rel_type: format!("{}", compact.rel_type()),
-                                timestamp: compact.timestamp,
-                                metadata: graph.meta_store.get(compact.metadata_offset),
-                                dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
-                            });
-                            break;
-                        }
-                    }
-                }
-                Ok(edges)
-            })?;
+            let edges = api_clone.get_events_for_node(
+                graph_hunter_api::dto::graph_ops::EventsForNodeRequest {
+                    session: None,
+                    node_id: node_id.clone(),
+                },
+            )?;
             // Build subgraph for the event participants to update the frontend map
             let mut ids: HashSet<String> = HashSet::new();
             ids.insert(node_id);
@@ -582,11 +554,11 @@ async fn handler_events_for_node(
             }
             let node_ids: Vec<String> = ids.into_iter().collect();
             let sg = if !node_ids.is_empty() {
-                build_subgraph_for_ids(state_clone.as_ref(), &node_ids).ok()
+                build_subgraph_for_ids(api_clone.as_ref(), &node_ids).ok()
             } else {
                 None
             };
-            Ok::<_, crate::error::CommandError>((edges, sg))
+            Ok::<_, graph_hunter_api::ApiError>((edges, sg))
         }),
     )
     .await;
@@ -597,7 +569,11 @@ async fn handler_events_for_node(
             }
             ok_json(edges)
         }
-        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
         Err(_) => err_json("Events query timed out after 60 seconds"),
     }
@@ -611,14 +587,23 @@ struct CreateNoteBody {
 
 async fn handler_create_note(
     State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Json(body): Json<CreateNoteBody>,
 ) -> Response {
-    match create_note_impl(state.as_ref(), body.content, body.node_id) {
+    match api.create_note(graph_hunter_api::dto::entity::CreateNoteRequest {
+        session: None,
+        content: body.content,
+        node_id: body.node_id,
+    }) {
         Ok(note) => {
             emit_notes_changed(state.as_ref());
             ok_json(note)
         }
-        Err(e) => err_json(e),
+        Err(e) => {
+            let code = axum::http::StatusCode::from_u16(e.status_code())
+                .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
     }
 }
 
@@ -630,42 +615,30 @@ struct HuntResultsQuery {
 }
 
 async fn handler_hunt_results(
-    State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<HuntResultsQuery>,
 ) -> Response {
     let page = q.page.unwrap_or(0);
     let page_size = q.page_size.unwrap_or(20);
-    let min_score = q.min_score;
-
-    let cache = match state.cached_hunt_paths.read() {
-        Ok(guard) => guard.clone(),
-        Err(_) => return err_json("Lock poisoned".to_string()),
-    };
-    let total_paths = cache.len();
-
-    if cache.is_empty() {
-        return ok_json(PaginatedHuntResults {
-            total_paths: 0,
-            filtered_paths: 0,
-            page,
-            page_size,
-            paths: vec![],
-        });
-    }
-
-    match with_current_graph(state.as_ref(), |graph| {
-        let (scored_page, filtered_count) =
-            graph.score_and_paginate_paths(&cache, page, page_size, min_score);
-        Ok(PaginatedHuntResults {
-            total_paths,
-            filtered_paths: filtered_count,
-            page,
-            page_size,
-            paths: scored_page,
-        })
+    match api.get_hunt_page(graph_hunter_api::dto::hunt::GetHuntPageRequest {
+        session: None,
+        page,
+        page_size,
+        min_score: q.min_score,
+        dedup_mode: Some(graph_hunter_core::DedupMode::ByPath),
     }) {
-        Ok(res) => ok_json(res),
-        Err(e) => err_json(e),
+        Ok(resp) => ok_json(PaginatedHuntResults {
+            total_paths: resp.total_paths,
+            filtered_paths: resp.filtered_paths,
+            page: resp.page,
+            page_size: resp.page_size,
+            paths: resp.paths,
+        }),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
     }
 }
 
@@ -678,11 +651,14 @@ struct RunHuntBody {
 struct RunHuntResponse {
     path_count: usize,
     truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<graph_hunter_core::HuntDiagnostic>,
 }
 
 /// Write-heavy handler: uses spawn_blocking + timeout to avoid holding the async runtime.
 async fn handler_run_hunt(
     State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Json(body): Json<RunHuntBody>,
 ) -> Response {
     let hypothesis: Hypothesis = match graph_hunter_core::parse_dsl(
@@ -692,44 +668,38 @@ async fn handler_run_hunt(
         Ok(r) => r.hypothesis,
         Err(e) => return err_json(e.to_string()),
     };
-    let state_clone = state.clone();
+    let api_clone = api.clone();
+    let hypothesis_for_search = hypothesis.clone();
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::task::spawn_blocking(move || {
-            #[cfg(feature = "simd")]
-            {
-                with_current_graph(state_clone.as_ref(), |graph| {
-                    graph.search_temporal_pattern_simd(&hypothesis, None, Some(10_000))
-                        .map_err(|e| crate::error::CommandError::Internal(format!("Search failed: {}", e)))
-                })
-            }
-            #[cfg(not(feature = "simd"))]
-            {
-                with_current_graph(state_clone.as_ref(), |graph| {
-                    let scorer_ready = graph
-                        .anomaly_scorer
-                        .as_ref()
-                        .map(|s| s.is_finalized())
-                        .unwrap_or(false);
-                    if scorer_ready {
-                        graph.search_temporal_pattern_smart(&hypothesis, None, 10_000)
-                            .map_err(|e| crate::error::CommandError::Internal(format!("Search failed: {}", e)))
-                    } else {
-                        graph.search_temporal_pattern(&hypothesis, None, Some(10_000))
-                            .map_err(|e| crate::error::CommandError::Internal(format!("Search failed: {}", e)))
-                    }
-                })
-            }
+            api_clone.run_hunt(graph_hunter_api::dto::hunt::RunHuntRequest {
+                session: None,
+                hypothesis: hypothesis_for_search,
+                time_window: None,
+                max_results: Some(10_000),
+            })
         }),
     )
     .await;
 
     match result {
-        Ok(Ok(Ok((paths, truncated)))) => {
-            let path_count = paths.len();
-            if let Ok(mut cache) = state.cached_hunt_paths.write() {
-                *cache = paths.clone();
-            }
+        Ok(Ok(Ok(resp))) => {
+            // The cache is already populated by api.run_hunt; we just
+            // need to emit the mcp-view-update for the matched nodes.
+            // Build `node_ids` from cache (resp.paths is empty when > 100).
+            let paths = if resp.paths.is_empty() {
+                // Pull from the shared hunt-cache handle (same Arc the
+                // API just wrote to). Using the API's `hunt_cache_handle`
+                // keeps every transport on the exact same state.
+                api.hunt_cache_handle()
+                    .read()
+                    .ok()
+                    .map(|g| g.clone())
+                    .unwrap_or_default()
+            } else {
+                resp.paths.clone()
+            };
             let node_ids: Vec<String> = paths
                 .iter()
                 .flat_map(|p| p.iter().cloned())
@@ -737,10 +707,10 @@ async fn handler_run_hunt(
                 .into_iter()
                 .collect();
             if !node_ids.is_empty() {
-                if let Ok(sg) = build_subgraph_for_ids(state.as_ref(), &node_ids) {
+                if let Ok(sg) = build_subgraph_for_ids(api.as_ref(), &node_ids) {
                     mcp_emit_view(state.as_ref(), sg);
                 }
-            } else if path_count == 0 {
+            } else if resp.path_count == 0 {
                 mcp_emit_view(
                     state.as_ref(),
                     Subgraph {
@@ -749,106 +719,107 @@ async fn handler_run_hunt(
                     },
                 );
             }
-            ok_json(RunHuntResponse { path_count, truncated })
+            ok_json(RunHuntResponse {
+                path_count: resp.path_count,
+                truncated: resp.truncated,
+                diagnostic: resp.diagnostic,
+            })
         }
-        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
         Err(_) => err_json("Hunt timed out after 30 seconds".to_string()),
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct DiffHuntsBody {
+    hypothesis_dsl: String,
+    baseline_ts: i64,
+    current_ts: i64,
+}
+
+async fn handler_diff_hunts(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<DiffHuntsBody>,
+) -> Response {
+    let hypothesis: Hypothesis = match graph_hunter_core::parse_dsl(
+        body.hypothesis_dsl.trim(),
+        Some("MCP Diff Hunt"),
+    ) {
+        Ok(r) => r.hypothesis,
+        Err(e) => return err_json(e.to_string()),
+    };
+    let api_clone = api.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            api_clone.diff_hunts(graph_hunter_api::dto::hunt::DiffHuntsRequest {
+                session: None,
+                hypothesis,
+                baseline_ts: body.baseline_ts,
+                current_ts: body.current_ts,
+            })
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Ok(v))) => ok_json(v),
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Ok(Err(e)) => err_json(format!("Task error: {}", e)),
+        Err(_) => err_json("Diff timed out after 60 seconds".to_string()),
+    }
+}
+
 // ── New MCP endpoints ──────────────────────────────────────────────────
 
-async fn handler_graph_summary(State(state): State<Arc<AppState>>) -> Response {
-    match with_current_graph(state.as_ref(), |g| Ok(g.get_graph_summary())) {
-        Ok(v) => ok_json(v),
-        Err(e) => err_json(e),
-    }
+async fn handler_graph_summary(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    api_response(api.get_graph_summary(
+        graph_hunter_api::dto::geoip::GraphSummaryRequest::default(),
+    ))
 }
 
-async fn handler_entity_type_counts(State(state): State<Arc<AppState>>) -> Response {
-    match with_current_graph(state.as_ref(), |g| {
-        let counts: Vec<serde_json::Value> = g
-            .entity_type_counts()
-            .into_iter()
-            .map(|(t, c)| serde_json::json!({ "entity_type": t, "count": c }))
-            .collect();
-        Ok(counts)
-    }) {
-        Ok(v) => ok_json(v),
-        Err(e) => err_json(e),
-    }
+async fn handler_entity_type_counts(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    api_response(api.get_entity_type_counts(
+        graph_hunter_api::dto::entity::SessionOnly::default(),
+    ))
 }
 
-async fn handler_temporal_heatmap(State(state): State<Arc<AppState>>) -> Response {
-    match with_current_graph(state.as_ref(), |g| Ok(g.temporal_heatmap())) {
-        Ok(v) => ok_json(v),
-        Err(e) => err_json(e),
-    }
+#[derive(Debug, Deserialize)]
+struct HeatmapQuery {
+    #[serde(default)]
+    bucket_size_seconds: Option<i64>,
 }
 
-async fn handler_subnet_analysis(State(state): State<Arc<AppState>>) -> Response {
-    match with_current_graph(state.as_ref(), |graph| {
-        use graph_hunter_core::types::EntityType;
-        use graph_hunter_core::ip_utils;
-        use std::collections::HashMap;
+async fn handler_temporal_heatmap(
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<HeatmapQuery>,
+) -> Response {
+    api_response(api.get_temporal_heatmap(
+        graph_hunter_api::dto::analytics::TemporalHeatmapRequest {
+            session: None,
+            bucket_size_seconds: q.bucket_size_seconds,
+        },
+    ))
+}
 
-        let ip_ids: Vec<String> = graph
-            .entity_ids_for_type(&EntityType::IP)
-            .unwrap_or_default();
-
-        if ip_ids.is_empty() {
-            return Ok(serde_json::json!([]));
+async fn handler_subnet_analysis(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    match api.get_subnet_analysis(graph_hunter_api::dto::enrichment::SubnetAnalysisRequest::default())
+    {
+        Ok(v) => ok_json(v),
+        Err(e) => {
+            let code = axum::http::StatusCode::from_u16(e.status_code())
+                .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
-
-        let refs: Vec<&str> = ip_ids.iter().map(|s| s.as_str()).collect();
-        let subnet_groups = ip_utils::group_by_subnet(&refs);
-
-        let mut result: Vec<serde_json::Value> = Vec::new();
-        for (subnet, ips) in subnet_groups {
-            let is_internal = ips.first().map(|ip| ip_utils::is_private(ip)).unwrap_or(false);
-            let mut total_bytes: u64 = 0;
-            let mut has_bytes = false;
-            let mut service_counts: HashMap<String, usize> = HashMap::new();
-
-            for ip_str in &ips {
-                if let Some(entity) = graph.get_entity(ip_str) {
-                    if let Some(b) = entity.metadata.get("bytes") {
-                        if let Ok(n) = b.trim().parse::<u64>() {
-                            total_bytes += n;
-                            has_bytes = true;
-                        }
-                    }
-                }
-                for rel in graph.get_relations(ip_str) {
-                    if let Some(cat) = rel.metadata.get("service_category") {
-                        *service_counts.entry(cat.clone()).or_insert(0) += 1;
-                    }
-                }
-            }
-
-            let mut top: Vec<(String, usize)> = service_counts.into_iter().collect();
-            top.sort_by(|a, b| b.1.cmp(&a.1));
-            let top_services: Vec<String> = top.into_iter().map(|(name, _)| name).collect();
-
-            result.push(serde_json::json!({
-                "subnet": subnet,
-                "ip_count": ips.len(),
-                "ips": ips,
-                "total_bytes": if has_bytes { Some(total_bytes) } else { None::<u64> },
-                "is_internal": is_internal,
-                "top_services": top_services,
-            }));
-        }
-        result.sort_by(|a, b| {
-            let ca = a["ip_count"].as_u64().unwrap_or(0);
-            let cb = b["ip_count"].as_u64().unwrap_or(0);
-            cb.cmp(&ca)
-        });
-        Ok(serde_json::json!(result))
-    }) {
-        Ok(v) => ok_json(v),
-        Err(e) => err_json(e),
     }
 }
 
@@ -858,91 +829,287 @@ struct EnrichIpBody {
 }
 
 async fn handler_enrich_ip(
-    State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Json(body): Json<EnrichIpBody>,
 ) -> Response {
-    use graph_hunter_core::{ip_utils, geoip, write_geoip_to_metadata};
-
-    if !ip_utils::is_public(&body.ip) {
-        return err_json(format!("IP {} is not a public/routable address", body.ip));
-    }
-
-    // Try offline MaxMind first
-    let maxmind_result = {
-        let provider = state.geoip_provider.lock().ok();
-        provider.and_then(|guard| guard.as_ref().and_then(|p| p.lookup(&body.ip)))
-    };
-
-    let result = if let Some(r) = maxmind_result {
-        r
-    } else {
-        // Try HTTP fallback
-        let client = {
-            let guard = state.http_geoip_client.lock().ok();
-            guard.and_then(|g| g.clone())
-        };
-        match client {
-            Some(c) => {
-                let provider = geoip::http::HttpGeoIpProvider::new(c);
-                let cancel = tokio_util::sync::CancellationToken::new();
-                match provider.lookup(&body.ip, cancel).await {
-                    Ok(r) => r,
-                    Err(e) => return err_json(format!("GeoIP lookup failed: {e}")),
-                }
-            }
-            None => return err_json("No GeoIP provider available".to_string()),
+    match api
+        .enrich_ip(graph_hunter_api::dto::geoip::EnrichIpRequest {
+            session: None,
+            ip: body.ip,
+        })
+        .await
+    {
+        Ok(v) => ok_json(v),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
-    };
+    }
+}
 
-    // Write to entity metadata
-    let _ = crate::with_current_graph_mut(state.as_ref(), |graph| {
-        if let Some(entity) = graph.get_entity_mut(&body.ip) {
-            write_geoip_to_metadata(&mut entity.metadata, &result);
+async fn handler_catalog(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    ok_json(api.get_catalog())
+}
+
+async fn handler_catalog_with_status(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    match api
+        .get_catalog_with_status(graph_hunter_api::dto::dsl::GetCatalogWithStatusRequest::default())
+    {
+        Ok(v) => ok_json(v),
+        Err(e) => {
+            let code = axum::http::StatusCode::from_u16(e.status_code())
+                .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
-        Ok(())
-    });
-
-    ok_json(result)
-}
-
-async fn handler_catalog(State(_state): State<Arc<AppState>>) -> Response {
-    let catalog = graph_hunter_core::get_catalog();
-    ok_json(catalog)
-}
-
-async fn handler_list_datasets(State(state): State<Arc<AppState>>) -> Response {
-    match crate::with_current_session(state.as_ref(), |session| {
-        let datasets = session.datasets.read().map_err(|e| {
-            crate::error::CommandError::GraphLocked(format!("Lock poisoned: {e}"))
-        })?;
-        Ok(datasets.clone())
-    }) {
-        Ok(v) => ok_json(v),
-        Err(e) => err_json(e),
     }
 }
 
-async fn handler_path_nodes(State(state): State<Arc<AppState>>) -> Response {
-    match crate::with_current_session(state.as_ref(), |session| {
-        let nodes = session.path_node_ids.read().map_err(|e| {
-            crate::error::CommandError::GraphLocked(format!("Lock poisoned: {e}"))
-        })?;
-        Ok(nodes.clone())
+async fn handler_catalog_diagnostics(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    ok_json(api.get_catalog_diagnostics())
+}
+
+#[derive(Debug, Deserialize)]
+struct TagEntityBody {
+    node_id: String,
+    tag: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn handler_tag_entity(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<TagEntityBody>,
+) -> Response {
+    api_response(api.tag_entity(graph_hunter_api::dto::entity::TagEntityRequest {
+        session: None,
+        node_id: body.node_id,
+        tag: body.tag,
+        reason: body.reason,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct UntagEntityBody {
+    node_id: String,
+    tag: String,
+}
+
+async fn handler_untag_entity(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<UntagEntityBody>,
+) -> Response {
+    match api.untag_entity(graph_hunter_api::dto::entity::UntagEntityRequest {
+        session: None,
+        node_id: body.node_id,
+        tag: body.tag,
     }) {
-        Ok(v) => ok_json(v),
-        Err(e) => err_json(e),
+        Ok(()) => ok_json(serde_json::json!({"ok": true})),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
     }
 }
 
-async fn handler_list_notes(State(state): State<Arc<AppState>>) -> Response {
-    match crate::with_current_session(state.as_ref(), |session| {
-        let notes = session.notes.read().map_err(|e| {
-            crate::error::CommandError::GraphLocked(format!("Lock poisoned: {e}"))
-        })?;
-        Ok(notes.clone())
+#[derive(Debug, Deserialize)]
+struct ListTaggedQuery {
+    #[serde(default)]
+    tag_prefix: Option<String>,
+}
+
+async fn handler_list_tagged(
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<ListTaggedQuery>,
+) -> Response {
+    api_response(api.list_tagged(graph_hunter_api::dto::entity::ListTaggedRequest {
+        session: None,
+        tag_prefix: q.tag_prefix,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ExportIocsBody {
+    format: String,
+    #[serde(default)]
+    tag_prefix: Option<String>,
+}
+
+async fn handler_export_iocs(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<ExportIocsBody>,
+) -> Response {
+    let format = body.format.clone();
+    match api.export_iocs(graph_hunter_api::dto::export::ExportIocsRequest {
+        session: None,
+        format: body.format,
+        tag_prefix: body.tag_prefix,
     }) {
+        Ok(data) => ok_json(serde_json::json!({ "data": data, "format": format })),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishIocsBody {
+    watchlist_name: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    tag_prefix: Option<String>,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    confirm: Option<bool>,
+}
+
+async fn handler_publish_iocs_to_sentinel(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<PublishIocsBody>,
+) -> Response {
+    match api
+        .publish_iocs_to_sentinel(graph_hunter_api::dto::sentinel::PublishIocsRequest {
+            session: None,
+            watchlist_name: body.watchlist_name,
+            display_name: body.display_name,
+            description: body.description,
+            tag_prefix: body.tag_prefix,
+            dry_run: body.dry_run.unwrap_or(false),
+            confirm: body.confirm.unwrap_or(false),
+        })
+        .await
+    {
         Ok(v) => ok_json(v),
-        Err(e) => err_json(e),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveSigmaBody {
+    hypothesis_dsl: String,
+    title: String,
+    #[serde(default)]
+    tag_prefix: Option<String>,
+    #[serde(default)]
+    level: Option<String>,
+}
+
+async fn handler_save_hypothesis_as_sigma(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<SaveSigmaBody>,
+) -> Response {
+    let api_clone = api.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        api_clone.save_hypothesis_as_sigma(graph_hunter_api::dto::sigma::SaveHypothesisAsSigmaRequest {
+            session: None,
+            hypothesis_dsl: body.hypothesis_dsl,
+            title: body.title,
+            tag_prefix: body.tag_prefix,
+            level: body.level,
+        })
+    })
+    .await;
+    match res {
+        Ok(Ok(v)) => ok_json(v),
+        Ok(Err(e)) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Err(e) => err_json(format!("Task error: {e}")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct FileTicketBody {
+    system: String,
+    title: String,
+    body: String,
+    #[serde(default)]
+    priority: Option<String>,
+    #[serde(default)]
+    assignee: Option<String>,
+    #[serde(default)]
+    dry_run: Option<bool>,
+    #[serde(default)]
+    confirm: Option<bool>,
+}
+
+async fn handler_file_ticket(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<FileTicketBody>,
+) -> Response {
+    match api
+        .file_ticket(graph_hunter_api::dto::ticket::FileTicketRequest {
+            system: body.system,
+            title: body.title,
+            body: body.body,
+            priority: body.priority,
+            assignee: body.assignee,
+            dry_run: body.dry_run.unwrap_or(false),
+            confirm: body.confirm.unwrap_or(false),
+        })
+        .await
+    {
+        Ok(v) => ok_json(v),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
+async fn handler_list_datasets(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    api_response(api.list_datasets(
+        graph_hunter_api::dto::dataset::ListDatasetsRequest::default(),
+    ))
+}
+
+async fn handler_path_nodes(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    api_response(api.get_path_nodes(
+        graph_hunter_api::dto::entity::SessionOnly::default(),
+    ))
+}
+
+async fn handler_list_notes(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    api_response(api.get_notes(
+        graph_hunter_api::dto::entity::SessionOnly::default(),
+    ))
+}
+
+/// Fetch a single note by its UUID. Used as the target of the `url` field
+/// returned by `cmd_create_note` so external systems (Jira, Zoho, Slack)
+/// can link directly to the note without reproducing the note list logic.
+async fn handler_get_note_by_id(
+    State(api): State<Arc<GraphHunterApi>>,
+    Path(id): Path<String>,
+) -> Response {
+    match api.get_notes(graph_hunter_api::dto::entity::SessionOnly::default()) {
+        Ok(notes) => match notes.into_iter().find(|n| n.id == id) {
+            Some(note) => ok_json(note),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("note not found: {id}") })),
+            )
+                .into_response(),
+        },
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
     }
 }
 
@@ -953,53 +1120,22 @@ struct ExportSubgraphBody {
 }
 
 async fn handler_export_subgraph(
-    State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Json(body): Json<ExportSubgraphBody>,
 ) -> Response {
     let fmt = body.format.unwrap_or_else(|| "json".to_string());
-    match with_current_graph(state.as_ref(), |graph| {
-        use graph_hunter_core::export::{
-            ExportSubgraphEdge, ExportSubgraphNode, export_subgraph_csv, export_subgraph_json,
-        };
-        let id_set: HashSet<&str> = body.node_ids.iter().map(|s| s.as_str()).collect();
-        struct ON { id: String, entity_type: String, score: f64 }
-        struct OE { source: String, target: String, rel_type: String, timestamp: i64 }
-        let owned_nodes: Vec<ON> = body.node_ids.iter()
-            .filter_map(|id| graph.get_entity(id))
-            .map(|e| ON { id: e.id.clone(), entity_type: format!("{}", e.entity_type), score: e.score })
-            .collect();
-        let mut owned_edges: Vec<OE> = Vec::new();
-        for src in &body.node_ids {
-            for c in graph.get_compact_relations(src) {
-                if owned_edges.len() >= 10_000 { break; }
-                let dst = graph.interner.resolve(c.dest_sid);
-                if id_set.contains(dst) {
-                    owned_edges.push(OE {
-                        source: graph.interner.resolve(c.source_sid).to_string(),
-                        target: dst.to_string(),
-                        rel_type: format!("{}", c.rel_type()),
-                        timestamp: c.timestamp,
-                    });
-                }
-            }
-        }
-        let en: Vec<ExportSubgraphNode<'_>> = owned_nodes.iter()
-            .map(|n| ExportSubgraphNode { id: &n.id, entity_type: &n.entity_type, score: n.score })
-            .collect();
-        let ee: Vec<ExportSubgraphEdge<'_>> = owned_edges.iter()
-            .map(|e| ExportSubgraphEdge { source: &e.source, target: &e.target, rel_type: &e.rel_type, timestamp: e.timestamp })
-            .collect();
-        let mut buf = Vec::new();
-        match fmt.as_str() {
-            "csv" => export_subgraph_csv(&en, &ee, &mut buf)
-                .map_err(|e| crate::error::CommandError::IoError(e.to_string()))?,
-            _ => export_subgraph_json(&en, &ee, &mut buf)
-                .map_err(|e| crate::error::CommandError::IoError(e.to_string()))?,
-        }
-        String::from_utf8(buf).map_err(|e| crate::error::CommandError::Internal(format!("{e}")))
+    let fmt_for_resp = fmt.clone();
+    match api.export_subgraph(graph_hunter_api::dto::export::ExportSubgraphRequest {
+        session: None,
+        format: fmt,
+        nodes: body.node_ids,
     }) {
-        Ok(text) => ok_json(serde_json::json!({ "data": text, "format": fmt })),
-        Err(e) => err_json(e),
+        Ok(text) => ok_json(serde_json::json!({ "data": text, "format": fmt_for_resp })),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
     }
 }
 
@@ -1011,12 +1147,22 @@ struct ParseDslBody {
     name: Option<String>,
 }
 
-async fn handler_parse_dsl(Json(body): Json<ParseDslBody>) -> Response {
-    match graph_hunter_core::parse_dsl(&body.dsl, body.name.as_deref()) {
-        Ok(result) => ok_json(serde_json::json!({
+async fn handler_parse_dsl(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<ParseDslBody>,
+) -> Response {
+    // Preserve the legacy `{valid, formatted, steps}` / `{valid:false, error}`
+    // shape for existing MCP clients. The canonical error path
+    // (`ApiError::InvalidInput` → 400) will become the default when MCP
+    // clients are migrated in a later phase; for now, adapt.
+    match api.parse_dsl(graph_hunter_api::dto::dsl::ParseDslRequest {
+        input: body.dsl,
+        name: body.name,
+    }) {
+        Ok(resp) => ok_json(serde_json::json!({
             "valid": true,
-            "formatted": result.formatted,
-            "steps": result.hypothesis.steps.len(),
+            "formatted": resp.formatted,
+            "steps": resp.steps,
         })),
         Err(e) => ok_json(serde_json::json!({
             "valid": false,
@@ -1034,100 +1180,62 @@ struct EventsPaginatedQuery {
 }
 
 async fn handler_events_paginated(
-    State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<EventsPaginatedQuery>,
 ) -> Response {
-    let state_clone = state.clone();
+    let api_clone = api.clone();
     let result = tokio::time::timeout(
         Duration::from_secs(60),
         tokio::task::spawn_blocking(move || {
-            with_current_graph(state_clone.as_ref(), |graph| {
-                let page = q.page.unwrap_or(0);
-                let page_size = q.page_size.unwrap_or(100);
-
-                let mut all_edges: Vec<SubgraphEdge> = Vec::new();
-                for compact in graph.get_compact_relations(&q.node_id) {
-                    all_edges.push(SubgraphEdge {
-                        source: graph.interner.resolve(compact.source_sid).to_string(),
-                        target: graph.interner.resolve(compact.dest_sid).to_string(),
-                        rel_type: format!("{}", compact.rel_type()),
-                        timestamp: compact.timestamp,
-                        metadata: graph.meta_store.get(compact.metadata_offset),
-                        dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
-                    });
-                }
-                let target_sid = graph.interner.get(&q.node_id);
-                for &source_sid in graph.get_reverse_source_sids(&q.node_id) {
-                    for compact in graph.get_relations_by_sid(source_sid) {
-                        if Some(compact.dest_sid) == target_sid {
-                            all_edges.push(SubgraphEdge {
-                                source: graph.interner.resolve(compact.source_sid).to_string(),
-                                target: graph.interner.resolve(compact.dest_sid).to_string(),
-                                rel_type: format!("{}", compact.rel_type()),
-                                timestamp: compact.timestamp,
-                                metadata: graph.meta_store.get(compact.metadata_offset),
-                                dataset_id: graph.resolve_dataset_tag(compact.dataset_tag).map(|s| s.to_string()),
-                            });
-                        }
-                    }
-                }
-
-                match q.sort_by.as_deref() {
-                    Some("timestamp") => all_edges.sort_by_key(|e| e.timestamp),
-                    Some("rel_type") => all_edges.sort_by(|a, b| a.rel_type.cmp(&b.rel_type)),
-                    Some("source") => all_edges.sort_by(|a, b| a.source.cmp(&b.source)),
-                    Some("target") => all_edges.sort_by(|a, b| a.target.cmp(&b.target)),
-                    _ => {}
-                }
-
-                let total_count = all_edges.len();
-                let start = page * page_size;
-                let events: Vec<SubgraphEdge> = all_edges.into_iter().skip(start).take(page_size).collect();
-
-                Ok(serde_json::json!({
-                    "events": events,
-                    "total_count": total_count,
-                    "page": page,
-                    "page_size": page_size,
-                }))
-            })
+            api_clone.get_events_paginated(
+                graph_hunter_api::dto::graph_ops::EventsPaginatedRequest {
+                    session: None,
+                    node_id: q.node_id,
+                    page: q.page.unwrap_or(0),
+                    page_size: q.page_size,
+                    sort_by: q.sort_by,
+                },
+            )
         }),
     )
     .await;
     match result {
         Ok(Ok(Ok(v))) => ok_json(v),
-        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
         Ok(Err(e)) => err_json(format!("Task error: {e}")),
         Err(_) => err_json("Events query timed out"),
     }
 }
 
 async fn handler_expand_grouped(
-    State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<ExpandQuery>,
 ) -> Response {
-    let state_clone = state.clone();
+    let api_clone = api.clone();
     let result = tokio::time::timeout(
         Duration::from_secs(60),
         tokio::task::spawn_blocking(move || {
-            with_current_graph(state_clone.as_ref(), |graph| {
-                graph
-                    .get_neighborhood_grouped(
-                        &q.node_id,
-                        q.max_hops.unwrap_or(1),
-                        q.max_nodes.unwrap_or(50),
-                        None,
-                    )
-                    .ok_or_else(|| crate::error::CommandError::InvalidInput(
-                        format!("Entity not found: {}", q.node_id),
-                    ))
+            api_clone.expand_node_grouped(graph_hunter_api::dto::graph_ops::ExpandNodeRequest {
+                session: None,
+                node_id: q.node_id,
+                max_hops: q.max_hops,
+                max_nodes: q.max_nodes,
+                filter: None,
             })
         }),
     )
     .await;
     match result {
         Ok(Ok(Ok(v))) => ok_json(v),
-        Ok(Ok(Err(e))) => err_json(e),
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
         Ok(Err(e)) => err_json(format!("Task error: {e}")),
         Err(_) => err_json("Expand grouped timed out"),
     }
@@ -1136,58 +1244,60 @@ async fn handler_expand_grouped(
 #[derive(Debug, Deserialize)]
 struct ExportHuntBody {
     format: Option<String>,
+    #[serde(default)]
+    page: Option<usize>,
+    #[serde(default)]
+    page_size: Option<usize>,
+    /// When `true`, collapses identical paths (DedupMode::ByPath) — the
+    /// critical fix for the 166 KB transport truncation the feedback cited.
+    #[serde(default)]
+    aggregate: Option<bool>,
 }
 
 async fn handler_export_hunt_results(
-    State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
     Json(body): Json<ExportHuntBody>,
 ) -> Response {
     let fmt = body.format.unwrap_or_else(|| "json".to_string());
-
-    let cache = {
-        let guard = state.cached_hunt_paths.read();
-        match guard {
-            Ok(g) if !g.is_empty() => g.clone(),
-            _ => return err_json("No hunt results to export. Run a hunt first."),
-        }
-    };
-
-    match with_current_graph(state.as_ref(), |graph| {
-        use graph_hunter_core::export::{export_hunt_results_csv, export_hunt_results_json};
-        let (scored, _) = graph.score_and_paginate_paths(&cache, 0, cache.len(), None);
-        let mut buf = Vec::new();
-        match fmt.as_str() {
-            "csv" => export_hunt_results_csv(&scored, &mut buf)
-                .map_err(|e| crate::error::CommandError::IoError(e.to_string()))?,
-            _ => export_hunt_results_json(&scored, &mut buf)
-                .map_err(|e| crate::error::CommandError::IoError(e.to_string()))?,
-        }
-        String::from_utf8(buf).map_err(|e| crate::error::CommandError::Internal(format!("{e}")))
+    let fmt_for_resp = fmt.clone();
+    match api.export_hunt_results(graph_hunter_api::dto::export::ExportHuntResultsRequest {
+        session: None,
+        format: fmt,
+        page: body.page,
+        page_size: body.page_size,
+        aggregate: body.aggregate,
     }) {
-        Ok(text) => ok_json(serde_json::json!({ "data": text, "format": fmt })),
-        Err(e) => err_json(e),
+        Ok(text) => ok_json(serde_json::json!({ "data": text, "format": fmt_for_resp })),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
     }
 }
 
-async fn handler_enable_anomaly_scoring(State(state): State<Arc<AppState>>) -> Response {
-    match crate::with_current_graph_mut(state.as_ref(), |graph| {
-        graph.enable_anomaly_scoring(Default::default());
-        Ok(serde_json::json!({ "enabled": true }))
-    }) {
-        Ok(v) => ok_json(v),
-        Err(e) => err_json(e),
+async fn handler_enable_anomaly_scoring(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    match api.enable_anomaly_scoring(
+        graph_hunter_api::dto::anomaly::EnableAnomalyScoringRequest::default(),
+    ) {
+        Ok(()) => ok_json(serde_json::json!({ "enabled": true })),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
     }
 }
 
-async fn handler_compute_scores(State(state): State<Arc<AppState>>) -> Response {
-    let state_clone = state.clone();
+async fn handler_compute_scores(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    let api_clone = api.clone();
     let result = tokio::time::timeout(
         Duration::from_secs(120),
         tokio::task::spawn_blocking(move || {
-            crate::with_current_graph_mut(state_clone.as_ref(), |graph| {
-                graph.compute_scores();
-                Ok(serde_json::json!({ "computed": true }))
-            })
+            api_clone
+                .compute_scores(graph_hunter_api::dto::graph_ops::ComputeScoresRequest::default())
+                .map(|()| serde_json::json!({ "computed": true }))
+                .map_err(|e| crate::error::CommandError::from(e))
         }),
     )
     .await;
@@ -1196,5 +1306,71 @@ async fn handler_compute_scores(State(state): State<Arc<AppState>>) -> Response 
         Ok(Ok(Err(e))) => err_json(e),
         Ok(Err(e)) => err_json(format!("Task error: {e}")),
         Err(_) => err_json("Score computation timed out"),
+    }
+}
+
+// ── KQL / Sentinel MCP endpoints ──
+
+#[derive(Debug, Deserialize)]
+struct RunKqlBody {
+    kql: String,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    azure_tenant_id: Option<String>,
+    #[serde(default)]
+    azure_client_id: Option<String>,
+    #[serde(default)]
+    azure_client_secret: Option<String>,
+}
+
+/// Execute an ad-hoc KQL query against Azure Log Analytics. Delegates
+/// to the canonical API.
+async fn handler_run_kql(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<RunKqlBody>,
+) -> Response {
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        api.run_kql(graph_hunter_api::dto::sentinel::RunKqlRequest {
+            kql: body.kql,
+            workspace_id: body.workspace_id.unwrap_or_default(),
+            azure_tenant_id: body.azure_tenant_id.unwrap_or_default(),
+            azure_client_id: body.azure_client_id.unwrap_or_default(),
+            azure_client_secret: body.azure_client_secret.unwrap_or_default(),
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(v)) => ok_json(v),
+        Ok(Err(e)) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Err(_) => err_json("KQL execution timed out (120s)"),
+    }
+}
+
+/// Get current Sentinel connector status.
+async fn handler_sentinel_status(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    match api.sentinel_status() {
+        Ok(v) => return ok_json(v),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            return (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
+        }
+    }
+    #[allow(unreachable_code)]
+    {
+        // Legacy branches left as dead code for one release; the
+        // canonical api.sentinel_status() already returns the `None`
+        // case as a proper response.
+        ok_json(serde_json::json!({
+            "connected": false,
+            "connector_id": null,
+            "status": null,
+        }))
     }
 }

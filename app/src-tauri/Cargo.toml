@@ -27,6 +27,7 @@ dirs = "5"
 memmap2 = "0.9"
 graph_hunter_core = { path = "../../graph_hunter_core", features = ["ml-scoring", "geoip"] }
 graph_hunter_cli = { path = "../../graph_hunter_cli" }
+graph_hunter_api = { path = "../../graph_hunter_api", features = ["ml-scoring"] }
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -53,4 +54,9 @@ subtle = "2"
 # Opt-in: enable with --features simd. Runtime falls back to pure-Rust DFS when AVX2 is unavailable.
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
-simd = ["graph_hunter_core/simd"]
+# Propagates to BOTH graph_hunter_core (the matcher) AND graph_hunter_api.
+# Without the api-crate propagation, the `#[cfg(feature = "simd")]` switch
+# in `GraphHunterApi::run_hunt` (which routes to `search_temporal_pattern_simd`)
+# stays OFF even when Tauri is built with `--features simd`, silently
+# dropping back to the scalar matcher.
+simd = ["graph_hunter_core/simd", "graph_hunter_api/simd"]

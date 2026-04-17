@@ -9,4 +9,7 @@ pub mod ai_commands;
 pub mod analytics;
 pub mod export;
 pub mod sentinel;
+pub mod sentinel_publish;
+pub mod sigma_save;
+pub mod ticket_file;
 pub mod azure_streaming_smoke;
