@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod anomaly;
+pub mod backend;
 pub mod benchmark;
 pub mod catalog;
 pub mod cognito;
@@ -69,6 +70,13 @@ pub use forti_analyzer::{
 };
 pub use iis_w3c::{IisW3cParser, looks_like_iis_w3c, extract_fields_header};
 pub use graph::{CompactionStats, GraphHunter};
+pub use backend::{GraphRead, GraphWrite};
+/// Forward-compatibility alias: the plan (P2-B) eventually renames
+/// `GraphHunter` → `InMemoryGraph` once every call site has migrated
+/// to the trait-based API. Until then, this alias lets new code opt
+/// into the target name without touching the 121+ existing
+/// references.
+pub type InMemoryGraph = graph::GraphHunter;
 pub use interner::{StrId, StringInterner};
 pub use hypothesis::{AggClause, AggColumn, Hypothesis, HypothesisStep, Predicate};
 pub use parser::{LogParser, ParsedTriple};
