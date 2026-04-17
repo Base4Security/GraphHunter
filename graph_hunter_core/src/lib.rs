@@ -31,6 +31,7 @@ pub mod scoring;
 pub mod sentinel;
 pub mod service_classifier;
 pub mod simd_matcher;
+pub mod simd_rust;
 pub mod sources;
 pub mod spill;
 pub mod sysmon;
