@@ -95,13 +95,21 @@ impl GraphHunterApi {
             }
 
             let target_sid = graph.interner.get(&req.node_id);
-            for &source_sid in graph
-                .get_reverse_source_sids(&req.node_id)
-                .iter()
-                .take(MAX_EVENTS)
-            {
+            // `reverse_adj` stores one entry per incoming edge, so a single
+            // source `S` with `X` incoming edges to `node_id` appears `X`
+            // times. Without dedup, the outer loop fires `X` times per
+            // unique source, and the inner `break` means we push the
+            // same first-match edge `X` times — that's why this endpoint
+            // used to return 500 identical events when a node had one
+            // heavy source.
+            let mut seen_sources: std::collections::HashSet<graph_hunter_core::StrId> =
+                std::collections::HashSet::new();
+            for &source_sid in graph.get_reverse_source_sids(&req.node_id) {
                 if edges.len() >= MAX_EVENTS {
                     break;
+                }
+                if !seen_sources.insert(source_sid) {
+                    continue;
                 }
                 for compact in graph.get_relations_by_sid(source_sid) {
                     if Some(compact.dest_sid) == target_sid {
@@ -139,7 +147,16 @@ impl GraphHunterApi {
                 compacts.push(*compact);
             }
             let target_sid = graph.interner.get(&req.node_id);
+            // `reverse_adj` stores one entry per incoming edge (not one
+            // per distinct source), so a source `S` with `X` edges to
+            // `node_id` appears `X` times. Without this dedup, the
+            // inner loop below pushes every matching edge `X` times,
+            // inflating `total_count` quadratically.
+            let mut seen_sources: HashSet<graph_hunter_core::StrId> = HashSet::new();
             for &source_sid in graph.get_reverse_source_sids(&req.node_id) {
+                if !seen_sources.insert(source_sid) {
+                    continue;
+                }
                 for compact in graph.get_relations_by_sid(source_sid) {
                     if Some(compact.dest_sid) == target_sid {
                         compacts.push(*compact);
