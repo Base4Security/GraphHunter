@@ -1283,12 +1283,34 @@ impl GraphHunter {
     /// and this surfaces that direction explicitly instead of forcing users
     /// to discover it through failed `run_hunt` calls.
     ///
-    /// O(E) scan over `edge_store`; metadata keys come from `meta_store`
-    /// and are unioned per group. Results are sorted by edge_count
-    /// descending so the most common relationships appear first.
+    /// Memoized behind `schema_cache` keyed by `(edge_count, meta_bytes)`;
+    /// warm calls are O(1). Cold computation is one O(E) pass over
+    /// `edge_store`, per-edge cost dominated by cheap entity type lookup
+    /// (full metadata is NOT decoded — only key names via
+    /// `MetadataStore::visit_keys`, and each triple stops sampling keys
+    /// after `SCHEMA_META_SAMPLE_CAP` edges since the key set is almost
+    /// always stable within the first hundred edges per triple). Results
+    /// are sorted by edge_count descending.
     pub fn get_relation_schema(&self) -> Vec<RelSchemaEntry> {
-        // Resolve sid → EntityType via `entities.get`; Other(name) entries
-        // hash on their Display string so custom types stay distinct.
+        let edge_count = self.edge_store.len();
+        let meta_bytes = self.meta_store.size_bytes();
+
+        {
+            let cache = self.schema_cache.lock().expect("schema_cache poisoned");
+            if let Some(entry) = cache.as_ref() {
+                if entry.edge_count == edge_count && entry.meta_bytes == meta_bytes {
+                    return entry.schema.clone();
+                }
+            }
+        }
+
+        // Per-triple edge sample cap for metadata key discovery. Threat-hunt
+        // edges emitted by the same parser share the same metadata schema;
+        // the key set is fixed within the first hundred edges of a triple.
+        // Scanning every one of the 7M edges just to re-confirm already-
+        // known keys wastes ~25% of schema compute for zero new info.
+        const SCHEMA_META_SAMPLE_CAP: usize = 1_000;
+
         let mut groups: HashMap<(RelationType, EntityType, EntityType), (usize, HashSet<String>)> =
             HashMap::new();
 
@@ -1305,11 +1327,12 @@ impl GraphHunter {
 
             let slot = groups.entry((rel, src_et, dst_et)).or_insert_with(|| (0, HashSet::new()));
             slot.0 += 1;
-            if compact.metadata_offset != 0 {
-                let meta = self.meta_store.get(compact.metadata_offset);
-                for k in meta.keys() {
-                    slot.1.insert(k.clone());
-                }
+            if compact.metadata_offset != 0 && slot.0 <= SCHEMA_META_SAMPLE_CAP {
+                self.meta_store.visit_keys(compact.metadata_offset, |k| {
+                    if !slot.1.contains(k) {
+                        slot.1.insert(k.to_string());
+                    }
+                });
             }
         }
 
@@ -1329,6 +1352,16 @@ impl GraphHunter {
             .collect();
 
         out.sort_by(|a, b| b.edge_count.cmp(&a.edge_count));
+
+        {
+            let mut cache = self.schema_cache.lock().expect("schema_cache poisoned");
+            *cache = Some(crate::graph::SchemaCacheEntry {
+                edge_count,
+                meta_bytes,
+                schema: out.clone(),
+            });
+        }
+
         out
     }
 

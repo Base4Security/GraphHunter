@@ -55,6 +55,14 @@ impl MetadataStore {
             self.data[pos], self.data[pos+1], self.data[pos+2], self.data[pos+3]
         ]) as usize;
         pos += 4;
+        // A single metadata entry occupies at least 4 bytes (two u16 lens
+        // for key and value with empty content). If `count` claims more
+        // pairs than could physically fit in the remaining bytes, the
+        // offset is corrupt / out of sync. Return empty instead of
+        // letting `HashMap::with_capacity` request gigabytes.
+        if count.saturating_mul(4) > self.data.len().saturating_sub(pos) {
+            return HashMap::new();
+        }
         let mut map = HashMap::with_capacity(count);
         for _ in 0..count {
             if pos + 2 > self.data.len() { break; }
@@ -72,6 +80,42 @@ impl MetadataStore {
             map.insert(key, val);
         }
         map
+    }
+
+    /// Walks only the keys at the given offset, handing each as a borrowed
+    /// `&str` into the backing bytes without allocating. Values are skipped
+    /// by advancing past their bytes. Used by aggregation paths (schema
+    /// discovery, stat counters) that need key names but not values —
+    /// `get()` would allocate a full `HashMap<String, String>` per call
+    /// and throw away the values, which dominates wall-clock on large
+    /// graphs.
+    pub fn visit_keys<F: FnMut(&str)>(&self, offset: u64, mut f: F) {
+        if offset == 0 || offset as usize >= self.data.len() {
+            return;
+        }
+        let mut pos = offset as usize;
+        if pos + 4 > self.data.len() {
+            return;
+        }
+        let count = u32::from_le_bytes([
+            self.data[pos], self.data[pos+1], self.data[pos+2], self.data[pos+3]
+        ]) as usize;
+        pos += 4;
+        if count.saturating_mul(4) > self.data.len().saturating_sub(pos) {
+            return;
+        }
+        for _ in 0..count {
+            if pos + 2 > self.data.len() { return; }
+            let klen = u16::from_le_bytes([self.data[pos], self.data[pos+1]]) as usize;
+            pos += 2;
+            if pos + klen > self.data.len() { return; }
+            let key = std::str::from_utf8(&self.data[pos..pos+klen]).unwrap_or("");
+            f(key);
+            pos += klen;
+            if pos + 2 > self.data.len() { return; }
+            let vlen = u16::from_le_bytes([self.data[pos], self.data[pos+1]]) as usize;
+            pos += 2 + vlen;
+        }
     }
 
     /// Current size in bytes.

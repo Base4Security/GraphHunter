@@ -1,6 +1,8 @@
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use crate::analytics::RelSchemaEntry;
 
 use rayon::prelude::*;
 
@@ -104,6 +106,23 @@ pub struct GraphHunter {
     pub anomaly_scorer: Option<AnomalyScorer>,
     /// Whether edges have been sorted by timestamp (avoids re-sorting on every search).
     edges_sorted: bool,
+    /// Memoized relation schema. Keyed by the `(edge_count, meta_bytes)`
+    /// fingerprint so it auto-invalidates after any ingest that appends
+    /// an edge (and any edge with metadata grows `meta_bytes`). Schema
+    /// computation is O(E) and dominated by metadata decode; on graphs
+    /// with millions of edges the uncached call costs tens of seconds.
+    /// Shared via `Arc<Mutex<_>>` so the default `#[derive(Clone)]` on
+    /// `GraphHunter` keeps working.
+    pub(crate) schema_cache: Arc<Mutex<Option<SchemaCacheEntry>>>,
+}
+
+/// One entry in the schema cache: stores the fingerprint used to validate
+/// freshness plus the computed schema.
+#[derive(Clone)]
+pub(crate) struct SchemaCacheEntry {
+    pub edge_count: usize,
+    pub meta_bytes: usize,
+    pub schema: Vec<RelSchemaEntry>,
 }
 
 /// Checks if a relation type tag matches a pattern, treating Any as wildcard.
@@ -127,6 +146,7 @@ impl GraphHunter {
             dataset_tags: vec![Arc::from("")],
             anomaly_scorer: None,
             edges_sorted: false,
+            schema_cache: Arc::new(Mutex::new(None)),
         }
     }
 
