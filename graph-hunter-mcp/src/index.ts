@@ -1023,14 +1023,19 @@ server.tool(
 // get_relation_schema – enumerate (rel_type, source_type, target_type) triples
 server.tool(
   "get_relation_schema",
-  "List every (rel_type, source_type, target_type) triple actually present in the loaded graph, with edge counts and observed metadata keys. Call this BEFORE writing a run_hunt DSL — it's the cheapest way to confirm edge direction and discover which metadata keys can be used in filter predicates. Replaces trial-and-error hunt authoring with zero-result feedback.",
+  "List every (rel_type, source_type, target_type) triple actually present in the loaded graph, with edge counts and observed metadata keys. Call this BEFORE writing a run_hunt DSL — it's the cheapest way to confirm edge direction and discover which metadata keys can be used in filter predicates. Replaces trial-and-error hunt authoring with zero-result feedback. Response shape: `{ entries, _meta: { compute_ms, cache_hit } }` — `cache_hit=true` means the result came from the memoized schema cache, so an analyst can tell at a glance whether the warm path is working.",
   async () => {
     const start = Date.now();
     log("tool", "get_relation_schema", {});
     try {
       const v = await apiGet("/relation_schema");
       const summaryStr = summarizeResult("get_relation_schema", v);
-      log("tool", "get_relation_schema done", { duration_ms: Date.now() - start, result: summaryStr });
+      const meta = (v as { _meta?: { compute_ms?: number; cache_hit?: boolean } })?._meta;
+      log("tool", "get_relation_schema done", {
+        duration_ms: Date.now() - start,
+        result: summaryStr,
+        ...(meta ? { server_compute_ms: meta.compute_ms, cache_hit: meta.cache_hit } : {}),
+      });
       return safeJsonContent(v);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

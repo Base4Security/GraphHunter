@@ -79,6 +79,18 @@ impl GraphHunterApi {
         self.with_graph_read(req.session.as_ref(), |g| Ok(g.get_relation_schema()))
     }
 
+    /// Like [`Self::get_relation_schema`] but also reports whether the
+    /// result came from the memoized cache. Used by the HTTP transport
+    /// to surface `_meta.cache_hit` in the response body.
+    pub fn get_relation_schema_with_cache_info(
+        &self,
+        req: SessionOnly,
+    ) -> ApiResult<(Vec<RelSchemaEntry>, bool)> {
+        self.with_graph_read(req.session.as_ref(), |g| {
+            Ok(g.get_relation_schema_with_cache_info())
+        })
+    }
+
     pub fn explain_score(&self, req: NodeScopedRequest) -> ApiResult<ExplainedScore> {
         self.with_graph_read(req.session.as_ref(), |g| {
             g.explain_score(&req.node_id)

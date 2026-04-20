@@ -1354,6 +1354,14 @@ impl GraphHunter {
     /// always stable within the first hundred edges per triple). Results
     /// are sorted by edge_count descending.
     pub fn get_relation_schema(&self) -> Vec<RelSchemaEntry> {
+        self.get_relation_schema_with_cache_info().0
+    }
+
+    /// Same as [`Self::get_relation_schema`] but also reports whether the
+    /// result came from the memoized cache. Used by the HTTP/MCP path so
+    /// callers can surface the cache-hit signal in response metadata
+    /// without re-running the computation for timing.
+    pub fn get_relation_schema_with_cache_info(&self) -> (Vec<RelSchemaEntry>, bool) {
         let edge_count = self.edge_store.len();
         let meta_bytes = self.meta_store.size_bytes();
 
@@ -1361,7 +1369,7 @@ impl GraphHunter {
             let cache = self.schema_cache.lock().expect("schema_cache poisoned");
             if let Some(entry) = cache.as_ref() {
                 if entry.edge_count == edge_count && entry.meta_bytes == meta_bytes {
-                    return entry.schema.clone();
+                    return (entry.schema.clone(), true);
                 }
             }
         }
@@ -1424,7 +1432,7 @@ impl GraphHunter {
             });
         }
 
-        out
+        (out, false)
     }
 
     /// Run the same hypothesis at two upper time bounds and return what

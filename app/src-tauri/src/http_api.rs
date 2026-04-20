@@ -352,9 +352,33 @@ async fn handler_entity_types(State(api): State<Arc<GraphHunterApi>>) -> Respons
 }
 
 async fn handler_relation_schema(State(api): State<Arc<GraphHunterApi>>) -> Response {
-    api_response(api.get_relation_schema(
+    // Response shape:
+    //   { "entries": [...], "_meta": { "compute_ms": N, "cache_hit": bool } }
+    // Wall-clock is measured here (at the transport edge) so the number
+    // reflects what a client would observe; `cache_hit` comes from the
+    // core and is authoritative. Used by the MCP transport to let
+    // Claude distinguish cached from uncached calls without having to
+    // run the request twice.
+    let start = std::time::Instant::now();
+    match api.get_relation_schema_with_cache_info(
         graph_hunter_api::dto::entity::SessionOnly::default(),
-    ))
+    ) {
+        Ok((entries, cache_hit)) => {
+            let compute_ms = start.elapsed().as_millis() as u64;
+            ok_json(serde_json::json!({
+                "entries": entries,
+                "_meta": {
+                    "compute_ms": compute_ms,
+                    "cache_hit": cache_hit,
+                },
+            }))
+        }
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
