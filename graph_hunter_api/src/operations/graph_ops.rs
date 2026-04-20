@@ -117,6 +117,14 @@ impl GraphHunterApi {
 
     /// Paginated variant of [`Self::get_events_for_node`] with optional
     /// `sort_by` key. Default sort is timestamp ascending.
+    ///
+    /// Collects incident edges as `CompactRelation` (32 bytes, `Copy`),
+    /// sorts in place, and only materializes `SubgraphEdge` (which
+    /// allocates per-edge `String`s + a metadata `HashMap`) for the
+    /// final page slice. The earlier implementation built a
+    /// `Vec<SubgraphEdge>` over every incident edge before paginating;
+    /// on a URL with 10^5+ incident edges that OOM-crashed the process
+    /// while allocating ~10 GB.
     pub fn get_events_paginated(
         &self,
         req: EventsPaginatedRequest,
@@ -125,31 +133,42 @@ impl GraphHunterApi {
         let page_size = req.page_size.unwrap_or(100);
         let sort_by = req.sort_by.clone();
         self.with_graph_read(req.session.as_ref(), |graph| {
-            let mut all_edges: Vec<SubgraphEdge> = Vec::new();
+            let mut compacts: Vec<graph_hunter_core::CompactRelation> = Vec::new();
 
             for compact in graph.get_compact_relations(&req.node_id) {
-                all_edges.push(subgraph_edge_from_compact(graph, compact));
+                compacts.push(*compact);
             }
             let target_sid = graph.interner.get(&req.node_id);
             for &source_sid in graph.get_reverse_source_sids(&req.node_id) {
                 for compact in graph.get_relations_by_sid(source_sid) {
                     if Some(compact.dest_sid) == target_sid {
-                        all_edges.push(subgraph_edge_from_compact(graph, compact));
+                        compacts.push(*compact);
                     }
                 }
             }
 
+            // String-keyed sorts resolve SIDs via the interner — that is
+            // a `&str` borrow, no allocation.
             match sort_by.as_deref() {
-                Some("rel_type") => all_edges.sort_by(|a, b| a.rel_type.cmp(&b.rel_type)),
-                Some("source") => all_edges.sort_by(|a, b| a.source.cmp(&b.source)),
-                Some("target") => all_edges.sort_by(|a, b| a.target.cmp(&b.target)),
-                _ => all_edges.sort_by_key(|e| e.timestamp),
+                Some("rel_type") => compacts.sort_by_key(|c| c.rel_type_tag),
+                Some("source") => compacts.sort_by(|a, b| {
+                    graph.interner.resolve(a.source_sid)
+                        .cmp(graph.interner.resolve(b.source_sid))
+                }),
+                Some("target") => compacts.sort_by(|a, b| {
+                    graph.interner.resolve(a.dest_sid)
+                        .cmp(graph.interner.resolve(b.dest_sid))
+                }),
+                _ => compacts.sort_by_key(|c| c.timestamp),
             }
 
-            let total_count = all_edges.len();
+            let total_count = compacts.len();
             let start = (page * page_size).min(total_count);
             let end = (start + page_size).min(total_count);
-            let events = all_edges[start..end].to_vec();
+            let events: Vec<SubgraphEdge> = compacts[start..end]
+                .iter()
+                .map(|c| subgraph_edge_from_compact(graph, c))
+                .collect();
             Ok(PaginatedEvents {
                 events,
                 total_count,
