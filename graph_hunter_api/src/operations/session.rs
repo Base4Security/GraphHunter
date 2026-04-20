@@ -197,6 +197,17 @@ impl GraphHunterApi {
                 .sort_edges_by_timestamp()
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+            // Reconcile persisted `entity.score` with the current scoring
+            // algorithm. Sessions saved before the rarity-aware composite
+            // shipped carry pre-rarity scores on disk; without this
+            // refresh, `top_anomalies` would surface centrality-dominant
+            // hot assets (logos, hub URLs) even though every other code
+            // path uses the hunt-oriented composite. Cheap — one O(V+E)
+            // pass over the freshly-loaded graph.
+            emitter.emit(event_names::SESSION_LOAD_PROGRESS, json_progress("scoring", 0, 0));
+            graph.compute_scores();
+            graph.compute_composite_score_hunt_default();
+
             tracing::info!(
                 "SESSION LOAD: {} entities, {} relations loaded",
                 entity_count,
