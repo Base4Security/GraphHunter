@@ -18,7 +18,7 @@ pub fn run_full_scoring(graph: &mut GraphHunter) {
     graph.compute_scores();
     graph.compute_temporal_pagerank(None, None, None, None, None);
     graph.compute_betweenness(None);
-    graph.compute_composite_score(1.0, 1.0, 1.0);
+    graph.compute_composite_score_hunt_default();
     graph.finalize_anomaly_scorer();
 }
 
@@ -52,7 +52,7 @@ pub fn run_scoring_adaptive(graph: &mut GraphHunter) -> Result<(), String> {
         tracing::info!("SCORING: skipping betweenness ({} entities)", n);
     }
 
-    graph.compute_composite_score(1.0, 1.0, 1.0);
+    graph.compute_composite_score_hunt_default();
     graph.finalize_anomaly_scorer();
     tracing::info!("SCORING: complete");
     Ok(())
@@ -63,5 +63,5 @@ pub fn run_scoring_adaptive(graph: &mut GraphHunter) -> Result<(), String> {
 /// until explicit `run_full_scoring` or disconnect.
 pub fn run_scoring_incremental(graph: &mut GraphHunter) {
     graph.compute_scores();
-    graph.compute_composite_score(1.0, 1.0, 1.0);
+    graph.compute_composite_score_hunt_default();
 }

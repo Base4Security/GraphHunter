@@ -136,6 +136,11 @@ pub struct ExplainedScore {
     pub degree_score: f64,
     pub pagerank_score: f64,
     pub betweenness: f64,
+    /// Rarity score [0, 100]: inverted degree. A hot public asset
+    /// (logo, CDN edge) sits near 0; a rarely-touched endpoint (one
+    /// IP reads it once) sits near 100. The hunt-oriented signal.
+    #[serde(default)]
+    pub rarity_score: f64,
     /// Four-dimension anomaly breakdown if anomaly scoring is active.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anomaly_breakdown: Option<ScoreBreakdown>,
@@ -144,6 +149,9 @@ pub struct ExplainedScore {
     pub composite_percentile: f64,
     /// Percentile rank of `degree_score` across all entities.
     pub degree_percentile: f64,
+    /// Percentile rank of `rarity_score` across all entities.
+    #[serde(default)]
+    pub rarity_percentile: f64,
     /// Top-5 peers (by composite score) of the same entity type, so the
     /// analyst can see whether this node is a legitimate outlier or a
     /// member of a cohort that all scored high (the `/usr/bin/grep` case
@@ -290,6 +298,8 @@ fn build_narrative(
     composite: f64,
     composite_pct: f64,
     degree_pct: f64,
+    rarity_pct: f64,
+    rarity: f64,
     pagerank: f64,
     breakdown: Option<&ScoreBreakdown>,
     peer_ids: String,
@@ -299,14 +309,23 @@ fn build_narrative(
         "Composite score {:.1} (percentile {:.1} of all entities).",
         composite, composite_pct
     ));
+    parts.push(format!(
+        "Rarity {:.1} (percentile {:.1}) — higher = touched by fewer edges.",
+        rarity, rarity_pct
+    ));
     parts.push(format!("Degree centrality percentile {:.1}.", degree_pct));
     if pagerank > 10.0 {
         parts.push(format!("PageRank {:.2} indicates this node is structurally central.", pagerank));
     }
+    // Call out the "hot asset" case explicitly: very high degree + very
+    // low rarity means a node that's heavily accessed but uninteresting
+    // for a threat hunt (logos, CDN edges, common DNS servers).
+    if degree_pct > 95.0 && rarity_pct < 20.0 {
+        parts.push(
+            "High degree + low rarity: this node is a hot, widely-used asset — likely infrastructure, not an anomaly.".into(),
+        );
+    }
     if let Some(b) = breakdown {
-        // Distinguish "structural centrality" from "genuine anomaly" — exactly
-        // what the feedback said was missing. Low temporal_novelty + high
-        // score means the node was common throughout the window.
         if b.temporal_novelty < 0.1 && composite_pct > 90.0 {
             parts.push(
                 "Temporal novelty is near zero — this node was present throughout the window, so the high score is centrality, not anomaly.".into(),
@@ -602,7 +621,14 @@ impl GraphHunter {
         })
     }
 
-    /// Computes degree centrality scores for all entities.
+    /// Computes degree centrality **and** entity rarity scores for all
+    /// entities in a single pass over `edge_store` + `reverse_adj`.
+    ///
+    /// `degree_score` is `(deg / max_deg) * 100` — high for hubs.
+    /// `rarity_score` is `(1 - ln(deg + 1) / ln(max_deg + 1)) * 100` —
+    /// high for rarely-touched nodes. Entities with zero edges get the
+    /// maximum rarity (100); the `+1` inside the log avoids `ln(0)`
+    /// without biasing the ordering between degree=1 and degree=2.
     pub fn compute_scores(&mut self) {
         if self.entities.is_empty() {
             return;
@@ -629,11 +655,18 @@ impl GraphHunter {
             return;
         }
 
+        let log_max = ((max_degree + 1) as f64).ln();
         for (&sid, entity) in &mut self.entities {
             let deg = degrees.get(&sid).copied().unwrap_or(0);
-            let normalized = (deg as f64 / max_degree as f64) * 100.0;
-            entity.score = normalized;
-            entity.degree_score = normalized;
+            let degree_norm = (deg as f64 / max_degree as f64) * 100.0;
+            entity.score = degree_norm;
+            entity.degree_score = degree_norm;
+            let rarity = if log_max > 0.0 {
+                (1.0 - ((deg + 1) as f64).ln() / log_max) * 100.0
+            } else {
+                0.0
+            };
+            entity.rarity_score = rarity.clamp(0.0, 100.0);
         }
     }
 
@@ -830,8 +863,21 @@ impl GraphHunter {
         }
     }
 
-    /// Composite scoring from weighted combination.
-    pub fn compute_composite_score(&mut self, degree_w: f64, pagerank_w: f64, betweenness_w: f64) {
+    /// Composite scoring from weighted combination of degree, pagerank,
+    /// betweenness, and rarity. The first three are centrality metrics
+    /// (high = hub/bridge); `rarity_weight` is the inverted-degree
+    /// signal that threat hunting wants (high = rarely touched). For
+    /// pure-hunt workloads call with `(0.0, 0.0, 0.0, 1.0)` to rank by
+    /// rarity alone; for balanced "what's interesting" use
+    /// [`Self::compute_composite_score_hunt_default`] which blends
+    /// rarity-dominant plus small centrality sprinkles.
+    pub fn compute_composite_score(
+        &mut self,
+        degree_w: f64,
+        pagerank_w: f64,
+        betweenness_w: f64,
+        rarity_w: f64,
+    ) {
         let n = self.entities.len();
         if n == 0 {
             return;
@@ -843,7 +889,8 @@ impl GraphHunter {
             .map(|(&sid, e)| {
                 let val = degree_w * e.degree_score
                     + pagerank_w * e.pagerank_score
-                    + betweenness_w * e.betweenness;
+                    + betweenness_w * e.betweenness
+                    + rarity_w * e.rarity_score;
                 (sid, val)
             })
             .collect();
@@ -860,6 +907,15 @@ impl GraphHunter {
                 entity.score = val;
             }
         }
+    }
+
+    /// Hunt-oriented default: rarity gets the lion's share of the weight;
+    /// centrality metrics contribute a small factor so genuine bridge
+    /// nodes don't get buried under the rarity floor. Use this when
+    /// ingest-time scoring needs a single sensible call that favours
+    /// threat-hunt-relevant ranking over hub-centric centrality.
+    pub fn compute_composite_score_hunt_default(&mut self) {
+        self.compute_composite_score(0.1, 0.1, 0.1, 1.0);
     }
 
     /// Returns detailed information about a specific node.
@@ -979,8 +1035,10 @@ impl GraphHunter {
         // Percentiles
         let all_scores: Vec<f64> = self.entities.values().map(|e| e.score).collect();
         let all_degrees: Vec<f64> = self.entities.values().map(|e| e.degree_score).collect();
+        let all_rarities: Vec<f64> = self.entities.values().map(|e| e.rarity_score).collect();
         let composite_percentile = percentile_of(&all_scores, entity.score);
         let degree_percentile = percentile_of(&all_degrees, entity.degree_score);
+        let rarity_percentile = percentile_of(&all_rarities, entity.rarity_score);
 
         // Peers: top 5 of the same type by composite score (excluding self).
         let mut same_type: Vec<(&str, f64)> = self
@@ -1013,6 +1071,8 @@ impl GraphHunter {
             entity.score,
             composite_percentile,
             degree_percentile,
+            rarity_percentile,
+            entity.rarity_score,
             entity.pagerank_score,
             anomaly_breakdown.as_ref(),
             peers.iter().take(3).map(|p| p.id.as_str()).collect::<Vec<_>>().join(", "),
@@ -1025,9 +1085,11 @@ impl GraphHunter {
             degree_score: entity.degree_score,
             pagerank_score: entity.pagerank_score,
             betweenness: entity.betweenness,
+            rarity_score: entity.rarity_score,
             anomaly_breakdown,
             composite_percentile,
             degree_percentile,
+            rarity_percentile,
             peers,
             narrative,
         })

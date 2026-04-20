@@ -85,19 +85,23 @@ pub fn cmd_compute_pagerank(
     .map_err(CommandError::from)
 }
 
-/// Weighted combination of degree, pagerank, and betweenness.
+/// Weighted combination of degree, pagerank, betweenness, and rarity.
+/// `rarity_weight` defaults to 0 if the caller doesn't pass it, so
+/// old clients preserve the pre-rarity (centrality-only) behaviour.
 #[tauri::command]
 pub fn cmd_compute_composite_scores(
     api: State<Arc<GraphHunterApi>>,
     degree_weight: f64,
     pagerank_weight: f64,
     betweenness_weight: f64,
+    rarity_weight: Option<f64>,
 ) -> Result<(), CommandError> {
     api.compute_composite_scores(ComputeCompositeScoresRequest {
         session: None,
         degree_weight,
         pagerank_weight,
         betweenness_weight,
+        rarity_weight: rarity_weight.unwrap_or(0.0),
     })
     .map_err(CommandError::from)
 }

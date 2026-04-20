@@ -212,7 +212,7 @@ pub async fn cmd_load_data_streaming(
                     }));
 
                     if let Ok(mut graph) = bg_session.graph.write() {
-                        graph.compute_composite_score(1.0, 1.0, 1.0);
+                        graph.compute_composite_score_hunt_default();
                         graph.finalize_anomaly_scorer();
                     }
 

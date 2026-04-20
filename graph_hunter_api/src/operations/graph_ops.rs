@@ -42,6 +42,14 @@ impl GraphHunterApi {
     pub fn compute_scores(&self, req: ComputeScoresRequest) -> ApiResult<()> {
         self.with_graph_write(req.session.as_ref(), |g| {
             g.compute_scores();
+            // Populate `entity.score` with the hunt-oriented composite so
+            // downstream consumers (`get_graph_summary.top_anomalies`,
+            // UI ranking, MCP tool callers) surface rarity-driven picks
+            // by default instead of pure degree centrality. PageRank and
+            // betweenness stay at 0 unless explicitly computed — the
+            // hunt default uses small weights for them so their absence
+            // doesn't distort the ranking.
+            g.compute_composite_score_hunt_default();
             Ok(())
         })
     }

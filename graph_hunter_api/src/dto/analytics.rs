@@ -63,6 +63,12 @@ pub struct ComputeCompositeScoresRequest {
     pub degree_weight: f64,
     pub pagerank_weight: f64,
     pub betweenness_weight: f64,
+    /// Weight on `rarity_score` (inverse of degree). Omitted by old
+    /// clients falls back to 0, preserving pre-rarity behaviour;
+    /// defaults in new callers should lean on this as the dominant
+    /// signal.
+    #[serde(default)]
+    pub rarity_weight: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

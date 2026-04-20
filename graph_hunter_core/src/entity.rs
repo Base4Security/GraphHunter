@@ -44,6 +44,15 @@ pub struct Entity {
     /// Temporal PageRank score, normalized [0, 100].
     #[serde(default)]
     pub pagerank_score: f64,
+    /// Entity rarity `[0, 100]`: `1 - ln(edge_count(v)) / ln(max_edge_count)`
+    /// normalized, scaled, where a node touched by few edges scores near
+    /// 100 and the hub of the graph scores near 0. This is the inverted
+    /// mirror of `degree_score` and is the signal a threat-hunting
+    /// composite should lean on: public hot assets (logos, CDN edges,
+    /// common DNS servers) get filtered out, while rare endpoints
+    /// (candidate C2 hosts, lateral-movement targets) float to the top.
+    #[serde(default)]
+    pub rarity_score: f64,
 }
 
 impl Entity {
@@ -58,6 +67,7 @@ impl Entity {
             degree_score: 0.0,
             betweenness: 0.0,
             pagerank_score: 0.0,
+            rarity_score: 0.0,
         }
     }
 
@@ -72,6 +82,7 @@ impl Entity {
             degree_score: 0.0,
             betweenness: 0.0,
             pagerank_score: 0.0,
+            rarity_score: 0.0,
         }
     }
 

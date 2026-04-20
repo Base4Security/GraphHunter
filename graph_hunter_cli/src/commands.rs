@@ -425,7 +425,7 @@ fn run_full_scoring(graph: &mut GraphHunter) {
     graph.compute_scores();
     graph.compute_temporal_pagerank(None, None, None, None, None);
     graph.compute_betweenness(None);
-    graph.compute_composite_score(1.0, 1.0, 1.0);
+    graph.compute_composite_score_hunt_default();
 }
 
 /// Resolves "auto" format from file contents (mirrors Tauri's resolve_format).

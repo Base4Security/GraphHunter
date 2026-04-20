@@ -4282,7 +4282,7 @@ mod tests {
         graph.add_relation(Relation::new("A", "C", RelationType::Connect, 200)).unwrap();
 
         graph.compute_scores(); // sets degree_score
-        graph.compute_composite_score(1.0, 0.0, 0.0);
+        graph.compute_composite_score(1.0, 0.0, 0.0, 0.0);
 
         let a = graph.get_entity("A").unwrap();
         assert_eq!(a.score, 100.0, "A has max degree → composite=100 with degree_only");
@@ -4298,7 +4298,7 @@ mod tests {
         graph.compute_scores();
         graph.compute_betweenness(None);
         graph.compute_temporal_pagerank(Some(0.0), None, None, None, None);
-        graph.compute_composite_score(1.0, 1.0, 1.0);
+        graph.compute_composite_score(1.0, 1.0, 1.0, 0.0);
 
         // Both nodes should have scores
         let a = graph.get_entity("A").unwrap();
@@ -4320,7 +4320,7 @@ mod tests {
         graph.compute_scores();
         graph.compute_betweenness(None);
         graph.compute_temporal_pagerank(Some(0.0), None, None, None, None);
-        graph.compute_composite_score(1.0, 1.0, 1.0);
+        graph.compute_composite_score(1.0, 1.0, 1.0, 0.0);
 
         // Max score should be exactly 100
         let max_score = graph.entities.values().map(|e| e.score).fold(0.0f64, f64::max);
@@ -4627,7 +4627,7 @@ mod tests {
         graph.compute_scores();
         graph.compute_temporal_pagerank(None, None, None, None, None);
         graph.compute_betweenness(None);
-        graph.compute_composite_score(1.0, 1.0, 1.0);
+        graph.compute_composite_score(1.0, 1.0, 1.0, 0.0);
 
         // Verify via get_node_details
         let details = graph.get_node_details("hub").unwrap();

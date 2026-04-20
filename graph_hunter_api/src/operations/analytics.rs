@@ -78,6 +78,7 @@ impl GraphHunterApi {
                 req.degree_weight,
                 req.pagerank_weight,
                 req.betweenness_weight,
+                req.rarity_weight,
             );
             Ok(())
         })

@@ -297,9 +297,13 @@ export interface ExplainedScore {
   degree_score: number;
   pagerank_score: number;
   betweenness: number;
+  /** Inverted-degree rarity signal [0-100]. High = rarely touched. */
+  rarity_score?: number;
   anomaly_breakdown?: ScoreBreakdown;
   composite_percentile: number;
   degree_percentile: number;
+  /** Percentile rank of rarity_score across all entities. */
+  rarity_percentile?: number;
   peers: ExplainedPeer[];
   /** One-paragraph explanation in English, assembled from the fields above. */
   narrative: string;
