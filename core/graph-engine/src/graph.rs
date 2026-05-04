@@ -1284,7 +1284,8 @@ impl GraphHunter {
     /// `origin_type == dest_type`. Returns `None` otherwise (mixed
     /// types, wildcards, `Other(_)`, name-marker-only paths). The
     /// LFTJ trie builders use this to decide whether to filter.
-    fn homogeneous_lftj_signature(&self, hypothesis: &Hypothesis) -> Option<(u8, u8)> {
+    /// Public so the API layer can use it as a cache key (D3 stage 4).
+    pub fn homogeneous_lftj_signature(&self, hypothesis: &Hypothesis) -> Option<(u8, u8)> {
         let steps = &hypothesis.steps;
         if steps.is_empty() {
             return None;

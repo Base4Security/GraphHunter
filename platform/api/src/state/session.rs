@@ -121,20 +121,70 @@ pub struct Session {
     pub lftj_cache: RwLock<Option<LftjSessionCache>>,
 }
 
-/// D3 stage 3 — Session-level LFTJ index cache. Built lazily on the
-/// first LFTJ-routed batch hypothesis and reused across subsequent
-/// batches until the graph mutates. The `version` field captures
-/// `GraphHunter::mutation_version()` at build time; on each batch
-/// entry the API code compares this to the live counter and
-/// invalidates the cache on mismatch.
+/// D3 stage 3+4 — Session-level LFTJ index cache. Built lazily on
+/// the first LFTJ-routed batch hypothesis and reused across
+/// subsequent batches until the graph mutates. The `version`
+/// field captures `GraphHunter::mutation_version()` at build
+/// time; on each batch entry the API code compares this to the
+/// live counter and invalidates the cache on mismatch.
+///
+/// Stage 4 generalizations vs. stage 3:
+///   * Typed tries — instead of a single forward/reverse pair,
+///     the cache holds a map keyed on the homogeneous-shape
+///     signature (`Option<(rel_type_tag, vertex_type_tag)>`).
+///     `None` is the type-blind trie (used by name-marker-only
+///     dispatch); concrete keys are typed tries built via
+///     `build_lftj_trie_for`. A single session that fires K4-Auth
+///     and C6-Connect templates back-to-back keeps both tries
+///     warm without rebuilding either.
+///   * Persistent canonical raw-result cache — the LFTJ raw
+///     enumerate output (keyed on dispatch plan, type signature,
+///     time window) is kept alive across batches too. FIFO
+///     eviction at `MAX_CANONICAL_ENTRIES` keeps the memory
+///     footprint bounded regardless of how many distinct
+///     templates a session fires.
 pub struct LftjSessionCache {
     pub version: u64,
+    /// Typed-trie map. Key is the homogeneous-shape signature or
+    /// `None` for the type-blind trie. Each entry holds the
+    /// forward trie + ts_map plus an optional reverse (built
+    /// lazily on first C6 dispatch for that key).
+    pub typed_tries: HashMap<Option<(u8, u8)>, LftjTypedTrie>,
+    /// Persistent canonical raw-result cache. Survives across
+    /// batches; bounded at `MAX_CANONICAL_ENTRIES` with FIFO
+    /// eviction (oldest insertion order discarded first).
+    pub canonical_results: HashMap<LftjCanonicalKey, Arc<Vec<graph_hunter_core::graph::HuntResult>>>,
+    /// Insertion-order witness for FIFO eviction. Front = oldest.
+    pub canonical_results_order: std::collections::VecDeque<LftjCanonicalKey>,
+}
+
+/// Maximum number of distinct LFTJ canonical raw-result entries
+/// kept warm across batches. Each entry is a `Vec<HuntResult>`
+/// of size up to `max_results` (default 10K paths × ~6 vertices
+/// × ~40 B/Arc<str> = ~2.4 MB per entry). At 64 entries this
+/// caps the canonical-cache footprint at ~150 MB per session,
+/// the right shape for SOC template batteries that fire many
+/// distinct templates against a single graph.
+pub const MAX_CANONICAL_ENTRIES: usize = 64;
+
+/// Per-(type-signature) typed trie entry. Reverse is C6-only
+/// and populated lazily on first C6 dispatch.
+pub struct LftjTypedTrie {
     pub forward: Arc<graph_hunter_core::lftj::MaterializedCsrTrie>,
     pub ts_map: Arc<graph_hunter_core::lftj_query::MinTimestampMap>,
-    /// C6-only. None until the first C6 dispatch, then populated
-    /// and reused for every later C6 within the same `version`.
     pub reverse: Option<Arc<graph_hunter_core::lftj::MaterializedCsrTrie>>,
 }
+
+/// Cache key for the persistent LFTJ canonical raw-result cache.
+/// The plan + type signature + time window together canonicalize
+/// the enumerate output: two hypotheses agreeing on this tuple
+/// produce identical raw paths.
+pub type LftjCanonicalKey = (
+    graph_hunter_core::planner::DispatchPlan,
+    Option<(u8, u8)>,
+    i64,
+    i64,
+);
 
 impl Session {
     pub fn new(
@@ -156,6 +206,43 @@ impl Session {
             agentic_review: RwLock::new(MappingReviewQueue::new()),
             lftj_cache: RwLock::new(None),
         }
+    }
+}
+
+impl LftjSessionCache {
+    /// Fresh empty cache stamped with a graph version. Both the
+    /// typed-trie map and the canonical-result map start empty;
+    /// entries accrete as batches dispatch.
+    pub fn new(version: u64) -> Self {
+        Self {
+            version,
+            typed_tries: HashMap::new(),
+            canonical_results: HashMap::new(),
+            canonical_results_order: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Insert a canonical raw-result entry, evicting the oldest if
+    /// `MAX_CANONICAL_ENTRIES` would be exceeded. Returns `true`
+    /// when the entry was newly inserted; `false` when the key
+    /// already existed (the previous value is overwritten with the
+    /// new one but the FIFO position is unchanged).
+    pub fn insert_canonical(
+        &mut self,
+        key: LftjCanonicalKey,
+        paths: Arc<Vec<graph_hunter_core::graph::HuntResult>>,
+    ) -> bool {
+        let is_new = !self.canonical_results.contains_key(&key);
+        if is_new {
+            if self.canonical_results.len() >= MAX_CANONICAL_ENTRIES {
+                if let Some(evict_key) = self.canonical_results_order.pop_front() {
+                    self.canonical_results.remove(&evict_key);
+                }
+            }
+            self.canonical_results_order.push_back(key);
+        }
+        self.canonical_results.insert(key, paths);
+        is_new
     }
 }
 

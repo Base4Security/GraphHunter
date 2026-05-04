@@ -182,6 +182,19 @@ pub struct RunHuntBatchResponse {
     /// pending.
     #[serde(default)]
     pub lftj_session_cache_reused: bool,
+    /// D3 stage 4: hypotheses whose raw enumeration output was
+    /// served from the *persistent* canonical cache (built in a
+    /// previous batch on the same graph version). Distinct from
+    /// `lftj_canonical_cache_hits` — that legacy counter captured
+    /// per-batch dedup; this one captures cross-batch reuse.
+    #[serde(default)]
+    pub lftj_persistent_canonical_hits: usize,
+    /// D3 stage 4: typed-trie lookups that resolved against the
+    /// persistent typed-trie map. A single session that fires
+    /// K4-Auth and C6-Connect templates back-to-back keeps both
+    /// tries warm; this counts the matches.
+    #[serde(default)]
+    pub lftj_persistent_trie_hits: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

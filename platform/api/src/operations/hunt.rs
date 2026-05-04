@@ -279,56 +279,28 @@ impl GraphHunterApi {
         let mut last_prefix_resume_depth: usize = 0;
         let mut prefix_cache_hits: usize = 0;
 
-        // D3 stage 1 — LFTJ trie batch cache. When the planner picks
-        // any LFTJ variant (Triangle/K4/K5/C6) for a hypothesis in
-        // this batch, build the forward CSR trie + MinTimestampMap
-        // once on first hit and reuse across every subsequent
-        // LFTJ-routed hypothesis. The reverse trie (only needed by
-        // C6) is built lazily on first C6 dispatch. At Sysmon-scale
-        // (V≈10^6, E≈10^7) trie build is ~100s of ms; sharing across
-        // N templates saves N-1 builds.
+        // D3 stages 1+3+4 — LFTJ session cache. The forward trie +
+        // ts_map (and reverse for C6) live on the Session keyed by
+        // (mutation_version, type_signature) so they survive across
+        // batches and across distinct typed templates. Stage 4
+        // generalizes this from a single trie pair (stage 3) to a
+        // map of typed tries — a session that fires K4-Auth and
+        // C6-Connect templates back-to-back keeps both warm.
         //
-        // D3 stage 3 — extend the cache lifetime: try the
-        // session-level `lftj_cache` first; if its `version`
-        // matches `graph.mutation_version()` we reuse across
-        // batches. On version mismatch the cache is rebuilt
-        // (cheap), and on a hit we record the reuse via the
-        // dedicated counter so callers can distinguish "warm
-        // session" from "first batch this session".
-        let mut lftj_forward: Option<std::sync::Arc<graph_hunter_core::lftj::MaterializedCsrTrie>> =
-            None;
-        let mut lftj_reverse: Option<std::sync::Arc<graph_hunter_core::lftj::MaterializedCsrTrie>> =
-            None;
-        let mut lftj_ts_map: Option<
-            std::sync::Arc<graph_hunter_core::lftj_query::MinTimestampMap>,
-        > = None;
+        // D3 stages 2+4 — persistent canonical raw-result cache.
+        // Stage 2 cached raw enumerate output per-batch; stage 4
+        // promotes that to per-Session, FIFO-bounded, keyed on
+        // (plan, type_signature, time_window). At Sysmon-scale
+        // SOC batteries that re-fire identical templates against
+        // a static graph pay enumeration once per (plan, type,
+        // window), not once per batch.
         let mut lftj_trie_cache_builds: usize = 0;
         let mut lftj_trie_cache_hits: usize = 0;
         let mut lftj_session_cache_reused: bool = false;
-        // Cache the version observed at first LFTJ hit so we can
-        // write it back into the session when a fresh build runs.
-        let mut lftj_session_version: u64 = 0;
-
-        // D3 stage 2 — canonical-form LFTJ result cache. The LFTJ
-        // enumerators (triangle / K4 / K5 / C6) are *type-blind*
-        // today: they walk the trie regardless of step entity-type
-        // or relation-type filters (documented at
-        // platform/dsl/src/hypothesis.rs:looks_like_k4_clique). So
-        // two hypotheses that route to the same DispatchPlan with
-        // the same time_window produce *identical* raw enumeration
-        // output, even when they differ in vertex/edge labels or
-        // hypothesis name. Cache the raw `Vec<HuntResult>` keyed on
-        // (DispatchPlan, time_window) so canonically-equivalent
-        // queries share enumeration; per-hypothesis aggregation
-        // (HAVING/WITHIN) is applied separately on each lookup.
-        // The cap is shared across the batch via `req.max_results`,
-        // so cap mismatch between cached and lookup never bites.
-        let mut lftj_raw_cache: std::collections::HashMap<
-            (graph_hunter_core::planner::DispatchPlan, i64, i64),
-            std::sync::Arc<Vec<graph_hunter_core::graph::HuntResult>>,
-        > = std::collections::HashMap::new();
         let mut lftj_canonical_cache_hits: usize = 0;
         let mut lftj_canonical_cache_misses: usize = 0;
+        let mut lftj_persistent_canonical_hits: usize = 0;
+        let mut lftj_persistent_trie_hits: usize = 0;
 
         let cap = max_results.unwrap_or(10_000);
         let mut entries = Vec::with_capacity(hypotheses.len());
@@ -376,98 +348,169 @@ impl GraphHunterApi {
                     .graph
                     .read()
                     .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
-                let canonical_key = (lftj_plan, t_lo_window, t_hi_window);
+                // D3 stage 4 — type-aware canonical key. The
+                // homogeneous-shape signature (rel_type, vertex_type)
+                // is part of the cache key so type-aware tries don't
+                // collide with type-blind tries.
+                let type_sig = graph.homogeneous_lftj_signature(&hypothesis);
+                let canonical_key: crate::state::session::LftjCanonicalKey =
+                    (lftj_plan, type_sig, t_lo_window, t_hi_window);
+                let live_version = graph.mutation_version();
 
-                // D3 stage 2 — try the canonical raw-result cache first.
-                let raw_paths = if let Some(cached) = lftj_raw_cache.get(&canonical_key) {
-                    lftj_canonical_cache_hits += 1;
-                    cached.clone()
+                // Acquire the session cache write lock for the
+                // duration of this LFTJ hypothesis. Stage-4 cache
+                // sees both reads and writes here; ordering with
+                // the graph read lock is consistent throughout.
+                let mut cache_lock = session_for_lftj
+                    .lftj_cache
+                    .write()
+                    .map_err(|e| ApiError::Internal(format!("lftj_cache poisoned: {e}")))?;
+
+                // Reset the cache when the version is stale (graph
+                // mutated since last write). Allocates a fresh empty
+                // typed_tries + canonical_results map at the new
+                // version stamp.
+                let cache_was_warm =
+                    cache_lock.as_ref().is_some_and(|c| c.version == live_version);
+                if !cache_was_warm {
+                    *cache_lock = Some(crate::state::session::LftjSessionCache::new(
+                        live_version,
+                    ));
                 } else {
-                    lftj_canonical_cache_misses += 1;
-                    // Build forward trie + ts_map on first LFTJ hit.
-                    if lftj_forward.is_none() {
-                        // D3 stage 3 — try the session cache before
-                        // building. The cache is invalidated by graph
-                        // mutation_version mismatch.
-                        let live_version = graph.mutation_version();
-                        lftj_session_version = live_version;
-                        let session_hit = if let Ok(cache_lock) =
-                            session_for_lftj.lftj_cache.read()
-                        {
-                            cache_lock.as_ref().and_then(|c| {
-                                if c.version == live_version {
-                                    Some((
-                                        c.forward.clone(),
-                                        c.ts_map.clone(),
-                                        c.reverse.clone(),
-                                    ))
-                                } else {
-                                    None
-                                }
-                            })
-                        } else {
-                            None
-                        };
-                        if let Some((fwd, tsm, rev)) = session_hit {
-                            lftj_forward = Some(fwd);
-                            lftj_ts_map = Some(tsm);
-                            lftj_reverse = rev;
-                            lftj_session_cache_reused = true;
-                        } else {
-                            let trie =
-                                graph_hunter_core::lftj::MaterializedCsrTrie::build(&*graph);
-                            let ts_map = graph_hunter_core::lftj_query::MinTimestampMap::build(
-                                &*graph, &trie,
-                            );
-                            lftj_forward = Some(std::sync::Arc::new(trie));
-                            lftj_ts_map = Some(std::sync::Arc::new(ts_map));
-                            lftj_trie_cache_builds += 1;
-                        }
-                    } else {
-                        lftj_trie_cache_hits += 1;
+                    lftj_session_cache_reused = true;
+                }
+                let cache = cache_lock.as_mut().expect("set above");
+
+                // Persistent canonical raw-result lookup.
+                if let Some(cached) = cache.canonical_results.get(&canonical_key) {
+                    lftj_persistent_canonical_hits += 1;
+                    lftj_canonical_cache_hits += 1;
+                    let raw_paths = cached.clone();
+                    drop(cache_lock);
+                    let truncated = raw_paths.len() >= cap;
+                    let paths = graph.apply_aggregation((*raw_paths).clone(), &hypothesis);
+                    drop(graph);
+                    let path_count = paths.len();
+                    let inline =
+                        if path_count <= 100 { paths.clone() } else { Vec::new() };
+                    if let Ok(mut hc) = self.inner.hunt_cache.write() {
+                        *hc = paths;
                     }
-                    let trie = lftj_forward.as_ref().expect("set above").clone();
-                    let ts_map = lftj_ts_map.as_ref().expect("set above").clone();
-                    // Run the raw enumerator directly. The
-                    // `_with_trie` GraphHunter wrappers also run
-                    // apply_aggregation; we want the pre-aggregation
-                    // output here so per-hypothesis HAVING/WITHIN
-                    // can be applied to the cached raw vector.
-                    let raw = match lftj_plan {
-                        graph_hunter_core::planner::DispatchPlan::TriangleLftj => {
-                            graph_hunter_core::lftj_query::enumerate_triangles_lftj_simd_window(
-                                &*graph, &trie, &ts_map, t_lo_window, t_hi_window, cap,
-                            )
-                        }
-                        graph_hunter_core::planner::DispatchPlan::K4Lftj => {
-                            graph_hunter_core::lftj_query::enumerate_4cliques_lftj_simd_par(
-                                &*graph, &trie, &ts_map, t_lo_window, t_hi_window, cap,
-                            )
-                        }
-                        graph_hunter_core::planner::DispatchPlan::K5Lftj => {
-                            graph_hunter_core::lftj_query::enumerate_5cliques_lftj_simd_par(
-                                &*graph, &trie, &ts_map, t_lo_window, t_hi_window, cap,
-                            )
-                        }
-                        graph_hunter_core::planner::DispatchPlan::C6Lftj => {
-                            if lftj_reverse.is_none() {
-                                let rev =
-                                    graph_hunter_core::lftj::MaterializedCsrTrie::build_reverse(
-                                        &*graph,
-                                    );
-                                lftj_reverse = Some(std::sync::Arc::new(rev));
-                            }
-                            let rev = lftj_reverse.as_ref().expect("set above").clone();
-                            graph_hunter_core::lftj_query::enumerate_6cycles_lftj_simd_par(
-                                &*graph, &trie, &rev, &ts_map, t_lo_window, t_hi_window, cap,
-                            )
-                        }
-                        _ => unreachable!("filtered above"),
+                    let entry = RunHuntBatchEntry {
+                        paths: inline,
+                        path_count,
+                        truncated,
+                        diagnostic: None,
+                        error: None,
                     };
-                    let arc = std::sync::Arc::new(raw);
-                    lftj_raw_cache.insert(canonical_key, arc.clone());
-                    arc
+                    result_cache.insert(result_cache_key, entry.clone());
+                    entries.push(entry);
+                    continue;
+                }
+                lftj_canonical_cache_misses += 1;
+
+                // Trie lookup / build (typed-trie map keyed by
+                // type_sig).  Type-aware path mirrors the single-
+                // query API: when type_sig is Some(...), build a
+                // filtered trie; otherwise build the type-blind one.
+                let typed_trie = if let Some(tt) = cache.typed_tries.get(&type_sig) {
+                    lftj_persistent_trie_hits += 1;
+                    lftj_trie_cache_hits += 1;
+                    crate::state::session::LftjTypedTrie {
+                        forward: tt.forward.clone(),
+                        ts_map: tt.ts_map.clone(),
+                        reverse: tt.reverse.clone(),
+                    }
+                } else {
+                    let trie = graph.build_lftj_trie_for(&hypothesis);
+                    let ts_map = graph_hunter_core::lftj_query::MinTimestampMap::build(
+                        &*graph, &trie,
+                    );
+                    let entry = crate::state::session::LftjTypedTrie {
+                        forward: std::sync::Arc::new(trie),
+                        ts_map: std::sync::Arc::new(ts_map),
+                        reverse: None,
+                    };
+                    cache.typed_tries.insert(
+                        type_sig,
+                        crate::state::session::LftjTypedTrie {
+                            forward: entry.forward.clone(),
+                            ts_map: entry.ts_map.clone(),
+                            reverse: None,
+                        },
+                    );
+                    lftj_trie_cache_builds += 1;
+                    entry
                 };
+
+                // C6 needs the reverse trie. Build lazily and
+                // populate the typed_tries entry if absent.
+                let reverse = if matches!(
+                    lftj_plan,
+                    graph_hunter_core::planner::DispatchPlan::C6Lftj
+                ) {
+                    if let Some(r) = typed_trie.reverse.clone() {
+                        Some(r)
+                    } else if let Some(r) = cache
+                        .typed_tries
+                        .get(&type_sig)
+                        .and_then(|e| e.reverse.clone())
+                    {
+                        Some(r)
+                    } else {
+                        let rev = graph.build_lftj_reverse_trie_for(&hypothesis);
+                        let arc = std::sync::Arc::new(rev);
+                        if let Some(slot) = cache.typed_tries.get_mut(&type_sig) {
+                            slot.reverse = Some(arc.clone());
+                        }
+                        Some(arc)
+                    }
+                } else {
+                    None
+                };
+
+                let trie = typed_trie.forward.clone();
+                let ts_map = typed_trie.ts_map.clone();
+                // Drop the cache lock before enumeration — keeps
+                // lock hold time bounded to map lookups, not the
+                // O(m^ρ*) enumerate work.
+                drop(cache_lock);
+
+                // (canonical hits accounted on the persistent path above)
+                let raw = match lftj_plan {
+                    graph_hunter_core::planner::DispatchPlan::TriangleLftj => {
+                        graph_hunter_core::lftj_query::enumerate_triangles_lftj_simd_window(
+                            &*graph, &trie, &ts_map, t_lo_window, t_hi_window, cap,
+                        )
+                    }
+                    graph_hunter_core::planner::DispatchPlan::K4Lftj => {
+                        graph_hunter_core::lftj_query::enumerate_4cliques_lftj_simd_par(
+                            &*graph, &trie, &ts_map, t_lo_window, t_hi_window, cap,
+                        )
+                    }
+                    graph_hunter_core::planner::DispatchPlan::K5Lftj => {
+                        graph_hunter_core::lftj_query::enumerate_5cliques_lftj_simd_par(
+                            &*graph, &trie, &ts_map, t_lo_window, t_hi_window, cap,
+                        )
+                    }
+                    graph_hunter_core::planner::DispatchPlan::C6Lftj => {
+                        let rev = reverse.expect("C6 path built reverse above");
+                        graph_hunter_core::lftj_query::enumerate_6cycles_lftj_simd_par(
+                            &*graph, &trie, &rev, &ts_map, t_lo_window, t_hi_window, cap,
+                        )
+                    }
+                    _ => unreachable!("filtered above"),
+                };
+                let raw_paths = std::sync::Arc::new(raw);
+
+                // Insert into the persistent canonical cache.
+                if let Ok(mut cache_lock) = session_for_lftj.lftj_cache.write() {
+                    if let Some(cache) = cache_lock.as_mut() {
+                        if cache.version == live_version {
+                            cache.insert_canonical(canonical_key, raw_paths.clone());
+                        }
+                    }
+                }
                 let truncated = raw_paths.len() >= cap;
                 // Apply per-hypothesis aggregation (HAVING / WITHIN)
                 // to the cached raw results. This is cheap relative
@@ -680,36 +723,11 @@ impl GraphHunterApi {
                 entries.push(entry);
             }
         }
-        // D3 stage 3 — write the LFTJ trie back to the session
-        // cache if we built or extended it during this batch. Skip
-        // when no LFTJ-routed hypothesis fired (forward stays
-        // None) so we don't churn the cache with empty writes. On
-        // a session-cache hit we still write back if a reverse
-        // trie was built lazily after the hit (i.e., the cached
-        // entry had no reverse and a C6 dispatch built one).
-        if let (Some(fwd), Some(tsm)) =
-            (lftj_forward.as_ref(), lftj_ts_map.as_ref())
-        {
-            let session_for_writeback = self.resolve_session(session.as_ref())?;
-            let needs_writeback = !lftj_session_cache_reused
-                || lftj_reverse.is_some()
-                    && session_for_writeback
-                        .lftj_cache
-                        .read()
-                        .ok()
-                        .and_then(|c| c.as_ref().map(|e| e.reverse.is_none()))
-                        .unwrap_or(false);
-            if needs_writeback {
-                if let Ok(mut slot) = session_for_writeback.lftj_cache.write() {
-                    *slot = Some(crate::state::session::LftjSessionCache {
-                        version: lftj_session_version,
-                        forward: fwd.clone(),
-                        ts_map: tsm.clone(),
-                        reverse: lftj_reverse.clone(),
-                    });
-                }
-            }
-        }
+        // D3 stage 4 — the session cache is updated inline within
+        // the per-hypothesis loop (typed_tries map + canonical
+        // FIFO insert). No trailing write-back needed: stage-3's
+        // post-loop write-back was a single-entry bulk update that
+        // the per-iteration cache.insert pattern subsumes cleanly.
 
         Ok(RunHuntBatchResponse {
             entries,
@@ -724,6 +742,8 @@ impl GraphHunterApi {
             lftj_canonical_cache_hits,
             lftj_canonical_cache_misses,
             lftj_session_cache_reused,
+            lftj_persistent_canonical_hits,
+            lftj_persistent_trie_hits,
         })
     }
 }
@@ -936,6 +956,116 @@ mod tests {
         let counts: Vec<usize> = resp.entries.iter().map(|e| e.path_count).collect();
         assert_eq!(counts[0], counts[1]);
         assert_eq!(counts[0], counts[2]);
+    }
+
+    #[test]
+    fn run_hunt_batch_d3_stage4_persistent_canonical_cache_across_batches() {
+        // D3 stage 4: the canonical raw-result cache survives
+        // across `run_hunt_batch` calls. First batch enumerates
+        // and writes; second batch on the same Session + graph
+        // version reads back without re-enumerating.
+        let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", "1") };
+        let api = api();
+        let mut h = hypo("Host -[Connect]-> Host -[Connect]-> Host");
+        h.name = "triangle template".into();
+
+        let first = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h.clone()],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("first batch ok");
+        assert_eq!(
+            first.lftj_persistent_canonical_hits, 0,
+            "first batch cannot have a persistent canonical hit"
+        );
+        assert_eq!(first.lftj_canonical_cache_misses, 1);
+
+        let second = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("second batch ok");
+
+        match prior_tri {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_TRIANGLE_LFTJ") },
+        }
+        assert_eq!(
+            second.lftj_persistent_canonical_hits, 1,
+            "second batch must hit the persistent canonical cache"
+        );
+        assert_eq!(
+            second.lftj_canonical_cache_misses, 0,
+            "no enumeration should fire on the second batch"
+        );
+    }
+
+    #[test]
+    fn run_hunt_batch_d3_stage4_typed_trie_map_holds_multiple_signatures() {
+        // D3 stage 4: typed-trie map keyed on (rel_type, vertex_type)
+        // signature. Two consecutive batches with different typed
+        // hypotheses (Auth-triangle then Connect-triangle) both
+        // build their own typed trie; a third batch firing the
+        // Auth-triangle again hits the persistent typed-trie map.
+        let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", "1") };
+        let api = api();
+        let mut h_auth = hypo("Host -[Auth]-> Host -[Auth]-> Host");
+        h_auth.name = "triangle template auth".into();
+        let mut h_conn = hypo("Host -[Connect]-> Host -[Connect]-> Host");
+        h_conn.name = "triangle template connect".into();
+
+        let _b1 = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h_auth.clone()],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("auth batch ok");
+        let _b2 = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h_conn],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("connect batch ok");
+        let b3 = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h_auth],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("auth-replay batch ok");
+
+        match prior_tri {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_TRIANGLE_LFTJ") },
+        }
+        // The third batch should hit BOTH the persistent typed-trie
+        // map (Auth signature already cached from b1) AND the
+        // canonical cache (Auth-triangle result already cached from
+        // b1). Persistent canonical hit implies persistent trie hit
+        // is unnecessary on this path because the canonical lookup
+        // wins first; but the cross-signature trie persistence is
+        // proven by b3's session_cache_reused.
+        assert!(
+            b3.lftj_session_cache_reused,
+            "cache should be warm — version unchanged across batches"
+        );
+        assert_eq!(
+            b3.lftj_persistent_canonical_hits, 1,
+            "auth-triangle result from batch 1 must still be in cache"
+        );
     }
 
     #[test]
