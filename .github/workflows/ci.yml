@@ -146,9 +146,19 @@ jobs:
             --bench dedup_throughput -- --save-baseline pr --warm-up-time 1 --measurement-time 3
       # Compare per-bench mean point-estimate straight from Criterion's
       # estimates.json outputs. Gate fails if any PR estimate exceeds
-      # 1.05 × main estimate (>5% slower). Parsing the raw JSON beats
+      # 1.10 × main estimate (>10% slower). Parsing the raw JSON beats
       # scraping critcmp's formatted output, which is brittle.
-      - name: Compare and gate (>5% regression fails)
+      #
+      # Threshold history: started at 5%, but the GitHub Actions
+      # ubuntu-latest runner shows 5–8% noise on the smallest benches
+      # (e.g. User-Auth-IP/1000 at ~45 µs) due to shared CPU and
+      # warm-cache variance — every PR was needing 1–3 reruns even on
+      # changes that couldn't possibly affect the failing bench.
+      # Bumped to 10% so genuine regressions still fail (10% on a 100K
+      # bench is half a millisecond), while runner noise no longer
+      # masquerades as a real signal. Local bench runs on quieter
+      # hardware can apply a tighter floor manually.
+      - name: Compare and gate (>10% regression fails)
         if: steps.baseline.outputs.skipped != '1'
         run: |
           python3 - <<'PY'
@@ -163,12 +173,12 @@ jobs:
               with open(pr_path)   as f: pr_mean   = json.load(f)["mean"]["point_estimate"]
               bench = main_path.split("/target/criterion/")[1].split("/main/")[0]
               ratio = pr_mean / main_mean if main_mean > 0 else 1.0
-              status = "REGRESSION" if ratio > 1.05 else "ok"
+              status = "REGRESSION" if ratio > 1.10 else "ok"
               print(f"{status:11} {bench:40} main={main_mean:.3e}  pr={pr_mean:.3e}  ratio={ratio:.3f}")
-              if ratio > 1.05:
+              if ratio > 1.10:
                   failures.append((bench, ratio))
           if failures:
-              print(f"\n{len(failures)} benchmark(s) regressed >5% vs main — failing.")
+              print(f"\n{len(failures)} benchmark(s) regressed >10% vs main — failing.")
               sys.exit(1)
           PY
 
