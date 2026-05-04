@@ -84,6 +84,11 @@ rayon = "1"
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 jsonschema = "0.18"
+criterion = "0.5"
+
+[[bench]]
+name = "batch_csh_cold_vs_warm"
+harness = false
 
 [features]
 default = []
