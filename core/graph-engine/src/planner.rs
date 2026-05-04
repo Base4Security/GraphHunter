@@ -141,7 +141,7 @@ fn cost_estimate(
 }
 
 /// Physical operator selected by the planner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DispatchPlan {
     /// Default — generic DFS-Match path with NLF/D5/B9/D2-lite prunes.
     DfsMatch,

@@ -156,6 +156,21 @@ pub struct RunHuntBatchResponse {
     /// one full O(E) trie build pass plus the per-source dedup-sort.
     #[serde(default)]
     pub lftj_trie_cache_hits: usize,
+    /// D3 stage 2: number of LFTJ-routed hypotheses whose raw
+    /// enumeration output was reused from the canonical-form cache
+    /// (keyed on (DispatchPlan, time_window)). Each hit skips the
+    /// O(m^ρ\*) enumerate work entirely; only per-hypothesis
+    /// aggregation runs. The LFTJ enumerators are type-blind today,
+    /// so two hypotheses routing to the same DispatchPlan with the
+    /// same time_window produce identical raw output regardless of
+    /// vertex/edge labels.
+    #[serde(default)]
+    pub lftj_canonical_cache_hits: usize,
+    /// D3 stage 2: number of distinct (DispatchPlan, time_window)
+    /// keys for which enumeration ran. Each miss populates the
+    /// cache for subsequent canonically-equivalent queries.
+    #[serde(default)]
+    pub lftj_canonical_cache_misses: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
