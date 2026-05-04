@@ -1015,12 +1015,31 @@ impl GraphHunter {
         time_window: Option<(i64, i64)>,
         max_results: Option<usize>,
     ) -> Result<(Vec<HuntResult>, bool), GraphError> {
-        let cap = max_results.unwrap_or(10_000);
-        let (t_lo, t_hi) = time_window.unwrap_or((i64::MIN, i64::MAX));
         let trie = crate::lftj::MaterializedCsrTrie::build(self);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
+        self.search_temporal_pattern_k4_lftj_with_trie(
+            hypothesis, &trie, &ts_map, time_window, max_results,
+        )
+    }
+
+    /// D3 stage 1 — K4 LFTJ fast path with caller-supplied trie.
+    /// `run_hunt_batch` uses this to build the forward trie + ts_map
+    /// once per (graph, time_window) and reuse across every
+    /// K4-routed hypothesis in the batch. At Sysmon-scale (V≈10^6,
+    /// E≈10^7) trie build is ~100s of ms; sharing across N templates
+    /// saves N-1 builds.
+    pub fn search_temporal_pattern_k4_lftj_with_trie(
+        &self,
+        hypothesis: &Hypothesis,
+        trie: &crate::lftj::MaterializedCsrTrie,
+        ts_map: &crate::lftj_query::MinTimestampMap,
+        time_window: Option<(i64, i64)>,
+        max_results: Option<usize>,
+    ) -> Result<(Vec<HuntResult>, bool), GraphError> {
+        let cap = max_results.unwrap_or(10_000);
+        let (t_lo, t_hi) = time_window.unwrap_or((i64::MIN, i64::MAX));
         let results = crate::lftj_query::enumerate_4cliques_lftj_simd_par(
-            self, &trie, &ts_map, t_lo, t_hi, cap,
+            self, trie, ts_map, t_lo, t_hi, cap,
         );
         let truncated = results.len() >= cap;
         let results = self.apply_aggregation(results, hypothesis);
@@ -1040,13 +1059,31 @@ impl GraphHunter {
         time_window: Option<(i64, i64)>,
         max_results: Option<usize>,
     ) -> Result<(Vec<HuntResult>, bool), GraphError> {
-        let cap = max_results.unwrap_or(10_000);
-        let (t_lo, t_hi) = time_window.unwrap_or((i64::MIN, i64::MAX));
         let forward = crate::lftj::MaterializedCsrTrie::build(self);
         let reverse = crate::lftj::MaterializedCsrTrie::build_reverse(self);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &forward);
+        self.search_temporal_pattern_c6_lftj_with_trie(
+            hypothesis, &forward, &reverse, &ts_map, time_window, max_results,
+        )
+    }
+
+    /// D3 stage 1 — C6 LFTJ fast path with caller-supplied tries.
+    /// C6 needs both forward and reverse tries (cycle closure
+    /// expressed as predecessors-of-`a`). `run_hunt_batch` builds
+    /// both once and reuses across every C6-routed hypothesis.
+    pub fn search_temporal_pattern_c6_lftj_with_trie(
+        &self,
+        hypothesis: &Hypothesis,
+        forward: &crate::lftj::MaterializedCsrTrie,
+        reverse: &crate::lftj::MaterializedCsrTrie,
+        ts_map: &crate::lftj_query::MinTimestampMap,
+        time_window: Option<(i64, i64)>,
+        max_results: Option<usize>,
+    ) -> Result<(Vec<HuntResult>, bool), GraphError> {
+        let cap = max_results.unwrap_or(10_000);
+        let (t_lo, t_hi) = time_window.unwrap_or((i64::MIN, i64::MAX));
         let results = crate::lftj_query::enumerate_6cycles_lftj_simd_par(
-            self, &forward, &reverse, &ts_map, t_lo, t_hi, cap,
+            self, forward, reverse, ts_map, t_lo, t_hi, cap,
         );
         let truncated = results.len() >= cap;
         let results = self.apply_aggregation(results, hypothesis);
@@ -1064,12 +1101,26 @@ impl GraphHunter {
         time_window: Option<(i64, i64)>,
         max_results: Option<usize>,
     ) -> Result<(Vec<HuntResult>, bool), GraphError> {
-        let cap = max_results.unwrap_or(10_000);
-        let (t_lo, t_hi) = time_window.unwrap_or((i64::MIN, i64::MAX));
         let trie = crate::lftj::MaterializedCsrTrie::build(self);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
+        self.search_temporal_pattern_k5_lftj_with_trie(
+            hypothesis, &trie, &ts_map, time_window, max_results,
+        )
+    }
+
+    /// D3 stage 1 — K5 LFTJ fast path with caller-supplied trie.
+    pub fn search_temporal_pattern_k5_lftj_with_trie(
+        &self,
+        hypothesis: &Hypothesis,
+        trie: &crate::lftj::MaterializedCsrTrie,
+        ts_map: &crate::lftj_query::MinTimestampMap,
+        time_window: Option<(i64, i64)>,
+        max_results: Option<usize>,
+    ) -> Result<(Vec<HuntResult>, bool), GraphError> {
+        let cap = max_results.unwrap_or(10_000);
+        let (t_lo, t_hi) = time_window.unwrap_or((i64::MIN, i64::MAX));
         let results = crate::lftj_query::enumerate_5cliques_lftj_simd_par(
-            self, &trie, &ts_map, t_lo, t_hi, cap,
+            self, trie, ts_map, t_lo, t_hi, cap,
         );
         let truncated = results.len() >= cap;
         let results = self.apply_aggregation(results, hypothesis);
@@ -1087,12 +1138,26 @@ impl GraphHunter {
         time_window: Option<(i64, i64)>,
         max_results: Option<usize>,
     ) -> Result<(Vec<HuntResult>, bool), GraphError> {
-        let cap = max_results.unwrap_or(10_000);
-        let (t_lo, t_hi) = time_window.unwrap_or((i64::MIN, i64::MAX));
         let trie = crate::lftj::MaterializedCsrTrie::build(self);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
+        self.search_temporal_pattern_triangle_with_trie(
+            hypothesis, &trie, &ts_map, time_window, max_results,
+        )
+    }
+
+    /// D3 stage 1 — triangle LFTJ fast path with caller-supplied trie.
+    pub fn search_temporal_pattern_triangle_with_trie(
+        &self,
+        hypothesis: &Hypothesis,
+        trie: &crate::lftj::MaterializedCsrTrie,
+        ts_map: &crate::lftj_query::MinTimestampMap,
+        time_window: Option<(i64, i64)>,
+        max_results: Option<usize>,
+    ) -> Result<(Vec<HuntResult>, bool), GraphError> {
+        let cap = max_results.unwrap_or(10_000);
+        let (t_lo, t_hi) = time_window.unwrap_or((i64::MIN, i64::MAX));
         let results = crate::lftj_query::enumerate_triangles_lftj_simd_window(
-            self, &trie, &ts_map, t_lo, t_hi, cap,
+            self, trie, ts_map, t_lo, t_hi, cap,
         );
         let truncated = results.len() >= cap;
         let results = self.apply_aggregation(results, hypothesis);

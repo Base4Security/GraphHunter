@@ -143,6 +143,19 @@ pub struct RunHuntBatchResponse {
     /// (depth >= 1).
     #[serde(default)]
     pub prefix_cache_hits: usize,
+    /// D3 stage 1: number of LFTJ trie + ts_map builds the batch
+    /// performed (one per (graph, time_window) pair). Increments
+    /// on the first LFTJ-routed hypothesis in a batch; subsequent
+    /// LFTJ hypotheses reuse the cached trie. Reverse-trie builds
+    /// (only needed for C6) are counted separately under the same
+    /// budget — at most 1 forward + 1 reverse per batch.
+    #[serde(default)]
+    pub lftj_trie_cache_builds: usize,
+    /// D3 stage 1: number of LFTJ-routed hypotheses that reused
+    /// the batch's pre-built forward trie + ts_map. Each hit saves
+    /// one full O(E) trie build pass plus the per-source dedup-sort.
+    #[serde(default)]
+    pub lftj_trie_cache_hits: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

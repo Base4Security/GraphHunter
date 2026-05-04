@@ -279,6 +279,24 @@ impl GraphHunterApi {
         let mut last_prefix_resume_depth: usize = 0;
         let mut prefix_cache_hits: usize = 0;
 
+        // D3 stage 1 — LFTJ trie batch cache. When the planner picks
+        // any LFTJ variant (Triangle/K4/K5/C6) for a hypothesis in
+        // this batch, build the forward CSR trie + MinTimestampMap
+        // once on first hit and reuse across every subsequent
+        // LFTJ-routed hypothesis. The reverse trie (only needed by
+        // C6) is built lazily on first C6 dispatch. At Sysmon-scale
+        // (V≈10^6, E≈10^7) trie build is ~100s of ms; sharing across
+        // N templates saves N-1 builds.
+        let mut lftj_forward: Option<std::sync::Arc<graph_hunter_core::lftj::MaterializedCsrTrie>> =
+            None;
+        let mut lftj_reverse: Option<std::sync::Arc<graph_hunter_core::lftj::MaterializedCsrTrie>> =
+            None;
+        let mut lftj_ts_map: Option<
+            std::sync::Arc<graph_hunter_core::lftj_query::MinTimestampMap>,
+        > = None;
+        let mut lftj_trie_cache_builds: usize = 0;
+        let mut lftj_trie_cache_hits: usize = 0;
+
         let cap = max_results.unwrap_or(10_000);
         let mut entries = Vec::with_capacity(hypotheses.len());
         for hypothesis in hypotheses.into_iter() {
@@ -304,6 +322,119 @@ impl GraphHunterApi {
                 entries.push(cached_entry);
                 continue;
             }
+            // D3 stage 1 — LFTJ batch routing. If the planner picks
+            // any LFTJ variant (Triangle/K4/K5/C6), short-circuit to
+            // the batch-cached `_with_trie` entry points. This avoids
+            // rebuilding the trie for every cyclic-shape hypothesis
+            // in the batch. Yannakakis still wins for α-acyclic chains
+            // and is checked below; if neither LFTJ nor Yannakakis
+            // applies, the per-call `run_hunt` branch handles it.
+            let lftj_plan = graph_hunter_core::planner::plan(&hypothesis);
+            let lftj_routed = matches!(
+                lftj_plan,
+                graph_hunter_core::planner::DispatchPlan::TriangleLftj
+                    | graph_hunter_core::planner::DispatchPlan::K4Lftj
+                    | graph_hunter_core::planner::DispatchPlan::K5Lftj
+                    | graph_hunter_core::planner::DispatchPlan::C6Lftj
+            );
+            if lftj_routed {
+                let session_for_lftj = self.resolve_session(session.as_ref())?;
+                let graph = session_for_lftj
+                    .graph
+                    .read()
+                    .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+                // Build forward trie + ts_map on first LFTJ hit.
+                if lftj_forward.is_none() {
+                    let trie = graph_hunter_core::lftj::MaterializedCsrTrie::build(&*graph);
+                    let ts_map = graph_hunter_core::lftj_query::MinTimestampMap::build(
+                        &*graph, &trie,
+                    );
+                    lftj_forward = Some(std::sync::Arc::new(trie));
+                    lftj_ts_map = Some(std::sync::Arc::new(ts_map));
+                    lftj_trie_cache_builds += 1;
+                } else {
+                    lftj_trie_cache_hits += 1;
+                }
+                let trie = lftj_forward.as_ref().expect("set above").clone();
+                let ts_map = lftj_ts_map.as_ref().expect("set above").clone();
+                let res = match lftj_plan {
+                    graph_hunter_core::planner::DispatchPlan::TriangleLftj => graph
+                        .search_temporal_pattern_triangle_with_trie(
+                            &hypothesis,
+                            &trie,
+                            &ts_map,
+                            time_window,
+                            Some(cap),
+                        ),
+                    graph_hunter_core::planner::DispatchPlan::K4Lftj => graph
+                        .search_temporal_pattern_k4_lftj_with_trie(
+                            &hypothesis,
+                            &trie,
+                            &ts_map,
+                            time_window,
+                            Some(cap),
+                        ),
+                    graph_hunter_core::planner::DispatchPlan::K5Lftj => graph
+                        .search_temporal_pattern_k5_lftj_with_trie(
+                            &hypothesis,
+                            &trie,
+                            &ts_map,
+                            time_window,
+                            Some(cap),
+                        ),
+                    graph_hunter_core::planner::DispatchPlan::C6Lftj => {
+                        // C6 also needs the reverse trie. Build once
+                        // on first C6 dispatch in the batch.
+                        if lftj_reverse.is_none() {
+                            let rev = graph_hunter_core::lftj::MaterializedCsrTrie::build_reverse(
+                                &*graph,
+                            );
+                            lftj_reverse = Some(std::sync::Arc::new(rev));
+                        }
+                        let rev = lftj_reverse.as_ref().expect("set above").clone();
+                        graph.search_temporal_pattern_c6_lftj_with_trie(
+                            &hypothesis,
+                            &trie,
+                            &rev,
+                            &ts_map,
+                            time_window,
+                            Some(cap),
+                        )
+                    }
+                    _ => unreachable!("filtered above"),
+                };
+                drop(graph);
+                let entry = match res {
+                    Ok((paths, truncated)) => {
+                        let path_count = paths.len();
+                        let inline =
+                            if path_count <= 100 { paths.clone() } else { Vec::new() };
+                        if let Ok(mut cache) = self.inner.hunt_cache.write() {
+                            *cache = paths;
+                        }
+                        RunHuntBatchEntry {
+                            paths: inline,
+                            path_count,
+                            truncated,
+                            diagnostic: None,
+                            error: None,
+                        }
+                    }
+                    Err(e) => RunHuntBatchEntry {
+                        paths: Vec::new(),
+                        path_count: 0,
+                        truncated: false,
+                        diagnostic: None,
+                        error: Some(e.to_string()),
+                    },
+                };
+                if entry.error.is_none() {
+                    result_cache.insert(result_cache_key, entry.clone());
+                }
+                entries.push(entry);
+                continue;
+            }
+
             // Decide whether this hypothesis is Yannakakis-eligible
             // by recomputing the planner's decision in API space.
             // We don't reach into graph_hunter_core::planner because
@@ -497,6 +628,8 @@ impl GraphHunterApi {
             result_cache_hits,
             last_prefix_resume_depth,
             prefix_cache_hits,
+            lftj_trie_cache_builds,
+            lftj_trie_cache_hits,
         })
     }
 }
@@ -709,6 +842,47 @@ mod tests {
         let counts: Vec<usize> = resp.entries.iter().map(|e| e.path_count).collect();
         assert_eq!(counts[0], counts[1]);
         assert_eq!(counts[0], counts[2]);
+    }
+
+    #[test]
+    fn run_hunt_batch_d3_lftj_trie_shared_across_cyclic_hypotheses() {
+        // D3 stage 1: two LFTJ-routed hypotheses (e.g. one K4 and
+        // one triangle, or two triangles with different windows)
+        // in the same batch should build the forward trie + ts_map
+        // once and share it. The counter records exactly 1 build
+        // and 1 hit when two LFTJ hypotheses run.
+        //
+        // The marker-based dispatch fires when the env flag for
+        // each shape is on. We use the triangle marker for both so
+        // a single env var enables the dispatch; the trie cache is
+        // shape-independent.
+        let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", "1") };
+        let api = api();
+        let mut h1 = hypo("Host -[Connect]-> Host -[Connect]-> Host");
+        h1.name = "triangle template alpha".into();
+        let mut h2 = hypo("Host -[Connect]-> Host -[Connect]-> Host");
+        h2.name = "triangle template beta".into();
+        let resp = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h1, h2],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("batch ok");
+        match prior_tri {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_TRIANGLE_LFTJ") },
+        }
+        assert_eq!(
+            resp.lftj_trie_cache_builds, 1,
+            "exactly one trie build should fire for the first LFTJ hypothesis"
+        );
+        assert_eq!(
+            resp.lftj_trie_cache_hits, 1,
+            "the second LFTJ hypothesis should reuse the cached trie"
+        );
     }
 
     #[test]
