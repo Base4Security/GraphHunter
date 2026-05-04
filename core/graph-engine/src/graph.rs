@@ -153,6 +153,18 @@ pub struct GraphHunter {
     /// `streaming.neighbors_arc(sid)` performs.
     pub(crate) streaming_snapshot:
         std::sync::OnceLock<crate::streaming::FrozenSnapshot>,
+    /// D3 stage 3 — monotonic mutation counter. Bumped on every
+    /// edge / entity ingestion or removal. External caches keyed
+    /// on this counter (e.g. the per-Session LFTJ trie cache in
+    /// `platform/api/state`) detect graph mutations cheaply
+    /// without diffing the whole graph: read the counter, compare
+    /// to the cached value, invalidate on mismatch. The clone
+    /// derive on `GraphHunter` clones the counter as a fresh
+    /// `AtomicU64` with the current value, which is the right
+    /// semantics for `compact_before` rebuilds — the cloned graph
+    /// gets the same version as the original at the clone moment,
+    /// then both diverge as they take subsequent writes.
+    pub(crate) mutation_version: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// One entry in the schema cache: stores the fingerprint used to validate
@@ -202,7 +214,27 @@ impl GraphHunter {
                     .with_memory_budget_edges(1_000_000),
             ),
             streaming_snapshot: std::sync::OnceLock::new(),
+            mutation_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// D3 stage 3 — current mutation version. Caller-side caches
+    /// (Session-level LFTJ trie, NLF/khop indexes that survive
+    /// across batches) compare this to a cached snapshot of the
+    /// counter to decide whether their data is stale. Invariant:
+    /// returning a value V here implies every mutation observed
+    /// up to and including the bump that produced V has retired.
+    pub fn mutation_version(&self) -> u64 {
+        self.mutation_version
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Internal: bump on every successful mutation. The Acquire/
+    /// Release pair guarantees that any reader that loads the
+    /// post-bump value also sees the writer's prior data.
+    fn bump_mutation_version(&self) {
+        self.mutation_version
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
     /// Lazy NLF accessor (heavy-logs #3.5). Builds the index on
@@ -338,6 +370,7 @@ impl GraphHunter {
         self.set_entity_type_tag(sid, &entity.entity_type);
         self.entities.insert(sid, entity);
         self.reverse_adj.entry(sid).or_default();
+        self.bump_mutation_version();
         Ok(())
     }
 
@@ -460,6 +493,7 @@ impl GraphHunter {
         if khop_invalidate {
             self.khop_reach = std::sync::OnceLock::new();
         }
+        self.bump_mutation_version();
         Ok(())
     }
 
@@ -2422,6 +2456,7 @@ impl GraphHunter {
         // call rebuilds against the post-mutation graph state.
         self.nlf = std::sync::OnceLock::new();
         self.khop_reach = std::sync::OnceLock::new();
+        self.bump_mutation_version();
         Ok((entities_removed, relations_removed))
     }
 
@@ -3053,6 +3088,7 @@ impl GraphHunter {
         // call rebuilds against the post-mutation graph state.
         self.nlf = std::sync::OnceLock::new();
         self.khop_reach = std::sync::OnceLock::new();
+        self.bump_mutation_version();
         Ok(CompactionStats {
             edges_before,
             edges_after: edges_before - edges_removed,

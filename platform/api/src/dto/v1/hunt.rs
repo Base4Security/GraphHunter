@@ -171,6 +171,17 @@ pub struct RunHuntBatchResponse {
     /// cache for subsequent canonically-equivalent queries.
     #[serde(default)]
     pub lftj_canonical_cache_misses: usize,
+    /// D3 stage 3: true when this batch reused the session-level
+    /// LFTJ trie cache (`Session::lftj_cache`) — i.e. the graph's
+    /// `mutation_version` matched the cached entry, so the
+    /// O(E) trie build was skipped entirely. False when this is
+    /// the first LFTJ-routed batch since the last graph mutation.
+    /// Distinguishes "warm session" from "cold session"; analysts
+    /// or tooling can use this to decide whether the next batch
+    /// is expected to be sub-millisecond or whether a build is
+    /// pending.
+    #[serde(default)]
+    pub lftj_session_cache_reused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

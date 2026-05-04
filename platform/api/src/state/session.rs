@@ -108,6 +108,32 @@ pub struct Session {
     /// In-memory only for M4; cleared on process restart. Persistence
     /// is part of the M5/M7 mapping-library work.
     pub agentic_review: RwLock<MappingReviewQueue>,
+    /// D3 stage 3 — persistent LFTJ cache, keyed on the graph's
+    /// mutation_version. Survives across `run_hunt_batch` calls
+    /// and is invalidated cheaply by the version comparator. The
+    /// forward trie and ts_map are shared by triangle / K4 / K5;
+    /// the reverse trie is built lazily on first C6 dispatch and
+    /// cached separately. Stored on the Session (not the
+    /// `GraphHunter` itself) because the cache is API-layer
+    /// concept — `core/graph-engine` doesn't own the run-hunt
+    /// concept and shouldn't carry rayon-built indexes that only
+    /// matter to batch lifetimes.
+    pub lftj_cache: RwLock<Option<LftjSessionCache>>,
+}
+
+/// D3 stage 3 — Session-level LFTJ index cache. Built lazily on the
+/// first LFTJ-routed batch hypothesis and reused across subsequent
+/// batches until the graph mutates. The `version` field captures
+/// `GraphHunter::mutation_version()` at build time; on each batch
+/// entry the API code compares this to the live counter and
+/// invalidates the cache on mismatch.
+pub struct LftjSessionCache {
+    pub version: u64,
+    pub forward: Arc<graph_hunter_core::lftj::MaterializedCsrTrie>,
+    pub ts_map: Arc<graph_hunter_core::lftj_query::MinTimestampMap>,
+    /// C6-only. None until the first C6 dispatch, then populated
+    /// and reused for every later C6 within the same `version`.
+    pub reverse: Option<Arc<graph_hunter_core::lftj::MaterializedCsrTrie>>,
 }
 
 impl Session {
@@ -128,6 +154,7 @@ impl Session {
             tags: RwLock::new(Vec::new()),
             ai_conversation: RwLock::new(AiConversation::new()),
             agentic_review: RwLock::new(MappingReviewQueue::new()),
+            lftj_cache: RwLock::new(None),
         }
     }
 }

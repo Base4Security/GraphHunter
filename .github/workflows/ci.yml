@@ -22,10 +22,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core/graph-engine
+      # --test-threads=1: planner / dispatch tests mutate process-wide
+      # env vars (GRAPHHUNTER_LFTJ_PLANNER, _C6_LFTJ, etc.); parallel
+      # runs race and the failures depend on scheduling. Pin serial
+      # execution for the env-coupled suite. Per-test runtime is
+      # sub-millisecond so the wall-clock cost is negligible.
       - name: Run tests (skip long benchmarks)
-        run: cargo test --manifest-path core/graph-engine/Cargo.toml -- --skip benchmark
+        run: cargo test --manifest-path core/graph-engine/Cargo.toml -- --skip benchmark --test-threads=1
       - name: Run tests (geoip feature)
-        run: cargo test --manifest-path core/graph-engine/Cargo.toml --features geoip -- --skip benchmark
+        run: cargo test --manifest-path core/graph-engine/Cargo.toml --features geoip -- --skip benchmark --test-threads=1
 
   # ── Tauri backend compile check ────────────────────────────────────
   tauri-check:

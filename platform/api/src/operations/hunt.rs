@@ -287,6 +287,14 @@ impl GraphHunterApi {
         // C6) is built lazily on first C6 dispatch. At Sysmon-scale
         // (V≈10^6, E≈10^7) trie build is ~100s of ms; sharing across
         // N templates saves N-1 builds.
+        //
+        // D3 stage 3 — extend the cache lifetime: try the
+        // session-level `lftj_cache` first; if its `version`
+        // matches `graph.mutation_version()` we reuse across
+        // batches. On version mismatch the cache is rebuilt
+        // (cheap), and on a hit we record the reuse via the
+        // dedicated counter so callers can distinguish "warm
+        // session" from "first batch this session".
         let mut lftj_forward: Option<std::sync::Arc<graph_hunter_core::lftj::MaterializedCsrTrie>> =
             None;
         let mut lftj_reverse: Option<std::sync::Arc<graph_hunter_core::lftj::MaterializedCsrTrie>> =
@@ -296,6 +304,10 @@ impl GraphHunterApi {
         > = None;
         let mut lftj_trie_cache_builds: usize = 0;
         let mut lftj_trie_cache_hits: usize = 0;
+        let mut lftj_session_cache_reused: bool = false;
+        // Cache the version observed at first LFTJ hit so we can
+        // write it back into the session when a fresh build runs.
+        let mut lftj_session_version: u64 = 0;
 
         // D3 stage 2 — canonical-form LFTJ result cache. The LFTJ
         // enumerators (triangle / K4 / K5 / C6) are *type-blind*
@@ -374,14 +386,43 @@ impl GraphHunterApi {
                     lftj_canonical_cache_misses += 1;
                     // Build forward trie + ts_map on first LFTJ hit.
                     if lftj_forward.is_none() {
-                        let trie =
-                            graph_hunter_core::lftj::MaterializedCsrTrie::build(&*graph);
-                        let ts_map = graph_hunter_core::lftj_query::MinTimestampMap::build(
-                            &*graph, &trie,
-                        );
-                        lftj_forward = Some(std::sync::Arc::new(trie));
-                        lftj_ts_map = Some(std::sync::Arc::new(ts_map));
-                        lftj_trie_cache_builds += 1;
+                        // D3 stage 3 — try the session cache before
+                        // building. The cache is invalidated by graph
+                        // mutation_version mismatch.
+                        let live_version = graph.mutation_version();
+                        lftj_session_version = live_version;
+                        let session_hit = if let Ok(cache_lock) =
+                            session_for_lftj.lftj_cache.read()
+                        {
+                            cache_lock.as_ref().and_then(|c| {
+                                if c.version == live_version {
+                                    Some((
+                                        c.forward.clone(),
+                                        c.ts_map.clone(),
+                                        c.reverse.clone(),
+                                    ))
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        if let Some((fwd, tsm, rev)) = session_hit {
+                            lftj_forward = Some(fwd);
+                            lftj_ts_map = Some(tsm);
+                            lftj_reverse = rev;
+                            lftj_session_cache_reused = true;
+                        } else {
+                            let trie =
+                                graph_hunter_core::lftj::MaterializedCsrTrie::build(&*graph);
+                            let ts_map = graph_hunter_core::lftj_query::MinTimestampMap::build(
+                                &*graph, &trie,
+                            );
+                            lftj_forward = Some(std::sync::Arc::new(trie));
+                            lftj_ts_map = Some(std::sync::Arc::new(ts_map));
+                            lftj_trie_cache_builds += 1;
+                        }
                     } else {
                         lftj_trie_cache_hits += 1;
                     }
@@ -639,6 +680,37 @@ impl GraphHunterApi {
                 entries.push(entry);
             }
         }
+        // D3 stage 3 — write the LFTJ trie back to the session
+        // cache if we built or extended it during this batch. Skip
+        // when no LFTJ-routed hypothesis fired (forward stays
+        // None) so we don't churn the cache with empty writes. On
+        // a session-cache hit we still write back if a reverse
+        // trie was built lazily after the hit (i.e., the cached
+        // entry had no reverse and a C6 dispatch built one).
+        if let (Some(fwd), Some(tsm)) =
+            (lftj_forward.as_ref(), lftj_ts_map.as_ref())
+        {
+            let session_for_writeback = self.resolve_session(session.as_ref())?;
+            let needs_writeback = !lftj_session_cache_reused
+                || lftj_reverse.is_some()
+                    && session_for_writeback
+                        .lftj_cache
+                        .read()
+                        .ok()
+                        .and_then(|c| c.as_ref().map(|e| e.reverse.is_none()))
+                        .unwrap_or(false);
+            if needs_writeback {
+                if let Ok(mut slot) = session_for_writeback.lftj_cache.write() {
+                    *slot = Some(crate::state::session::LftjSessionCache {
+                        version: lftj_session_version,
+                        forward: fwd.clone(),
+                        ts_map: tsm.clone(),
+                        reverse: lftj_reverse.clone(),
+                    });
+                }
+            }
+        }
+
         Ok(RunHuntBatchResponse {
             entries,
             indexes_were_warm,
@@ -651,6 +723,7 @@ impl GraphHunterApi {
             lftj_trie_cache_hits,
             lftj_canonical_cache_hits,
             lftj_canonical_cache_misses,
+            lftj_session_cache_reused,
         })
     }
 }
@@ -863,6 +936,110 @@ mod tests {
         let counts: Vec<usize> = resp.entries.iter().map(|e| e.path_count).collect();
         assert_eq!(counts[0], counts[1]);
         assert_eq!(counts[0], counts[2]);
+    }
+
+    #[test]
+    fn run_hunt_batch_d3_stage3_session_cache_reused_across_batches() {
+        // D3 stage 3: the session-level LFTJ cache survives
+        // across `run_hunt_batch` calls when the graph hasn't
+        // mutated. First batch builds (lftj_session_cache_reused
+        // = false); second batch on the same Session reuses
+        // (lftj_session_cache_reused = true).
+        let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", "1") };
+        let api = api();
+        let mut h = hypo("Host -[Connect]-> Host -[Connect]-> Host");
+        h.name = "triangle template".into();
+
+        let first = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h.clone()],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("first batch ok");
+        assert!(
+            !first.lftj_session_cache_reused,
+            "first batch builds the session cache; it cannot have been reused"
+        );
+        assert_eq!(first.lftj_trie_cache_builds, 1);
+
+        let second = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("second batch ok");
+
+        match prior_tri {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_TRIANGLE_LFTJ") },
+        }
+        assert!(
+            second.lftj_session_cache_reused,
+            "second batch on unchanged graph must reuse the session cache"
+        );
+        assert_eq!(
+            second.lftj_trie_cache_builds, 0,
+            "no trie build should fire when the session cache is warm"
+        );
+    }
+
+    #[test]
+    fn run_hunt_batch_d3_stage3_session_cache_invalidated_by_mutation() {
+        // After the first batch the session cache is populated.
+        // Mutating the graph (add_relation) bumps mutation_version
+        // and the next batch must rebuild — session cache reused
+        // = false.
+        let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", "1") };
+        let api = api();
+        let mut h = hypo("Host -[Connect]-> Host -[Connect]-> Host");
+        h.name = "triangle template".into();
+
+        let _first = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h.clone()],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("first batch ok");
+
+        // Mutate the graph: add an entity (a no-op for the LFTJ
+        // result on an empty graph but enough to bump the
+        // mutation_version counter).
+        {
+            let session = api.resolve_session(None).expect("session");
+            let mut g = session.graph.write().unwrap();
+            g.add_entity(graph_hunter_core::Entity::new(
+                "marker",
+                graph_hunter_core::types::EntityType::Host,
+            ))
+            .unwrap();
+        }
+
+        let second = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("second batch ok");
+
+        match prior_tri {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_TRIANGLE_LFTJ") },
+        }
+        assert!(
+            !second.lftj_session_cache_reused,
+            "graph mutation between batches must invalidate the session cache"
+        );
+        assert_eq!(second.lftj_trie_cache_builds, 1);
     }
 
     #[test]
