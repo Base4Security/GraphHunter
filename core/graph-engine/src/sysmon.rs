@@ -1,11 +1,45 @@
 use chrono::NaiveDateTime;
 use rayon::prelude::*;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::entity::Entity;
 use crate::parser::{LogParser, ParsedTriple};
 use crate::relation::Relation;
 use crate::types::{EntityType, RelationType};
+
+/// Typed Sysmon event row used by the direct-typed fast path
+/// (`SysmonJsonParser::try_parse_typed`). Every field is `Option`
+/// + `borrow`ed from the input scratch buffer for zero-copy
+/// deserialization through `simd_json::serde::from_slice`. The
+/// fields cover the union of what every implemented EventID needs
+/// — fields not relevant to the active EventID stay `None` and
+/// add no per-event cost.
+#[derive(Deserialize)]
+struct SysmonEventTyped<'a> {
+    #[serde(rename = "EventID", default)]
+    event_id: Option<u64>,
+    #[serde(rename = "UtcTime", default, borrow)]
+    utc_time: Option<&'a str>,
+    #[serde(rename = "EventTime", default, borrow)]
+    event_time: Option<&'a str>,
+    #[serde(rename = "@timestamp", default, borrow)]
+    timestamp_at: Option<&'a str>,
+    #[serde(rename = "Image", default, borrow)]
+    image: Option<&'a str>,
+    #[serde(rename = "User", default, borrow)]
+    user: Option<&'a str>,
+    #[serde(rename = "Computer", default, borrow)]
+    computer: Option<&'a str>,
+    #[serde(rename = "ProcessId", default)]
+    process_id: Option<u64>,
+    #[serde(rename = "ParentImage", default, borrow)]
+    parent_image: Option<&'a str>,
+    #[serde(rename = "ParentProcessId", default)]
+    parent_process_id: Option<u64>,
+    #[serde(rename = "CommandLine", default, borrow)]
+    command_line: Option<&'a str>,
+}
 
 /// Parser for Sysmon, Windows Security, PowerShell, and Winlogbeat events exported as JSON.
 ///
@@ -839,6 +873,67 @@ impl SysmonJsonParser {
 }
 
 impl SysmonJsonParser {
+    /// Direct-typed parser for the most common Sysmon EventIDs.
+    /// Returns `Some(triples)` on a successful typed parse;
+    /// `None` falls back to the legacy `Value`-based path. Saves
+    /// the HashMap construction + per-field probe cost that the
+    /// `parse_event(Value)` path pays.
+    ///
+    /// Today handles EventID 1 (Process Create) only — the highest-
+    /// volume Sysmon event by far. Other IDs fall through to the
+    /// legacy parser. Adding more variants is a mechanical extension
+    /// of the field set.
+    fn try_parse_typed(line: &str) -> Option<Vec<ParsedTriple>> {
+        // simd-json mutates its input buffer in place. Allocate a
+        // line-scoped buffer; the deserialized fields will reference
+        // it via `&'a str`, so the buffer must outlive `event` (it
+        // does — both live until end of this fn).
+        let mut buf = line.as_bytes().to_vec();
+        let event: SysmonEventTyped<'_> = simd_json::serde::from_slice(&mut buf).ok()?;
+        let event_id = event.event_id?;
+        if event_id != 1 {
+            // Only EventID 1 is implemented in the typed fast path.
+            // Returning None here forces the caller to dispatch via
+            // the legacy Value-based parser, which handles every
+            // other EventID. The scratch `buf` is dropped on return;
+            // the next line gets its own.
+            return None;
+        }
+        let timestamp = event
+            .utc_time
+            .or(event.event_time)
+            .or(event.timestamp_at)
+            .and_then(Self::parse_timestamp)
+            .unwrap_or(0);
+        let image = event.image?;
+        let mut triples = Vec::with_capacity(2);
+        let mut child = Entity::new(image, EntityType::Process);
+        if let Some(pid) = event.process_id {
+            child.metadata.insert("pid".into(), pid.to_string());
+        }
+        if let Some(cmd) = event.command_line {
+            child.metadata.insert("cmdline".into(), cmd.into());
+        }
+        if let Some(comp) = event.computer {
+            child.metadata.insert("computer".into(), comp.into());
+        }
+        if let Some(user_name) = event.user {
+            let user_entity = Entity::new(user_name, EntityType::User);
+            let rel =
+                Relation::new(&user_entity.id, &child.id, RelationType::Execute, timestamp);
+            triples.push((user_entity, rel, child.clone()));
+        }
+        if let Some(parent_image) = event.parent_image {
+            let mut parent = Entity::new(parent_image, EntityType::Process);
+            if let Some(ppid) = event.parent_process_id {
+                parent.metadata.insert("pid".into(), ppid.to_string());
+            }
+            let rel = Relation::new(&parent.id, &child.id, RelationType::Spawn, timestamp);
+            triples.push((parent, rel, child));
+        }
+        Some(triples)
+    }
+
     /// Decodes the input into a `Vec<Value>` using the same JSON-array +
     /// NDJSON fallback logic `parse` uses, so stats and triples see the
     /// exact same row stream.
@@ -895,14 +990,19 @@ impl LogParser for SysmonJsonParser {
         }
 
         // NDJSON fast path: fuse line-parse and event-parse into a
-        // single rayon pipeline. Each worker decodes one line into a
-        // `Value` and immediately converts to `ParsedTriple`s without
-        // ever materializing a `Vec<Value>` — saves a full pass plus
-        // the intermediate vector allocation.
+        // single rayon pipeline. Each worker tries the typed path
+        // first (`try_parse_typed`); on miss falls through to the
+        // legacy `Value` path which handles every EventID. The
+        // typed path skips the HashMap construction + per-field
+        // probe overhead of the Value path and is dramatically
+        // faster for the highest-volume Sysmon events (EventID 1).
         trimmed
             .par_lines()
             .filter(|l| !l.trim().is_empty())
             .flat_map_iter(|line| {
+                if let Some(triples) = Self::try_parse_typed(line) {
+                    return triples.into_iter();
+                }
                 let mut buf = line.as_bytes().to_vec();
                 let event = simd_json::serde::from_slice::<Value>(&mut buf)
                     .ok()
