@@ -525,22 +525,51 @@ mod tests {
         h
     }
 
+    /// Process-wide mutex shared by every env-mutating test in this
+    /// module. Cargo test runs in parallel by default; without this
+    /// guard, two tests setting different `GRAPHHUNTER_*_LFTJ` flags
+    /// race and the loser sees an inconsistent dispatch route. CI
+    /// used to band-aid this with `--test-threads=1` (see
+    /// `.github/workflows/ci.yml`); the mutex makes that workaround
+    /// unnecessary by serializing only the env-touching tests
+    /// instead of the whole suite.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Holds the env lock for the closure's lifetime, sets / restores
+    /// the named var, and survives panics by storing the prior value
+    /// before mutating. Always pair with `lock_env()` in tests that
+    /// also call `std::env::remove_var` directly.
     fn with_var<F: FnOnce()>(name: &str, value: &str, f: F) {
-        // SAFETY: tests in this module mutate the same env vars but run
-        // serially under `cargo test --test-threads=1`. The dispatch
-        // module's only callers (the matcher entry points) are not
-        // exercised concurrently with these tests.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var(name).ok();
+        // SAFETY: env mutations on this thread are serialized by
+        // ENV_LOCK; no other test reads or writes these vars while
+        // the guard is held. The dispatch module's only callers
+        // (the matcher entry points) are not exercised concurrently
+        // with these tests.
         unsafe {
             std::env::set_var(name, value);
         }
         f();
         unsafe {
-            std::env::remove_var(name);
+            match prior {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
         }
+    }
+
+    /// Acquire the env lock without setting any var — for tests that
+    /// only want to call `remove_var` or read existing state.
+    /// Returns a guard the caller must keep alive for the duration
+    /// of the env access.
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
     fn default_is_dfs_match() {
+        let _guard = lock_env();
         let h = k4_homogeneous();
         // No env vars set → no dispatch.
         unsafe {
@@ -562,6 +591,7 @@ mod tests {
 
     #[test]
     fn name_marker_route_inactive_without_env() {
+        let _guard = lock_env();
         let h = Hypothesis::new("k4-clique probe").add_step(HypothesisStep::new(
             EntityType::Host,
             RelationType::Connect,
@@ -741,6 +771,7 @@ mod tests {
 
     #[test]
     fn cost_model_inactive_falls_back_to_legacy_plan() {
+        let _guard = lock_env();
         let h = triangle_homogeneous();
         let hints = CostHints {
             vertex_count: 100_000,
@@ -803,6 +834,7 @@ mod tests {
 
     #[test]
     fn c6_route_takes_priority_over_k4_for_six_step() {
+        let _guard = lock_env();
         // Without the C6 name marker, a 6-step homogeneous shape
         // routes to K4 (legacy behavior preserved). With the marker
         // and the C6 flag, it routes to C6.
