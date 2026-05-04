@@ -60,10 +60,10 @@
 \newcommand{\filepath}[1]{\texttt{\small\detokenize{#1}}}
 \newcommand{\code}[1]{\texttt{\detokenize{#1}}}
 
-\title{GraphHunter --- Cambios de performance abril 2026 \\
-  \large Capa de \emph{matching} temporal: D5, B9, C2, D2-lite, D1 (\emph{scaffold})}
+\title{GraphHunter --- Cambios de performance abril--mayo 2026 \\
+  \large Capa de \emph{matching} temporal: D5, B9, C2, D2-lite, D1 (\emph{vertical completa K3 \(\to\) K4 \(\to\) K5 \(\to\) C6}), tipo-aware LFTJ, D3 (\emph{caching staircase} stages 1--4)}
 \author{Lucas Sotomayor \\ Base4Security}
-\date{29 de abril de 2026}
+\date{4 de mayo de 2026}
 
 \begin{document}
 \maketitle
@@ -697,6 +697,65 @@ Con ventana, la amortización es \textbf{multiplicativa y monótona en $K$}: cad
 A $K=1$ las dos rutas dan paridad (la construcción se hace una sola vez en ambos caminos); el $0{,}88\times$ a $p=0{,}02,\ K=1$ es ruido por debajo del segundo dígito. La pendiente clara aparece desde $K=4$.
 
 Esto cierra la lectura abierta del \emph{benchmark} sin ventana: D3 no es \emph{insurance} en el régimen real de \emph{threat hunting}; es la palanca que vuelve rentable la composición del \emph{trie} compartido en cuanto las \emph{queries} se vuelven mínimamente selectivas. Lo siguiente es encadenar B9 (\emph{symmetry}), D5 (k-hop \emph{label reach}) y D2-lite (\emph{semi-join}) sobre patrones no triangulares, donde la \emph{output cardinality} es naturalmente más chica que en Erdős-Rényi denso.
+
+\chapter{D3 stages 1--4 --- \emph{caching staircase} \emph{end-to-end}}
+
+\textbf{Contexto.} El capítulo anterior dejó D3 como una \emph{single-shot} comparison entre \emph{shared-trie} vs \emph{rebuild-trie} sobre el mismo proceso. La \emph{producción real} es distinta: el \emph{operador} no corre 64 \emph{queries} idénticas seguidas; corre 6--20 \emph{templates ATT\&CK} distintas \emph{cada pocos minutos} contra un grafo que se actualiza por \emph{ingest} de stream. Las cuatro \emph{stages} de D3 cubren progresivamente esa carga: \emph{stage 1} comparte el \emph{trie} dentro del \emph{batch}; \emph{stage 2} \emph{deduplica} resultados \emph{canónicamente equivalentes} dentro del \emph{batch}; \emph{stage 3} promueve el \emph{trie} cache a \emph{per-Session} con \emph{invalidation} por \code{mutation\_version}; \emph{stage 4} generaliza a un \emph{map} de \emph{typed tries} y promueve el \emph{canonical raw-result cache} a \emph{per-Session} con \emph{FIFO eviction}.
+
+\section{D3 stage 1 --- \emph{shared trie} dentro del \emph{batch}}
+
+\code{run\_hunt\_batch} en \filepath{platform/api/src/operations/hunt.rs} construye el \emph{forward trie} y \code{MinTimestampMap} \emph{una sola vez} por (\emph{graph, time\_window}) y los reusa entre todas las \emph{LFTJ-routed} \emph{hypotheses} del \emph{batch}. La \emph{reverse trie} (sólo C6) se construye \emph{lazy} en el primer \emph{C6 dispatch}. Counters \code{lftj\_trie\_cache\_builds} (\(\le 1\) forward + \(\le 1\) reverse por \emph{batch}) y \code{lftj\_trie\_cache\_hits} (uno por \emph{template} reusado) se exponen en la \code{RunHuntBatchResponse}.
+
+\section{D3 stage 2 --- \emph{canonical raw-result cache} dentro del \emph{batch}}
+
+Los \emph{enumerators LFTJ} producían \emph{idéntica} salida cuando dos \emph{templates} compartían \code{(DispatchPlan, time\_window)} (independiente de los \emph{step labels} en aquel momento, antes del \emph{type-aware fix}). \emph{Stage 2} cachea el \emph{raw} \code{Vec<HuntResult>} \emph{por} esa clave; el segundo \emph{template} canónicamente equivalente saltea por completo la enumeración \(O(m^{\rho^*})\) y sólo paga \code{apply\_aggregation}. Counters \code{lftj\_canonical\_cache\_hits} y \code{lftj\_canonical\_cache\_misses}.
+
+\section{D3 stage 3 --- \emph{persistent session cache} con \code{mutation\_version}}
+
+\code{GraphHunter} gana un \code{mutation\_version: AtomicU64} que se incrementa en cada \code{add\_entity} / \code{add\_relation} / \code{compact\_before} / \code{remove\_entities\_and\_relations\_by\_dataset}. \code{Session} gana un campo \code{lftj\_cache: RwLock<Option<LftjSessionCache>>} con la \code{version} congelada al \emph{build time}. Al entrar al próximo \emph{batch}, si la \emph{version} cacheada coincide con la \emph{live} → reuso de \emph{trie}. En el \emph{otherwise} → \emph{rebuild}. Counter \code{lftj\_session\_cache\_reused: bool} distingue \emph{warm session} de \emph{cold session}.
+
+\section{Type-aware LFTJ --- \emph{correctness fix}}
+
+Antes de este \emph{push}, los \emph{enumerators LFTJ} (triangle / K4 / K5 / C6) eran \emph{type-blind}: caminaban el \emph{trie} sin filtrar por \emph{rel\_type} o \emph{vertex\_type} de los \emph{steps}, produciendo \emph{matches} de todos los \emph{rel types} aunque el \emph{operador} hubiese pedido sólo \emph{Auth}. La \emph{limitación} estaba documentada \emph{quietly} en \code{looks\_like\_k4\_clique}. El \emph{fix}: nuevas funciones \code{MaterializedCsrTrie::build\_filtered} y \code{build\_reverse\_filtered} aceptan un \emph{predicate} \code{Fn(StrId, \&StreamEdge) -> bool}. \code{GraphHunter::build\_lftj\_trie\_for(\&Hypothesis)} decide \emph{filtered} vs \emph{blind} basándose en el resultado de \code{homogeneous\_lftj\_signature}: si todos los \emph{steps} comparten un \code{(rel\_type, src\_type==dst\_type)} concreto, construye \emph{filtered}. Test de regresión: dos K4 disjuntos sobre \emph{rel types} distintos --- el \emph{enumerator} \emph{type-aware} emite sólo el matching, el \emph{type-blind} emite los dos (probando que el \emph{bug} existía).
+
+\section{D3 stage 4 --- \emph{typed-trie map} \(+\) \emph{persistent canonical cache}}
+
+\emph{Stage 3} mantenía un \emph{único} \emph{trie} cacheado por \code{Session}. Si un \emph{batch} disparaba primero K4-Auth y luego C6-Connect, el segundo \emph{shape} reconstruía. \emph{Stage 4} generaliza:
+
+\begin{itemize}
+  \item \code{LftjSessionCache.typed\_tries: HashMap<Option<(u8, u8)>, LftjTypedTrie>} --- una entrada \emph{por} \code{(rel\_type\_tag, vertex\_type\_tag)}, o \code{None} para el \emph{type-blind trie} de \emph{name-marker-only} \emph{paths}. K4-Auth y C6-Connect mantienen \emph{ambas} \emph{tries} \emph{warm} sin reconstrucción.
+  \item \code{LftjSessionCache.canonical\_results: HashMap<LftjCanonicalKey, Arc<Vec<HuntResult>>>} con \code{VecDeque} de \emph{insertion order} para \emph{FIFO eviction} a \code{MAX\_CANONICAL\_ENTRIES = 64}. Sobrevive entre \emph{batches}; se invalida \emph{whole-cache} cuando \code{mutation\_version} cambia.
+  \item Counter \code{lftj\_persistent\_canonical\_hits} cuenta \emph{cross-batch} \emph{enumerate} reusos. Counter \code{lftj\_persistent\_trie\_hits} cuenta \emph{lookups} en el \emph{typed-trie map} que aciertan.
+  \item El \emph{batch path} ahora usa \code{graph.build\_lftj\_trie\_for(\&hypothesis)} consistente con el \emph{single-query API}, cerrando el \emph{gap} de \emph{type-blindness} que el \emph{type-aware fix} había dejado en \emph{run\_hunt\_batch}.
+\end{itemize}
+
+\section{Bench \emph{cold-vs-warm} --- el \emph{headline} para \emph{Black Hat 2026}}
+
+\filepath{platform/api/benches/batch\_csh\_cold\_vs\_warm.rs} ejercita \emph{end-to-end} la \emph{caching staircase} sobre una \emph{6-template} \emph{SOC battery} (triangle + K4 + C6, dos \emph{type signatures} cada uno) contra grafos \emph{Barabási-Albert scale-free} (\emph{Sysmon-shaped}). Galaxy-book4, \emph{thin LTO}, \emph{warm-up} 1~s, \emph{measurement-time} 5~s, 20 \emph{samples} \emph{per case}.
+
+\begin{tabular}{lrrr}
+\toprule
+\emph{Fixture} & \emph{cold} & \emph{warm} & \emph{speedup} \\
+\midrule
+\(V=1\)K, BA\((m=3)\) & 2{,}40~ms & \textbf{19~\(\mu\)s} & \textbf{126\(\times\)} \\
+\(V=5\)K, BA\((m=3)\) & 6{,}89~ms & \textbf{19~\(\mu\)s} & \textbf{358\(\times\)} \\
+\bottomrule
+\end{tabular}
+
+\textbf{Lectura.} El \emph{warm} time es \emph{constante} en \(\sim 19\,\mu\)s independientemente del tamaño del grafo --- \emph{cache-lookup floor}. El \emph{cold} crece con \(O(E)\) (\emph{trie build} + \emph{enumerate}). El \emph{cold/warm ratio} crece con \(V\) precisamente porque el \emph{cold work} escala linearmente mientras el \emph{warm} se queda en el \emph{floor}. \emph{Producción story}: el \emph{operador} \emph{paga} el \emph{trie build} + \emph{enumerate} \emph{una vez por ingest} y luego corre \emph{re-fires ilimitados} de la misma \emph{template battery} \emph{gratis} hasta que \code{mutation\_version} se \emph{bumpa}.
+
+\textbf{Por qué importa para \emph{Black Hat}.} En SOC \emph{template batteries} el \emph{operador} corre la \emph{misma batería} cada 5--15 minutos contra un grafo que crece por \emph{ingest} pero no se mutila. Con la \emph{D3 staircase} en \code{main}, esa carga colapsa de \emph{N templates × build cost} a \emph{1 build} amortizado entre \emph{N templates} \emph{y} entre \emph{M batches} hasta el próximo \emph{ingest}. Es la diferencia operacional entre \emph{matcher como herramienta de \emph{ad-hoc query}} (lo que era) y \emph{matcher como motor de monitoreo continuo} (lo que ahora es).
+
+\section{Resumen de \emph{counters} expuestos en \code{RunHuntBatchResponse}}
+
+\begin{itemize}
+  \item \code{lftj\_trie\_cache\_builds} --- \emph{trie} \emph{builds} \emph{intra-batch} (\(\le 1\) forward \(+ \le 1\) reverse).
+  \item \code{lftj\_trie\_cache\_hits} --- \emph{template} \emph{reusos} del \emph{trie} dentro del \emph{batch}.
+  \item \code{lftj\_canonical\_cache\_hits} / \code{lftj\_canonical\_cache\_misses} --- \emph{raw-result} \emph{lookups} (\emph{whole batch} window).
+  \item \code{lftj\_session\_cache\_reused: bool} --- \emph{warm session} indicator (D3 stage 3).
+  \item \code{lftj\_persistent\_canonical\_hits} --- \emph{cross-batch} \emph{enumerate} reusos (D3 stage 4 \emph{strict subset of} \code{lftj\_canonical\_cache\_hits}).
+  \item \code{lftj\_persistent\_trie\_hits} --- \emph{typed-trie map} \emph{hits} (D3 stage 4 \emph{strict subset of} \code{lftj\_trie\_cache\_hits}).
+\end{itemize}
 
 \chapter{D1 --- cruce AGM en patrones cíclicos: K4}
 
