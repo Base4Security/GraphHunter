@@ -1049,7 +1049,7 @@ impl GraphHunter {
         time_window: Option<(i64, i64)>,
         max_results: Option<usize>,
     ) -> Result<(Vec<HuntResult>, bool), GraphError> {
-        let trie = crate::lftj::MaterializedCsrTrie::build(self);
+        let trie = self.build_lftj_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
         self.search_temporal_pattern_k4_lftj_with_trie(
             hypothesis, &trie, &ts_map, time_window, max_results,
@@ -1093,8 +1093,8 @@ impl GraphHunter {
         time_window: Option<(i64, i64)>,
         max_results: Option<usize>,
     ) -> Result<(Vec<HuntResult>, bool), GraphError> {
-        let forward = crate::lftj::MaterializedCsrTrie::build(self);
-        let reverse = crate::lftj::MaterializedCsrTrie::build_reverse(self);
+        let forward = self.build_lftj_trie_for(hypothesis);
+        let reverse = self.build_lftj_reverse_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &forward);
         self.search_temporal_pattern_c6_lftj_with_trie(
             hypothesis, &forward, &reverse, &ts_map, time_window, max_results,
@@ -1135,7 +1135,7 @@ impl GraphHunter {
         time_window: Option<(i64, i64)>,
         max_results: Option<usize>,
     ) -> Result<(Vec<HuntResult>, bool), GraphError> {
-        let trie = crate::lftj::MaterializedCsrTrie::build(self);
+        let trie = self.build_lftj_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
         self.search_temporal_pattern_k5_lftj_with_trie(
             hypothesis, &trie, &ts_map, time_window, max_results,
@@ -1172,7 +1172,7 @@ impl GraphHunter {
         time_window: Option<(i64, i64)>,
         max_results: Option<usize>,
     ) -> Result<(Vec<HuntResult>, bool), GraphError> {
-        let trie = crate::lftj::MaterializedCsrTrie::build(self);
+        let trie = self.build_lftj_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
         self.search_temporal_pattern_triangle_with_trie(
             hypothesis, &trie, &ts_map, time_window, max_results,
@@ -1196,6 +1196,124 @@ impl GraphHunter {
         let truncated = results.len() >= cap;
         let results = self.apply_aggregation(results, hypothesis);
         Ok((results, truncated))
+    }
+
+    /// Type-aware LFTJ trie builder. When the hypothesis is a
+    /// homogeneous shape (all steps share concrete `relation_type`
+    /// and `origin_type == dest_type`), builds a trie filtered to
+    /// edges of that (rel_type, vertex_type) pair so the LFTJ
+    /// enumerators don't pick up edges of other types. When the
+    /// hypothesis is heterogeneous or carries wildcards / Other
+    /// (the name-marker dispatch path), falls back to the
+    /// type-blind `MaterializedCsrTrie::build`.
+    ///
+    /// Note that the caller already knows the hypothesis routes
+    /// to LFTJ — this helper only decides whether the trie should
+    /// be filtered, not whether LFTJ applies.
+    pub fn build_lftj_trie_for(
+        &self,
+        hypothesis: &Hypothesis,
+    ) -> crate::lftj::MaterializedCsrTrie {
+        if let Some((rel_tag, ent_tag)) = self.homogeneous_lftj_signature(hypothesis) {
+            crate::lftj::MaterializedCsrTrie::build_filtered(self, |src_sid, edge| {
+                if edge.rel_type_tag != rel_tag {
+                    return false;
+                }
+                let src_ok = self
+                    .entity_type_tags
+                    .get(src_sid.index())
+                    .copied()
+                    .map(|t| t == ent_tag)
+                    .unwrap_or(false);
+                if !src_ok {
+                    return false;
+                }
+                self.entity_type_tags
+                    .get(edge.dest_sid.index())
+                    .copied()
+                    .map(|t| t == ent_tag)
+                    .unwrap_or(false)
+            })
+        } else {
+            crate::lftj::MaterializedCsrTrie::build(self)
+        }
+    }
+
+    /// Type-aware reverse-trie builder for cyclic shapes that need
+    /// the predecessor view (today: C6). Filtered to the same
+    /// (rel_type, vertex_type) signature as the forward trie so
+    /// the cycle-closure intersect doesn't pull in mismatched edges.
+    pub fn build_lftj_reverse_trie_for(
+        &self,
+        hypothesis: &Hypothesis,
+    ) -> crate::lftj::MaterializedCsrTrie {
+        // The reverse trie groups by destination, but the rel_type
+        // and vertex-type filter is symmetric — both endpoints must
+        // be the homogeneous vertex type, and the edge type must
+        // match. Use build_reverse_filtered if it exists; otherwise
+        // build the reverse from a filtered forward by swapping the
+        // input. Cleanest path: add a dedicated build_reverse_filtered.
+        if let Some((rel_tag, ent_tag)) = self.homogeneous_lftj_signature(hypothesis) {
+            crate::lftj::MaterializedCsrTrie::build_reverse_filtered(self, |src_sid, edge| {
+                if edge.rel_type_tag != rel_tag {
+                    return false;
+                }
+                let src_ok = self
+                    .entity_type_tags
+                    .get(src_sid.index())
+                    .copied()
+                    .map(|t| t == ent_tag)
+                    .unwrap_or(false);
+                if !src_ok {
+                    return false;
+                }
+                self.entity_type_tags
+                    .get(edge.dest_sid.index())
+                    .copied()
+                    .map(|t| t == ent_tag)
+                    .unwrap_or(false)
+            })
+        } else {
+            crate::lftj::MaterializedCsrTrie::build_reverse(self)
+        }
+    }
+
+    /// Returns `Some((rel_type_tag, vertex_type_tag))` when the
+    /// hypothesis is structurally a homogeneous shape — every step
+    /// shares the same concrete `relation_type` and the same
+    /// `origin_type == dest_type`. Returns `None` otherwise (mixed
+    /// types, wildcards, `Other(_)`, name-marker-only paths). The
+    /// LFTJ trie builders use this to decide whether to filter.
+    fn homogeneous_lftj_signature(&self, hypothesis: &Hypothesis) -> Option<(u8, u8)> {
+        let steps = &hypothesis.steps;
+        if steps.is_empty() {
+            return None;
+        }
+        let first = &steps[0];
+        if matches!(
+            first.relation_type,
+            crate::types::RelationType::Any | crate::types::RelationType::Other(_)
+        ) {
+            return None;
+        }
+        if matches!(
+            first.origin_type,
+            EntityType::Any | EntityType::Other(_)
+        ) {
+            return None;
+        }
+        if first.origin_type != first.dest_type {
+            return None;
+        }
+        let all_match = steps.iter().all(|s| {
+            s.relation_type == first.relation_type
+                && s.origin_type == first.origin_type
+                && s.dest_type == first.dest_type
+        });
+        if !all_match {
+            return None;
+        }
+        Some((first.relation_type.to_u8(), first.origin_type.to_u8()))
     }
 
     /// Apply `HAVING` and `WITHIN` clauses to the raw result set. A no-op

@@ -1286,6 +1286,62 @@ pub struct MaterializedCsrTrie {
 }
 
 impl MaterializedCsrTrie {
+    /// Build from a graph filtering edges by a caller-supplied
+    /// predicate. Used by the type-aware LFTJ path so a hypothesis
+    /// like `Host -[Connect]-> Host -[Connect]-> Host` (homogeneous
+    /// triangle on a specific edge type) only sees `Connect` edges
+    /// in its trie, matching what the operator authored.
+    ///
+    /// The predicate is invoked once per (src, edge) pair. Vertices
+    /// whose entire dst slice gets filtered out are dropped from
+    /// `src_keys` so the trie iterator doesn't waste cycles on them.
+    pub fn build_filtered<F>(graph: &crate::graph::GraphHunter, mut accept: F) -> Self
+    where
+        F: FnMut(crate::interner::StrId, &crate::streaming::StreamEdge) -> bool,
+    {
+        let mut srcs_candidate: Vec<u32> = graph
+            .entities
+            .keys()
+            .copied()
+            .map(|sid| sid.index() as u32)
+            .collect();
+        srcs_candidate.sort_unstable();
+
+        let mut src_keys: Vec<u32> = Vec::with_capacity(srcs_candidate.len());
+        let mut dst_offsets: Vec<u32> = Vec::with_capacity(srcs_candidate.len() + 1);
+        let mut dst_keys: Vec<u32> = Vec::new();
+        dst_offsets.push(0);
+
+        for &src_idx in &srcs_candidate {
+            let sid = crate::interner::StrId::from_raw(src_idx);
+            let arc = match graph.streaming.neighbors_arc(sid) {
+                Some(a) => a,
+                None => continue,
+            };
+            let g = arc.read();
+            let mut dsts: Vec<u32> = g
+                .as_slice()
+                .iter()
+                .filter(|e| accept(sid, e))
+                .map(|e| e.dest_sid.index() as u32)
+                .collect();
+            if dsts.is_empty() {
+                continue;
+            }
+            dsts.sort_unstable();
+            dsts.dedup();
+            src_keys.push(src_idx);
+            dst_keys.extend_from_slice(&dsts);
+            dst_offsets.push(dst_keys.len() as u32);
+        }
+
+        Self {
+            src_keys,
+            dst_offsets,
+            dst_keys,
+        }
+    }
+
     /// Build from a graph by walking every entity's outgoing-edge
     /// slice and packing the (src, dst) pairs into a CSR. Cost: O(E)
     /// for the walk plus O(deg log deg) per source for dedup-sort.
@@ -1340,6 +1396,48 @@ impl MaterializedCsrTrie {
     /// Number of unique (src, dst) pairs stored.
     pub fn edge_count(&self) -> usize {
         self.dst_keys.len()
+    }
+
+    /// Type-aware variant of `build_reverse`. Same shape as
+    /// `build_filtered` (forward) but emits the predecessor view.
+    /// The predicate is invoked once per (src, edge) pair against
+    /// the underlying graph; only matching edges contribute to the
+    /// reverse trie.
+    pub fn build_reverse_filtered<F>(graph: &crate::graph::GraphHunter, mut accept: F) -> Self
+    where
+        F: FnMut(crate::interner::StrId, &crate::streaming::StreamEdge) -> bool,
+    {
+        let mut pairs: Vec<(u32, u32)> = Vec::new();
+        graph.streaming.for_each_edge(|src_sid, edge| {
+            if !accept(src_sid, edge) {
+                return;
+            }
+            let s = src_sid.index() as u32;
+            let d = edge.dest_sid.index() as u32;
+            pairs.push((d, s));
+        });
+        pairs.sort_unstable();
+        pairs.dedup();
+
+        let mut src_keys: Vec<u32> = Vec::new();
+        let mut dst_offsets: Vec<u32> = vec![0];
+        let mut dst_keys: Vec<u32> = Vec::with_capacity(pairs.len());
+        let mut i = 0usize;
+        while i < pairs.len() {
+            let key = pairs[i].0;
+            src_keys.push(key);
+            while i < pairs.len() && pairs[i].0 == key {
+                dst_keys.push(pairs[i].1);
+                i += 1;
+            }
+            dst_offsets.push(dst_keys.len() as u32);
+        }
+
+        Self {
+            src_keys,
+            dst_offsets,
+            dst_keys,
+        }
     }
 
     /// Build the *reverse* CSR: indexed by destination, with sorted

@@ -2057,6 +2057,90 @@ mod tests {
         assert!(r.len() <= 3, "max_results must cap output");
     }
 
+    /// Type-aware trie: homogeneous K4 (Auth) hypothesis must NOT
+    /// emit a K4 whose edges are mixed types. Build a graph that
+    /// contains a K4 in `Auth` edges and a separate K4 in `Connect`
+    /// edges (with chronologically valid timestamps each); the
+    /// type-aware LFTJ on a homogeneous-Auth K4 hypothesis must
+    /// only return the Auth K4. Without the filter, the type-blind
+    /// trie sees both K4s as topologically equivalent and returns
+    /// both — that's the correctness bug this fix closes.
+    #[test]
+    fn type_aware_lftj_k4_filters_by_relation_type() {
+        use crate::types::RelationType;
+        // Two disjoint K4s: (a..d) connected by Auth, (e..h)
+        // connected by Connect. Eight separate vertices so the K4s
+        // can't share any nodes.
+        let mut g = GraphHunter::new();
+        for n in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+            g.add_entity(Entity::new(n, EntityType::User)).unwrap();
+        }
+        let auth_edges: &[(&str, &str, i64)] = &[
+            ("a", "b", 10),
+            ("a", "c", 20),
+            ("a", "d", 30),
+            ("b", "c", 40),
+            ("b", "d", 50),
+            ("c", "d", 60),
+        ];
+        let conn_edges: &[(&str, &str, i64)] = &[
+            ("e", "f", 110),
+            ("e", "g", 120),
+            ("e", "h", 130),
+            ("f", "g", 140),
+            ("f", "h", 150),
+            ("g", "h", 160),
+        ];
+        for (s, d, t) in auth_edges {
+            g.add_relation(Relation::new(*s, *d, RelationType::Auth, *t))
+                .unwrap();
+        }
+        for (s, d, t) in conn_edges {
+            g.add_relation(Relation::new(*s, *d, RelationType::Connect, *t))
+                .unwrap();
+        }
+        g.sort_edges_by_timestamp().unwrap();
+
+        // Build a homogeneous K4-Auth hypothesis (six steps, all
+        // User -[Auth]-> User).
+        let mut h = crate::Hypothesis::new("auth K4");
+        for _ in 0..6 {
+            h = h.add_step(crate::HypothesisStep::new(
+                EntityType::User,
+                RelationType::Auth,
+                EntityType::User,
+            ));
+        }
+
+        // Type-aware trie via the new helper.
+        let trie = g.build_lftj_trie_for(&h);
+        let ts_map = MinTimestampMap::build(&g, &trie);
+        let mut results = enumerate_4cliques_lftj_simd(
+            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100,
+        );
+        results.sort_by(|a, b| a[0].cmp(&b[0]));
+
+        assert_eq!(
+            results.len(),
+            1,
+            "type-aware K4-Auth must emit exactly the Auth K4, not the Connect K4"
+        );
+        let names: Vec<&str> = results[0].iter().map(|s| &**s).collect();
+        assert_eq!(names, vec!["a", "b", "c", "d"]);
+
+        // Sanity: the type-blind trie sees both K4s.
+        let blind_trie = MaterializedCsrTrie::build(&g);
+        let blind_ts = MinTimestampMap::build(&g, &blind_trie);
+        let blind = enumerate_4cliques_lftj_simd(
+            &g, &blind_trie, &blind_ts, i64::MIN, i64::MAX, 100,
+        );
+        assert_eq!(
+            blind.len(),
+            2,
+            "type-blind trie must see both K4s — confirms the bug the type-aware path fixes"
+        );
+    }
+
     /// Build a 5-vertex graph with the ten lex-ordered forward edges
     /// of a K5 and timestamps strictly chronological in lex order:
     /// `t_ab=10 < t_ac=20 < t_ad=30 < t_ae=40 < t_bc=50 < t_bd=60 <
