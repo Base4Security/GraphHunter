@@ -122,6 +122,20 @@ void gm_free_string(char* s);
 /// "avx512" | "avx2" | "sse42" | "neon" | "scalar"
 const char* gm_simd_isa(void);
 
+/// ABI version of the compiled library. Rust callers verify this at
+/// init time and refuse to run if the library they linked against does
+/// not match the ABI they were built for. Bumped whenever any function
+/// signature, handle layout, or numeric tag assignment changes in a
+/// way Rust cannot safely tolerate.
+///
+/// Current: 1
+uint32_t gm_abi_version(void);
+
+/// Constant Rust asserts against at init time. Increment this in both
+/// the C header AND Rust's `EXPECTED_ABI_VERSION` on breaking ABI
+/// changes.
+#define GM_ABI_VERSION 1u
+
 // ---------------------------------------------------------------------------
 // String interning (for resolving node IDs to names)
 // ---------------------------------------------------------------------------

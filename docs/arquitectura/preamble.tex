@@ -1,0 +1,121 @@
+% GraphHunter — Libro «Arquitectura»
+% Preamble compartido con el resto de libros (copiado literal, variación
+% sólo en hyperref/pdftitle y colores de acento).
+%
+% Este libro usa un azul pizarra como color de acento para distinguirlo
+% visualmente de los otros PDFs.
+
+% XeLaTeX usa Unicode nativamente — evitar inputenc/fontenc.
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}
+\setsansfont{Latin Modern Sans}
+\setmonofont{Latin Modern Mono}
+\usepackage[spanish,es-tabla,es-lcroman,es-noshorthands]{babel}
+\usepackage{csquotes}
+
+\usepackage[a4paper,margin=2.4cm]{geometry}
+
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+
+% Pseudocódigo estilo CLRS.
+\usepackage[ruled,linesnumbered,algochapter]{algorithm2e}
+\SetKwComment{Comment}{$\triangleright$ }{}
+\SetKwFor{For}{for}{do}{end}
+\SetKwFor{While}{while}{do}{end}
+\SetKwIF{If}{ElseIf}{Else}{if}{then}{else if}{else}{end}
+\SetKwRepeat{Repeat}{repeat}{until}
+
+% Código.
+\usepackage{listings}
+\usepackage{xcolor}
+\definecolor{accent}{HTML}{2F4858}       % azul pizarra (Arquitectura)
+\definecolor{codecomment}{rgb}{0.35,0.45,0.45}
+\definecolor{codekw}{rgb}{0.55,0.10,0.55}
+\definecolor{codestr}{rgb}{0.10,0.45,0.10}
+\lstdefinelanguage{Rust}{
+    morekeywords={fn,let,mut,pub,struct,enum,impl,trait,where,if,else,for,while,
+                  loop,match,return,use,mod,const,static,self,Self,as,in,ref,move,
+                  async,await,dyn,unsafe,crate,super,extern,type,break,continue},
+    morecomment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    morestring=[b]",
+    morestring=[b]',
+}
+\lstdefinelanguage{TypeScript}{
+    morekeywords={function,const,let,var,if,else,for,while,return,async,await,
+                  import,export,from,as,class,interface,type,extends,implements,
+                  new,this,super,public,private,protected,readonly,static,true,false,null,undefined},
+    morecomment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    morestring=[b]",
+    morestring=[b]',
+}
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{codekw}\bfseries,
+    commentstyle=\color{codecomment}\itshape,
+    stringstyle=\color{codestr},
+    showstringspaces=false,
+    frame=single,
+    numbers=none,
+    captionpos=b,
+    breaklines=true,
+    tabsize=4,
+}
+
+% Enlaces.
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=accent,
+    citecolor=black,
+    urlcolor=accent,
+    pdftitle={GraphHunter — Arquitectura},
+    pdfauthor={Lucas Sotomayor / Base4Security},
+    bookmarks=true,
+    bookmarksopen=true,
+    bookmarksnumbered=true,
+}
+\usepackage{bookmark}
+
+% Tablas y diagramas.
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{float}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, fit, backgrounds}
+
+% Teoremas / notas.
+\theoremstyle{plain}
+\newtheorem{theorem}{Teorema}[chapter]
+\newtheorem{lemma}[theorem]{Lema}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definición}
+
+\theoremstyle{remark}
+\newtheorem*{invariant}{Invariante}
+\newtheorem*{nota}{Nota}
+
+\newenvironment{enelcodigo}{%
+    \par\vspace{0.4em}%
+    \noindent\textbf{En el código.}\nopagebreak\par\nopagebreak\vspace{0.2em}%
+}{\par\vspace{0.4em}}
+
+% Macros.
+\newcommand{\filepath}[1]{\texttt{\small\detokenize{#1}}}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+
+% Títulos de capítulo grandes.
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\normalfont\huge\bfseries\color{accent}}
+  {\chaptertitlename~\thechapter}
+  {20pt}
+  {\Huge}
+
+% Marcador TODO visible para capítulos en progreso.
+\newcommand{\TODO}[1]{\textbf{\textcolor{red}{[TODO: #1]}}}
+
+\newcommand{\passthrough}[1]{#1}

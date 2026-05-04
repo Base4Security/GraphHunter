@@ -1,0 +1,146 @@
+\chapter*{Convenciones}
+\addcontentsline{toc}{chapter}{Convenciones}
+\label{cap:notacion-pseudocodigo}
+
+Este capítulo no se lee de corrido: es una referencia para volver
+cuando aparezca una notación que no reconozcas. Si querés arrancar
+con el contenido, saltá al capítulo~\ref{cap:threat-hunting}.
+
+\section*{Notación matemática}
+
+\begin{itemize}
+    \item \(G = (\V, \E)\) — un grafo dirigido, donde \(\V\) es el
+    conjunto de vértices y \(\E \subseteq \V \times \V\) el de aristas.
+    Para grafos temporales, las aristas son ternas \((u, v, t)\) con
+    \(t \in \T\); el \emph{multigrafo} permite que existan varias
+    aristas entre el mismo par \((u, v)\) con distintos \(t\).
+    \item \(|\V| = n\), \(|\E| = m\). Convención CLRS estándar.
+    \item \(\Lc\) — alfabeto de etiquetas (en GraphHunter:
+    \texttt{EntityType} para vértices, \texttt{RelationType} para
+    aristas).
+    \item \(\deg(v)\), \(\indeg(v)\), \(\outdeg(v)\) — grado, grado de
+    entrada y de salida del vértice \(v\).
+    \item \(N(v)\), \(N^{+}(v)\), \(N^{-}(v)\) — vecindad, vecindad
+    saliente y vecindad entrante.
+    \item \(\NLF(v, L)\) — \emph{Neighborhood Label Frequency}: número
+    de vecinos salientes de \(v\) con etiqueta \(L\). Definida
+    formalmente en el capítulo~\ref{cap:nlf-detalle}.
+    \item \(\bits[v]\) — bitmap de \(|\Lc|\) bits asociado a \(v\),
+    donde el bit \(L\) está prendido sii existe un camino válido de
+    \(v\) a algún vértice de tipo \(L\). Definido en el
+    capítulo~\ref{cap:khop-detalle}.
+    \item \(\AGM(Q)\) y \(\rhostar(Q)\) — \emph{Atserias-Grohe-Marx
+    bound} y \emph{fractional edge cover number} de la consulta \(Q\).
+    Definidos y derivados en el capítulo~\ref{cap:wcoj}.
+\end{itemize}
+
+\section*{Notación del pseudocódigo}
+
+Los algoritmos siguen convención CLRS, ligeramente adaptada:
+
+\begin{itemize}
+    \item Asignación: \(x \leftarrow y\). Igualdad: \(x = y\).
+    \item Acceso a campos: \(v.\mathrm{campo}\) (notación punto, igual
+    que un \emph{struct} en C/Rust).
+    \item Bloques \texttt{for/while/if/else} delimitados por
+    indentación más \texttt{end} explícito (igual que algorithm2e).
+    \item \texttt{\textbf{return}} sale del procedimiento.
+    \item \texttt{\textbf{emit}} agrega un resultado a la salida del
+    enumerador (sin retornar).
+    \item Conjuntos: \(\{x : P(x)\}\) (comprensión), \(A \cup B\),
+    \(A \cap B\), \(A \setminus B\), \(\emptyset\).
+    \item Operaciones \emph{bitwise}: \(a \mid b\) (\emph{or}),
+    \(a \mathrel{|}\!= b\) (\emph{or-assign}), \(a \,\&\, b\)
+    (\emph{and}). Cuando aparezcan, los explicamos en el momento.
+\end{itemize}
+
+\section*{Cajas y entornos visuales}
+
+\begin{intuicion}
+Los párrafos importantes en lenguaje plano arrancan con una caja
+\emph{Intuición} verde clara. Su propósito es que entiendas el
+\emph{qué} y el \emph{por qué} antes de leer el \emph{cómo} formal.
+Si la prueba o el pseudocódigo se vuelven difíciles, releé la
+intuición ---suele alcanzar para reconstruirlos.
+\end{intuicion}
+
+\begin{ejemplo}
+Las cajas \emph{Ejemplo} (borde verde claro, fondo blanco)
+contienen un ejemplo trabajado paso a paso. Suelen incluir un
+diagrama TikZ y la traza de un algoritmo sobre una entrada chica.
+\end{ejemplo}
+
+\begin{enelcodigo}
+Los párrafos \textbf{En el código} apuntan del concepto al fichero
+real del repo donde está implementado. Por ejemplo:
+\filepath{core/graph-engine/src/lftj.rs}.
+\end{enelcodigo}
+
+\begin{nota}
+Las notas (sin numeración) son aclaraciones puntuales: una
+diferencia con un libro de referencia, una pista para el lector
+avanzado, una elección de diseño que vale la pena justificar.
+\end{nota}
+
+\begin{advertencia}
+Las advertencias señalan errores frecuentes. Léelas con cuidado: por
+ejemplo, ``no confundir \emph{path} con \emph{walk}'' es una trampa
+clásica del threat hunting (¿se permite repetir vértices?).
+\end{advertencia}
+
+\section*{Teoremas, lemas, definiciones}
+
+\begin{definition}[Plantilla]
+Cada definición se enuncia con cuantificadores explícitos y la
+referencia al objeto matemático preciso. La numeración es por
+capítulo: \(\mathrm{Definici\acute{o}n}\,X.Y\) significa la \(Y\)-ésima
+definición del capítulo \(X\).
+\end{definition}
+
+\begin{theorem}[Plantilla]
+Cada teorema enuncia formalmente una propiedad y la prueba sigue
+inmediatamente debajo. El símbolo \(\square\) cierra la prueba.
+\end{theorem}
+
+\begin{proof}
+Esta es la prueba. \(\square\)
+\end{proof}
+
+Los \emph{Lemas} son resultados auxiliares; los \emph{Corolarios}
+consecuencias inmediatas; las \emph{Proposiciones}, enunciados de
+medio peso (más fuertes que un lema, menos que un teorema).
+
+\section*{Ejercicios}
+
+\begin{ejercicios}
+Cada capítulo termina con 3--6 ejercicios. Tres tipos:
+
+\begin{enumerate}
+    \item \textbf{Warm-up}: confirma que entendiste las definiciones.
+    Suelen ser de 1--3 minutos.
+    \item \textbf{Derivaciones}: pedís \emph{trabajar} un ejemplo
+    nuevo o probar una variante chica del teorema. 10--30 minutos.
+    \item \textbf{Extensiones}: la solución requiere ir más allá del
+    capítulo. Pueden ser problemas abiertos del motor; los abordamos
+    en el capítulo siguiente o quedan como \emph{food for thought}.
+\end{enumerate}
+
+Los ejercicios marcados con \starred{} tienen solución en el
+Apéndice~\ref{ap:soluciones}. Los demás quedan abiertos por diseño.
+\end{ejercicios}
+
+\section*{Referencias cruzadas}
+
+\begin{itemize}
+    \item Los \texttt{\textbackslash ref}s a capítulos son del estilo
+    ``capítulo~\ref{cap:threat-hunting}''.
+    \item Los \texttt{\textbackslash ref}s a apéndices son del estilo
+    ``Apéndice~\ref{ap:notacion}''.
+    \item Las figuras se referencian con ``figura~X.Y'' y los
+    algoritmos con ``algoritmo~X.Y''.
+    \item Las citas a literatura externa son nombre+año entre
+    paréntesis: ``(Veldhuizen, 2014)''. Las referencias completas
+    están en la bibliografía (Apéndice~\ref{ap:bibliografia}).
+\end{itemize}
+
+\cleardoublepage

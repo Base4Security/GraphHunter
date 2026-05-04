@@ -1,0 +1,266 @@
+\chapter{\texttt{CompactRelation}: 32 bytes por arista}
+\label{cap:compact-relation}
+
+\begin{intuicion}
+La \texttt{Relation} pública pesa \(\sim 200\)~bytes en RAM por la
+metadata flexible y los IDs como \texttt{String}. A 100~M aristas
+eso son 20~GB ---inviable en una notebook---. La
+\texttt{CompactRelation} es el equivalente \emph{interno} que el
+matcher itera: 32~bytes exactos, \texttt{\#[repr(C)]}, dos por
+\emph{cache line}, \emph{mmap-friendly}. Este capítulo justifica
+cada byte del layout, explica por qué \texttt{repr(C)} es
+obligatorio (no opcional), y muestra cómo el motor convierte de
+\texttt{Relation} pública a \texttt{CompactRelation} en la frontera
+del ingestor.
+\end{intuicion}
+
+\section{El layout}
+
+\begin{lstlisting}[language=Rust]
+#[repr(C)]
+pub struct CompactRelation {
+    pub timestamp: i64,            // 8 B (offset  0)
+    pub metadata_offset: u64,       // 8 B (offset  8)  handle al MetadataStore
+    pub source_sid: StrId,          // 4 B (offset 16)
+    pub dest_sid: StrId,            // 4 B (offset 20)
+    pub ingested_at_delta: u32,     // 4 B (offset 24)  segundos desde INGEST_EPOCH_BASE
+    pub dataset_tag: u16,           // 2 B (offset 28)
+    pub rel_type_tag: u8,           // 1 B (offset 30)
+    // 1 B padding implícito        // 1 B (offset 31)
+}
+// Total: 32 bytes alineados a 8.
+\end{lstlisting}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    every node/.style={font=\scriptsize, align=center},
+    cell/.style={draw=accent, thick, fill=accentlight, minimum height=1cm, font=\scriptsize}
+]
+\node[cell, minimum width=2.4cm] (ts)      {timestamp\\\scriptsize 8\,B};
+\node[cell, minimum width=2.4cm, right=0pt of ts] (mo)  {metadata\_offset\\\scriptsize 8\,B};
+\node[cell, minimum width=1.2cm, right=0pt of mo] (src) {src\_sid\\\scriptsize 4\,B};
+\node[cell, minimum width=1.2cm, right=0pt of src] (dst) {dst\_sid\\\scriptsize 4\,B};
+
+\node[cell, minimum width=1.2cm, below=0.5cm of ts.south west, anchor=north west]
+    (ing) {ingested\_at\\\scriptsize 4\,B};
+\node[cell, minimum width=0.8cm, right=0pt of ing] (ds)  {ds\_tag\\\scriptsize 2\,B};
+\node[cell, minimum width=0.6cm, right=0pt of ds]  (rel) {rel\_tag\\\scriptsize 1\,B};
+\node[cell, minimum width=0.6cm, right=0pt of rel, fill=white, draw=accent, dashed]
+     (pad) {pad\\\scriptsize 1\,B};
+
+\draw[decorate, decoration={brace, mirror, amplitude=4pt}, accent, thick]
+    ([yshift=-2pt]ts.south west) -- ([yshift=-2pt]dst.south east)
+    node[midway, below=10pt]{\footnotesize 24~B (dos cache half-lines)};
+\end{tikzpicture}
+\caption{\texttt{CompactRelation} en \texttt{\#[repr(C)]}: 32 bytes
+exactos, alineados a 8. El \emph{layout} fue elegido para que un
+\texttt{\&[StreamEdge]} (que comparte el mismo layout byte-a-byte)
+se mapee directamente a una región mmap cuando el \emph{streaming
+backend} \emph{spills} a disco.}
+\label{fig:compact-relation-layout}
+\end{figure}
+
+\section{Por qué exactamente 32 bytes (y no 24, no 40)}
+
+Tres restricciones cruzaron en el diseño:
+
+\begin{enumerate}
+    \item \textbf{Half cache line.} 32~B es la mitad de una cache
+    line típica (64~B). Dos aristas por cache line significa que
+    una iteración secuencial sobre un \texttt{Vec<CompactRelation>}
+    procesa dos elementos por cada transferencia de RAM. Si pesara
+    40~B, sería 1.6 elementos por línea (con líneas a medio
+    aprovechar). 32~B es óptimo en \emph{packing}.
+    \item \textbf{Alineación a 8 para \texttt{i64}.} El campo
+    \texttt{timestamp} es \texttt{i64}; las arquitecturas exigen
+    alineación a 8~B para evitar penalty (en algunas, \emph{cras h}).
+    Con 32~B el siguiente \texttt{CompactRelation} arranca también
+    alineado a 8 sin padding entre elementos.
+    \item \textbf{Suficientes bits para los campos.} Cada campo
+    tiene su requerimiento mínimo:
+    \begin{itemize}
+        \item \texttt{timestamp i64}: epoch en segundos cubre desde
+        $\sim$292~B AC hasta $\sim$292~B DC. Margen sobrado para
+        \texttt{Relation}s con timestamps razonables.
+        \item \texttt{metadata\_offset u64}: handle al
+        \texttt{MetadataStore}; con 64~bits podés indexar 16~exabytes
+        de metadata. Margen ridículo, pero \texttt{u32} (4~B)
+        limitaría a 4~GB de metadata por sesión, que en algunos
+        casos extremos podría pellizcar.
+        \item \texttt{source\_sid u32}, \texttt{dest\_sid u32}: el
+        interner soporta hasta \(2^{32}\) strings; el motor jamás
+        vio más de \(10^7\). Margen $\geq 100\times$.
+        \item \texttt{ingested\_at\_delta u32}: segundos desde
+        \texttt{INGEST\_EPOCH\_BASE} (epoch al inicio de la sesión).
+        Cubre $\sim$136 años; el motor jamás vio una sesión más
+        larga que un mes.
+        \item \texttt{dataset\_tag u16}: identifica de qué dataset
+        proviene la arista (sesiones multi-dataset). 65\,536
+        datasets distintos por sesión es ridículamente generoso.
+        \item \texttt{rel\_type\_tag u8}: 256 \emph{relation types}
+        distintos. Hoy hay $\sim$15.
+    \end{itemize}
+\end{enumerate}
+
+\noindent
+Sumá los campos: \(8 + 8 + 4 + 4 + 4 + 2 + 1 = 31\)~B. Padding
+implícito de 1~B para alinear a 8 \(\Rightarrow\) 32~B exactos.
+
+\section{\texttt{\#[repr(C)]}: por qué es obligatorio}
+
+Sin \texttt{\#[repr(C)]}, el compilador de Rust puede reordenar los
+campos. Para un struct de 7 campos puede haber \(7! = 5040\)
+permutaciones (no todas válidas por alineación, pero muchas).
+Distintas versiones del compilador podrían elegir distinto. Eso
+rompe tres cosas:
+
+\begin{enumerate}
+    \item \textbf{Mapeo a mmap.} El \emph{streaming backend}
+    (capítulo~\ref{cap:streaming-mirror}) escribe la \emph{slice
+    contiguous} \texttt{\&[StreamEdge]} (mismo \texttt{repr(C)} 32~B
+    de \texttt{CompactRelation}) a un archivo durante \emph{auto-spill}
+    y la mapea de vuelta a memoria. Si el layout cambia entre
+    escritura y lectura ---por ejemplo, sesión guardada con
+    compilador A, cargada con compilador B---, los bytes en disco
+    se interpretan mal. \texttt{repr(C)} garantiza layout estable.
+    \item \textbf{C ABI / FFI.} El motor expone partes de su API
+    como C ABI (capítulo correspondiente del libro
+    \emph{Especificación}). Pasar un \texttt{*const CompactRelation}
+    a código C requiere que el layout sea predecible; sin
+    \texttt{repr(C)}, no lo es.
+    \item \textbf{Razonamiento sobre tamaño.} El programador eligió
+    32~B; sin \texttt{repr(C)}, el compilador podría empaquetar a
+    24~B o expandir a 40~B según convenga. Las cuentas de
+    ``cuántas aristas caben en L2'' dejan de ser fijas.
+\end{enumerate}
+
+\begin{nota}
+\texttt{repr(C)} \emph{no} garantiza endianness. Un mmap escrito en
+una máquina x86\_64 little-endian y leído en una ARM big-endian
+(rara hoy en día) tendría los bytes invertidos. GraphHunter asume
+little-endian (todos los hosts modernos lo son); si en el futuro
+hay que soportar big-endian, hay que serializar/deserializar
+campo por campo en lugar de \texttt{mmap} directo.
+\end{nota}
+
+\section{Conversión: \texttt{Relation} $\to$ \texttt{CompactRelation}}
+
+Cada \texttt{add\_relation} hace la conversión:
+
+\begin{lstlisting}[language=Rust]
+pub fn add_relation(&mut self, r: Relation) -> Result<(), Error> {
+    let source_sid = self.interner.intern(&r.source_id);
+    let dest_sid   = self.interner.intern(&r.dest_id);
+    let metadata_offset = if r.metadata.is_empty() {
+        0  // sentinel: "no metadata"
+    } else {
+        self.metadata_store.append(&r.metadata)?
+    };
+    let ingested_at_delta =
+        (self.now() - self.ingest_epoch_base) as u32;
+    let cr = CompactRelation {
+        timestamp: r.timestamp,
+        metadata_offset,
+        source_sid,
+        dest_sid,
+        ingested_at_delta,
+        dataset_tag: self.current_dataset_tag,
+        rel_type_tag: r.rel_type as u8,
+    };
+    self.push_to_streaming(&cr);  // sole canonical store
+    Ok(())
+}
+\end{lstlisting}
+
+\noindent
+Lo importante para el resto del libro:
+
+\begin{itemize}
+    \item \texttt{source\_sid} y \texttt{dest\_sid} salen del
+    interner (capítulo~\ref{cap:interner}). Strings comunes
+    (\texttt{"alice"}) se internan \emph{una vez} y todos los
+    \texttt{CompactRelation} que los referencian comparten el
+    \texttt{StrId}.
+    \item \texttt{metadata\_offset = 0} es el sentinel
+    ``sin metadata''; el matcher chequea \texttt{== 0} sin lookup
+    al \texttt{MetadataStore}.
+    \item \texttt{rel\_type\_tag} es un \texttt{u8} casteado del enum
+    \texttt{RelationType}; el matcher usa el \texttt{u8} directo en
+    sus comparaciones, sin resolver el enum.
+\end{itemize}
+
+\section{Por qué el matcher itera \texttt{CompactRelation}, no \texttt{Relation}}
+
+El matcher hot path itera $\sim 10^7$ aristas por hunt. Para cada
+arista chequea: ¿el tipo coincide?, ¿el timestamp cae en la ventana?,
+¿el source binding ya está fijado? Cada chequeo tiene que ser una
+operación de palabra de máquina, no una desreferencia + recorrido
+de string.
+
+\begin{itemize}
+    \item Type check: \texttt{cr.rel\_type\_tag == hypothesis.step\_tag}
+    (1 cache line, 1 comparación).
+    \item Timestamp check: \texttt{lo $\leq$ cr.timestamp $\leq$ hi}
+    (datos ya en cache desde el step anterior, 2 comparaciones).
+    \item Source binding check: \texttt{cr.source\_sid ==
+    binding[var]} (1 comparación de \texttt{u32}).
+\end{itemize}
+
+\noindent
+Tres operaciones, tres palabras de máquina. Una iteración del
+\emph{inner loop} del DFS es del orden de \(\sim 10\) ciclos.
+Iterar la \texttt{Relation} pública sería del orden de \(\sim
+10^3\) ciclos por la indirección a strings y al hashmap de
+metadata.
+
+\section{Resumen}
+
+\begin{itemize}
+    \item \texttt{CompactRelation}: 32~B exactos,
+    \texttt{\#[repr(C)]}, alineados a 8, dos por cache line.
+    \item Cada campo justificado: \texttt{i64} timestamp para
+    margen, \texttt{u32} sids por el interner, \texttt{u8 rel\_tag}
+    para matching sin resolver enum, \texttt{u64} metadata\_offset
+    por escala extrema.
+    \item \texttt{repr(C)} obligatorio para mmap stability, FFI, y
+    razonamiento de tamaño.
+    \item Conversión \texttt{Relation $\to$ CompactRelation} en
+    \texttt{add\_relation}, vía interner para los sids y
+    \texttt{MetadataStore} para metadata.
+    \item El matcher itera \texttt{CompactRelation} (\(\sim 10\)
+    ciclos por arista) en lugar de \texttt{Relation} (\(\sim 10^3\)
+    ciclos por arista).
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Calculá: en una cache L2 de 1~MB, ¿cuántas
+    aristas \texttt{CompactRelation} caben? ¿Cuántas
+    \texttt{Relation} de \(200\)~B caben? ¿Cuál es el ratio?
+
+    \item Diseñá un layout alternativo de 24~B para una
+    \texttt{CompactRelation} más chica. ¿Qué campos sacrificás?
+    ¿Bajo qué condiciones (qué tipo de hunts) sería preferible?
+
+    \item \starred{} Si quitás \texttt{\#[repr(C)]}, el
+    compilador podría reordenar a \texttt{(timestamp, metadata\_offset,
+    source\_sid, dest\_sid, ingested\_at\_delta, dataset\_tag,
+    rel\_type\_tag)} = 31~B + 1~B padding. Mismo tamaño total.
+    ¿Está mal? Discutí: ¿qué se rompe específicamente?
+
+    \item Calculá: para un grafo de \(10^8\) aristas almacenadas como
+    \texttt{Vec<CompactRelation>} ordenadas, ¿cuánta memoria total
+    ocupan? Si la notebook tiene 16~GB de RAM, ¿cabe?
+
+    \item ¿Por qué \texttt{metadata\_offset} es \texttt{u64} y
+    \texttt{source\_sid} es \texttt{u32}? Justificá la asimetría
+    desde la escala esperada de cada uno.
+
+    \item Imaginá que quisieras agregar un campo
+    \texttt{flags: u8} a \texttt{CompactRelation} (por ejemplo,
+    para marcar la arista como ``deprecated'' por una operación
+    futura). ¿Cuál es el impacto en el layout? ¿Tenés que crecer
+    a 40~B?
+\end{enumerate}
+\end{ejercicios}

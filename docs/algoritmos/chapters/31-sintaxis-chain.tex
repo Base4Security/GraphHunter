@@ -1,0 +1,259 @@
+\chapter{Sintaxis \emph{chain} (legacy)}
+\label{cap:dsl-chain}
+
+\begin{intuicion}
+La sintaxis \emph{chain} es la forma original de la DSL: una
+cadena lineal de pasos \(p_0 \to p_1 \to \dots \to p_k\) con
+predicados opcionales y cláusulas trailing. Es la forma más usada
+y la única que existía antes de L1 stage 3c. Este capítulo
+documenta cada parte de la sintaxis con ejemplos y muestra cómo el
+parser la convierte en \texttt{Hypothesis}.
+\end{intuicion}
+
+\section{Anatomía de una hipótesis chain}
+
+\begin{lstlisting}
+User u -[Auth]-> Host h -[Connect]-> IP {k=2} HAVING count(distinct last) >= 5 WITHIN 30m
+\end{lstlisting}
+
+\noindent
+Componentes:
+
+\begin{itemize}
+    \item \texttt{User u}: \emph{type declaration} con
+    \emph{binding}. Declara que el primer vértice es de tipo
+    \texttt{User} y se referenciará como \texttt{u}.
+    \item \texttt{-[Auth]->}: arista con \texttt{RelationType}.
+    \item \texttt{Host h}: type declaration del próximo vértice.
+    \item \texttt{-[Connect]->}: segunda arista.
+    \item \texttt{IP}: type declaration sin binding (no se
+    referencia).
+    \item \texttt{\{k=2\}}: \(k\)-simplicidad. Cada vértice puede
+    repetirse hasta 2 veces.
+    \item \texttt{HAVING count(distinct last) >= 5}: agregación
+    post-hoc. Acepta sólo grupos de \(\geq 5\) lasts distintos.
+    \item \texttt{WITHIN 30m}: ventana temporal de 30 minutos
+    entre primera y última arista.
+\end{itemize}
+
+\section{Type bindings}
+
+\begin{lstlisting}
+User u -[Auth]-> Host h
+\end{lstlisting}
+
+\noindent
+\texttt{u} y \texttt{h} son \emph{bindings}: identificadores que
+referencian el vértice \emph{en cláusulas trailing} o \emph{en
+otras chains} (shape graph). En una chain pura sin \texttt{HAVING},
+los bindings son opcionales:
+
+\begin{lstlisting}
+User -[Auth]-> Host -[Connect]-> IP
+\end{lstlisting}
+
+\noindent
+es equivalente a la versión con bindings, pero el motor pierde la
+capacidad de referenciar los vértices intermedios.
+
+\subsection{Casos donde el binding importa}
+
+\begin{itemize}
+    \item \texttt{HAVING count(distinct h) >= 3}: requiere binding
+    \texttt{h} en el segundo vértice.
+    \item Shape graph: \texttt{c -[Auth]-> Host h1; c -[Auth]-> Host h2}
+    necesita binding \texttt{c} para que el segundo \texttt{c} lo
+    referencie.
+\end{itemize}
+
+\section{Predicados sobre la arista}
+
+\begin{lstlisting}
+User -[Auth{result=success}]-> Host
+\end{lstlisting}
+
+\noindent
+\texttt{\{result=success\}} es un predicado sobre la metadata de
+la arista. El matcher consulta el \texttt{MetadataStore}
+(capítulo~\ref{cap:entity-relation}) para verificar que el campo
+\texttt{result} valga \texttt{success}.
+
+Predicados soportados:
+
+\begin{itemize}
+    \item \texttt{key=value}: igualdad.
+    \item \texttt{key>value}, \texttt{key<value}: comparación
+    numérica.
+    \item \texttt{key in [v1, v2, v3]}: pertenencia a conjunto.
+    \item \texttt{key matches /regex/}: regex (caro, evitar si
+    posible).
+\end{itemize}
+
+\section{Predicados sobre el vértice destino}
+
+\begin{lstlisting}
+User -[Auth]-> Host {os=Windows} -[Connect]-> IP
+\end{lstlisting}
+
+\noindent
+Las llaves \emph{después} del type declaration aplican el predicado
+al vértice destino. El matcher las verifica en el momento de
+extender el path.
+
+\section{Cláusulas trailing}
+
+\subsection{\texttt{WITHIN}}
+
+\begin{lstlisting}
+User -[Auth]-> Host -[Connect]-> IP WITHIN 30m
+\end{lstlisting}
+
+\noindent
+\(\Delta t = 30\) minutos entre el timestamp de la \emph{primera}
+arista y el de la \emph{última}. Sintaxis: número + unidad
+(\texttt{s}, \texttt{m}, \texttt{h}, \texttt{d}).
+
+Sin \texttt{WITHIN}: \(\Delta t = +\infty\) (sin restricción).
+
+\subsection{\texttt{HAVING}}
+
+\begin{lstlisting}
+User -[Auth]-> Host h -[Connect]-> IP HAVING count(distinct h) >= 5
+\end{lstlisting}
+
+\noindent
+Agregación sobre los matches del path. \texttt{count(distinct h)}
+cuenta hosts distintos por start; \texttt{>= 5} acepta sólo starts
+con $\geq$ 5 hosts distintos.
+
+Funciones soportadas:
+\begin{itemize}
+    \item \texttt{count(distinct binding)}.
+    \item \texttt{count(distinct first)} / \texttt{count(distinct last)}:
+    sintaxis especial referenciando el primer / último vértice de la
+    chain.
+    \item \texttt{count(*)}: cardinalidad bruta del grupo.
+\end{itemize}
+
+\subsection{\texttt{\{k=N\}}}
+
+\begin{lstlisting}
+User -[Auth]-> Host -[Connect]-> IP {k=2}
+\end{lstlisting}
+
+\noindent
+\(k\)-simplicidad (capítulo~\ref{cap:grafos-temporales}): cada
+vértice puede aparecer hasta \(k\) veces en el path. Default: \(k=1\)
+(path simple). \(k=2\) permite revisitar un vértice una vez (útil
+para hipótesis donde un usuario \emph{vuelve} a un host).
+
+\section{Ejemplos completos}
+
+\begin{ejemplo}[Lateral movement chain]
+\begin{lstlisting}
+User u -[Auth]-> Host h1 -[Auth]-> User u2 -[Auth]-> Host h2
+WITHIN 1h
+HAVING count(distinct h2) >= 3
+\end{lstlisting}
+
+\noindent
+``Un usuario que se autentica en un host, desde donde otro usuario
+se autentica en un tercer host distinto, repetido para al menos 3
+hosts distintos, todo en menos de una hora.'' Patrón típico de
+movimiento lateral con credential reuse.
+\end{ejemplo}
+
+\begin{ejemplo}[Beaconing inicial]
+\begin{lstlisting}
+Process p {image=powershell.exe} -[Connect]-> IP -[Beacon{interval<60s}]-> Domain
+WITHIN 5m
+\end{lstlisting}
+
+\noindent
+``Un proceso PowerShell que se conecta a una IP, y desde esa IP hay
+beaconing con intervalo $<$ 60 segundos a un Domain, todo en menos
+de 5 minutos.'' Detección C2 de bajo volumen.
+\end{ejemplo}
+
+\section{Cómo el parser construye la \texttt{Hypothesis}}
+
+Para la hipótesis del primer ejemplo, el parser produce:
+
+\begin{lstlisting}[language=Rust]
+Hypothesis {
+    name: "...",
+    steps: vec![
+        HypothesisStep {
+            source_type: User,  source_binding: Some("u"),
+            rel_type: Auth,     edge_predicates: vec![],
+            dest_type: Host,    dest_binding: Some("h1"),
+            dest_predicates: vec![],
+        },
+        HypothesisStep {
+            source_type: Host,  source_binding: Some("h1"),
+            rel_type: Auth,     edge_predicates: vec![],
+            dest_type: User,    dest_binding: Some("u2"),
+            dest_predicates: vec![],
+        },
+        HypothesisStep {
+            source_type: User,  source_binding: Some("u2"),
+            rel_type: Auth,     edge_predicates: vec![],
+            dest_type: Host,    dest_binding: Some("h2"),
+            dest_predicates: vec![],
+        },
+    ],
+    k_simplicity: 1,
+    aggregations: vec![
+        AggClause::CountDistinct {
+            binding: "h2",
+            op: Op::Gte,
+            value: 3,
+        }
+    ],
+    window_seconds: Some(3600),
+    shape: HypothesisShape::Chain,
+}
+\end{lstlisting}
+
+\noindent
+Notar que \texttt{shape == Chain} ---no hay \texttt{;} en la
+hipótesis. Si lo hubiera, sería \texttt{Graph}
+(capítulo~\ref{cap:dsl-graph}).
+
+\section{Resumen}
+
+\begin{itemize}
+    \item Sintaxis chain: cadena lineal \texttt{Type binding -[rel]-> Type binding}
+    + cláusulas trailing.
+    \item Predicados: en aristas (\texttt{[rel\{predicates\}]}) y
+    en vértices destino (\texttt{Type \{predicates\}}).
+    \item Trailing: \texttt{WITHIN N(m|h|d)}, \texttt{HAVING agg op
+    val}, \texttt{\{k=N\}}.
+    \item Defaults: sin WITHIN $\Rightarrow$ ventana infinita;
+    sin HAVING $\Rightarrow$ enumeración bruta; \texttt{\{k=1\}}
+    $\Rightarrow$ path simple.
+    \item \texttt{shape == Chain} para hipótesis sin \texttt{;}.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Escribí en la DSL: ``un usuario que en menos
+    de 10 minutos se autenticó en al menos 3 hosts distintos''.
+    Identificá las cláusulas trailing necesarias.
+
+    \item ¿Cuál es la diferencia entre
+    \texttt{User -[Auth\{result=success\}]-> Host} y
+    \texttt{User -[Auth]-> Host \{result=success\}}?
+
+    \item \starred{} Construí la \texttt{Hypothesis} (struct Rust)
+    para la hipótesis: \texttt{Process p -[Spawn]-> Process c -[Write]-> File f WITHIN 1m}.
+
+    \item ¿Por qué los bindings son opcionales en chain pura pero
+    obligatorios en HAVING? Pensá: ¿qué referenciaría el HAVING
+    sin binding?
+
+    \item Imaginá una hipótesis donde necesitás \(k=3\). Escribí
+    un caso real (en threat hunting) donde la repetición triple es
+    sensata.
+\end{enumerate}
+\end{ejercicios}

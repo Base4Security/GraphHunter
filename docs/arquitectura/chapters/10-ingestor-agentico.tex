@@ -1,0 +1,209 @@
+\chapter{Ingestor agéntico (tres carriles)}
+\label{sec:ingestor-agentico}
+
+\section{Motivación}
+
+La ingesta heurística original —un parser por formato, compilado en
+el binario— cubre los formatos conocidos y se acaba: cada formato
+nuevo requiere release del daemon, y cada cambio de schema aguas
+arriba (Sentinel agrega un campo, FortiOS cambia un separador)
+rompe el parser en producción.
+
+El rediseño divide la ingesta en \emph{tres carriles}
+independientes, cada uno con un perfil de latencia, determinismo y
+superficie de cambio distinto:
+
+\begin{enumerate}
+    \item \textbf{Fast lane (VRL compilado)}: ruta caliente,
+    determinística, sin LLM, sin red. Un \code{FieldConfig} ya
+    validado compila a un programa VRL; el daemon lo ejecuta para
+    cada batch. Es el \emph{único} carril que toca la ingesta
+    productiva.
+    \item \textbf{Slow lane (LLM-as-compiler, offline)}: cuando
+    llega un formato nuevo o cambia uno conocido, un LLM analiza una
+    muestra y propone un \code{FieldConfig} + mapping OCSF. El
+    output pasa por revisión humana en la UI agéntica; al aprobarse,
+    el compilador VRL emite el programa para el fast lane. El LLM
+    \emph{no} toca datos en runtime.
+    \item \textbf{Learning lane (drift-as-signal)}: el fast lane
+    mide, a costo casi cero, métricas estructurales por batch
+    (distribución de tipos, cardinalidad de campos, ratio de DLQ).
+    Cuando un batch se desvía del perfil esperado más allá de un
+    umbral, se dispara re-revisión en el slow lane. El fast lane no
+    se para: sigue ingestando con el mapping actual mientras la
+    propuesta madura.
+\end{enumerate}
+
+\section{Flujo end-to-end}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  node distance=12mm and 20mm,
+  lane/.style={draw, rounded corners=2mm, minimum width=32mm, minimum height=14mm, align=center, thick},
+  fast/.style={lane, fill=green!8!white, draw=green!50!black},
+  slow/.style={lane, fill=orange!8!white, draw=orange!50!black},
+  learn/.style={lane, fill=blue!8!white, draw=blue!50!black},
+  store/.style={draw, cylinder, shape border rotate=90, aspect=0.3, minimum width=20mm, minimum height=12mm, align=center},
+  arr/.style={-Latex, thick},
+  arrdotted/.style={-Latex, thick, dashed},
+]
+  \node[fast]  (fast)    {Fast\\VRL runtime};
+  \node[slow, above=of fast] (slow) {Slow\\LLM compiler\\+ human review};
+  \node[learn, below=of fast] (learn) {Learning\\drift monitor};
+
+  \node[store, left=of fast, xshift=-4mm] (raw) {raw\\events};
+  \node[store, right=of fast, xshift=4mm] (canon) {canonical\\OCSF};
+
+  \node[store, right=of slow, xshift=4mm] (lib) {mapping\\library};
+
+  \draw[arr] (raw) -- (fast);
+  \draw[arr] (fast) -- (canon);
+  \draw[arr] (slow) -- (lib);
+  \draw[arrdotted] (lib) -- node[above, font=\footnotesize]{compile} (fast);
+  \draw[arrdotted] (fast) -- node[left, font=\footnotesize]{metrics} (learn);
+  \draw[arrdotted] (learn) -- node[right, font=\footnotesize]{re-review} (slow);
+\end{tikzpicture}
+\caption{Tres carriles. Flechas sólidas = ruta de datos en runtime.
+Flechas punteadas = feedback y compilación offline.}
+\end{figure}
+
+El contrato entre carriles es el \code{FieldConfig} + el mapping
+OCSF, ambos datos. Ningún carril llama a otro por función: el slow
+lane emite un artefacto que el fast lane recoge, el learning lane
+emite una señal que el slow lane consume.
+
+\section{Fast lane: VRL compilado}
+
+El crate \filepath{platform/vrl} toma un \code{FieldConfig} y emite
+un programa VRL textual. La compilación es pura:
+
+\begin{equation*}
+\text{VRL}(f) = \text{compile}(f) \qquad
+\text{mapping\_hash}(f) = \text{sha256}(\text{VRL}(f))
+\end{equation*}
+
+El \code{mapping_hash} identifica al programa y se estampa en cada
+evento emitido (campo \code{provenance.mapping_hash}), cerrando el
+circuito entre un evento canonical y el \code{FieldConfig} que lo
+produjo. El runtime es un intérprete VRL embebido; el reemplazo por
+la crate \code{vrl} upstream es follow-up de performance, no de
+semántica.
+
+Consecuencias:
+
+\begin{itemize}
+    \item Cambiar un mapping no requiere release del daemon; sólo
+    recompilar el VRL y reapuntar.
+    \item Un batch con el mismo \code{mapping_hash} es reproducible
+    byte-a-byte: ingesta determinística.
+    \item El fast lane nunca llama a un LLM. Seguridad y latencia
+    predecibles.
+\end{itemize}
+
+\section{Slow lane: LLM-as-compiler offline}
+
+El LLM se usa como \emph{compilador} de ejemplos a
+\code{FieldConfig}. El prompt recibe:
+
+\begin{itemize}
+    \item Muestra del formato crudo (20-100 líneas).
+    \item Catálogo de tipos de entidad y relación disponibles.
+    \item Schema OCSF target.
+\end{itemize}
+
+Y emite un \code{FieldConfig} propuesto + mapping OCSF. Esta
+propuesta entra a la cola de review agéntica
+(\code{POST /agentic_review_list}). Un humano aprueba, edita o
+rechaza. Sólo tras aprobación el compilador VRL genera el programa
+de fast lane.
+
+\textbf{Propiedades}:
+
+\begin{itemize}
+    \item El LLM jamás procesa eventos de producción. Opera sobre
+    muestras explícitas.
+    \item El output es datos (\code{FieldConfig}), no código. El
+    código lo genera el compilador determinístico.
+    \item El humano es el último filtro: mismas garantías de un
+    mapping curado a mano, con el boilerplate automatizado.
+    \item Backend LLM intercambiable
+    (\filepath{platform/local-llm}): local GGUF o API remota según
+    configuración.
+\end{itemize}
+
+\section{Learning lane: drift-as-signal}
+
+Cada batch en fast lane emite métricas baratas:
+
+\begin{itemize}
+    \item Histograma de entity types producidos.
+    \item Cardinalidad de cada campo canonical.
+    \item Ratio de eventos que fueron a DLQ.
+    \item Distribución de timestamps (gap, skew).
+\end{itemize}
+
+El monitor de drift
+(\filepath{platform/api/src/operations/agentic_drift.rs}) compara
+estas métricas contra el perfil esperado del mapping. Un Kolmogorov-Smirnov
+por campo, con ventana móvil. Si el drift supera el umbral:
+
+\begin{enumerate}
+    \item Se abre una propuesta de re-review apuntando al mapping
+    actual.
+    \item El batch \emph{sigue} ingestando con el mapping viejo —
+    ingest-or-drop, no ingest-or-stall.
+    \item El slow lane retoma: el LLM ve el batch anómalo + el
+    mapping actual, propone delta.
+    \item Humano aprueba, nuevo \code{mapping_hash}, el fast lane
+    recoge la nueva versión en el siguiente batch.
+\end{enumerate}
+
+El drift no es un error, es una señal. El sistema nunca deja de
+ingestar mientras aprende.
+
+\section{Estabilidad de cada carril}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+ & Fast & Slow & Learning \\
+\midrule
+Determinismo       & \checkmark         & parcial (hash estable del output) & \checkmark \\
+Latencia           & runtime (ms)       & offline (minutos)                  & runtime (por batch) \\
+Depende de LLM     & nunca              & sí                                 & no \\
+Puede fallar caliente & sí (datos)      & n/a                                & n/a \\
+Gating humano      & ninguno            & mandatorio                         & ninguno \\
+\bottomrule
+\end{tabular}
+\caption{Perfil de cada carril. El único carril con latencia en el
+camino crítico es el fast lane; sólo el slow requiere LLM y humano.}
+\end{table}
+
+\section{Relación con el resto de la arquitectura}
+
+El ingestor agéntico vive íntegramente en la \emph{capa platform}
+(ver cap.~\ref{sec:capa-platform}). El core no cambia: sigue
+recibiendo \code{Event} canonical como siempre. Los cambios están
+concentrados en \filepath{platform/vrl},
+\filepath{platform/mapping-library},
+\filepath{platform/local-llm} y
+\filepath{platform/api/src/operations/agentic*.rs}.
+
+Esto es consistente con shearing-layers: un cambio de política de
+ingesta (pasar de parser-compilado a VRL-compilado-desde-LLM) se
+absorbe en la capa de cambio medio sin tocar el núcleo (motor de
+grafo y matcher SIMD).
+
+\section{Qué queda fuera de este libro}
+
+\begin{itemize}
+    \item La semántica concreta del lenguaje VRL emitido y el
+    mapeo canonical OCSF están en el libro de Especificación
+    (ver cap.\ \emph{Formatos de log} y cap.\ \emph{MCP tools},
+    dominio \code{agentic}).
+    \item La evaluación cuantitativa (latencia del fast lane,
+    accuracy del LLM, tasa de drift real) vive en el Paper.
+\end{itemize}

@@ -1,0 +1,131 @@
+\chapter{DFS temporal guiado por score}
+\label{sec:paper-dfs}
+
+\section{Rol dentro del pipeline}
+
+El matcher SIMD (cap.~\ref{sec:paper-simd}) enumera paths
+\emph{estructuralmente} válidos: cumplen los tipos de nodo/arista
+y la longitud del patrón. Sobre ese conjunto se aplica una segunda
+fase, \emph{refinement}, que:
+
+\begin{enumerate}
+    \item impone orden temporal sobre las aristas del path;
+    \item computa score compuesto por path;
+    \item poda paths debajo de umbral o que exceden cotas de
+    ramificación (\code{k-simplicity}).
+\end{enumerate}
+
+La fase \emph{refinement} se implementa como un DFS temporal
+guiado por score parcial. Este capítulo describe el algoritmo, las
+invariantes que preserva, y por qué usamos DFS en vez de las
+variantes clásicas (Ullmann, VF2, TurboISO).
+
+\section{Hipótesis como forma de patrón}
+
+Una hipótesis en el DSL tiene forma:
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+User -[Auth]-> Host -[Connect]-> IP {k=3, window=30m, min_score=0.4}
+\end{lstlisting}
+
+que se desazucara a una secuencia ordenada de restricciones:
+
+\begin{itemize}
+    \item tipos por posición $(\tau_0, \tau_1, \tau_2, \tau_3)$;
+    \item tipos de arista por salto $(\rho_0, \rho_1, \rho_2)$;
+    \item ventana temporal $W$ sobre el path completo;
+    \item cota estructural $k$ (rama del DFS);
+    \item filtro post-hoc $\text{score} \ge s_{\min}$.
+\end{itemize}
+
+\begin{definition}[Path instancia del patrón]
+Una secuencia $\pi = (v_0, e_0, v_1, e_1, \dots, v_n)$ es instancia
+si: (i) $\text{type}(v_i) = \tau_i$ para $i = 0..n$; (ii)
+$\text{type}(e_i) = \rho_i$ para $i = 0..n-1$; (iii)
+$t(e_0) \le t(e_1) \le \dots \le t(e_{n-1})$ y
+$t(e_{n-1}) - t(e_0) \le W$; (iv) la ramificación de cada nodo
+interno del patrón es $\le k$.
+\end{definition}
+
+\section{Algoritmo}
+
+\begin{algorithm}[H]
+\caption{DFS temporal guiado por score parcial}
+\label{alg:paper-dfs}
+\KwIn{Grafo $G$, patrón $(\tau, \rho)$, ventana $W$, $k$, $s_{\min}$}
+\KwOut{Paths ordenados por score}
+$R \gets \emptyset$ \Comment{resultado}
+\ForEach{$v_0 \in V: \text{type}(v_0) = \tau_0$}{
+    DFS($v_0$, path$=[v_0]$, $t_0=-\infty$, score$=0$, depth$=0$)\;
+}
+\Return top $N$ de $R$ por score\;
+
+\BlankLine
+\textbf{procedure} DFS($v$, path, $t_{\min}$, score, depth):\\
+\If{depth $= n$}{
+    \If{$\text{score} \ge s_{\min}$}{
+        $R \gets R \cup \{(\text{path}, \text{score})\}$\;
+    }
+    \Return\;
+}
+$\tau_{\text{next}} \gets \tau_{\text{depth}+1}$;
+$\rho_{\text{next}} \gets \rho_{\text{depth}}$\;
+$N_v \gets \{(e, u) : e = (v, u), \text{type}(e) = \rho_{\text{next}}, \text{type}(u) = \tau_{\text{next}}\}$\;
+\If{$|N_v| > k$}{\Return \Comment{poda por k-simplicity}}
+\ForEach{$(e, u) \in N_v$}{
+    \If{$t(e) < t_{\min} \lor t(e) - t(e_0) > W$}{continue}
+    $s' \gets \text{update\_partial\_score}(\text{score}, v, e, u)$\;
+    \If{$\text{upper\_bound}(s', \text{depth}+1) < s_{\min}$}{
+        continue \Comment{poda por score}
+    }
+    DFS($u$, path $\cup \{e, u\}$, $t(e)$, $s'$, depth+1)\;
+}
+\end{algorithm}
+
+\section{Propiedades y complejidad}
+
+\begin{lemma}[Orden temporal]
+Todo path $\pi$ emitido por DFS satisface
+$t(e_0) \le t(e_1) \le \dots$ por construcción
+(gracias a $t_{\min}$).
+\end{lemma}
+
+\begin{lemma}[Monotonía del score parcial]
+Si $\text{upper\_bound}(s, d)$ acota superiormente el score
+alcanzable extendiendo $d$ hops más, podar cuando
+$\text{upper\_bound} < s_{\min}$ es seguro: ningún path emitido por
+esa rama superaría $s_{\min}$.
+\end{lemma}
+
+La cota superior se construye asumiendo puntajes máximos locales
+para los componentes que monotonizan (entity rarity, temporal
+novelty) y cero para los que requieren contexto completo
+(neighborhood concentration). No es apretada pero sí válida.
+
+La complejidad en el peor caso es
+$O(|V_{\tau_0}| \cdot k^n)$. En la práctica el DFS emite orden de
+decenas a miles de paths para hipótesis de 3-4 hops sobre grafos
+de $10^4$-$10^5$ nodos, con tiempos sub-segundo reportados en
+benchmarks.
+
+\section{¿Por qué DFS y no Ullmann/VF2?}
+
+Los clásicos (Ullmann~\cite{ullmann1976}, VF2~\cite{cordella2004vf2},
+TurboISO) resuelven \emph{subgraph isomorphism} sobre grafos
+estáticos con pesos uniformes. Nuestro setup difiere en tres
+puntos:
+
+\begin{enumerate}
+    \item \textbf{Multigrafo temporal}. Múltiples aristas entre un
+    par de nodos distinguidas por timestamp. Ullmann/VF2 asumen
+    único edge.
+    \item \textbf{Score como guía}, no como post-filtro. Queremos
+    podar ramas prometedoramente malas temprano. DFS con
+    \emph{best-first} en la frontera de siblings es natural.
+    \item \textbf{Paths, no subgrafos}. Buscamos caminos lineales
+    (a veces con fork), no cliques ni cualquier subgrafo.
+\end{enumerate}
+
+DFS encaja los tres. La complejidad es peor en el peor caso pero
+la cota $k$ (\emph{k-simplicity}) lo acota estructuralmente y el
+upper-bound de score lo acota semánticamente.

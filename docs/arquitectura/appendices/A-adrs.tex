@@ -1,0 +1,212 @@
+\chapter{ADRs: registros de decisión}
+\label{sec:adrs}
+
+Este apéndice recoge las siete ADRs (Architectural Decision
+Records) que fundamentan el diseño actual. El formato es el mismo para
+todas: contexto breve, decisión, consecuencias. El capítulo
+\ref{sec:decisiones} del cuerpo principal narra cómo encajan entre
+sí; aquí quedan en su forma de referencia.
+
+\textbf{Fuente primaria}: \filepath{docs/_archive/adrs/001..006.md}
+en el repositorio. Si hay discrepancia entre este apéndice y esos
+archivos, prevalece el archivo.
+
+\section*{ADR-001 — Canonical API Layer}
+
+\textbf{Fecha}: 2026-04-23. \textbf{Estado}: aprobada e
+implementada (Fase 2).
+
+\textbf{Contexto}. \filepath{platform/api} dependía de
+\filepath{apps/cli} como librería para reusar
+\code{sentinel_streaming}, creando un ciclo lógico
+API $\to$ CLI $\to$ core. \filepath{apps/cli} además saltaba la API
+yendo directo al core, bifurcando la ruta de ingesta.
+
+\textbf{Decisión}. (D1) Extraer \code{sentinel_streaming} a un
+crate nuevo \filepath{platform/siem} del que dependen API y CLI.
+(D2) \filepath{apps/cli} pasa a ser cliente in-proc de
+\filepath{platform/api} (descartada la variante HTTP). (D3) DTOs
+en \filepath{platform/api/src/dto/v1/} versionados con semver.
+
+\textbf{Consecuencias}. Cero ciclos en \code{cargo metadata}. Una
+única lógica, varios transportes. Extender la API requiere versionar
+DTOs y dejar el endpoint viejo funcional durante un ciclo.
+
+\section*{ADR-002 — FFI Isolation}
+
+\textbf{Fecha}: 2026-04-23. \textbf{Estado}: aprobada e
+implementada (Fase 3).
+
+\textbf{Contexto}. Un único \code{extern "C"} (bueno), pero RAII
+parcial, invariante ``válido tras \code{finalize()}'' no codificada,
+cinco funciones C sin uso desde Rust, cero tests de equivalencia,
+build script sin chequeo de ABI.
+
+\textbf{Decisión}. (D1) Extraer la fachada FFI a
+\filepath{core/matcher-ffi}. (D2) Typestate para \code{GmGraph}
+con \code{Building}/\code{Finalized}. (D3) RAII completo en
+\code{GmMatcher}. (D4) \code{gm_abi_version()} con check en
+load-time; mismatch $\Rightarrow$ crash temprano. (D5) Property
+tests de equivalencia DFS $\leftrightarrow$ SIMD.
+
+\textbf{Consecuencias}. El aislamiento FFI pasa de convención a
+garantía de tipo. Imposible ejecutar un hunt sobre un grafo no
+finalizado. Imposible shippear con un \filepath{libgraphmatch.so}
+de ABI distinta sin que el binario crashee al arranque.
+
+\section*{ADR-003 — GNN v2 Experimental}
+
+\textbf{Fecha}: 2026-04-23. \textbf{Estado}: aprobada; corpus
+export y gate implementados; modelo no entrenado para Fortigate.
+
+\textbf{Contexto}. \filepath{gnn_v2.onnx} referenciado en
+producción por string literal, no entrenado sobre todos los
+datasets objetivo. Binario enviado con skeleton produce
+probabilidades sin fallar visiblemente.
+
+\textbf{Decisión}. (D1) Tres componentes separados:
+\filepath{core/gnn/v1} estable, \filepath{core/gnn/v2} detrás de
+\code{feature = "gnn-v2-experimental"}, \filepath{core/gnn/common}
+con el gate. (D2) \code{ModelGate::validate} rechaza archivos no
+firmados o con dimensiones incorrectas. (D3) Corpus export
+(\filepath{platform/sources/aad_training_export.rs}) separado del
+inferencer.
+
+\textbf{Consecuencias}. Enviar un binario con GNN v2 no validado
+requiere (a) flippear el feature flag y (b) pasar el gate.
+Accidentalmente imposible. Extender a Fortigate exige nuevo corpus
+export + entrenamiento.
+
+\section*{ADR-004 — MCP Tools Architecture}
+
+\textbf{Fecha}: 2026-04-23. \textbf{Estado}: aprobada e
+implementada (Fase 4).
+
+\textbf{Contexto}. \filepath{graph-hunter-mcp/src/index.ts} era un
+monolito de \raisebox{0pt}[0pt][0pt]{\textasciitilde}1670 líneas con 54 tools hardcoded, sin
+contrato tipado entre definición de tool y endpoint HTTP.
+
+\textbf{Decisión}. (D1) Interfaz \code{Tool<I, O>} tipada con
+\code{stability} y \code{version}. (D2) Registry modular por
+dominio (10 dominios). (D3) Un archivo por tool. (D4) Tests
+contractuales contra \filepath{platform/api}. (D5) El paquete vive
+en \filepath{platform/mcp/}; el paquete legacy
+\filepath{graph-hunter-mcp/} queda un ciclo más por compat.
+
+\textbf{Consecuencias}. Cambiar una tool es un PR localizado.
+Deprecar una tool es una operación gobernable. Mismatches de
+contrato se ven en tests, no en producción.
+
+\section*{ADR-005 — DSL Extensibility}
+
+\textbf{Fecha}: 2026-04-23. \textbf{Estado}: aprobada e
+implementada (Fase 3).
+
+\textbf{Contexto}. El DSL vivía en
+\filepath{core/graph_hunter_core/src/dsl.rs}, con entity types y
+relation types hardcoded. Clientes pedían extensiones
+(\code{Container}, \code{ServiceAccount}, predicados temporales).
+
+\textbf{Decisión}. (D1) Extraer a \filepath{platform/dsl}. (D2)
+Trait \code{DslExtension} para registrar entity/relation/predicate.
+(D3) Versionar gramática: \code{v1} estable, \code{v2-experimental}
+detrás de feature. (D4) Preservar compatibilidad de hipótesis
+escritas contra v1.
+
+\textbf{Consecuencias}. El DSL deja de ser código del núcleo y pasa
+a ser superficie extensible. Un cliente puede extender sin bloquear
+a otros. Versiones futuras viven en paralelo hasta promoción.
+
+\section*{ADR-006 — WIP Absorption}
+
+\textbf{Fecha}: 2026-04-23. \textbf{Estado}: aprobada e
+implementada (Fase 2, commit 0).
+
+\textbf{Contexto}. \code{git status} al arrancar Fase 0: 44
+archivos modificados + 14 untracked. No era código abandonado:
+iteraciones M4 (agentic slow-lane), M5 (DLQ), M6 (invariant
+checker) coherentes con el rediseño. Ignorarlas habría perdido
+trabajo; separarlas antes de reorganizar habría diluido la señal de
+cada commit.
+
+\textbf{Decisión}. Tres commits atómicos \emph{antes} de la
+reorganización: (1) M4 agentic + local-llm, (2) M5 DLQ, (3) M6
+invariants. Cada commit incluye código + tests + DTOs asociados.
+
+\textbf{Consecuencias}. El rediseño arranca desde una base
+coherente. Los commits siguientes son puramente estructurales, no
+mezcla de nuevas features con cambios arquitectónicos.
+
+\section*{ADR-007 — Ingestor schema-agnóstico en tres carriles}
+\label{sec:adr-007}
+
+\textbf{Fecha}: 2026-04-24. \textbf{Estado}: aprobada, en
+implementación (fast lane en \filepath{platform/vrl}; slow/learning
+lanes en \filepath{platform/api/src/operations/agentic*.rs}).
+
+\textbf{Contexto}. La ingesta heurística acopla un parser por
+formato en el binario del daemon. Cada formato nuevo o cambio
+aguas arriba (campo agregado en Sentinel, separador nuevo en
+FortiOS) obliga a release para que el daemon lo procese. El parser
+generic cubre casos conocidos y falla silencioso en los demás.
+Resultado: un SOC con un formato no reconocido se queda sin ingesta
+utilizable, o pierde fidelidad con el parser generic. No hay
+camino incremental: ninguno de los parsers aprende de su propia
+operación.
+
+\textbf{Decisión}.
+
+\begin{enumerate}
+    \item \textbf{Fast lane}: separar la ingesta caliente en un
+    programa VRL compilado determinísticamente desde un
+    \code{FieldConfig}. Cero LLM en el camino crítico.
+    \item \textbf{Slow lane}: usar un LLM \emph{offline} como
+    compilador de muestras a \code{FieldConfig}. El output del LLM
+    es datos, no código. Todo output pasa por revisión humana antes
+    de entrar a producción.
+    \item \textbf{Learning lane}: el fast lane emite métricas
+    estructurales por batch; un monitor de drift dispara re-review
+    en el slow lane sin parar la ingesta.
+    \item \textbf{Mapping library}:
+    \filepath{platform/mapping-library} persiste los mappings
+    aprobados con \code{mapping_hash = sha256(VRL)} como identidad
+    estable y provenance-stamp por evento ingestado.
+    \item \textbf{Target canonical}: los mappings emiten OCSF v1.4
+    como shape canonical. El parser no decide qué es una entidad;
+    el FieldConfig-a-OCSF sí.
+\end{enumerate}
+
+\textbf{Consecuencias}.
+
+\begin{itemize}
+    \item La frontera humano/máquina queda bien puesta: LLM
+    propone, humano aprueba, compilador emite, runtime ejecuta. Cada
+    paso es trazable.
+    \item El daemon no necesita release por formato nuevo: se
+    publica un nuevo \code{FieldConfig} y el runtime lo recoge.
+    \item La determinística del fast lane se preserva:
+    \code{mapping_hash} estable, reproducible byte-a-byte.
+    \item Superficie nueva: tools MCP
+    (\code{parser_generate}, \code{publish_mapping},
+    \code{agentic_review_*}, \code{schema_drift_detect},
+    \code{mapping_regression_test}, \code{fetch_shared_mappings})
+    que juntas materializan el carril agéntico.
+    \item Dependencia operativa nueva (backend LLM). Mitigada por
+    intercambiabilidad vía \filepath{platform/local-llm} y por que
+    el carril es offline — caída del LLM no afecta ingesta viva.
+\end{itemize}
+
+\textbf{Alternativas consideradas}.
+
+\begin{itemize}
+    \item \textbf{LLM online en el camino crítico}: descartado por
+    latencia, costo y superficie de falla. El LLM puede parsear mal
+    un batch productivo; el humano, no. Y el costo por evento
+    ingerido sería prohibitivo.
+    \item \textbf{Parser genérico mejorado}: descartado porque
+    hereda la misma falla — no aprende de su propia ejecución ni se
+    adapta a cambios aguas arriba.
+    \item \textbf{Schema-registry estático aportado por usuario}:
+    factible pero exige que el usuario escriba FieldConfig a mano.
+    El slow lane automatiza ese paso sin perder el gate humano.
+\end{itemize}

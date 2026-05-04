@@ -1,0 +1,112 @@
+\chapter{Arquitectura: capas de cizalla}
+\label{sec:paper-arq}
+
+\section{Idea central}
+
+\emph{Shearing
+layers}~\cite{brand1994how} organiza un sistema por velocidades de
+cambio. Lo que cambia rápido (pieles, superficies, integraciones)
+no debe acoplar a lo que cambia lento (esqueletos, motores). En
+software, la consecuencia práctica es dirigir todas las
+dependencias \emph{desde} lo rápido \emph{hacia} lo lento, y
+prohibir dependencias en sentido contrario. Una arista
+núcleo$\to$plataforma, si existe, es una fuente de fricción
+estructural: el núcleo se ve forzado a moverse a la velocidad de
+la superficie.
+
+GraphHunter adopta tres capas con esta disciplina:
+
+\begin{enumerate}
+    \item \textbf{Core} (``esqueleto''): tipos del grafo, operaciones
+    estructurales, scoring, matcher FFI, clasificador GNN. Cambia
+    por meses.
+    \item \textbf{Platform} (``carne''): DSL, parsers, sources de
+    ingesta, canonical OCSF, servidor HTTP, MCP TypeScript,
+    servicios compartidos (catálogo, DLQ, drift monitor, mapping
+    library). Cambia por semanas.
+    \item \textbf{Apps} (``piel''): Tauri desktop, CLI. Cambia por
+    días.
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.6cm and 0.8cm,
+    layer/.style={draw, rounded corners, minimum width=11cm,
+                  minimum height=1.2cm, align=center, font=\small\bfseries},
+    apps/.style={layer, fill=red!10, draw=red!50!black},
+    platform/.style={layer, fill=orange!10, draw=orange!60!black},
+    core/.style={layer, fill=blue!10, draw=blue!50!black},
+]
+\node[apps]     (apps)      {Apps\\\footnotesize\mdseries (tauri · cli)};
+\node[platform] (platform)  [below=of apps]
+    {Platform\\\footnotesize\mdseries (api · dsl · parsers · sources · canonical · mcp · mapping-library)};
+\node[core]     (core)      [below=of platform]
+    {Core\\\footnotesize\mdseries (graph-engine · matcher-ffi · gnn · libgraphmatch C++)};
+\draw[->, thick] (apps)      -- (platform);
+\draw[->, thick] (platform)  -- (core);
+\end{tikzpicture}
+\caption{Las tres capas. Todas las aristas de dependencia apuntan
+hacia abajo (piel$\to$carne$\to$esqueleto). No hay ciclos.}
+\label{fig:paper-capas}
+\end{figure}
+
+\section{Crates y lenguajes}
+
+El sistema está compuesto por 14 \emph{crates} Rust, un servidor
+MCP en TypeScript, y una biblioteca C++ (\filepath{libgraphmatch})
+con intrínsecas AVX2 para el matcher. La elección de lenguajes
+sigue la misma lógica de shearing:
+
+\begin{itemize}
+    \item \textbf{C++} donde el costo de abstracción es inaceptable:
+    intersección SIMD de posting-lists en el núcleo del matcher.
+    \item \textbf{Rust} en todo el sistema: tipos fuertes, zero-cost
+    abstractions, seguridad sin recolector. Es el tejido por
+    defecto.
+    \item \textbf{TypeScript} sólo para la superficie MCP: el
+    protocolo tiene SDK oficial en TS y la audiencia es
+    asistentes LLM con tooling JS.
+\end{itemize}
+
+\section{Contraste con SOLID uniforme}
+
+Una crítica posible es: \emph{``ya existe SOLID, ¿para qué otro
+modelo?''}. SOLID es un conjunto de reglas micro, aplicables a
+clases individuales. Shearing layers es una regla macro: aplica a
+\emph{módulos de alto nivel}. Son complementarios. La diferencia
+relevante es la dirección de la presión de diseño: SOLID empuja a
+abstraer \emph{por contrato}; shearing empuja a separar \emph{por
+velocidad de cambio}. Un sistema bien SOLID puede seguir teniendo
+dependencias núcleo$\to$superficie; shearing prohibe eso
+explícitamente.
+
+\section{Propiedades verificables}
+
+La descomposición se validó con tres propiedades:
+
+\begin{enumerate}
+    \item \textbf{Cero ciclos}. Verificado con
+    \code{cargo-modules}/\code{cargo-deps} y \code{cargo check}
+    sobre el workspace. Un ciclo rompería la capacidad de aislar
+    lo que cambia.
+    \item \textbf{FFI aislado en una capa}. Sólo
+    \code{matcher-ffi} en el core toca C++. El resto del código
+    Rust no ve \code{extern "C"}, no maneja punteros crudos y no
+    preocupa por ABI. La versión ABI se chequea en runtime
+    (cap.~\ref{sec:paper-ffi}).
+    \item \textbf{Canonical API \emph{sealed}}. Los tipos
+    que cruzan la superficie HTTP/MCP se definen en una capa de
+    DTOs; las mutaciones del grafo canonical no escapan.
+\end{enumerate}
+
+Las dos aristas residuales \code{core}$\to$\code{platform} (ver
+cap.~\ref{sec:paper-limites}) no son ciclos pero invierten la
+dirección deseada. Son deuda reconocida.
+
+\section{Relación con los otros libros}
+
+Este capítulo resume lo mínimo para situar las contribuciones
+técnicas que siguen. La versión detallada del modelo, con el
+inventario completo de crates y seis ADRs, vive en el libro
+\emph{Arquitectura} de la documentación.

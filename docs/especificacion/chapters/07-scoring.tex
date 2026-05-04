@@ -1,0 +1,160 @@
+\chapter{Anomaly scoring}
+\label{sec:scoring}
+
+\section{Composición}
+
+GraphHunter asigna a cada path resultado de un hunt un \emph{score}
+compuesto en $[0, 1]$, calculado como combinación ponderada de cinco
+componentes independientes.
+
+\begin{equation*}
+S(p) = \sum_{i=1}^{5} w_i \cdot C_i(p) \qquad \sum_i w_i = 1
+\end{equation*}
+
+Los pesos $w_i$ están en \code{ScoringWeights} (ver
+\filepath{core/graph-engine/src/anomaly.rs}). Valores por defecto:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Campo & Peso default & Componente \\
+\midrule
+\code{w1_entity_rarity}      & 0.25 & Entity Rarity \\
+\code{w2_edge_rarity}        & 0.30 & Edge Rarity \\
+\code{w3_neighborhood_conc}  & 0.25 & Neighborhood Concentration \\
+\code{w4_temporal_novelty}   & 0.20 & Temporal Novelty \\
+\code{w5_gnn_threat}         & 0.00 & GNN Threat \\
+\bottomrule
+\end{tabular}
+\caption{Pesos por defecto. El GNN está desactivado salvo que el
+usuario provea modelo y opte-in.}
+\end{table}
+
+Los pesos se renormalizan automáticamente si no suman 1. El
+usuario puede sobreescribirlos por sesión vía
+\code{POST /enable_anomaly_scoring} o \code{POST /compute_scores}.
+
+\section{Componente 1: Entity Rarity}
+\label{sec:scoring-er}
+
+Mide qué tan infrecuentes son las entidades del path individualmente.
+
+\begin{equation*}
+ER(v) = 1 - \frac{\ln(\text{freq}(v))}{\ln(\text{max\_freq})}
+\qquad C_1(p) = \frac{1}{|p|} \sum_{v \in p} ER(v)
+\end{equation*}
+
+Donde $\text{freq}(v)$ es el conteo de apariciones del nodo $v$ en
+eventos ingresados, y $\text{max\_freq}$ el máximo global. Un nodo
+que aparece una vez tiene $ER \approx 1$; el nodo más visto tiene
+$ER = 0$.
+
+\textbf{Uso típico}: captura \emph{qué tan raro es ver a estos
+actores del todo}. Sirve para priorizar paths donde participan
+cuentas o hosts rara vez observados.
+
+\section{Componente 2: Edge Rarity}
+\label{sec:scoring-edger}
+
+Mide qué tan infrecuentes son las transiciones observadas.
+
+\begin{equation*}
+EdgeR(s, d) = 1 - \frac{\ln(\text{freq}(s, d))}{\ln(\text{max\_pair\_freq})}
+\end{equation*}
+
+$C_2(p)$ se calcula como promedio sobre todas las aristas del path.
+
+\textbf{Uso típico}: captura \emph{qué tan inusual es esta secuencia
+concreta}. Un usuario que rutinariamente se autentica en un host
+tiene $ER$ bajo para ambos nodos por separado, pero si un día ese
+usuario escribe en un directorio sensible al que nunca había ido, el
+edge rarity se dispara.
+
+\section{Componente 3: Neighborhood Concentration}
+\label{sec:scoring-nc}
+
+Promedio sobre los nodos del path de su concentración de vecindario
+(precomputada en \code{gm_graph_finalize}).
+
+\begin{equation*}
+NC(v) = \frac{\max_t |\{u : (v, u) \in E, \tau(u) = t\}|}{|\text{neigh}(v)|}
+\end{equation*}
+
+Donde $\tau(u)$ es el tipo de la entidad $u$. Un nodo cuyos vecinos
+son de tipos muy diversos tiene $NC$ bajo; uno cuyos vecinos son
+casi todos del mismo tipo tiene $NC$ alto (centralidad estructural).
+
+\textbf{Uso típico}: \emph{penaliza} paths que atraviesan hubs
+naturales (ej.\ un DC con 5000 usuarios conectados) porque su alto
+score en otras dimensiones se explica por topología, no por anomalía
+real.
+
+\section{Componente 4: Temporal Novelty}
+\label{sec:scoring-tn}
+
+Qué tan recientemente apareció la entidad en la ventana observada.
+
+\begin{equation*}
+TN(v) = \frac{\tau_{\text{first}}(v) - \tau_{\min}}{\tau_{\max} - \tau_{\min}}
+\qquad C_4(p) = \frac{1}{|p|} \sum_{v \in p} TN(v)
+\end{equation*}
+
+$TN(v) \approx 0$: el nodo existe desde el inicio de la ventana.
+$TN(v) \approx 1$: el nodo apareció al final.
+
+\textbf{Uso típico}: separa \emph{centralidad estructural} de
+\emph{novedad genuina}. Un DC corporativo tiene $TN = 0$ (siempre
+estuvo); una IP externa recién observada tiene $TN \approx 1$.
+
+\section{Componente 5: GNN Threat}
+\label{sec:scoring-gnn}
+
+Score de amenaza por path según clasificador GNN entrenado
+(ver capítulo de Arquitectura, Capa Core). Cuando no hay modelo
+cargado, devuelve 0.0 para todo path — caso común en entornos
+limpios.
+
+Clases de amenaza soportadas (\code{ThreatClass}):
+\code{Benign}, \code{Exfiltration}, \code{C2Beacon},
+\code{LateralMovement}, \code{PrivilegeEscalation}. La probabilidad
+del argmax se usa como score. Peso por defecto 0.0 (opt-in).
+
+\section{Explicación}
+
+El endpoint \code{GET /explain_score} y la tool
+\code{scoring.explain_score} devuelven el desglose:
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+{
+  "path_id": "...",
+  "composite": 0.73,
+  "components": {
+    "entity_rarity":              0.82,
+    "edge_rarity":                0.91,
+    "neighborhood_concentration": 0.45,
+    "temporal_novelty":           0.64,
+    "gnn_threat":                 0.00
+  },
+  "weights": { "w1": 0.25, "w2": 0.30, "w3": 0.25, "w4": 0.20, "w5": 0.0 },
+  "narrative": "entity rare (0.82), transition rare (0.91), ..."
+}
+\end{lstlisting}
+
+\code{narrative} es texto humano generado en
+\filepath{core/graph-engine/src/analytics.rs::build_narrative}. No
+substituye el desglose numérico; lo acompaña.
+
+\section{Invariantes}
+
+\begin{itemize}
+    \item Cada $C_i(p) \in [0, 1]$.
+    \item $S(p) \in [0, 1]$ estrictamente tras renormalización.
+    \item Path vacío devuelve todos los componentes en 0.0 sin
+    panic.
+    \item Si el grafo no está finalizado, el scorer cortocircuita a
+    0.0 (precondición, no error).
+    \item Todos los pesos en 0 $\Rightarrow$ $S(p) = 0$ para
+    cualquier $p$.
+\end{itemize}

@@ -1,0 +1,211 @@
+\chapter{Subgraph matching ingenuo: por qué no escala}
+\label{cap:naive-matching}
+
+\begin{intuicion}
+El DFS subgraph match del capítulo anterior es \emph{el} baseline.
+En grafos chicos o hipótesis con etiquetas selectivas, anda
+perfecto. En grafos grandes o hipótesis sin filtros, su complejidad
+\(O(\deg^k)\) explota. Este capítulo pone números concretos a esa
+explosión: dado un grafo \emph{scale-free} típico (\(\sim 10^7\)
+aristas, distribución de grado power-law), una hipótesis de \(k=4\)
+sin filtros puede generar trillones de paths. Esa es la motivación
+empírica para los \emph{prunes} (próximos dos capítulos), los
+\emph{worst-case-optimal joins} (cap.~\ref{cap:lftj}), y los
+\emph{semi-join reducers} (cap.~\ref{cap:yannakakis-chain}).
+\end{intuicion}
+
+\section{El peor caso teórico}
+
+Recordemos el bound del capítulo~\ref{cap:dfs-baseline}:
+\[
+\text{paths visitados} \leq |\V_{L_0^V}| \cdot \prod_{i=0}^{k-1} \deg^{+}_{L_i^E, L_{i+1}^V}.
+\]
+
+\noindent
+Si todas las etiquetas son ``cualquiera'' (sin filtro), \(\deg^{+}\)
+es el grado promedio del grafo, \(\bar{d}\). Si todas las
+etiquetas son selectivas, cada \(\deg^{+}_{L^E, L^V}\) es una
+fracción chica de \(\bar{d}\). El producto \(\prod \deg^{+}\) tiene
+crecimiento geométrico en \(k\); con \(\bar{d} = 100\) y \(k = 4\),
+eso son \(10^8\) paths \emph{por start}. Multiplicado por
+\(|\V_{L_0^V}| = 10^5\) starts: \(10^{13}\) paths totales. A 1~ns
+por path (optimistic), 10\,000 segundos = 2.7 horas.
+
+\subsection{El gráfico que vale más que el álgebra}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    every node/.style={font=\footnotesize}
+]
+\draw[->, thick] (0,0) -- (8.5,0) node[right]{\(k\)};
+\draw[->, thick] (0,0) -- (0,5.5) node[above, align=center]{paths visitados\\\scriptsize (log scale)};
+
+\foreach \x/\lbl in {1/1, 2/2, 3/3, 4/4, 5/5, 6/6, 7/7, 8/8} {
+    \draw (\x,-0.05) -- (\x,0.05) node[below=2pt, font=\scriptsize]{\lbl};
+}
+\foreach \y/\lbl in {1/$10^2$, 2/$10^4$, 3/$10^6$, 4/$10^8$, 5/$10^{10}$} {
+    \draw (-0.05,\y) -- (0.05,\y) node[left=2pt, font=\scriptsize]{\lbl};
+}
+
+\draw[accent, thick] plot[smooth] coordinates {(1,1.5) (2,2.0) (3,2.4) (4,2.8) (5,3.1) (6,3.4) (7,3.7) (8,4.0)};
+\node[accent] at (5,3.6) {\scriptsize típico (con podas)};
+
+\draw[red, thick, dashed] plot[smooth] coordinates {(1,1.5) (2,2.5) (3,3.5) (4,4.5) (5,5.5)};
+\node[red] at (5,5.5) [above]{\scriptsize naive $O(\bar{d}^k)$};
+
+\draw[gray, thick, dotted] (0, 4) -- (8, 4);
+\node[gray, font=\scriptsize] at (8, 3.85) [left]{\scriptsize cap=10\,000 = $10^4$};
+\end{tikzpicture}
+\caption{Crecimiento de paths visitados por hunt vs longitud de la
+hipótesis. Naive es \(O(\bar{d}^k)\) ---explosión geométrica que
+satura el cap a \(k = 3\)---. Con podas, el crecimiento es
+sub-exponencial; en grafos típicos los hunts de \(k = 6\) terminan
+bajo el cap.}
+\label{fig:naive-explosion}
+\end{figure}
+
+\section{¿Por qué scale-free empeora todo?}
+
+Las redes corporativas reales NO son grafos aleatorios uniformes.
+Son \emph{scale-free}: la distribución de grado sigue una
+\emph{power-law},
+\(\Pr[\deg(v) = d] \propto d^{-\alpha}\) con \(\alpha \in [2, 3]\).
+Eso significa:
+
+\begin{itemize}
+    \item La mayoría de los vértices tienen grado bajo (1--10).
+    \item Una minoría tiene grado mediano (50--500).
+    \item Existe un puñado de \emph{hubs} con grado masivo (\(10^4\)
+    a \(10^6\)).
+\end{itemize}
+
+\noindent
+El DFS naive sufre desproporcionalmente por los hubs:
+
+\begin{itemize}
+    \item Un \emph{Domain Controller} con \(10^4\) usuarios
+    autenticando contra él tiene grado entrante 10\,000.
+    \item Un hunt de la forma
+    \texttt{User -[Auth]-> Host -[Connect]-> IP} pasa por el DC en
+    el segundo paso. Iterar sus \(10^4\) salidas es \emph{una sola}
+    iteración del DFS \emph{en ese vértice}; pero el DFS volverá al
+    DC desde \emph{cada uno} de los starts que lo alcanzan.
+    \item Si \(10^3\) usuarios alcanzan al DC, el DFS itera
+    \(10^4\) salidas \(10^3\) veces \(\Rightarrow\) \(10^7\)
+    iteraciones sólo en ese paso.
+\end{itemize}
+
+\subsection{El \emph{output} también explota}
+
+Más sutil que la \emph{exploración}: el resultado \emph{en sí}
+puede ser enorme. Si un hub tiene grado \(10^4\) y aparece en el
+medio de una hipótesis de \(k = 3\), las paths que pasan por él se
+multiplican: una arista \emph{entrante} al hub combinada con
+\(10^4\) salientes del hub, da \(10^4\) paths \emph{por arista
+entrante}. Para \(10^3\) entrantes: \(10^7\) paths.
+
+GraphHunter \emph{cap-eaba} la salida en 10\,000 resultados; pero
+el DFS necesita \emph{generarlos para verificarlos}. Aún con cap,
+el trabajo del DFS es proporcional al output total, no al cap.
+Esto es exactamente el caso ``cap-saturado'' del capítulo
+\ref{cap:hunt-result}: el DFS produce más resultados que el cap, y
+el costo del emit (no de la búsqueda) es lo que mata.
+
+\section{Tres caminos para escalar}
+
+Cuando el DFS naive explota, hay tres familias de soluciones, cada
+una atacando un aspecto distinto:
+
+\subsection{Camino 1: Reducir \emph{starts} con prunes}
+
+Si una fracción significativa de los starts no genera ningún
+resultado, descartarlos antes de iniciar el DFS ahorra trabajo.
+Dos prunes:
+
+\begin{itemize}
+    \item \textbf{NLF prune}: si el primer paso requiere
+    \(\geq r\) vecinos del tipo \(L\), descartar \(v\) si
+    \(\NLF(v, L) < r\). Local, \(O(|\V|)\).
+    \item \textbf{k-hop reachability prune}: si la hipótesis exige
+    llegar al tipo \(L_k^V\), descartar \(v\) si \(L_k^V \notin
+    \mathrm{bits}[v]\). Transitivo, requiere índice precomputado.
+\end{itemize}
+
+Capítulos \ref{cap:prune-nlf} y \ref{cap:prune-khop} desarrollan.
+
+\subsection{Camino 2: Cambiar el algoritmo (WCOJ)}
+
+Para hipótesis con \emph{shape} estructural especial (\(K_4\)), el
+DFS naive es estrictamente subóptimo en peor caso: visita
+\(O(\deg^3)\) cuando un \emph{worst-case-optimal join} (LFTJ)
+visita \(O(m)\). Capítulos \ref{cap:wcoj} y \ref{cap:lftj}.
+
+\subsection{Camino 3: Reducir antes de enumerar (Yannakakis)}
+
+Para hipótesis \(\alpha\)-acíclicas (cadena, estrella, árbol), una
+\emph{semi-join reducer} elimina del grafo todas las aristas que
+no participan de \emph{ningún} match completo, ANTES de empezar a
+enumerar. La enumeración después es trivial. Capítulos
+\ref{cap:hipergrafos} y \ref{cap:yannakakis-chain}.
+
+\section{¿Cuándo el DFS naive es suficiente?}
+
+A pesar de su pesadilla teórica, el DFS naive (con podas) anda
+perfecto en muchos casos:
+
+\begin{itemize}
+    \item \textbf{Hipótesis con etiquetas muy selectivas.} Por
+    ejemplo, \texttt{User -[MfaPush]-> Device}. Si MfaPush es raro
+    (pocas aristas), el producto \(\deg^{+}_{L^E,L^V}\) es chico.
+    \item \textbf{Hipótesis cortas.} \(k = 1\) o \(k = 2\) es DFS
+    chico por construcción.
+    \item \textbf{Grafos \emph{no} scale-free.} Algunos datasets
+    sintéticos o redes muy estructuradas tienen distribuciones de
+    grado uniforme; ahí el DFS no sufre los hubs.
+\end{itemize}
+
+\noindent
+La estrategia del motor: usar el DFS por defecto, ofrecer
+operadores especializados cuando la hipótesis tiene la estructura
+adecuada. El \emph{planner} (capítulo~\ref{cap:planner}) hace la
+elección.
+
+\section{Resumen}
+
+\begin{itemize}
+    \item DFS naive: \(O(\bar{d}^k)\) en peor caso. Geométrico en
+    \(k\); explota a \(k = 3, 4\) sin podas.
+    \item Grafos scale-free amplifican: hubs causan multiplicación
+    de paths intermedios.
+    \item Tres caminos de escalado: prunes (reducir starts),
+    WCOJ (mejor algoritmo), Yannakakis (reducir antes de enumerar).
+    \item DFS bien-podado sigue siendo el baseline; los operadores
+    especializados se dispatchan cuando la estructura lo permite.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Para un grafo con \(\bar{d} = 50\) y una
+    hipótesis de \(k = 4\) sin filtros sobre \(|\V_{L_0^V}| = 10^4\)
+    starts, ¿cuántos paths visita el DFS naive en peor caso?
+
+    \item ¿Cómo cambia el orden de magnitud si las etiquetas filtran
+    al 10\% del grado? ¿Y si filtran al 1\%?
+
+    \item \starred{} En un grafo scale-free, los hubs son raros
+    pero contribuyen mucho. Modelá: si el grafo tiene \(10^6\)
+    vértices con \(\bar{d} = 5\) pero un solo hub con
+    \(\deg = 10^5\), ¿cuál es el costo extra del DFS al pasar por
+    el hub vs por un vértice promedio?
+
+    \item Diseñá una hipótesis ``imposible'' (que el DFS no termine
+    en tiempo razonable). ¿Qué propiedad estructural la convierte
+    en imposible? ¿Cómo la detectaría el motor para rechazarla?
+
+    \item ¿Por qué el cap del cuello de botella es el output, no
+    la exploración? Pensá: si el DFS encuentra \(10^7\) paths
+    válidos pero sólo emite los primeros \(10^4\), ¿el costo de
+    \emph{emit} es proporcional al cap o al total?
+\end{enumerate}
+\end{ejercicios}

@@ -1,0 +1,80 @@
+\chapter{Introducción}
+\label{sec:arq-introduccion}
+
+GraphHunter es un motor de caza de amenazas sobre grafos temporales
+construidos a partir de logs de seguridad. Este libro describe
+\emph{cómo está construido}: qué capas lo componen, qué piezas viven
+en cada capa, por qué se eligieron esos límites y qué patrones se
+repiten en todo el código.
+
+\textbf{Véase también} el libro \emph{Diseño completo}
+(\filepath{docs/diseno/diseno.pdf}) para una guía pedagógica
+del diseño algorítmico: pipeline de ingesta, matcher tier-por-tier
+(DFS / LFTJ-K4 / Yannakakis chain / Yannakakis tree-walk), índices
+auxiliares (NLF, k-hop reachability), DSL, y el plano de obra de
+las stages futuras L3 stage 2b/2c.
+
+\section{Audiencia}
+
+Está pensado para tres lectores distintos:
+
+\begin{itemize}
+    \item \textbf{Nuevo contribuidor}: necesita el mapa del
+    repositorio y el razonamiento detrás de la estructura antes de
+    abrir su primer pull request.
+    \item \textbf{Revisor arquitectónico}: evalúa propuestas de
+    cambio que tocan múltiples capas, o sanciona nuevas dependencias
+    entre crates.
+    \item \textbf{Operador técnico}: opera el sistema en producción
+    y necesita entender los límites de aislamiento (FFI, canonical
+    API, model gate) para diagnosticar problemas.
+\end{itemize}
+
+\section{Alcance}
+
+Este libro cubre \emph{la arquitectura en sí}: estructura,
+decisiones, patrones, deudas. No cubre:
+
+\begin{itemize}
+    \item Las \textbf{superficies externas} (HTTP API, MCP tools,
+    DSL, C ABI) — eso vive en el libro de Especificación.
+    \item El \textbf{flujo de uso} del sistema (ingestar, cazar,
+    anotar, exportar) — eso vive en el Manual.
+    \item La \textbf{justificación experimental} de algoritmos
+    (matcher SIMD, DFS temporal, scoring compuesto) — eso vive en el
+    Paper.
+\end{itemize}
+
+\section{Mapa del libro}
+
+\begin{itemize}
+    \item El capítulo~\ref{sec:shearing-layers} introduce el modelo
+    de capas de cizalla (\emph{shearing layers}) que organiza el
+    proyecto.
+    \item El capítulo~\ref{sec:grafo-deps} muestra el grafo de
+    dependencias inter-crate y las propiedades que garantiza.
+    \item Los capítulos~\ref{sec:capa-core}, \ref{sec:capa-platform}
+    y~\ref{sec:capa-apps} recorren cada capa en detalle.
+    \item El capítulo~\ref{sec:patrones} describe patrones
+    transversales: typestate, RAII, canonical API, model gate.
+    \item El capítulo~\ref{sec:decisiones} resume las seis decisiones
+    arquitectónicas (ADR-001 a ADR-006) que fundamentan el estado
+    actual.
+    \item El capítulo~\ref{sec:deudas} documenta honestamente la
+    deuda conocida y el trabajo futuro.
+    \item El apéndice~\ref{sec:adrs} contiene las ADRs textualmente.
+    El apéndice~\ref{sec:metricas} reporta métricas cuantitativas
+    (LOC, tests, crates, ciclos).
+\end{itemize}
+
+\section{Convenciones}
+
+\begin{itemize}
+    \item \filepath{rutas/de/archivo} en tipografía monoespaciada.
+    \item \code{identificadores_de_código} igualmente monoespaciados.
+    \item Crates Rust se escriben con su path en el repositorio:
+    \filepath{core/graph-engine} significa ``el crate que vive en
+    \filepath{core/graph-engine/Cargo.toml}''.
+    \item Cuando un párrafo dice ``ADR-00N'' se refiere al apéndice
+    \ref{sec:adrs}, que contiene el documento completo.
+\end{itemize}

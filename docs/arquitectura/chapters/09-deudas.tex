@@ -1,0 +1,158 @@
+\chapter{Deudas y trabajo futuro}
+\label{sec:deudas}
+
+Este capítulo documenta lo que \emph{no} está resuelto. Hay cuatro
+categorías: aristas indebidas en el grafo de dependencias, tests
+flaky, brechas de modelo y follow-ups del sistema agentic.
+
+\section{Dos aristas \filepath{core} $\to$ \filepath{platform}
+(con \emph{guardrail} automatizado)}
+
+Como registra el capítulo~\ref{sec:grafo-deps}, existen dos
+dependencias que van hacia arriba:
+
+\begin{itemize}
+    \item \filepath{core/graph-engine} $\to$
+    \filepath{platform/sources}: el GNN bridge usa
+    \code{AadEventBatch} definido en \filepath{platform/sources}
+    para materializar el corpus de entrenamiento. Es un préstamo de
+    tipo; se resuelve moviendo \code{AadEventBatch} a un crate más
+    bajo (candidato: un crate nuevo \filepath{core/ingest-types})
+    o invirtiendo la dirección vía un trait.
+    \item \filepath{core/graph-engine} $\to$ \filepath{platform/dsl}:
+    el compilador de hipótesis y el runtime del grafo comparten
+    tipos; separarlos completamente exige introducir un crate
+    intermedio de tipos compartidos.
+\end{itemize}
+
+No son ciclos (el grafo sigue siendo DAG) pero violan la regla de
+capas. \textbf{A partir del ciclo 2026-04 ambas aristas están
+explícitamente \emph{whitelisted} en
+\filepath{docs/arquitectura/layering-exceptions.yaml} y verificadas
+en cada PR por \filepath{scripts/check-layering.sh}}. Esto convierte
+la deuda en regresión visible: cualquier nueva arista
+\filepath{core} $\to$ \filepath{platform} no-whitelisted rompe CI.
+El indicador de éxito de largo plazo sigue siendo que
+\code{cargo metadata} reporte cero aristas hacia arriba; el
+indicador de corto plazo ---cerrado--- es que ninguna arista nueva
+pueda colarse silenciosamente.
+
+\section{Tests flaky conocidos}
+
+\begin{itemize}
+    \item \code{sentinel\_connector::tests::backoff\_retries} —
+    depende de timing con \code{tokio::time::advance}, a veces
+    falla en CI bajo carga. Mitigación actual: reintentar el job.
+    Solución: rediseñar el test para usar relojes virtuales sin
+    depender de wall-clock.
+    \item Smoke tests de ingesta que abren archivos grandes en
+    paralelo saturan I/O en runners GitHub y producen timeouts
+    esporádicos. Mitigación: serializar la fase de ingesta en CI.
+\end{itemize}
+
+Ninguno se ha visto fallar localmente de forma reproducible. No
+bloquean releases pero contaminan el ruido de CI.
+
+\section{GNN v2 sin modelo entrenado}
+
+ADR-003 previene que un binario acepte el modelo skeleton, pero no
+resuelve la brecha subyacente: el entrenamiento de GNN v2 está
+hecho sobre Sentinel/AAD y no se ha validado contra datasets
+Fortigate o IIS. Dos consecuencias:
+
+\begin{itemize}
+    \item La componente \code{gnn\_threat} del scoring compuesto no
+    aporta señal útil cuando se alimenta con logs fuera del dominio
+    entrenado. En esos casos el gate rechaza la carga y el scoring
+    se reduce a cuatro componentes. Es el comportamiento correcto,
+    pero es menos discriminante.
+    \item No hay \emph{corpus export} operativo para
+    FortiAnalyzer; el trabajo necesario incluye estructurar el
+    pipeline de exportación + entrenamiento para esa familia de
+    logs.
+\end{itemize}
+
+\section{Follow-ups agentic slow lane}
+
+El sistema agentic (integrado en Fase 2 vía ADR-006) tiene tres
+piezas pendientes:
+
+\begin{itemize}
+    \item \textbf{Backend local-llm real}: actualmente el backend
+    \code{candle} está cableado pero el modelo de bajo recurso no
+    converge con calidad suficiente para el \emph{review loop}.
+    Falta decidir entre (a) afinar el modelo actual, (b) integrar
+    un backend remoto con API key rotada, o (c) ambos con fallback.
+    \item \textbf{Drift detection feedback loop}: la operación
+    \code{agentic::drift} detecta schema drift pero no propaga la
+    corrección al \code{mapping\_library}. Falta cablear esa vuelta
+    para que un drift detectado genere una propuesta de re-mapping
+    revisable.
+    \item \textbf{DLQ triage UI}: la DLQ es funcional por API pero
+    no tiene vista en el Tauri. Consecuencia: un operador ve
+    ``hay N eventos fallidos'' pero no puede triagearlos sin
+    \code{curl}.
+\end{itemize}
+
+\section{Deudas cerradas en el ciclo 2026-04}
+
+Se dejan registradas aquí, con puntero a la evidencia, para que la
+próxima revisión del capítulo no tenga que re-descubrirlas:
+
+\begin{itemize}
+    \item \textbf{FFI sin anotaciones \code{SAFETY}}: todos los
+    bloques \code{unsafe} de \filepath{core/matcher-ffi/src/lib.rs}
+    tienen ahora un comentario \code{// SAFETY: ...} explícito y el
+    lint \code{missing-safety-doc} está habilitado. Test de ABI
+    mismatch + 6 tests negativos (null, grafo vacío, patrón
+    inválido, ventana temporal fuera de rango, double-drop bloqueado
+    por typestate) en \filepath{core/matcher-ffi/tests/}.
+
+    \item \textbf{DSL v1 sin semántica formal}: publicada en
+    \filepath{docs/spec/dsl-v1-semantics.md}. Cubre definición de
+    \emph{match} (paths vs walks), semántica de \code{WITHIN},
+    \code{\{k=N\}}, \code{HAVING count(distinct)}, y los predicados
+    \code{\textasciitilde}, \code{in}, \code{not in}. El roundtrip
+    proptest cubre ahora bindings, HAVING y WITHIN que antes se
+    excluían.
+
+    \item \textbf{Matcher 3-way equivalence}: proptest en
+    \filepath{core/matcher-ffi/tests/equivalence\_proptest.rs}
+    compara iterativo vs smart vs SIMD a 256 casos. Con scorer
+    finalizado, los tres devuelven conjuntos idénticos.
+
+    \item \textbf{Scoring sin \code{ScoreBreakdown} documentado}:
+    publicado en \filepath{docs/spec/scoring-v1.md}. Perfil por
+    defecto con \code{w\_gnn = 0}, breakdown por path expuesto en
+    \code{analytics::HuntResult::anomaly\_breakdown}, tests de
+    reproducibilidad bit-for-bit (\code{f64::to\_bits}) y
+    direccionalidad.
+
+    \item \textbf{Escenarios demo no reproducibles}:
+    \filepath{scripts/demo.sh} + snapshot tests en
+    \filepath{platform/api/tests/demo\_scenarios.rs} cubren los
+    tres fixtures (Sysmon, Sentinel, CSV) con tolerancia
+    $\pm 10\%$ sobre el número de paths.
+
+    \item \textbf{Benchmarks limitados a 2 suites}: agregadas
+    \code{ingest\_throughput}, \code{matching\_hops} y
+    \code{scoring\_path}. \filepath{scripts/bench-report.sh}
+    convierte \filepath{target/criterion/*/estimates.json} en
+    \filepath{docs/paper/data/bench-table.md}.
+
+    \item \textbf{Feature flags sin tabla canónica}: publicada en
+    \filepath{docs/spec/features.md} con clasificación
+    stable/experimental/future sobre 14 flags.
+\end{itemize}
+
+\section{Formato del libro}
+
+Este capítulo se actualiza en cada ciclo de trabajo. Si una deuda
+se resuelve, se elimina de aquí y se anota en la ADR correspondiente
+bajo ``consecuencias''. Si aparece una nueva, se documenta aquí
+antes de que alguien la descubra por sorpresa durante un incidente.
+
+La regla editorial: las deudas se enumeran con nombre de módulo,
+efecto observable y criterio de resolución. No se usan frases
+vagas (``mejorar''); se usan criterios verificables (``cero
+aristas hacia arriba en \code{cargo metadata}'').

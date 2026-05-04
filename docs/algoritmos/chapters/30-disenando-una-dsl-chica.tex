@@ -1,0 +1,227 @@
+\chapter{Diseñando una DSL chica}
+\label{cap:dsl-design}
+
+\begin{intuicion}
+La DSL de GraphHunter es deliberadamente \emph{chica}: el analista
+debería poder escribir una hipótesis en menos de una línea sin
+abrir manual. Eso es una decisión de diseño, no una limitación.
+Una DSL chica gana legibilidad, reduce la curva de aprendizaje, y
+fuerza al motor a ser bueno en pocos casos en lugar de mediocre en
+muchos. Este capítulo explica los principios que guiaron el diseño
+de la DSL: una sintaxis primaria de cadena, un solo separador (\texttt{;})
+para extender a shapes graph, predicados como cláusulas
+post-fix, y una semántica que mapea uno-a-uno a la estructura del
+matcher.
+\end{intuicion}
+
+\section{Por qué una DSL en vez de SQL / Cypher / KQL}
+
+GraphHunter podría haber expuesto su API en uno de los lenguajes
+de query existentes:
+
+\begin{itemize}
+    \item \textbf{SQL}: estándar, pero verboso para multi-joins.
+    Una hipótesis de 3 saltos = $\sim$15 líneas de SQL.
+    \item \textbf{Cypher} (Neo4j): tiene sintaxis grafo
+    (\texttt{(n)-[r]->(m)}), pero es enorme: una hipótesis simple
+    obliga a aprender 30+ keywords, predicados completos, agrupaciones.
+    \item \textbf{KQL} (Microsoft Sentinel): poderoso pero
+    table-centric; modelar grafo encima de KQL pierde la naturaleza
+    estructural.
+\end{itemize}
+
+\noindent
+La decisión: una DSL nueva, optimizada para el problema concreto
+(subgraph matching temporal), con una superficie chica que el
+analista pueda dominar en una mañana.
+
+\section{Principios de diseño}
+
+\subsection{Principio 1: legibilidad de izquierda a derecha}
+
+Una hipótesis se lee como se escribe: ``usuario que se autentica
+en un host que se conecta a una IP''. La sintaxis refleja la
+estructura del path:
+
+\begin{lstlisting}
+User -[Auth]-> Host -[Connect]-> IP
+\end{lstlisting}
+
+\noindent
+Comparado con SQL (``\texttt{SELECT \dots FROM auth a JOIN connect c
+ON a.host = c.host}''): el SQL invierte el orden mental ---primero
+declara qué quiere, después cómo se conectan los datos---. La DSL
+matchea el orden de la pregunta del analista.
+
+\subsection{Principio 2: un solo separador}
+
+La DSL legacy era pura cadena. La extensión \emph{shape graph} (L1
+stage 3c) agregó la posibilidad de hipótesis no-cadena: estrellas,
+árboles, cualquier hipergrafo \(\alpha\)-acíclico
+(capítulo~\ref{cap:hipergrafos}). El diseño consideró varias
+sintaxis alternativas:
+
+\begin{enumerate}
+    \item \texttt{User c \{ -[Auth]-> Host h1; -[Auth]-> Host h2 \}}:
+    bloque explícito con corchetes.
+    \item \texttt{User c -[Auth]-> Host h1 AND c -[Auth]-> Host h2}:
+    \texttt{AND} entre cláusulas.
+    \item \texttt{User c -[Auth]-> Host h1; c -[Auth]-> Host h2}:
+    separador \texttt{;}.
+\end{enumerate}
+
+\noindent
+Se eligió la 3 (separador \texttt{;}) por dos razones:
+
+\begin{itemize}
+    \item \textbf{Mínimo cambio sintáctico}. La cadena legacy NO
+    contiene \texttt{;}, así que cualquier hipótesis con \texttt{;}
+    es \emph{trivialmente} graph shape. Disambigua sin lookahead.
+    \item \textbf{Familiaridad}. Los analistas que vienen de SQL
+    asocian \texttt{;} con ``fin de declaración / siguiente
+    cláusula''. El uso es coherente.
+\end{itemize}
+
+\subsection{Principio 3: predicados como cláusulas post-fix}
+
+\begin{lstlisting}
+User -[Auth]-> Host -[Connect]-> IP {k=2} HAVING count(distinct last) >= 5 WITHIN 30m
+\end{lstlisting}
+
+\noindent
+La estructura del path va primero (la parte ``visual''); las
+cláusulas modificadoras (\(k\)-simplicidad, ventana, agregaciones)
+van al final, separadas por palabras clave (\texttt{WITHIN},
+\texttt{HAVING}) o llaves (\texttt{\{k=N\}}).
+
+Alternativa rechazada: predicados \emph{interlaced} con la cadena.
+Hace el código más denso pero menos escaneable. La forma post-fix
+se lee como un párrafo: ``este path; bajo estas condiciones''.
+
+\subsection{Principio 4: defaults razonables}
+
+Tres cosas que la DSL NO obliga a especificar:
+
+\begin{itemize}
+    \item \textbf{\(k\)-simplicidad}: default \(k = 1\) (path
+    simple). Sólo \texttt{\{k=N\}} cuando el analista explícitamente
+    quiere repeticiones.
+    \item \textbf{Ventana temporal}: default \(\Delta t = +\infty\).
+    Sólo \texttt{WITHIN} si el analista quiere acotar.
+    \item \textbf{Aggregations}: default ``ninguna'', enumerar
+    tal cual.
+\end{itemize}
+
+\noindent
+La hipótesis mínima de 2 saltos ---\texttt{User -[Auth]-> Host
+-[Connect]-> IP}--- es self-contained, sin cláusulas extras. Eso
+baja la barrera de entrada: un analista nuevo puede escribir su
+primera hipótesis sin leer manual.
+
+\section{La gramática (informal)}
+
+\begin{lstlisting}
+hypothesis     := chain | graph
+chain          := type_decl chain_step* trailing_clauses?
+graph          := type_decl chain_step* (";" clause_head chain_step*)+ trailing_clauses?
+chain_step     := "-[" rel_type ("{" predicates "}")? "]->" type_decl
+type_decl      := EntityType (binding | "{" predicates "}")?
+clause_head    := type_decl | binding_ref
+binding_ref    := identifier   // referencia a binding ya declarado
+predicates     := predicate ("," predicate)*
+predicate      := key "=" value | key ">" value | ...
+trailing_clauses := ("WITHIN" duration | "HAVING" agg | "{k=" int "}")*
+\end{lstlisting}
+
+\noindent
+Tres terminales: \texttt{EntityType} (\texttt{User}, \texttt{Host},
+etc.), \texttt{rel\_type} (\texttt{Auth}, \texttt{Connect}, etc.),
+\texttt{identifier} (\texttt{c}, \texttt{h1}, \texttt{user}). El
+parser dispatcha entre \texttt{type\_decl} y \texttt{binding\_ref}
+en \texttt{clause\_head} consultando los bindings previamente
+declarados (capítulo~\ref{cap:dsl-graph}).
+
+\section{Lo que la DSL \emph{no} hace}
+
+Decisiones de exclusión deliberadas:
+
+\begin{itemize}
+    \item \textbf{Sin disjunción}. No hay \texttt{OR} entre paths.
+    Si el analista quiere ``A o B'', escribe dos hipótesis y une
+    los resultados en el frontend. Razón: \texttt{OR} en DSL
+    obliga al matcher a manejar disjunción, lo que rompe la
+    semántica de path-único.
+    \item \textbf{Sin negación}. No hay \texttt{NOT} sobre
+    predicados (``vecino de tipo \emph{no}-IP''). Razón:
+    negación general explota la cardinalidad ---el dominio de
+    ``no-IP'' es enorme---. Caso de uso raro en threat hunting.
+    \item \textbf{Sin variables libres en cláusulas trailing}. El
+    \texttt{HAVING} sólo refiere a \texttt{first}, \texttt{last},
+    o agregaciones builtin. No hay binding de variables
+    intermedias. Razón: simpleza del parser y evaluador.
+    \item \textbf{Sin recursividad}. No hay
+    \texttt{User -[Knows]*-> User} (transitivo de longitud
+    variable). Razón: explosión de estado; los hunts realmente
+    útiles son de longitud chica.
+\end{itemize}
+
+\noindent
+Cada exclusión es un trade-off: alguna pregunta legítima no se
+puede expresar. La regla: si el caso de uso aparece en \(<\) 5\%
+de los hunts del corpus, no entra en la DSL; el analista lo resuelve
+combinando varias queries.
+
+\section{La sintaxis no es la semántica}
+
+Importante: la DSL es la \emph{interfaz}, no la
+\emph{representación interna}. El parser convierte la string a
+\texttt{Hypothesis} (capítulo~\ref{cap:ast}); a partir de ahí
+\emph{todo} el motor trabaja sobre \texttt{Hypothesis}, no sobre
+strings. Eso permite:
+
+\begin{itemize}
+    \item Construir hipótesis programáticamente desde otros
+    transports (MCP, REST) sin parsear DSL.
+    \item Cambiar la sintaxis de la DSL sin tocar el matcher.
+    \item Generar la DSL desde un constructor visual (planeado
+    futuro UI).
+\end{itemize}
+
+\section{Resumen}
+
+\begin{itemize}
+    \item DSL chica deliberada: legible, low-barrier, mapea a la
+    estructura del matcher.
+    \item Cuatro principios: legibilidad LR, un solo separador,
+    predicados post-fix, defaults razonables.
+    \item Exclusiones deliberadas: sin disjunción, sin negación,
+    sin recursividad, sin variables libres en trailing.
+    \item DSL es la interfaz; \texttt{Hypothesis} es la
+    representación interna. Cualquier transport puede saltarse el
+    parser.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Escribí en la DSL la hipótesis: ``un proceso
+    que escribió un archivo y después se conectó a una IP, todo
+    en menos de 5 minutos''. Identificá los tres componentes
+    (cadena, ventana, predicados).
+
+    \item ¿Por qué \texttt{;} es mejor disambiguador que
+    \texttt{AND}? Discutí dos casos donde \texttt{AND} sería
+    ambiguo.
+
+    \item \starred{} Diseñá una sintaxis para
+    \emph{disjunción} (``patrón A o patrón B''). ¿Cómo se
+    parsearía? ¿Qué cambia para el matcher?
+
+    \item Imaginá un caso de uso real (de threat hunting) que la
+    DSL actual \emph{no} puede expresar. ¿Cuál es? ¿Vale la pena
+    extender la DSL para cubrirlo?
+
+    \item Si el frontend quisiera ofrecer un constructor visual
+    (drag-and-drop nodes y edges) en vez de DSL, ¿qué tendría que
+    generar para que el motor lo entienda?
+\end{enumerate}
+\end{ejercicios}

@@ -1,0 +1,87 @@
+\chapter{Modo explorador}
+\label{sec:man-explorador}
+
+\section{Qué es}
+
+El modo explorador es la vista nodo-céntrica. Donde el modo caza
+responde ``dada esta forma, ¿qué paths la tienen?'', el modo
+explorador responde ``dada esta entidad, ¿a qué está conectada y
+cuándo?''.
+
+Se entra haciendo doble click sobre cualquier nodo de un resultado
+de hunt, o desde \emph{Buscar}.
+
+\section{Buscar entidades}
+
+En la barra superior: escribir parte del valor (IP, hostname,
+nombre de usuario) y filtrar opcionalmente por tipo. Resultados
+aparecen con el conteo de eventos donde participa cada entidad.
+Click $\to$ entra al modo explorador sobre ese nodo.
+
+\section{Panel de detalle}
+
+Para un nodo seleccionado:
+
+\begin{itemize}
+    \item \textbf{Propiedades}: tipo, valor, hash si aplica,
+    timestamps de primera y última aparición.
+    \item \textbf{Grados}: cuántas aristas entrantes y salientes.
+    \item \textbf{Scores precomputados}: entity rarity,
+    neighborhood concentration, temporal novelty (individuales del
+    nodo, antes de ponderar).
+    \item \textbf{Tags y notas}: lo que le pusiste.
+    \item \textbf{Timeline}: histograma de actividad por hora /
+    día.
+\end{itemize}
+
+\section{Expandir vecinos}
+
+\emph{Expand}: muestra todos los nodos conectados, con la relación
+y el timestamp del evento que produjo la arista. Para nodos con
+muchos vecinos:
+
+\emph{Expand grouped}: agrupa los vecinos por tipo de relación.
+Primero ves las relaciones (\code{Connect} $\times$ 1523,
+\code{DNS} $\times$ 87), después desplegás la que interese. Útil
+cuando el nodo es un hub.
+
+\section{Eventos del nodo}
+
+Pestaña \emph{Events}: la lista cronológica de eventos donde
+participa el nodo (como actor o target). Paginada. Cada entrada
+tiene timestamp, los otros participantes, y atributos del evento.
+
+Para nodos con miles de eventos (hub), la paginación cursor-based
+evita OOM. Podés filtrar por ventana temporal o por tipo de
+relación.
+
+\section{Subgrafo}
+
+Selección múltiple: ctrl+click sobre varios nodos, después
+\emph{Subgraph}. Abre una vista del subgrafo inducido — todas las
+aristas entre esos nodos. Exportable a GraphSON o JSONL para
+compartir o diagramar en herramientas externas.
+
+\section{Cuándo pasar de caza a exploración}
+
+\begin{itemize}
+    \item Encontraste un path con score alto y querés entender
+    quién más participa alrededor de esas entidades.
+    \item Un path sospechoso tiene un nodo hub y querés ver de dónde
+    viene la concentración.
+    \item Querés reconstruir narrativa temporal: qué pasó primero,
+    qué vino después.
+\end{itemize}
+
+\section{Cuándo volver a caza}
+
+\begin{itemize}
+    \item Al explorar una IP externa sospechosa, ves que hay otros
+    3 hosts que también se conectaron allí dentro de 2 horas —
+    escribís un hunt nuevo con esa forma.
+    \item El patrón que descubriste manualmente se puede generalizar
+    a hipótesis reutilizable.
+\end{itemize}
+
+La iteración caza $\to$ exploración $\to$ caza es el modo normal
+de trabajo.

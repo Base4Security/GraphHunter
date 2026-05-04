@@ -1,0 +1,129 @@
+\chapter{Scoring compuesto}
+\label{sec:paper-score}
+
+\section{Motivación}
+
+El DFS temporal produce paths estructuralmente válidos. Ninguno
+está \emph{etiquetado} como malicioso. El scoring convierte el
+conjunto de paths en una lista ordenada que un analista puede
+triar. El diseño persigue tres propiedades:
+
+\begin{enumerate}
+    \item \textbf{Descomposable}. Un score único monolítico (``la
+    caja negra dijo 0.87'') no informa al analista. Queremos que
+    cada path muestre sus componentes y que el analista pueda
+    razonar sobre ellos.
+    \item \textbf{Operable}. Los pesos deben ser ajustables por
+    entorno sin retraining de un modelo. Un analista con contexto
+    organizacional sabe que \emph{novelty temporal} importa más
+    en una telco que en una boutique financiera.
+    \item \textbf{Degradable}. Si un componente no está disponible
+    (típicamente \code{gnn_threat} sin modelo), el score total
+    debe seguir siendo significativo.
+\end{enumerate}
+
+\section{Los cinco componentes}
+
+Todos los componentes retornan $[0, 1]$. Sean $v$ un nodo, $e$ una
+arista, $\pi = (v_0, e_0, \dots, v_n)$ un path.
+
+\subsection{Entity rarity}
+
+\[
+\text{ER}(v) = 1 - \frac{\ln(\text{freq}(v))}{\ln(\max_u \text{freq}(u))}
+\]
+
+donde $\text{freq}(v)$ es el grado del nodo en el grafo actual.
+El log normaliza la distribución de grados power-law. Rarity alta
+para nodos que aparecen poco; rarity 0 para el hub dominante.
+Aplicado por path como promedio sobre $v_0, \dots, v_n$.
+
+\subsection{Edge rarity}
+
+Análogo al anterior pero sobre pares $(\text{type}(v), \rho, \text{type}(u))$:
+
+\[
+\text{EdgeR}(e) = 1 - \frac{\ln(\text{freq}(\text{type}(e)))}{\ln(\max_{\rho'} \text{freq}(\rho'))}
+\]
+
+Captura qué tan raro es \emph{este tipo de relación} en el grafo.
+Un \code{User-[Spawn]->Process} dentro de un grafo de red pura es
+maxR; dentro de un grafo dominado por endpoint, es común.
+
+\subsection{Neighborhood concentration}
+
+\[
+\text{NC}(\pi) = 1 - \frac{|\bigcap_{v \in \pi} N(v)|}{|\bigcup_{v \in \pi} N(v)|}
+\]
+
+Jaccard-complement entre los vecindarios de los nodos del path. Si
+los vecindarios se solapan mucho (actividad rutinaria en la misma
+sub-red), NC es bajo. Si los nodos del path se tocan pero
+pertenecen a mundos distintos (lateral movement real), NC es alto.
+
+\subsection{Temporal novelty}
+
+\[
+\text{TN}(\pi) = \min_{e \in \pi} \text{novelty}(e), \quad
+\text{novelty}(e) = 1 - \frac{\text{n\_past}(e)}{\text{n\_past}(e) + 1}
+\]
+
+donde $\text{n\_past}(e)$ es la cantidad de veces que se observó
+el mismo par ordenado $(v_u, v_v)$ en los 30 días previos. Una
+arista nunca vista antes tiene \text{novelty} = 1; una arista
+observada ayer 10 veces tiene $\sim 0.09$. El path toma el mínimo
+porque una sola arista rutinaria basta para hacer el path poco
+novedoso.
+
+\subsection{GNN threat}
+
+\[
+\text{GT}(\pi) = \begin{cases} f_\theta(\pi) & \text{si hay modelo cargado}\\ 0 & \text{caso contrario} \end{cases}
+\]
+
+donde $f_\theta$ es un clasificador GNN entrenado sobre paths
+etiquetados. El ``0 si no hay modelo'' no penaliza: el
+compositor combina con peso $w_5 = 0$ por defecto (ver
+cap.~\ref{sec:paper-gate}).
+
+\section{Composición}
+
+\[
+S(\pi) = w_1\,\overline{\text{ER}} + w_2\,\overline{\text{EdgeR}} + w_3\,\text{NC} + w_4\,\text{TN} + w_5\,\text{GT}
+\]
+
+con $\sum w_i = 1$ y pesos por defecto
+$(0.25, 0.25, 0.30, 0.20, 0.00)$. La ausencia de peso para GNN
+obedece al principio de \emph{degradación segura}: el sistema
+debe funcionar en el primer día sin modelo entrenado. Si el
+cliente entrena uno, sube $w_5$ a expensas de los otros.
+
+\section{Propiedades numéricas}
+
+\begin{invariant}
+$S(\pi) \in [0, 1]$ por construcción ya que cada componente
+$\in [0,1]$ y $\sum w_i = 1$.
+\end{invariant}
+
+\begin{invariant}
+Si dos paths $\pi, \pi'$ difieren sólo en un nodo $v \ne v'$ con
+$\text{freq}(v) > \text{freq}(v')$, entonces
+$\text{ER}(\pi) \le \text{ER}(\pi')$. \emph{Ceteris paribus},
+favorece el path con entidades más raras.
+\end{invariant}
+
+El test \filepath{core/graph-engine/tests/anomaly_proptest.rs}
+verifica estabilidad numérica: pequeñas perturbaciones en el
+grafo no causan saltos en el score superiores a la perturbación.
+
+\section{Explicación por path}
+
+El endpoint \code{explain\_hunt\_result} devuelve los cinco
+componentes normalizados y su producto con el peso. La UI los
+presenta como barras apiladas. El diseño explicable es una
+respuesta deliberada a la trampa de los scores opacos: un analista
+que no entiende por qué un path subió no puede ni confiar ni
+cuestionar el ranking.
+
+La especificación formal de endpoints y fórmulas vive en el libro
+\emph{Especificación}.

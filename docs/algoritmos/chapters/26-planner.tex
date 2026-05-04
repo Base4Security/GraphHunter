@@ -1,0 +1,267 @@
+\chapter{El \emph{planner}}
+\label{cap:planner}
+
+\begin{intuicion}
+GraphHunter tiene cuatro operadores de matching ---DFS legacy con
+prunes, LFTJ-K\(_4\), Yannakakis chain, Yannakakis tree-walk---.
+El \emph{planner} es la pieza chiquita y fundamental que decide
+cuál se usa para cada hunt. Inspecciona la \texttt{Hypothesis},
+clasifica su shape y propiedades estructurales, y devuelve un
+\texttt{DispatchPlan}. La política es deliberadamente simple: tres
+reglas en orden, primer match gana, fallback al DFS. Este capítulo
+documenta las tres reglas, justifica su orden, y explica cómo
+agregar reglas nuevas sin romper backwards compat.
+\end{intuicion}
+
+\section{El \texttt{DispatchPlan}}
+
+\begin{lstlisting}[language=Rust]
+pub enum DispatchPlan {
+    DfsMatch,    // default, generic; implementa cualquier hipótesis
+    K4Lftj,      // M1/S3, sólo K_4 homogéneo
+    Yannakakis,  // L1, $\alpha$-acíclica + flag GRAPHHUNTER_YANNAKAKIS
+}
+\end{lstlisting}
+
+\noindent
+Tres variantes, no más. \texttt{DfsMatch} es el fallback genérico.
+\texttt{K4Lftj} y \texttt{Yannakakis} son los \emph{lifts}
+especializados. La filosofía: \emph{conservadora}; sólo dispatchamos
+a un especializado si \emph{sabemos} que la estructura lo permite.
+
+\section{Las tres reglas}
+
+\begin{lstlisting}[language=Rust]
+pub fn plan(hypothesis: &Hypothesis) -> DispatchPlan {
+    if name_marker_dispatch(hypothesis)   { return DispatchPlan::K4Lftj; }
+    if structural_dispatch(hypothesis)    { return DispatchPlan::K4Lftj; }
+    if yannakakis_dispatch(hypothesis)    { return DispatchPlan::Yannakakis; }
+    DispatchPlan::DfsMatch
+}
+\end{lstlisting}
+
+\noindent
+Cada función es un test booleano sobre la \texttt{Hypothesis}. La
+primera que retorna \texttt{true} gana.
+
+\subsection{Regla 1: \texttt{name\_marker\_dispatch} (back-compat S3)}
+
+\begin{lstlisting}[language=Rust]
+fn name_marker_dispatch(hyp: &Hypothesis) -> bool {
+    std::env::var("GRAPHHUNTER_K4_LFTJ").map_or(false, |v| v == "1")
+        && hyp.name.to_lowercase().contains("k4-clique")
+}
+\end{lstlisting}
+
+\noindent
+Es la primera versión histórica del dispatch a LFTJ: el analista
+nombra explícitamente su hipótesis con la string ``k4-clique'' y el
+motor asume que es \(K_4\). Frágil, pero útil para debugging y
+rollback. Hoy se mantiene para que tests viejos no se rompan; los
+hunts nuevos no necesitan el marker.
+
+\subsection{Regla 2: \texttt{structural\_dispatch} (M1)}
+
+\begin{lstlisting}[language=Rust]
+fn structural_dispatch(hyp: &Hypothesis) -> bool {
+    let lftj_planner = std::env::var("GRAPHHUNTER_LFTJ_PLANNER")
+        .map_or(true, |v| v == "1");  // default ON
+    if !lftj_planner { return false; }
+
+    // Detectar K_4 homogéneo:
+    // - exactamente 6 pasos
+    // - todos los pasos tienen el mismo EntityType en source y dest
+    // - todos los pasos tienen el mismo RelationType
+    // - sin predicados sobre metadata
+    if hyp.steps.len() != 6 { return false; }
+    let first = &hyp.steps[0];
+    let same_entity_type = hyp.steps.iter().all(|s| {
+        s.source_type == first.source_type && s.dest_type == first.dest_type
+    });
+    let same_rel_type = hyp.steps.iter().all(|s| s.rel_type == first.rel_type);
+    let no_predicates = hyp.steps.iter().all(|s| s.predicates.is_empty());
+
+    same_entity_type && same_rel_type && no_predicates
+        && first.source_type == first.dest_type  // K_4 es homogéneo
+}
+\end{lstlisting}
+
+\noindent
+M1 (entregado abril 2026) destrabó el dispatch automático sin
+requerir name marker. Inspecciona la estructura: 6 pasos
+homogéneos, sin predicados, mismo tipo en todo $\Rightarrow$ es
+\(K_4\) homogéneo $\Rightarrow$ LFTJ funciona.
+
+\subsection{Regla 3: \texttt{yannakakis\_dispatch} (L1)}
+
+\begin{lstlisting}[language=Rust]
+fn yannakakis_dispatch(hyp: &Hypothesis) -> bool {
+    let yannakakis_on = std::env::var("GRAPHHUNTER_YANNAKAKIS")
+        .map_or(true, |v| v == "1");  // default ON
+    if !yannakakis_on { return false; }
+
+    // Cualquier hipótesis $\alpha$-acíclica aplica.
+    // Tanto shape Chain como shape Graph dispatchan al matcher
+    // de Yannakakis correspondiente.
+    is_alpha_acyclic(hyp)
+}
+\end{lstlisting}
+
+\noindent
+La regla es la más general: \emph{cualquier hipótesis
+\(\alpha\)-acíclica}. La función \texttt{is\_alpha\_acyclic} corre
+GYO sobre el hipergrafo de la hipótesis (capítulo
+\ref{cap:hipergrafos}) ---trivialmente rápido para hipótesis con
+\(\leq 6\) pasos.
+
+Notar que cubre las dos shapes:
+\begin{itemize}
+    \item \texttt{HypothesisShape::Chain}: dispatcha a Yannakakis
+    chain (capítulo~\ref{cap:yannakakis-chain}).
+    \item \texttt{HypothesisShape::Graph}: dispatcha a Yannakakis
+    tree-walk (capítulo~\ref{cap:yannakakis-tree}).
+\end{itemize}
+
+\noindent
+Adentro del matcher Yannakakis, otro \emph{branch} sobre
+\texttt{shape} elige el sub-operador.
+
+\section{¿Por qué este orden?}
+
+Las tres reglas se chequean en orden. Razones:
+
+\begin{enumerate}
+    \item \textbf{name\_marker antes de structural}: el name marker
+    permite force-override en tests y A/B comparisons. Si está
+    seteado, gana sin importar la estructura.
+    \item \textbf{structural antes de yannakakis}: \(K_4\) es
+    cíclico, así que \texttt{yannakakis\_dispatch} lo rechazaría.
+    Pero LFTJ-K\(_4\) le da mejor performance que el DFS para
+    \(K_4\). Si chequeáramos Yannakakis primero, \(K_4\) caería al
+    DFS innecesariamente.
+
+    Además, la jerarquía estructural es estricta: \(K_4\)
+    homogéneo (\texttt{structural}) es un subset de los hunts; los
+    \(\alpha\)-acíclicos son otro subset; ambos son disjoint
+    (\(K_4\) NO es \(\alpha\)-acíclico). Pero el orden importa
+    sólo si una hipótesis cae en ambos ---imposible por la
+    aciclicidad---. La razón real para el orden es de
+    \emph{previsibilidad}: el lector que mira \texttt{plan()}
+    sabe qué se intenta primero.
+    \item \textbf{Fallback al DFS}: el DFS implementa cualquier
+    hipótesis (incluso las que ningún operador especializado
+    soporta). Es la red de seguridad.
+\end{enumerate}
+
+\section{Cuándo el planner ``se equivoca''}
+
+El planner es \emph{estructural}: mira la shape, no el grafo. Es
+posible que dispatchar a Yannakakis (\(O(|\E| + |Q_{\text{out}}|)\))
+sea peor que DFS para una hipótesis donde NLF + k-hop ya filtraron
+hasta dejar 10 starts válidos:
+
+\begin{itemize}
+    \item DFS desde 10 starts: $\sim$10~ms.
+    \item Yannakakis full reducer sobre $|\E| = 10^7$: $\sim$300~ms.
+\end{itemize}
+
+\noindent
+Hoy el planner no tiene heurísticos sobre el \emph{grafo}, sólo sobre
+la \emph{hipótesis}. La razón es simplicidad: agregar costos
+estimados requiere statistics actualizadas (cardinalidades,
+selectividades) que el motor no mantiene. Para casos donde el
+analista quiere forzar DFS, puede setear
+\texttt{GRAPHHUNTER\_YANNAKAKIS=0}.
+
+\section{Surface en UI: ``Perf: M+L1''}
+
+El planner expone su elección al frontend vía \texttt{cmd\_get\_perf\_status}:
+
+\begin{lstlisting}[language=Rust]
+pub struct PerfStatus {
+    pub lftj_planner: bool,        // M1
+    pub k4_lftj_marker: bool,      // S3
+    pub yannakakis: bool,           // L1
+    pub plug_and_play_active: bool,
+}
+\end{lstlisting}
+
+\noindent
+El frontend renderiza una pildora ``Perf: M+L1'' (verde) cuando los
+tres flags están on (default). Si el usuario forzó alguno a 0
+(legacy path para debugging), la pildora se vuelve gris ``Perf:
+legacy'' (capítulo~\ref{cap:plug-and-play}).
+
+\section{Agregar una regla nueva: el procedimiento}
+
+Cuando el equipo decide agregar un operador nuevo (digamos, LFTJ
+para triángulo):
+
+\begin{enumerate}
+    \item Implementar el operador en
+    \filepath{core/graph-engine/src/lftj\_triangle.rs}.
+    \item Agregar variante a \texttt{DispatchPlan}:
+    \texttt{TriangleLftj}.
+    \item Escribir una función \texttt{triangle\_dispatch} con la
+    detección estructural (3 pasos, ciclo, mismo tipo).
+    \item Agregar a la cadena de \texttt{plan()}, antes de
+    \texttt{yannakakis\_dispatch} (porque triángulo es cíclico,
+    Yannakakis lo rechazaría):
+    \begin{lstlisting}[language=Rust]
+        if triangle_dispatch(hyp) { return DispatchPlan::TriangleLftj; }
+    \end{lstlisting}
+    \item Agregar el flag a \texttt{PerfStatus} y a la pildora.
+    \item Default-on al startup (\filepath{apps/tauri/src-tauri/src/lib.rs})
+    siguiendo la regla plug-and-play (capítulo~\ref{cap:plug-and-play}).
+\end{enumerate}
+
+\noindent
+La política: cada nuevo operador es una rama nueva en
+\texttt{plan()} con su detección estructural propia, default-on,
+expuesto en UI.
+
+\section{Resumen}
+
+\begin{itemize}
+    \item Planner: tres reglas en orden
+    (\texttt{name\_marker}, \texttt{structural}, \texttt{yannakakis}),
+    primero que matchea gana, fallback al DFS.
+    \item \texttt{name\_marker}: legacy hardcoded
+    para back-compat.
+    \item \texttt{structural}: detecta \(K_4\) homogéneo via
+    inspección de pasos.
+    \item \texttt{yannakakis}: cualquier hipótesis
+    \(\alpha\)-acíclica (chain o graph).
+    \item DFS legacy es el fallback genérico; implementa cualquier
+    hipótesis.
+    \item El planner es estructural, no statistic-aware; cuando se
+    equivoca, el usuario puede forzar via flags.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Para cada una de estas hipótesis, identificá
+    qué operador dispatcha el planner:
+    \begin{itemize}
+        \item \texttt{User -[Auth]-> Host -[Connect]-> IP}
+        \item \texttt{c -[Knows]-> p1; c -[Knows]-> p2; p1 -[Knows]-> p2}
+        \item Hipótesis con name=``k4-clique'' y 6 pasos heterogéneos
+    \end{itemize}
+
+    \item ¿Por qué \texttt{name\_marker\_dispatch} se chequea
+    primero? Discutí: ¿qué se rompe si lo movemos al final?
+
+    \item \starred{} Diseñá un detector estructural para la
+    \emph{estrella de \(k\) brazos}. ¿Cómo se vería la función
+    booleana?
+
+    \item Si una hipótesis es \(\alpha\)-acíclica pero el usuario
+    forzó \texttt{GRAPHHUNTER\_YANNAKAKIS=0}, ¿a qué operador cae?
+    Justificá por qué la cadena de fallbacks es ``correcta''.
+
+    \item Imaginá que el motor empieza a recolectar estadísticas
+    de cardinalidades. ¿Cómo cambiarías \texttt{plan()} para
+    aprovecharlas? Discutí pros y contras de un planner
+    cost-based.
+\end{enumerate}
+\end{ejercicios}

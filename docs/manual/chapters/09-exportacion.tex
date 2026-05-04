@@ -1,0 +1,111 @@
+\chapter{Exportación}
+\label{sec:man-export}
+
+\section{IOCs}
+
+\emph{Archivo \textrightarrow{} Exportar \textrightarrow{} IOCs}.
+Parámetros:
+
+\begin{itemize}
+    \item \textbf{Filtro por tag} (ej.\ \code{ioc}): exporta sólo
+    entidades con ese tag. Default: todas las IPs, domains, hashes
+    marcados en la sesión.
+    \item \textbf{Formato}: STIX 2.1 (default), JSON plano, CSV.
+\end{itemize}
+
+El output lista las entidades como indicadores STIX con tipo
+(\code{ipv4-addr}, \code{domain-name}, \code{file:hashes.SHA256}),
+primer y último visto, y relaciones explícitas si las agregaste
+vía tags.
+
+\section{Publicar IOCs a Sentinel}
+
+Si tu organización usa Microsoft Sentinel:
+\emph{Integraciones \textrightarrow{} Publicar IOCs}. Requiere:
+
+\begin{itemize}
+    \item \code{GRAPHHUNTER_IOC_PUBLISH_ENABLED=1} configurada.
+    \item Credenciales Azure configuradas (ver
+    cap.~\ref{sec:man-integraciones}).
+\end{itemize}
+
+La app pide confirmación antes de publicar; podés elegir
+\emph{dry-run} para ver qué se enviaría sin enviar.
+
+\section{OCSF}
+
+Exporta los eventos canonical ya normalizados (ver \emph{Canonical
+OCSF} en Especificación):
+
+\begin{itemize}
+    \item \textbf{Scope}: toda la sesión, o un subset filtrado por
+    ventana temporal, tipos de entidad, o tags.
+    \item \textbf{Formato}: JSONL (una línea por evento) o JSON
+    array.
+\end{itemize}
+
+Útil para:
+
+\begin{itemize}
+    \item Reingestar en otra plataforma que hable OCSF.
+    \item Archivo a largo plazo en formato estandarizado.
+    \item Compartir con equipos que usan otras herramientas.
+\end{itemize}
+
+\section{Subgrafos}
+
+\emph{Archivo \textrightarrow{} Exportar \textrightarrow{}
+Subgraph} a partir de la selección actual (del modo explorador) o
+de un path específico (del modo caza). Formatos:
+
+\begin{itemize}
+    \item \textbf{GraphSON 3.0}: compatible con TinkerPop /
+    Gremlin.
+    \item \textbf{JSONL}: lista de vértices y aristas, simple.
+    \item \textbf{DOT}: para renderizar con Graphviz.
+\end{itemize}
+
+\section{Resultados de hunt}
+
+Un hunt con sus paths y scores se exporta con
+\emph{Hunt \textrightarrow{} Export results}. Formatos CSV o JSON.
+CSV incluye una columna por componente de score más el compuesto,
+útil para análisis en planilla.
+
+\section{Sigma}
+
+Una hipótesis útil puede guardarse como regla Sigma
+(\emph{Hunt \textrightarrow{} Save as Sigma}). La conversión mapea
+los nodos y relaciones del DSL a la estructura \code{detection} de
+Sigma. No todo DSL es convertible 1:1 — hipótesis que dependen de
+ventanas temporales o predicados exóticos emiten Sigma con notas
+sobre qué parte no se tradujo.
+
+\section{Abrir ticket}
+
+\emph{Integraciones \textrightarrow{} Crear ticket}. Requiere
+\code{GRAPHHUNTER_TICKET_PUBLISH_ENABLED=1} y credenciales de Jira
+o ServiceNow. El ticket incluye:
+
+\begin{itemize}
+    \item Título y descripción editables.
+    \item Paths seleccionados con su desglose de scoring.
+    \item IOCs tagueados.
+    \item Link a la sesión si está publicada.
+\end{itemize}
+
+Igual que IOCs, soporta \emph{dry-run}.
+
+\section{Workflow típico de entrega}
+
+\begin{enumerate}
+    \item Taguear entidades y paths relevantes durante el
+    análisis.
+    \item \emph{Exportar IOCs} filtrado por tag — lo mandas al SOC
+    o lo publicas a Sentinel.
+    \item \emph{Exportar subgrafo} de los paths clave — útil para
+    ilustrar en el reporte.
+    \item \emph{Crear ticket} con narrativa completa y paths
+    anexados.
+    \item Mantener la sesión archivada por si se necesita volver.
+\end{enumerate}

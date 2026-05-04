@@ -1,0 +1,9 @@
+# Pinned to the slot of small multilingual transformers that fit on
+# CPU and export cleanly to ONNX. Kept separate from the GNN pipeline
+# requirements next door so installs don't collide.
+transformers>=4.40,<5.0
+torch>=2.2,<3.0
+datasets>=2.18
+scikit-learn>=1.4
+onnx>=1.16
+onnxruntime>=1.17

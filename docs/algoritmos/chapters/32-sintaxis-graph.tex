@@ -1,0 +1,268 @@
+\chapter{Sintaxis \emph{graph}: el separador \texttt{;}}
+\label{cap:dsl-graph}
+
+\begin{intuicion}
+La sintaxis chain (capítulo anterior) sólo expresa cadenas
+lineales. Para hipótesis tipo estrella o árbol ---``un usuario
+que se autentica en tres hosts distintos''--- la cadena no alcanza.
+La extensión L1 stage 3c agregó un solo separador, \texttt{;}, que
+abre las puertas a hipótesis no-cadena. Una hipótesis con
+\texttt{;} en cualquier parte se marca como \emph{shape graph}; el
+parser construye un hipergrafo, el planner detecta
+\(\alpha\)-aciclidad, y el matcher dispatcha a Yannakakis tree-walk
+(capítulo~\ref{cap:yannakakis-tree}). Este capítulo documenta la
+sintaxis y el flujo del parser.
+\end{intuicion}
+
+\section{El cambio mínimo: agregar \texttt{;}}
+
+\begin{lstlisting}
+User c -[Auth]-> Host h1; c -[Auth]-> Host h2; c -[Auth]-> Host h3
+\end{lstlisting}
+
+\noindent
+Esa es la hipótesis ``un usuario que se autentica en al menos tres
+hosts distintos'' (la \emph{star query}). Tres cláusulas separadas
+por \texttt{;}; las tres comparten el binding \texttt{c}.
+
+Compará con la equivalente en chain pura:
+\begin{lstlisting}
+User c -[Auth]-> Host  HAVING count(distinct last) >= 3
+\end{lstlisting}
+
+\noindent
+La versión chain es más concisa pero menos expresiva: enumera
+\emph{cualquier} count de hosts \(\geq 3\), sin nombrarlos. La
+graph version los nombra (\(h_1, h_2, h_3\)) y permite predicados
+distintos sobre cada uno.
+
+\section{Reglas de las cláusulas tras \texttt{;}}
+
+\subsection{Bare binding reference}
+
+\begin{lstlisting}
+User c -[Auth]-> Host h1; c -[Auth]-> Host h2
+\end{lstlisting}
+
+\noindent
+La segunda cláusula arranca con \texttt{c}, que NO es un type sino
+un binding ya declarado. El parser:
+
+\begin{enumerate}
+    \item Peeka el primer token de la cláusula post-\texttt{;}.
+    \item Si matchea un binding declarado en cláusulas previas
+    (\texttt{c} sí), retorna \texttt{(existing\_type, Some(name))}
+    al loop principal.
+    \item El loop arranca el chain step desde ese vértice
+    compartido: hereda el \texttt{EntityType} (\texttt{User}) del
+    binding original.
+\end{enumerate}
+
+\subsection{Fresh type declaration}
+
+\begin{lstlisting}
+User c -[Auth]-> Host h1; Process p -[Spawn]-> File f
+\end{lstlisting}
+
+\noindent
+La segunda cláusula arranca con \texttt{Process p}, que es un nuevo
+type declaration. El parser introduce un vértice fresco
+independiente del primero. La hipótesis representa: ``ambos
+patrones existen en el grafo, sin conexión entre ellos''.
+
+\begin{nota}
+Este caso (cláusulas \emph{disconectadas} unidas sólo por
+\texttt{;}) es legal pero raro: el matcher las trata como un
+\emph{producto cartesiano} de matches independientes. Output:
+$|\text{matches del primero}| \times |\text{matches del segundo}|$.
+Útil sólo cuando el analista quiere correlacionar patrones
+distintos.
+\end{nota}
+
+\subsection{Disambiguación}
+
+¿Qué hace el parser si el primer token de la cláusula post-\texttt{;}
+es ambiguo? Reglas:
+
+\begin{enumerate}
+    \item Si matchea un \emph{builtin EntityType}
+    (\texttt{User}, \texttt{Host}, \texttt{IP}, etc.) $\Rightarrow$
+    siempre se parsea como type declaration. Sombrea cualquier
+    binding del mismo nombre. (Razón: los EntityTypes son
+    palabras reservadas; usar ``User'' como binding sería
+    confuso.)
+    \item Si matchea un binding ya declarado $\Rightarrow$ bare
+    binding ref.
+    \item Si no matchea ninguno $\Rightarrow$ \textbf{error} con
+    \emph{hint}: ``binding desconocido; los declarados son: \dots''.
+\end{enumerate}
+
+\noindent
+El error con hint es deliberado: descarta el fallback silencioso a
+\texttt{Other} (capítulo~\ref{cap:entity-relation}). Los typos del
+analista (\texttt{Hsot} en vez de \texttt{Host}) tienen que
+saltar como error, no como ``vértice de tipo Other''.
+
+\section{Estructura interna del parser}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.5cm,
+    every node/.style={font=\scriptsize, align=center},
+    state/.style={draw=accent, thick, rounded corners=1mm,
+                  minimum height=0.7cm, minimum width=2.6cm,
+                  fill=accentlight}
+]
+\node[state] (start) {\texttt{parse()}};
+\node[state, below=of start] (head) {\texttt{parse\_entity\_type\_with\_binding}};
+\node[state, below=of head] (chain) {\texttt{parse\_chain\_steps}};
+\node[state, below=of chain] (sep) {peek \texttt{;}};
+\node[state, below left=of sep] (clause) {\texttt{parse\_clause\_head}};
+\node[state, below right=of sep] (trail) {\texttt{parse\_trailing\_clauses}};
+
+\draw[->, >=Latex, accent, thick] (start) -- (head);
+\draw[->, >=Latex, accent, thick] (head) -- (chain);
+\draw[->, >=Latex, accent, thick] (chain) -- (sep);
+\draw[->, >=Latex, accent, thick] (sep) -- node[left]{si \texttt{;}} (clause);
+\draw[->, >=Latex, accent, thick, dashed]
+    (clause.east) to[out=0,in=180] (chain.west);
+\draw[->, >=Latex, accent, thick] (sep) -- node[right]{else} (trail);
+\end{tikzpicture}
+\caption{Flujo del parser. \texttt{parse\_chain\_steps} es el bucle
+interior reusable; cada \texttt{;} dispara un re-entry vía
+\texttt{parse\_clause\_head}, que decide entre bare binding ref y
+type declaration.}
+\label{fig:dsl-parser-flow}
+\end{figure}
+
+\subsection{Cómo se lee cada nodo}
+
+\begin{itemize}
+    \item \texttt{parse\_entity\_type\_with\_binding}
+    (\emph{first clause head}): consume un \texttt{Type}
+    obligatorio y, si lo sigue un identificador no reservado, lo
+    registra como binding. Es la única forma de declarar el primer
+    vértice ---las hipótesis no pueden empezar con un bare binding
+    ref porque no hay nada declarado todavía---.
+
+    \item \texttt{parse\_chain\_steps}: bucle que consume \(N\)
+    pasos \texttt{-[rel]-> Type binding} encadenados. Termina cuando
+    ve EOF, \texttt{\{} (suffix \texttt{\{k=N\}} o predicate block),
+    \texttt{;} (clause separator), o un identificador alfabético
+    (HAVING/WITHIN). Cada terminación delega al manejador
+    correspondiente.
+
+    \item \texttt{parse\_clause\_head} (\emph{tras un \texttt{;}}):
+    peeka el identificador líder y decide:
+
+    \begin{itemize}
+        \item Si matchea un builtin type name (\texttt{User},
+        \texttt{Host}, \texttt{IP}, etc.) $\Rightarrow$ rewind y
+        delega a \texttt{parse\_entity\_type\_with\_binding}.
+        \item Si matchea un binding ya declarado $\Rightarrow$
+        retorna \texttt{(existing\_type, Some(name))} para que el
+        bucle de \texttt{parse\_chain\_steps} arranque desde ese
+        vértice compartido.
+        \item Si no es ninguno de los dos $\Rightarrow$ error con
+        hint listando los bindings válidos.
+    \end{itemize}
+
+    \item \texttt{parse\_trailing\_clauses}: consume \emph{HAVING}
+    y \emph{WITHIN} en cualquier orden hasta encontrar
+    \texttt{\{k=N\}} o EOF. Estos no pueden re-entrar el bucle de
+    chain steps; son estrictamente post-fix a la última cláusula
+    del cuerpo.
+\end{itemize}
+
+\section{Ejemplos}
+
+\begin{ejemplo}[Estrella de tres brazos]
+\begin{lstlisting}
+User c -[Auth]-> Host h1; c -[Auth]-> Host h2; c -[Auth]-> Host h3
+\end{lstlisting}
+
+Tres cláusulas, todas comparten \(c\). Shape graph $\Rightarrow$
+Yannakakis tree-walk. El join tree es una estrella: nodo central
+es step 0; los otros dos son hijos.
+\end{ejemplo}
+
+\begin{ejemplo}[Triángulo de relaciones]
+\begin{lstlisting}
+User a -[Knows]-> User b; b -[Knows]-> User c; c -[Knows]-> a
+\end{lstlisting}
+
+Tres cláusulas formando ciclo: \(a \to b \to c \to a\). El
+hipergrafo es cíclico (no \(\alpha\)-acíclico). El planner detecta
+y cae al DFS legacy ---no es \(K_4\), no aplica LFTJ; no es
+\(\alpha\)-acíclico, no aplica Yannakakis.
+\end{ejemplo}
+
+\begin{ejemplo}[Árbol de cuatro niveles]
+\begin{lstlisting}
+User u -[Auth]-> Host h; h -[Hosts]-> Process p; p -[Spawn]-> Process c
+\end{lstlisting}
+
+Tres cláusulas conectadas en árbol (\(u \to h \to p \to c\)). Es
+\(\alpha\)-acíclico $\Rightarrow$ Yannakakis. Notar que esta
+hipótesis se podría haber escrito como chain pura
+(\texttt{User -[Auth]-> Host -[Hosts]-> Process -[Spawn]-> Process});
+la versión graph no aporta nada nuevo. La forma chain es más
+concisa.
+
+(El motor detecta esto: si la graph hypothesis es estrictamente
+una chain disfrazada, podría re-escribirla como chain. Hoy no lo
+hace; ambas formas pasan por sus respectivos matchers, y los
+benches no muestran diferencia significativa.)
+\end{ejemplo}
+
+\section{Limitaciones}
+
+\begin{itemize}
+    \item \textbf{No hay disjunción intra-cláusula}. Cada cláusula
+    es una chain pura. Si querés ``\(c\) tiene un Auth A o B'',
+    necesitás dos hipótesis separadas.
+    \item \textbf{No hay subqueries}. Cada cláusula es plana; no
+    hay anidamiento.
+    \item \textbf{Sólo \(\alpha\)-acíclicos eficientes}. Si la
+    hipótesis introduce un ciclo (como el ejemplo del triángulo),
+    el motor cae al DFS, perdiendo el lift de Yannakakis.
+\end{itemize}
+
+\section{Resumen}
+
+\begin{itemize}
+    \item Sintaxis graph: chains separadas por \texttt{;}, todas
+    comparten variables (bindings) cuando se referencian.
+    \item Cada cláusula post-\texttt{;} arranca con type declaration
+    (vértice fresco) o bare binding ref (vértice compartido).
+    \item Errores explícitos en typos: ``binding desconocido''
+    en vez de fallback silencioso.
+    \item \texttt{shape == Graph} si y sólo si hay \texttt{;}.
+    Yannakakis tree-walk dispatcha si \(\alpha\)-acíclico; DFS si
+    cíclico.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Escribí en sintaxis graph: ``un usuario que
+    crea un proceso, y ese proceso escribe un archivo, y ese
+    proceso también lanza otro proceso''. Identificá los bindings
+    compartidos.
+
+    \item Para la hipótesis del ejercicio 1, dibujá el join tree.
+    ¿Cuál es la root?
+
+    \item \starred{} ¿La hipótesis
+    \texttt{User c -[Auth]-> Host h; c -[Auth]-> Host h}
+    (dos cláusulas idénticas) es legal? Si sí, ¿qué encuentra el
+    matcher?
+
+    \item Diseñá una hipótesis graph cíclica de tres pasos.
+    ¿Cómo la detecta el planner? ¿A qué operador cae?
+
+    \item Si una hipótesis tiene 5 cláusulas separadas por
+    \texttt{;}, todas \emph{disconectadas} (sin bindings
+    compartidos), ¿qué tamaño de output puede tener? Cota teórica.
+\end{enumerate}
+\end{ejercicios}

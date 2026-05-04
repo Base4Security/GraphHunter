@@ -1,0 +1,300 @@
+\chapter{\texttt{HuntResult} y la migración a \texttt{Arc<str>}}
+\label{cap:hunt-result}
+
+\begin{intuicion}
+Un \texttt{HuntResult} es una secuencia de \emph{vertex IDs}
+resueltos al alfabeto humano: el \emph{path} encontrado por el
+matcher, ya listo para mostrarse en la UI o serializarse al
+frontend. La elección concreta de \emph{cómo} representar esa
+secuencia ---\texttt{Vec<String>} versus \texttt{Vec<Arc<str>>}---
+parece menor, pero un bench de matching cap-saturado mostró que la
+opción equivocada cuesta \(\sim 55\%\) del tiempo total. Este
+capítulo cuenta la historia: por qué el \texttt{Vec<String>}
+original era el cuello de botella, por qué la ``solución obvia''
+(materialización diferida) fracasó, y por qué finalmente
+\texttt{Vec<Arc<str>>} fue la que cerró el caso.
+\end{intuicion}
+
+\section{La forma del resultado}
+
+\begin{lstlisting}[language=Rust]
+pub type HuntResult = Vec<Arc<str>>;
+\end{lstlisting}
+
+\noindent
+Un \texttt{HuntResult} es un \texttt{Vec} con \texttt{path.len() +
+1} elementos, uno por vértice del path encontrado:
+
+\begin{itemize}
+    \item Hipótesis \texttt{User -[Auth]-> Host -[Connect]-> IP}
+    (\(k = 2\) aristas, \(3\) vértices) $\Rightarrow$ cada
+    \texttt{HuntResult} tiene 3 elementos.
+    \item Hipótesis \texttt{User -[Auth]-> Host} (\(k = 1\)) $\Rightarrow$
+    2 elementos.
+    \item Cap del motor: 10\,000 \texttt{HuntResult}s por hunt
+    (default). Suficientes para que el analista vea ``los
+    sospechosos''; muchos más sería ruido.
+\end{itemize}
+
+\noindent
+La salida del matcher es \texttt{Vec<HuntResult>} ---una lista de
+paths---. El frontend la pagina; el scoring la ranquea.
+
+\section{El bench que disparó el cambio}
+
+En 2026-04 corrimos benches sobre el patrón
+\texttt{matching\_powerlaw / ba-any-2hop V=10000}: un grafo
+\emph{Barabasi-Albert} (scale-free) de 10\,000 vértices, hipótesis
+\texttt{any -[any]-> any -[any]-> any} (sin filtros de tipo). El
+hunt satura el cap (10\,000 resultados). Tiempo total: \(2.4\)~ms.
+
+Patcheamos \texttt{dfs\_match\_iterative} para que el \emph{emit}
+del resultado fuese \texttt{Vec::new()} en lugar de
+\texttt{path.iter().map(\dots).collect()}. Resto idéntico. Tiempo
+nuevo: \(1.06\)~ms. \textbf{Diferencia: \(-55\%\)}.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Bench} & \textbf{Inline strings} & \textbf{Empty push} & \(\Delta\) \\
+\midrule
+ba-typed-2hop V=1000   & 86~$\mu$s & 75~$\mu$s & \(-13\%\) \\
+ba-typed-2hop V=10000  & 165~$\mu$s & 196~$\mu$s & \(+19\%\) noisy \\
+ba-any-2hop V=1000     & 2.24~ms & 854~$\mu$s & \(\mathbf{-62\%}\) \\
+ba-any-2hop V=10000    & 2.38~ms & 1.06~ms & \(\mathbf{-55\%}\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+El patrón es claro: cuando el cap \emph{no} se satura
+(\texttt{ba-typed} con tipos que filtran agresivo), el costo del
+emit es marginal. Cuando el cap se satura
+(\texttt{ba-any}: 10\,000 resultados emitidos), el costo del emit
+domina la mitad del tiempo.
+
+\section{Por qué \texttt{Vec<String>} era el problema}
+
+Cada \texttt{emit} hacía:
+
+\begin{lstlisting}[language=Rust]
+let path: Vec<String> = current_path
+    .iter()
+    .map(|sid| interner.resolve(*sid).to_string())
+    .collect();
+results.push(path);
+\end{lstlisting}
+
+\noindent
+Cada elemento de \texttt{path} es una \texttt{String} fresca
+---\texttt{to\_string()} aloca bytes en heap y los copia desde el
+\texttt{Arc<str>} del interner. Tres operaciones que cuestan
+nanosegundos cada una, multiplicadas por:
+
+\begin{itemize}
+    \item 3 vértices por path.
+    \item 1 \texttt{Vec::new} + 3 \texttt{push} per path.
+    \item 10\,000 paths.
+\end{itemize}
+
+\noindent
+\(10\,000 \cdot 4 = 40\,000\) allocaciones. Con \texttt{mimalloc}
+(\(\sim 65\)~ns por alloc chico), eso son \(2.6\)~ms ---que es
+exactamente el tiempo total observado. Las allocaciones de
+\texttt{String} \emph{eran} todo el bench.
+
+\section{Por qué la materialización diferida fracasó}
+
+La idea natural: pushear algo barato dentro del DFS (por ejemplo,
+\texttt{SmallVec<[StrId; 8]>}) y materializar las strings al final,
+quizás en paralelo con \texttt{rayon}. Implementamos esto. El bench
+\textbf{regresó \(+48\%\)}.
+
+Dos razones que se compusieron:
+
+\begin{enumerate}
+    \item \textbf{Tamaño del elemento intermedio.} Cada
+    \texttt{SmallVec<[StrId; 8]>} pesa 40~B
+    (8 \(\times\) \texttt{u32} inline + len + cap). 10\,000
+    elementos = 400~KB de buffer intermedio. Eso busta L2 (256~KB
+    en las E-cores del Galaxy Book4); las próximas iteraciones
+    pagan cache miss.
+    \item \textbf{Two-pass cache miss.} La fase DFS produce, la
+    fase materialización lee. La versión inline produce y descarta
+    inmediatamente (el writer thread mantiene los bytes en L1
+    hasta que rayon los drena). La versión two-pass mata esa
+    \emph{producer-consumer locality}.
+\end{enumerate}
+
+\noindent
+\textbf{Lección}: optimizar ``sólo el hot loop'' sin pensar en el
+working set total puede empeorar el rendimiento. La cache importa
+tanto como las allocaciones.
+
+\section{La solución: \texttt{Vec<Arc<str>>}}
+
+El cambio que finalmente cerró el caso fue de tres pasos:
+
+\begin{enumerate}
+    \item Refactor del \texttt{StringInterner} para que su backing
+    sean \texttt{Arc<str>}, no \texttt{String}. \texttt{resolve}
+    devuelve \texttt{Arc<str>} clonado (refcount bump,
+    \(\sim 5\)~ns), no \texttt{String} alocado.
+    \item Cambio de tipo: \texttt{HuntResult = Vec<String>}
+    $\rightarrow$ \texttt{Vec<Arc<str>>}.
+    \item Audit de los $\sim 35$ call sites que tocan
+    \texttt{HuntResult} (FFI, MCP, REST DTOs, Tauri TS bindings).
+    La mayoría eran \texttt{result.iter().map(|s|
+    s.as\_str())}-shaped y migraron mecánicamente.
+\end{enumerate}
+
+\noindent
+Resultado: el \emph{emit} ahora es:
+
+\begin{lstlisting}[language=Rust]
+let path: Vec<Arc<str>> = current_path
+    .iter()
+    .map(|sid| interner.resolve(*sid))   // Arc::clone, refcount bump
+    .collect();
+results.push(path);
+\end{lstlisting}
+
+\noindent
+3 \texttt{Arc::clone} (\(\sim 5\)~ns cada uno) + 1 alloc del
+\texttt{Vec} per path. \(10\,000 \cdot (3 \cdot 5 + 65)\)~ns
+\(\approx 0.8\)~ms ---comparable al ``empty push'' baseline. La
+mejora del \(55\%\) bajó al PR.
+
+\section{Por qué \texttt{Arc<str>} en vez de \texttt{Rc<str>}}
+
+\texttt{Rc} (reference count) es la versión \emph{single-threaded}:
+el contador no es atómico. \texttt{Arc} es atómica. \texttt{Rc}
+sería \(\sim 2\times\) más rápida (un increment normal vs un
+\texttt{fetch\_add}), pero:
+
+\begin{itemize}
+    \item Los \texttt{HuntResult} cruzan boundaries de thread: el
+    matcher los produce, el scoring los consume desde otro thread,
+    eventualmente cruzan al frontend vía Tauri.
+    \item \texttt{Rc} no es \texttt{Send}, así que el compilador
+    rechazaría el cruce. La alternativa sería convertir a
+    \texttt{Arc} en el boundary, lo que neutraliza la ganancia.
+\end{itemize}
+
+\noindent
+\texttt{Arc} de entrada gana en simplicidad y predictibilidad.
+
+\section{Por qué \texttt{Arc<str>} en vez de \texttt{Arc<String>}}
+
+\texttt{Arc<String>} agrega un nivel de indirección: el \texttt{Arc}
+apunta a un \texttt{String}, que apunta al heap con los bytes
+reales. Dos cargas de memoria para llegar a los caracteres.
+
+\texttt{Arc<str>} es un \emph{fat pointer} directo: 16 bytes en el
+\texttt{Vec} (puntero a heap + length). El heap contiene
+\texttt{(refcount, bytes\_de\_la\_string)}. Una sola carga de
+memoria. \texttt{Arc<str>} gana en cache locality y en tamaño del
+\texttt{Vec} (\texttt{Arc<String>} sería 8~B per element pero con
+indirección extra; \texttt{Arc<str>} es 16~B per element pero
+directo).
+
+\section{Implicaciones para el resto del sistema}
+
+\subsection{Serialización}
+
+El frontend Tauri serializa \texttt{Vec<HuntResult>} como JSON.
+\texttt{serde\_json} maneja \texttt{Arc<str>} igual que
+\texttt{String} ---son trivialmente serializables como JSON
+strings. Cero cambios en los serde derives.
+
+\subsection{FFI}
+
+La C ABI espera \texttt{*mut *mut c\_char} (puntero a array de
+strings C). El adapter convierte cada \texttt{Arc<str>} a
+\texttt{CString} antes de cruzar el boundary; eso paga la alloc
+una vez por resultado, pero solo en consumers FFI (no en Tauri ni
+HTTP). El costo es pagado por el caller que decidió usar FFI.
+
+\subsection{Memoria total}
+
+En un hunt cap-saturado:
+
+\begin{itemize}
+    \item Antes: \(10\,000\) paths \(\times\) 3 vertices \(\times\)
+    (24~B header + 16~B promedio bytes) = \(1.2\)~MB de heap por
+    hunt.
+    \item Después: \(10\,000 \times\) 3 \(\times\) 16~B (\texttt{Arc<str>})
+    = \(480\)~KB de heap por hunt. Las strings reales se
+    \emph{comparten} con el interner; ningún byte se duplica.
+\end{itemize}
+
+\noindent
+Bonus: \(2.5\times\) menos memoria por hunt, además del \(55\%\)
+menos tiempo.
+
+\section{Cuándo \emph{no} vale la pena \texttt{Arc<str>}}
+
+Tres escenarios donde el patrón pierde:
+
+\begin{enumerate}
+    \item \textbf{Strings únicas.} Si nunca se comparten
+    (cada \texttt{HuntResult} tiene strings que aparecen una sola
+    vez), el costo de \texttt{Arc} (16~B header + atómica de
+    refcount) es overhead puro. Pero las identidades de un grafo se
+    repiten masivamente; este escenario no aplica.
+    \item \textbf{Stringes muy chicas.} Si las strings son de 1--2
+    caracteres, el header del \texttt{Arc} domina ($\sim$30~B
+    overhead para 2~B útiles). Las identidades de threat hunting
+    promedian 10--40 caracteres; ratio sano.
+    \item \textbf{Lifecycle predecible.} Si conocés exactamente
+    cuándo se libera la string, una arena (bump allocator) gana
+    sobre \texttt{Arc}. No es el caso de \texttt{HuntResult}: cruza
+    threads, vive en caches, la duración es por-hunt.
+\end{enumerate}
+
+\section{Resumen}
+
+\begin{itemize}
+    \item \texttt{HuntResult = Vec<Arc<str>>}: una secuencia de
+    vértices del path encontrado por el matcher.
+    \item Cap saturado (10\,000 results): el \emph{emit} domina si
+    cada elemento es una \texttt{String} alocada nueva.
+    \item Materialización diferida fracasó por \emph{cache miss}
+    en el buffer intermedio + pérdida de producer-consumer locality.
+    \item \texttt{Arc<str>} resuelve: el \texttt{resolve} del
+    interner clona refcount (\(\sim 5\)~ns), las strings se
+    comparten, sin allocs en el hot path.
+    \item Mejora: \(55\%\) menos tiempo, \(2.5\times\) menos memoria
+    en cap-saturated benches. Audit de $\sim 35$ call sites
+    mecánico.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Calculá el ahorro de memoria por hunt para una
+    hipótesis de \(k = 5\) saltos (\(6\) vértices) con cap saturado
+    a 10\,000 resultados, asumiendo identidades de 24~B promedio.
+    Compará \texttt{Vec<String>} vs \texttt{Vec<Arc<str>>}.
+
+    \item ¿Por qué \texttt{Arc<str>} es mejor que \texttt{Arc<String>}?
+    Dibujá el layout de memoria de cada uno.
+
+    \item \starred{} Imaginá que un atacante puede inyectar strings
+    en la ingesta. ¿Hay algún ataque DoS contra el interner que el
+    cambio a \texttt{Arc<str>} \emph{no} mitiga? (Pista: pensá en
+    cardinality blowup.)
+
+    \item Diseñá un caso donde la materialización diferida
+    \emph{ganaría}. (Pista: ¿qué pasa si el cap es muy chico, digamos
+    100 resultados? ¿Y si el path es muy largo, digamos 20 vértices?)
+
+    \item \texttt{Vec<Arc<str>>} pesa \(16\)~B por elemento + \(24\)~B
+    de header del Vec. Para 10\,000 paths de 3 elementos, ¿cuánta
+    memoria es?
+
+    \item ¿Por qué la C ABI todavía expone \texttt{*mut *mut
+    c\_char} (no \texttt{Arc<str>})? Discutí: ¿qué clases de bug
+    surgirían si pasáramos un \texttt{Arc} por FFI?
+\end{enumerate}
+\end{ejercicios}

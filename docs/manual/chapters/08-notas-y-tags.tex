@@ -1,0 +1,73 @@
+\chapter{Notas y tags}
+\label{sec:man-notas}
+
+\section{Tags}
+
+Una etiqueta es un string corto asociado a una entidad. Tag típicos:
+
+\begin{itemize}
+    \item \code{sospechoso-c2} — entidad candidata a command-and-control.
+    \item \code{cuenta-comprometida} — user con evidencia de compromiso.
+    \item \code{externa-benigna} — IP/domain externo ya triado como no malicioso.
+    \item \code{hub-corporativo} — entidad hub que hay que ignorar de la caza.
+\end{itemize}
+
+Crear: click derecho sobre un nodo $\to$ \emph{Tag} $\to$ escribir
+el tag. Remover: click derecho $\to$ \emph{Untag}.
+
+\section{Listar por tag}
+
+\emph{Panel \textrightarrow{} Tags} muestra todas las etiquetas
+creadas con sus conteos. Click sobre un tag lista las entidades
+que lo llevan. Útil para:
+
+\begin{itemize}
+    \item Revisar todos los candidatos de una categoría.
+    \item Armar el inventario de evidencia para un reporte.
+\end{itemize}
+
+\section{Notas}
+
+Una nota es texto libre asociado a una entidad, un path
+específico, o un hunt. Se crean desde:
+
+\begin{itemize}
+    \item Click derecho sobre un nodo $\to$ \emph{Note}.
+    \item Sobre un path en los resultados de hunt $\to$
+    \emph{Annotate}.
+    \item Sobre un hunt en el historial $\to$ \emph{Note}.
+\end{itemize}
+
+Soporta Markdown básico. Quedan persistidas en la sesión.
+
+\section{Workflow de reporte}
+
+Flujo típico de construir un reporte desde dentro de la app:
+
+\begin{enumerate}
+    \item Ingerir datos.
+    \item Correr hunts relevantes; tagear paths sospechosos.
+    \item Explorar los paths top y tagear entidades clave con
+    \code{sospechoso-*} o \code{ioc}.
+    \item Agregar notas con la narrativa en cada entidad clave
+    (``IP externa con beacon a intervalos regulares, ver captura
+    \#12'').
+    \item Al final: \emph{Listar por tag \textrightarrow{} ioc}
+    da el set de entidades para exportar como IOCs.
+    \item \emph{Historial de hunts} listado con sus notas da la
+    narrativa completa.
+\end{enumerate}
+
+\section{Interacción con DSL}
+
+Una hipótesis puede filtrar por tag:
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+IP {tag("externa-benigna")} -[Connect]-> Host
+\end{lstlisting}
+
+O lo más común: \textbf{excluir} entidades ya triadas como no
+maliciosas para que no contaminen resultados de nuevos hunts.
+
+Los tags viven en la sesión. No se propagan entre sesiones a menos
+que las exportes explícitamente.

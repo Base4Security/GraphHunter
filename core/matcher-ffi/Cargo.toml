@@ -1,0 +1,32 @@
+[package]
+name = "graph_hunter_matcher_ffi"
+version = "0.1.0"
+edition = "2024"
+description = "FFI bridge to libgraphmatch — SIMD-accelerated temporal graph pattern matching. Extracted from graph_hunter_core per F2.13 (ADR-002) so the core graph engine stops naming the C++ matcher. The previous `GraphHunter::search_temporal_pattern_simd` method now lives here as a free function taking `&GraphHunter`, which breaks the old bidirectional edge (core → simd_matcher and simd_matcher → core) into a one-way arrow."
+license = "GPL-3.0"
+
+[lib]
+name = "graph_hunter_matcher_ffi"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Enables the C++ libgraphmatch build + runtime dispatch. Downstream
+# crates forward into this feature via their own `simd` flag.
+simd = []
+
+[dependencies]
+graph_hunter_core = { path = "../graph-engine" }
+# mimalloc as global allocator for the bench_dfs binary. Library code
+# in this crate never names this dep — only the bin's
+# `#[global_allocator]` does.
+mimalloc = { version = "0.1", default-features = false }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+# F3.6: property-based test of DFS ↔ SIMD result equivalence. Enumerates
+# random small graphs + hypotheses and asserts both search paths return
+# the same set of matches. Only pulled during `cargo test`.
+proptest = "1"

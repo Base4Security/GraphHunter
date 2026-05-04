@@ -747,6 +747,390 @@ server.tool(
   }
 );
 
+// export_ocsf – project every triple to OCSF v1.4 + Provenance Extension
+server.tool(
+  "export_ocsf",
+  "Export every triple in the session — or a single dataset — as OCSF v1.4 events carrying Graph Hunter's Provenance Extension (schema_version, parser_name, mapping_id, mapping_hash, source_dataset_id, raw_event_sha256). Use when you need an auditable canonical view of the graph for cold storage, downstream SIEM ingest, or mapping audits. Shapes outside the shipping subset (Authentication, Process/Network/DNS/File/Registry activity) fall into the `Other` variant with a diagnostic reason instead of being silently dropped. `format='ndjson'` streams one event per line; `format='json'` returns a single JSON array.",
+  {
+    dataset_id: z.string().max(500).optional().describe("Restrict the export to triples from this dataset. Omit to export every dataset."),
+    format: z.enum(["json", "ndjson"]).optional().default("ndjson").describe("Output format: 'ndjson' (one event per line, streaming-friendly) or 'json' (single array)"),
+  },
+  async ({ dataset_id, format }) => {
+    const start = Date.now();
+    log("tool", "export_ocsf", { dataset_id: dataset_id ?? "-", format });
+    try {
+      const body: Record<string, unknown> = { format };
+      if (dataset_id != null) body.dataset_id = dataset_id;
+      const v = await apiPost("/export_ocsf", body, HEAVY_TIMEOUT_MS) as { data: string; format: string };
+      log("tool", "export_ocsf done", { duration_ms: Date.now() - start, result: `format=${v.format} len=${v.data.length}` });
+      return textContent(v.data);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "export_ocsf error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// invariant_checker – run P1/P2/P3/P4 + treewidth heuristic over session/dataset
+server.tool(
+  "invariant_checker",
+  "Run the shipped first-order invariants over the current session's graph (or a single dataset) and return a per-predicate report. Predicates: P1 causal monotonicity (timestamps along source→dest chains are non-decreasing), P2 type-shape plausibility (each (src_type, rel_type, dst_type) triple is in the catalog), P3 identity coherence (no illegal same-timestamp self-loops), P4 referential closure (every endpoint resolves to an entity in scope). Also returns a treewidth upper bound on the type-quotient graph with an explicit method tag. Use this after ingest to audit a mapping, or before trusting a detection query that assumes causal order. P5 (rarity sanity) is reserved and currently reports 'skipped'.",
+  {
+    dataset_id: z.string().max(500).optional().describe("Restrict the check to this dataset. Omit to run against every dataset in the session."),
+  },
+  async ({ dataset_id }) => {
+    const start = Date.now();
+    log("tool", "invariant_checker", { dataset_id: dataset_id ?? "-" });
+    try {
+      const body: Record<string, unknown> = {};
+      if (dataset_id != null) body.dataset_id = dataset_id;
+      const report = await apiPost("/check_invariants", body, HEAVY_TIMEOUT_MS) as {
+        entity_count: number;
+        relation_count: number;
+        results: Array<{ predicate: string; passed: boolean; violated: number }>;
+        treewidth_estimate?: { value: number; method: string };
+      };
+      const totalViolations = (report.results ?? [])
+        .reduce((acc, r) => acc + (r.violated ?? 0), 0);
+      log("tool", "invariant_checker done", {
+        duration_ms: Date.now() - start,
+        result: `entities=${report.entity_count} relations=${report.relation_count} violations=${totalViolations} tw=${report.treewidth_estimate?.value ?? "n/a"}`,
+      });
+      return safeJsonContent(report);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "invariant_checker error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// ── M4 agentic slow-lane tools (6 ops + 3 review-queue ops) ──────────
+//
+// All nine tools share the same LLM-as-compiler guardrail: deterministic
+// heuristics own the primary path, LLM refinement only kicks in when the
+// heuristic is visibly insufficient. Every artefact lands in the per-
+// session review queue as a `MappingDraft` with a stable `draft_id`,
+// and no draft is ever auto-promoted — approval always requires a
+// separate `agentic_review_approve` call.
+
+const fieldConfigSchema = z
+  .object({ mappings: z.array(z.record(z.any())) })
+  .passthrough()
+  .describe("FieldConfig produced by preview_fields / ingest_negotiate.");
+
+server.tool(
+  "ingest_negotiate",
+  "Propose a FieldConfig for a raw-log sample by running the deterministic preview heuristic first and only falling back to the local LLM when the heuristic yields nothing useful. Returns a draft_id referring to a pending MappingDraft in the session's review queue — approve it via agentic_review_approve to stamp the FieldConfig onto the target dataset. The LLM NEVER sees production events; only the `raw_sample` block passed here.",
+  {
+    raw_sample: z.string().max(100_000).describe("Small slice of raw events (typically 50–200 rows). Bounded by the caller."),
+    dataset_id: z.string().max(500).optional().describe("Optional dataset to scope the proposal to."),
+    hint_format: z.string().max(100).optional().describe("Format hint ('csv', 'sysmon', 'generic', ...). Omit for auto-detect."),
+    max_rounds: z.number().int().min(1).max(10).optional().describe("Soft cap on negotiation rounds. Advisory in M4 (single pass)."),
+  },
+  async ({ raw_sample, dataset_id, hint_format, max_rounds }) => {
+    const start = Date.now();
+    log("tool", "ingest_negotiate", { sample_len: raw_sample.length, dataset_id: dataset_id ?? "-", hint_format: hint_format ?? "-" });
+    try {
+      const body: Record<string, unknown> = { raw_sample };
+      if (dataset_id != null) body.dataset_id = dataset_id;
+      if (hint_format != null) body.hint_format = hint_format;
+      if (max_rounds != null) body.max_rounds = max_rounds;
+      const resp = await apiPost("/ingest_negotiate", body, HEAVY_TIMEOUT_MS);
+      log("tool", "ingest_negotiate done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "ingest_negotiate error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+server.tool(
+  "canonical_map",
+  "Given a FieldConfig, decide which OCSF v1.4 category it projects to (process_activity, network_activity, authentication, dns_activity, file_activity, or 'other') and return a ProvenanceTemplate stamp. The common cases are pinned deterministically by entity-type signature; the LLM is only consulted when a target_ocsf_category is supplied that contradicts the deterministic pick.",
+  {
+    field_config: fieldConfigSchema,
+    target_ocsf_category: z.string().max(120).optional().describe("Pin a specific OCSF category; mapper warns if deterministic choice disagrees."),
+  },
+  async ({ field_config, target_ocsf_category }) => {
+    const start = Date.now();
+    log("tool", "canonical_map", { target: target_ocsf_category ?? "-" });
+    try {
+      const body: Record<string, unknown> = { field_config };
+      if (target_ocsf_category != null) body.target_ocsf_category = target_ocsf_category;
+      const resp = await apiPost("/canonical_map", body);
+      log("tool", "canonical_map done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "canonical_map error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+server.tool(
+  "parser_generate",
+  "Compile a FieldConfig to a deterministic VRL program (via field_config_to_vrl) and register the result as a pending MappingDraft in the review queue. Returns the VRL source and its mapping_hash (sha256 of the source). With optimization_hint='fidelity', the LLM is allowed to propose refinements — still gated by the review queue and (in M6) by constrained decoding, so malformed VRL can never be emitted.",
+  {
+    field_config: fieldConfigSchema,
+    ocsf_category: z.string().max(120).optional().describe("Carried verbatim into the program's provenance template."),
+    optimization_hint: z.enum(["speed", "fidelity"]).optional().describe("'speed' keeps deterministic output as-is; 'fidelity' allows LLM refinement."),
+  },
+  async ({ field_config, ocsf_category, optimization_hint }) => {
+    const start = Date.now();
+    log("tool", "parser_generate", { hint: optimization_hint ?? "speed" });
+    try {
+      const body: Record<string, unknown> = { field_config };
+      if (ocsf_category != null) body.ocsf_category = ocsf_category;
+      if (optimization_hint != null) body.optimization_hint = optimization_hint;
+      const resp = await apiPost("/parser_generate", body, HEAVY_TIMEOUT_MS);
+      log("tool", "parser_generate done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "parser_generate error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+server.tool(
+  "schema_drift_detect",
+  "Report per-field drift signals for a dataset — type-tag histogram mix, null-rate EWMA, and a recommended action ('none' | 'review' | 'renegotiate'). Backed by the drift store written by the ingest path; no LLM is consulted. Use this as a scheduled trigger for re-running ingest_negotiate when a source starts producing novel field shapes.",
+  {
+    dataset_id: z.string().max(500).describe("Dataset to inspect."),
+    window_secs: z.number().int().min(60).optional().describe("Aggregation window in seconds. Defaults to 3600."),
+  },
+  async ({ dataset_id, window_secs }) => {
+    const start = Date.now();
+    log("tool", "schema_drift_detect", { dataset_id });
+    try {
+      const body: Record<string, unknown> = { dataset_id };
+      if (window_secs != null) body.window_secs = window_secs;
+      const resp = await apiPost("/schema_drift_detect", body);
+      log("tool", "schema_drift_detect done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "schema_drift_detect error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+server.tool(
+  "mapping_regression_test",
+  "Replay a baseline dataset's events through a candidate VRL program and diff the resulting triples (Jaccard), OCSF field coverage, and invariant-violation counts against the live mapping. Returns verdict 'pass' | 'warn' | 'fail'. Zero production-graph writes — the candidate never touches the live state. Pair this with parser_generate before promoting a new mapping via agentic_review_approve.",
+  {
+    candidate_vrl: z.string().max(200_000).describe("VRL source to evaluate. Typically sourced from a parser_generate draft."),
+    baseline_dataset_id: z.string().max(500).describe("Dataset whose events are replayed through both baseline and candidate."),
+    sample_size: z.number().int().min(1).optional().describe("Cap on rows to replay. Defaults to 1000."),
+  },
+  async ({ candidate_vrl, baseline_dataset_id, sample_size }) => {
+    const start = Date.now();
+    log("tool", "mapping_regression_test", { baseline_dataset_id, sample_size: sample_size ?? 1000 });
+    try {
+      const body: Record<string, unknown> = { candidate_vrl, baseline_dataset_id };
+      if (sample_size != null) body.sample_size = sample_size;
+      const resp = await apiPost("/mapping_regression_test", body, HEAVY_TIMEOUT_MS);
+      log("tool", "mapping_regression_test done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "mapping_regression_test error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+server.tool(
+  "invariant_check_hypothetical",
+  "Run the P1–P5 invariant suite against a *hypothetical* graph: replay a dataset's events through a candidate VRL program, project the resulting triples, and evaluate invariants over that synthetic graph. Lets you sanity-check a candidate mapping before approval without paying any ingest cost.",
+  {
+    hypothetical_vrl: z.string().max(200_000).describe("VRL source to evaluate. Usually the `vrl_source` from a parser_generate draft."),
+    dataset_id: z.string().max(500).describe("Dataset whose events provide the synthetic graph's inputs."),
+    sample_size: z.number().int().min(1).optional().describe("Cap on rows to replay. Defaults to 1000."),
+  },
+  async ({ hypothetical_vrl, dataset_id, sample_size }) => {
+    const start = Date.now();
+    log("tool", "invariant_check_hypothetical", { dataset_id, sample_size: sample_size ?? 1000 });
+    try {
+      const body: Record<string, unknown> = { hypothetical_vrl, dataset_id };
+      if (sample_size != null) body.sample_size = sample_size;
+      const resp = await apiPost("/invariant_check_hypothetical", body, HEAVY_TIMEOUT_MS);
+      log("tool", "invariant_check_hypothetical done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "invariant_check_hypothetical error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+server.tool(
+  "agentic_review_list",
+  "List MappingDrafts in the current session's review queue. Defaults to pending only; pass include_resolved=true to see the audit trail of prior Approved/Rejected drafts (with their reasons and timestamps).",
+  {
+    include_resolved: z.boolean().optional().describe("When true, include Approved and Rejected drafts. Defaults to false."),
+  },
+  async ({ include_resolved }) => {
+    const start = Date.now();
+    log("tool", "agentic_review_list", { include_resolved: include_resolved ?? false });
+    try {
+      const body: Record<string, unknown> = {};
+      if (include_resolved != null) body.include_resolved = include_resolved;
+      const resp = await apiPost("/agentic_review_list", body);
+      log("tool", "agentic_review_list done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "agentic_review_list error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+server.tool(
+  "agentic_review_approve",
+  "Approve a pending MappingDraft. For IngestNegotiator drafts, this stamps the proposed FieldConfig onto the most recent dataset in the session (returned as promoted_dataset_id). For ParserGenerator / CanonicalMapper drafts, approval only flips status — the VRL flows into provenance the next time export_ocsf runs on a dataset whose FieldConfig hashes to the same mapping_hash. Idempotent: approving an already-resolved draft returns InvalidState.",
+  {
+    draft_id: z.string().max(200).describe("The draft_id returned by a previous agentic tool call."),
+  },
+  async ({ draft_id }) => {
+    const start = Date.now();
+    log("tool", "agentic_review_approve", { draft_id });
+    try {
+      const resp = await apiPost("/agentic_review_approve", { draft_id });
+      log("tool", "agentic_review_approve done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "agentic_review_approve error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+server.tool(
+  "agentic_review_reject",
+  "Reject a pending MappingDraft and persist the reason on the draft for audit. Reason is required — an empty or whitespace-only string is rejected with InvalidInput.",
+  {
+    draft_id: z.string().max(200).describe("The draft_id returned by a previous agentic tool call."),
+    reason: z.string().min(1).max(2000).describe("Required human-readable reason. Stored verbatim on the draft."),
+  },
+  async ({ draft_id, reason }) => {
+    const start = Date.now();
+    log("tool", "agentic_review_reject", { draft_id });
+    try {
+      const resp = await apiPost("/agentic_review_reject", { draft_id, reason });
+      log("tool", "agentic_review_reject done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "agentic_review_reject error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// ── M5 dead-letter queue tools ────────────────────────────────────────
+
+server.tool(
+  "list_dead_letters",
+  "List rows the ingest pipeline rejected (parse failure, invariant violation, empty yield). Supports filtering by dataset_id and failure_kind plus paging. The DLQ lives on disk as JSONL shards and survives restarts — when unconfigured (tests / headless), returns an empty page.",
+  {
+    dataset_id: z.string().max(500).optional().describe("Restrict to rows rejected for this dataset."),
+    failure_kind: z.enum([
+      "parse_failure",
+      "invariant_causality",
+      "invariant_referential",
+      "invariant_type_shape",
+      "empty_yield",
+      "other",
+    ]).optional().describe("Restrict to a single failure category."),
+    offset: z.number().int().min(0).optional(),
+    limit: z.number().int().min(1).max(1000).optional().describe("Page size. Defaults to 100."),
+  },
+  async ({ dataset_id, failure_kind, offset, limit }) => {
+    const start = Date.now();
+    log("tool", "list_dead_letters", { dataset_id: dataset_id ?? "-", failure_kind: failure_kind ?? "-" });
+    try {
+      const body: Record<string, unknown> = {};
+      if (dataset_id != null) body.dataset_id = dataset_id;
+      if (failure_kind != null) body.failure_kind = failure_kind;
+      if (offset != null) body.offset = offset;
+      if (limit != null) body.limit = limit;
+      const resp = await apiPost("/list_dead_letters", body);
+      log("tool", "list_dead_letters done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "list_dead_letters error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+server.tool(
+  "reingest_dead_letter",
+  "Retry a set of DLQ entries against their datasets' *current* FieldConfigs. The expected workflow: a row failed with the previous mapping → user fixes the mapping (agentic_review_approve) → reingest. Entries whose dataset is gone or unmapped come back in `failed`; successful ones are removed from the DLQ.",
+  {
+    dlq_ids: z.array(z.string().max(200)).min(1).max(1000).describe("IDs returned by list_dead_letters."),
+  },
+  async ({ dlq_ids }) => {
+    const start = Date.now();
+    log("tool", "reingest_dead_letter", { count: dlq_ids.length });
+    try {
+      const resp = await apiPost("/reingest_dead_letter", { dlq_ids }, HEAVY_TIMEOUT_MS);
+      log("tool", "reingest_dead_letter done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "reingest_dead_letter error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+server.tool(
+  "purge_dead_letters",
+  "Bulk-remove DLQ entries. Without `all=true`, at least one of `dataset_id` / `failure_kind` is required — the empty-filter case is rejected to prevent accidental wipes.",
+  {
+    all: z.boolean().optional().describe("When true, remove every DLQ entry regardless of filter."),
+    dataset_id: z.string().max(500).optional(),
+    failure_kind: z.enum([
+      "parse_failure",
+      "invariant_causality",
+      "invariant_referential",
+      "invariant_type_shape",
+      "empty_yield",
+      "other",
+    ]).optional(),
+  },
+  async ({ all, dataset_id, failure_kind }) => {
+    const start = Date.now();
+    log("tool", "purge_dead_letters", { all: all ?? false });
+    try {
+      const body: Record<string, unknown> = {};
+      if (all != null) body.all = all;
+      if (dataset_id != null) body.dataset_id = dataset_id;
+      if (failure_kind != null) body.failure_kind = failure_kind;
+      const resp = await apiPost("/purge_dead_letters", body);
+      log("tool", "purge_dead_letters done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "purge_dead_letters error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
 // ── Phase 2: Complete MCP coverage (6 new tools) ──
 
 // parse_dsl – validate DSL before executing hunt
@@ -1199,6 +1583,59 @@ server.tool(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log("tool", "export_iocs error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+// ── M7 mapping library publish/consume ──────────────────────────────
+
+server.tool(
+  "publish_mapping",
+  "Force-publish any review-queue draft (Pending / Approved / Rejected) to the shared mapping library. Mirrors what agentic_review_approve does as a side effect, but is the analyst path: stamps PublishSource::Manual so audit can distinguish auto-publication from explicit override. Errors with InvalidState when the mapping library is not configured (headless / tests) or when the draft has no field_config to fingerprint.",
+  {
+    draft_id: z.string().max(200).describe("draft_id from any prior agentic_* tool call."),
+    ocsf_category: z.string().max(120).optional().describe("Optional OCSF class to stamp on the entry (e.g. 'authentication', 'process_activity')."),
+  },
+  async ({ draft_id, ocsf_category }) => {
+    const start = Date.now();
+    log("tool", "publish_mapping", { draft_id, ocsf_category: ocsf_category ?? "-" });
+    try {
+      const body: Record<string, unknown> = { draft_id };
+      if (ocsf_category != null) body.ocsf_category = ocsf_category;
+      const resp = await apiPost("/publish_mapping", body);
+      log("tool", "publish_mapping done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "publish_mapping error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
+      return textContent(msg);
+    }
+  }
+);
+
+server.tool(
+  "fetch_shared_mappings",
+  "List published mappings from the shared library as compact summaries. Optionally filter by exact fingerprint or ocsf_category; pass `limit` to cap the page (newest first). Returns `total` pre-limit so the caller can paginate. The library lives on disk and is shared across sessions — drafts auto-publish on agentic_review_approve, and analysts can force-publish via publish_mapping.",
+  {
+    fingerprint: z.string().max(64).optional().describe("Exact-match fingerprint filter (e.g. 'fp-abc123…')."),
+    ocsf_category: z.string().max(120).optional().describe("Exact-match category filter."),
+    limit: z.number().int().min(1).max(1000).optional().describe("Cap on returned summaries; sorts newest-first when set."),
+  },
+  async ({ fingerprint, ocsf_category, limit }) => {
+    const start = Date.now();
+    log("tool", "fetch_shared_mappings", { fingerprint: fingerprint ?? "-", ocsf_category: ocsf_category ?? "-", limit: limit ?? "-" });
+    try {
+      const body: Record<string, unknown> = {};
+      if (fingerprint != null) body.fingerprint = fingerprint;
+      if (ocsf_category != null) body.ocsf_category = ocsf_category;
+      if (limit != null) body.limit = limit;
+      const resp = await apiPost("/fetch_shared_mappings", body);
+      log("tool", "fetch_shared_mappings done", { duration_ms: Date.now() - start });
+      return safeJsonContent(resp);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("tool", "fetch_shared_mappings error", { duration_ms: Date.now() - start, error: truncate(msg, 200) });
       return textContent(msg);
     }
   }

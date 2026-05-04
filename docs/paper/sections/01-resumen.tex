@@ -1,0 +1,47 @@
+\chapter*{Resumen}
+\addcontentsline{toc}{chapter}{Resumen}
+\label{sec:resumen}
+
+La caza de amenazas sobre grafos heterogéneos construidos a partir
+de logs de seguridad choca contra tres obstáculos recurrentes:
+(i) ingesta frágil frente a formatos nuevos o mutantes, (ii) costo
+combinatorio del \emph{matching} de patrones en grafos grandes con
+múltiples tipos de entidades y aristas, (iii) señales de amenaza
+mezcladas con ruido operacional sin un esquema de priorización
+estable. Los SIEM tradicionales responden sobre tablas con
+lenguajes orientados a texto; el analista pierde la estructura
+relacional del incidente en el momento mismo de formular la
+pregunta.
+
+Este reporte describe GraphHunter, una arquitectura diseñada para
+atacar los tres obstáculos por separado. La contribución principal
+es una descomposición en \emph{shearing layers} que aísla tres
+capas con velocidades de cambio distintas: un núcleo estable con el
+motor de grafo, el matcher SIMD y el gate de ML; una plataforma
+con superficies (HTTP, MCP, DSL, parsers, canonical OCSF); y un
+conjunto de aplicaciones delgadas. Sobre esa descomposición
+presentamos: un matcher de patrones con intersección AVX2 de
+posting-lists cuya equivalencia con una referencia DFS se verifica
+por property-testing; un DFS temporal guiado por score para la fase
+de \emph{refinement}; un compositor de anomalía de cinco
+componentes con pesos operables; un aislamiento FFI para el motor
+C++ mediante \emph{typestate} y RAII con versionado ABI explícito;
+un \emph{model gate} que hace opcional al GNN de amenazas sin
+degradar el camino base; y un ingestor agéntico de tres carriles
+(VRL compilado, LLM-como-compilador offline, drift-como-señal) que
+combina determinismo productivo con adaptación offline gobernada.
+La evaluación incluye benchmarks de latencia y throughput,
+property-tests de equivalencia DFS↔SIMD, y un smoke manual
+end-to-end sobre datasets sintéticos. Concluimos con limitaciones
+abiertas: dos aristas residuales \code{core}$\to$\code{platform} y
+la ausencia de un modelo GNN entrenado sobre FortiAnalyzer
+producción.
+
+El libro complementario \emph{Diseño completo}
+(\filepath{docs/diseno/diseno.pdf}) profundiza en el diseño
+algorítmico del \emph{matcher} y los índices auxiliares con
+diagramas pedagógicos: el \emph{stack} de operadores físicos
+(DFS, LFTJ-K4, Yannakakis chain, Yannakakis tree-walk), la
+\emph{lazy build} y el \emph{sparse mmap-spill} de NLF y k-hop
+reachability, y el plano de obra de las stages futuras de la
+\emph{streaming layer}.

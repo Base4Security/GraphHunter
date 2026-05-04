@@ -1,0 +1,158 @@
+\chapter{Grafo de dependencias}
+\label{sec:grafo-deps}
+
+\section{Catorce crates Rust más dos vecinos}
+
+El repositorio contiene 14 crates Rust, un crate C++ independiente
+(\filepath{libgraphmatch/}) y un paquete TypeScript
+(\filepath{platform/mcp/}). El cuadro~\ref{tab:crates} los enumera
+por capa.
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Capa & Crate/paquete & Rol \\
+\midrule
+core       & \filepath{core/graph-engine}        & grafo, DFS, anomaly, interner \\
+core       & \filepath{core/matcher-ffi}         & fachada segura a \filepath{libgraphmatch} \\
+core       & \filepath{core/gnn}                 & scorer ONNX (v1 estable, v2 gate) \\
+\addlinespace
+platform   & \filepath{platform/api}             & \code{GraphHunterApi} facade \\
+platform   & \filepath{platform/canonical}       & proyección OCSF v1.4 \\
+platform   & \filepath{platform/constrained-decode} & guardrail LLM \\
+platform   & \filepath{platform/dsl}             & gramática de hipótesis \\
+platform   & \filepath{platform/local-llm}       & backends mock/candle \\
+platform   & \filepath{platform/parsers}         & \code{LogParser} + impls \\
+platform   & \filepath{platform/siem}            & Sentinel / Elastic streaming \\
+platform   & \filepath{platform/sources}         & \code{LogSource} + conectores \\
+platform   & \filepath{platform/vrl}             & compilador FieldConfig $\to$ VRL \\
+\addlinespace
+apps       & \filepath{apps/tauri/src-tauri}     & GUI Tauri + commands \\
+apps       & \filepath{apps/cli}                 & CLI \\
+\addlinespace
+vecino C++ & \filepath{libgraphmatch/}           & motor SIMD AVX2 \\
+vecino TS  & \filepath{platform/mcp/}            & 54 tools MCP \\
+\bottomrule
+\end{tabular}
+\caption{Crates y paquetes por capa.}
+\label{tab:crates}
+\end{table}
+
+\section{Dependencias ideales}
+
+La regla enunciada en el capítulo anterior, aplicada al grafo,
+produce tres aristas de capa:
+
+\begin{itemize}
+    \item \filepath{apps/*} $\to$ \filepath{platform/*}
+    \item \filepath{platform/*} $\to$ \filepath{core/*}
+    \item \filepath{core/matcher-ffi} $\to$ \filepath{libgraphmatch/}
+    (a través del \code{build.rs} que compila el C++ y el único
+    bloque \code{extern "C"}).
+\end{itemize}
+
+El vecino TypeScript \filepath{platform/mcp/} no depende de crates
+Rust en tiempo de compilación: cada tool llama al HTTP API que
+expone el Tauri (o un binario dedicado). Lo clasificamos como
+\emph{plataforma} por rol, aunque técnicamente es su propio proceso.
+
+\section{Dependencias reales}
+
+Dos aristas rompen la regla hacia abajo en el estado actual:
+
+\begin{itemize}
+    \item \filepath{core/graph-engine} $\to$
+    \filepath{platform/sources} (referencia por conveniencia al
+    tipo \code{AadEventBatch} usado por el GNN bridge).
+    \item \filepath{core/graph-engine} $\to$ \filepath{platform/dsl}
+    (acoplamiento pragmático introducido al extraer el DSL; el
+    parser necesita helpers del core y el core necesita tipos del
+    DSL para materializar hipótesis).
+\end{itemize}
+
+Son dos aristas de \emph{core a platform}, dirección prohibida por
+el modelo. No son ciclos (el grafo sigue siendo un DAG), pero
+violan el ideal de shearing. El capítulo~\ref{sec:deudas} discute
+cómo eliminarlas en el siguiente ciclo de trabajo.
+
+\section{Ausencia de ciclos}
+
+La verificación se hace fuera de banda con:
+
+\begin{lstlisting}[language=, basicstyle=\ttfamily\small]
+cargo metadata --format-version 1 | \
+  jq -r '.packages[] | "\(.name) \(.dependencies[].name)"' | \
+  ...construcción de DAG y detección de ciclos
+\end{lstlisting}
+
+El resultado al cierre de la Fase~4 del rediseño: \textbf{cero
+ciclos}. Dos edges ``indeseados'' documentados, pero nada
+bidireccional. Es una propiedad que se reverifica en cada PR que
+toca \filepath{Cargo.toml}.
+
+\section{Diagrama resumen}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=8mm and 14mm,
+    crate/.style={draw, rounded corners=2pt, minimum width=24mm,
+                  minimum height=6mm, font=\small\ttfamily,
+                  fill=gray!5},
+    app/.style={crate, fill=accent!15},
+    plat/.style={crate, fill=accent!8},
+    core/.style={crate, fill=gray!10},
+    ext/.style={crate, fill=gray!20, font=\small\ttfamily\itshape},
+    dep/.style={-Latex, thick, gray!70},
+    bad/.style={-Latex, thick, red!70, dashed},
+]
+
+\node[app] (tauri)   {apps/tauri};
+\node[app, right=of tauri] (cli) {apps/cli};
+\node[app, right=of cli]   (mcp) {platform/mcp};
+
+\node[plat, below=of tauri] (api)     {platform/api};
+\node[plat, right=of api]   (siem)    {platform/siem};
+\node[plat, right=of siem]  (can)     {platform/canonical};
+
+\node[plat, below=of api]   (sources) {platform/sources};
+\node[plat, right=of sources](parsers){platform/parsers};
+\node[plat, right=of parsers](dsl)    {platform/dsl};
+
+\node[core, below=of sources](engine) {core/graph-engine};
+\node[core, right=of engine](ffi)    {core/matcher-ffi};
+\node[core, right=of ffi]  (gnn)    {core/gnn};
+
+\node[ext, below=of ffi]    (libgm)  {libgraphmatch};
+
+\draw[dep] (tauri) -- (api);
+\draw[dep] (cli)   -- (api);
+\draw[dep] (mcp)   -- (api);
+\draw[dep] (api)   -- (siem);
+\draw[dep] (api)   -- (can);
+\draw[dep] (api)   -- (sources);
+\draw[dep] (api)   -- (parsers);
+\draw[dep] (api)   -- (dsl);
+\draw[dep] (api)   -- (engine);
+\draw[dep] (sources) -- (engine);
+\draw[dep] (parsers) -- (engine);
+\draw[dep] (dsl)     -- (engine);
+\draw[dep] (engine)  -- (ffi);
+\draw[dep] (ffi)     -- (libgm);
+\draw[dep] (engine)  -- (gnn);
+
+\draw[bad] (engine.east) to[bend right=30] (dsl.south);
+\draw[bad] (engine) to[bend left=20] (sources);
+
+\end{tikzpicture}
+\caption{Grafo de dependencias (simplificado). Las flechas rojas
+punteadas son las dos edges ``core $\to$ platform'' que rompen la
+regla; capítulo~\ref{sec:deudas} las discute.}
+\label{fig:dep-graph}
+\end{figure}
+
+El grafo es un DAG; la única bidireccionalidad conceptual
+(\filepath{core} $\leftrightarrow$ \filepath{platform}) es la
+deuda explícita que se quiere eliminar.

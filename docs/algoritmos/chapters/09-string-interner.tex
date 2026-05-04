@@ -1,0 +1,301 @@
+\chapter{El \emph{string interner}}
+\label{cap:interner}
+
+\begin{intuicion}
+Las identidades del grafo (\texttt{"alice"}, \texttt{"db-01"},
+\texttt{"10.0.0.42"}) son \emph{strings} para los humanos, pero
+manipularlas como \texttt{String} en el matcher es caro: cada
+\texttt{Relation} arrastra dos punteros al heap, cada comparación
+recorre los caracteres byte por byte, cada hash recalcula desde
+cero. El \emph{interner} resuelve esto canónicamente: cada string
+única se almacena \emph{una vez} y se referencia por un
+\texttt{StrId} de 4~bytes (\texttt{u32}). El matcher pasa
+\texttt{StrId}s en su \emph{hot loop}; sólo al \emph{emit} de un
+resultado se resuelve el \texttt{StrId} de vuelta a la string
+visible al humano.
+\end{intuicion}
+
+\section{El problema}
+
+Consideremos un grafo de 10\,M aristas donde cada arista guarda dos
+strings (\texttt{source\_id}, \texttt{dest\_id}) de 16 caracteres en
+promedio.
+
+\begin{itemize}
+    \item Como \texttt{String}: cada string es \(16\)~B en heap +
+    \(24\)~B de \emph{header} (puntero, longitud, capacidad). Total
+    por string: \(40\)~B. Por arista: \(80\)~B sólo en strings.
+    \item Total: \(10^7 \times 80 = 800\)~MB sólo para los IDs de
+    las aristas.
+\end{itemize}
+
+\noindent
+Pero las identidades se repiten masivamente: en un grafo típico hay
+\(\sim 100\)\,K usuarios distintos, \(\sim 10\)\,K hosts distintos,
+\(\sim 1\)\,M IPs distintas. La cardinalidad real del conjunto de
+strings es del orden de \(10^6\), no \(10^7\); guardar la string
+completa en cada arista es \(\sim 10\times\) más memoria de lo
+necesario.
+
+Además, el matcher hace \(\sim 10^9\) comparaciones de IDs por
+hunt (cada paso del DFS chequea ``¿este vértice ya está bound?''
+contra los bindings actuales). Comparar dos \texttt{String}s de 16~B
+es 16 cargas de memoria + 16 comparaciones de byte. Comparar dos
+\texttt{u32} es una sola instrucción.
+
+\section{Definición}
+
+\begin{definition}[String interner]
+Un \emph{interner} sobre un alfabeto \(\Sigma\) es una estructura de
+datos que mantiene:
+\begin{itemize}
+    \item Un mapeo inyectivo \(\sigma \colon \Sigma \to \mathbb{N}\)
+    (la \emph{intern function}).
+    \item Una resolución \(\sigma^{-1} \colon \mathbb{N} \to \Sigma\)
+    (la \emph{resolve function}).
+\end{itemize}
+Las dos operaciones soportadas son:
+\begin{itemize}
+    \item \texttt{intern}\((s)\): si \(s\) ya está internada, devuelve
+    su \(\mathrm{id}\); si no, le asigna el próximo \(\mathrm{id}\)
+    libre y la guarda.
+    \item \texttt{resolve}\((\mathrm{id})\): devuelve la string
+    asociada al \(\mathrm{id}\).
+\end{itemize}
+\end{definition}
+
+\section{Implementación: tabla bidireccional}
+
+La realización canónica:
+
+\begin{lstlisting}[language=Rust]
+pub struct StringInterner {
+    forward: HashMap<Arc<str>, StrId>,  // string  -> id
+    backward: Vec<Arc<str>>,            // id      -> string
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct StrId(pub u32);
+
+impl StringInterner {
+    pub fn intern(&mut self, s: &str) -> StrId {
+        if let Some(id) = self.forward.get(s) {
+            return *id;
+        }
+        let arc: Arc<str> = Arc::from(s);
+        let id = StrId(self.backward.len() as u32);
+        self.backward.push(arc.clone());
+        self.forward.insert(arc, id);
+        id
+    }
+
+    pub fn resolve(&self, id: StrId) -> Arc<str> {
+        self.backward[id.0 as usize].clone()
+    }
+}
+\end{lstlisting}
+
+\noindent
+Tres detalles importantes:
+
+\begin{enumerate}
+    \item \textbf{\texttt{Arc<str>} en ambos lados.} Tanto la
+    \texttt{HashMap} como el \texttt{Vec} guardan
+    \texttt{Arc<str>} ---no \texttt{String}---. Esto permite que
+    \texttt{resolve} devuelva un \texttt{Arc<str>} clonado (refcount
+    bump, $\sim$5~ns) en vez de una \texttt{String} alocada de
+    nuevo. Es la pieza que destrabó el \(55\%\) de mejora en los
+    benches cap-saturados (capítulo~\ref{cap:hunt-result}).
+    \item \textbf{\texttt{StrId} es \texttt{u32}, no \texttt{u64}.}
+    Asume \(< 2^{32} = 4.3 \cdot 10^9\) strings distintas. En
+    GraphHunter eso es muchísimo: el grafo más grande visto en
+    producción tiene \(\sim 10^7\) strings únicas, tres órdenes de
+    magnitud por debajo del techo.
+    \item \textbf{No requiere \texttt{remove}.} El interner es
+    \emph{append-only}; los IDs son estables por la vida de la
+    sesión. Cuando la sesión se cierra, el interner se descarta
+    completo. Esa propiedad simplifica todo: no hay
+    \emph{tombstones}, no hay re-asignación, no hay locks complejos
+    para ``hueco liberado''.
+\end{enumerate}
+
+\section{Análisis de costos}
+
+\subsection{\texttt{intern}: amortizado \(O(1)\)}
+
+\begin{itemize}
+    \item Lookup en la \texttt{HashMap}: \(O(1)\) esperado (hash de
+    \(s\), comparación contra el bucket). Para \(s\) de longitud
+    \(L\), el hash cuesta \(O(L)\) ---no es independiente del
+    tamaño de la string---. Pero \(L\) es chico ($\sim$10--40
+    bytes para identidades típicas) y constante en escala
+    asintótica.
+    \item Si miss: alocación de \texttt{Arc<str>}, \texttt{push} al
+    \texttt{Vec}, \texttt{insert} al \texttt{HashMap}. Los tres son
+    \(O(1)\) amortizado (la \texttt{Vec} y la \texttt{HashMap}
+    crecen geométricamente).
+\end{itemize}
+
+\subsection{\texttt{resolve}: \(O(1)\)}
+
+Indexación directa al \texttt{Vec}. \texttt{Arc::clone} es un
+\texttt{fetch\_add} atómico ($\sim$5 ns). Sin alocación, sin
+copia de bytes.
+
+\subsection{Espacio}
+
+Sea \(N\) el número de strings únicas, \(L\) la longitud promedio.
+La memoria total es:
+
+\[
+\underbrace{N \cdot L}_{\text{bytes de las strings}} +
+\underbrace{N \cdot 16}_{\text{Arc<str> headers en backward}} +
+\underbrace{N \cdot (\sim 40)}_{\text{HashMap buckets}}
+\approx N \cdot (L + 56).
+\]
+
+Para \(N = 10^6\), \(L = 16\): \(\sim 72\)~MB. Comparado con los
+\(800\)~MB que costaría almacenar las strings repetidas en cada
+arista, el ahorro es \(\sim 11\times\).
+
+\subsection{Comparaciones rápidas}
+
+Una vez internadas dos strings, \(\sigma(s_1) = \sigma(s_2) \iff
+s_1 = s_2\). Comparar \texttt{StrId == StrId} es una sola
+comparación de \texttt{u32}; \texttt{HashMap<StrId, V>} usa el
+\texttt{u32} mismo como hash (no hay re-hash de bytes). Esto es lo
+que hace que el \emph{hot loop} del DFS pueda chequear
+``¿\texttt{StrId} \(v\) ya está bound?'' en una sola comparación
+de palabra de máquina.
+
+\section{Variantes de diseño}
+
+\subsection{Por qué \emph{no} usamos \texttt{Symbol} de string-interner crate}
+
+Hay crates de Rust (\texttt{string-interner},
+\texttt{lasso}) que hacen lo mismo. Las consideramos. Los rechazamos
+por dos razones:
+
+\begin{itemize}
+    \item Devuelven \texttt{\&str} con \emph{lifetime} atado al
+    interner. El motor necesita \texttt{Arc<str>} (ownership compartido,
+    serialización por refcount). Un \texttt{\&str} se vuelve estorbo
+    cuando el resultado del hunt cruza un \emph{thread boundary} o
+    se serializa al frontend.
+    \item Soportan \emph{dropping} de strings (con
+    \emph{tombstones}, \emph{garbage collection}). En GraphHunter
+    nunca se borra; pagar el overhead de soportar drops sería
+    desperdicio.
+\end{itemize}
+
+\subsection{Por qué \emph{no} usamos un \emph{trie} de prefix sharing}
+
+Un \emph{trie} podría compartir prefijos comunes
+(\texttt{"CORP\textbackslash{}m.gomez"} y
+\texttt{"CORP\textbackslash{}j.lopez"} compartirían 5 bytes). El
+ahorro teórico es real pero dos factores juegan en contra:
+
+\begin{itemize}
+    \item Lookup en trie es \(O(L)\) con \(L\) cargas de memoria
+    no-secuenciales. Para \(L = 16\), eso son 16 cache misses
+    posibles ---\(>200\) ciclos. Hash table (con buen hash) es \(\sim
+    10\) ciclos.
+    \item Devolver \texttt{Arc<str>} desde un trie requiere
+    materializar la string concatenando los prefijos. La
+    concatenación cuesta lo que ahorraste.
+\end{itemize}
+
+\noindent
+La hash table \texttt{Arc<str>} gana en práctica.
+
+\section{Concurrencia}
+
+El \texttt{StringInterner} de GraphHunter es \texttt{\&mut self}
+para \texttt{intern}: los writers (el ingestor) toman acceso
+exclusivo durante la inserción. Los \texttt{StrId} resueltos son
+estables, así que los readers (el matcher) pueden trabajar con
+copias de los IDs sin tocar el interner.
+
+\begin{enelcodigo}
+\filepath{core/graph-engine/src/interner.rs}: \texttt{StringInterner}
+con \texttt{intern}, \texttt{resolve}. Bajo concurrencia
+ingest+matching, el interner se envuelve en un \texttt{RwLock}; el
+ingestor toma write-lock para inserts, los matchers toman
+read-lock para resolves. Los matchers nunca bloquean a otros
+matchers ---el bottleneck efectivo es el ingest, que típicamente es
+sigle-threaded.
+\end{enelcodigo}
+
+\section{Por qué importa para el resto del libro}
+
+El \texttt{StrId} es la representación interna de una identidad en
+todo el motor:
+
+\begin{itemize}
+    \item \texttt{CompactRelation} (capítulo~\ref{cap:compact-relation})
+    almacena \texttt{source\_sid: StrId} y \texttt{dest\_sid: StrId},
+    cada uno 4~B en lugar de los 24~B de un \texttt{String}.
+    \item NLF (capítulo~\ref{cap:nlf-detalle}) indexa por
+    \texttt{StrId} para tener \(O(1)\) lookup.
+    \item k-hop reachability (capítulo~\ref{cap:khop-detalle}) usa
+    \texttt{StrId} como índice en sus arrays \texttt{bits} y
+    \texttt{rank}.
+    \item El DFS \emph{hot loop} pasa \texttt{StrId} entre frames de
+    la recursión sin tocar strings.
+    \item Sólo el \emph{emit} de un resultado al fin del DFS resuelve
+    \texttt{StrId} $\rightarrow$ \texttt{Arc<str>}.
+\end{itemize}
+
+Esto último importa: la \emph{cantidad} de resoluciones es
+proporcional al número de resultados (\(\leq 10\,000\) por hunt en
+default), no al trabajo del DFS (\(10^9\) comparaciones). Pagar
+\(5\)~ns por resolución es 50~$\mu$s de overhead total ---trivial.
+
+\section{Resumen}
+
+\begin{itemize}
+    \item Interner: \texttt{intern}\((s) \to \mathrm{id}\) y
+    \texttt{resolve}\((\mathrm{id}) \to s\). Tabla bidireccional
+    (\texttt{HashMap} + \texttt{Vec}).
+    \item \texttt{StrId} es \texttt{u32} (4~B); \texttt{Arc<str>}
+    en el backing store permite \texttt{resolve} con refcount bump,
+    sin alocar.
+    \item Memoria: \(\sim 11\times\) más eficiente que repetir las
+    strings en cada \texttt{Relation}; comparaciones \(\sim 16\times\)
+    más rápidas que comparar strings byte a byte.
+    \item Ningún \texttt{drop}; \texttt{StrId}s estables por la vida
+    de la sesión.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Calculá la memoria que ahorraría el interner en
+    un grafo de \(10^8\) aristas con \(N = 10^6\) strings únicas de
+    longitud promedio \(L = 20\)~B. Compará con almacenar la string
+    completa en cada arista.
+
+    \item ¿Por qué la \texttt{intern} hash function NO debería ser
+    crypto-grade (SHA-256)? ¿Qué propiedades sí necesita? (Pista:
+    pensá adversarial: ¿qué pasa si un atacante puede elegir las
+    strings que entran al interner?)
+
+    \item \starred{} Implementá una variante del interner que NO
+    use \texttt{HashMap} para \texttt{forward}, sino un \emph{Vec}
+    ordenado con búsqueda binaria. ¿Qué cambia en la complejidad de
+    \texttt{intern}? ¿Cuándo conviene?
+
+    \item Imaginá que mañana la red corporativa explota y el
+    interner crece a \(N = 10^9\) strings. \texttt{StrId = u32} ya
+    no alcanza. ¿Qué cambia? Discutí: ¿migrar a \texttt{u64}?
+    ¿segmentar por \texttt{EntityType}? ¿ambas?
+
+    \item ¿Por qué el interner usa \texttt{Arc<str>} en
+    \texttt{backward} y no \texttt{String}? ¿Qué cambia para
+    \texttt{resolve}?
+
+    \item En un sistema con concurrencia ingest + matching, el
+    matcher tiene un \texttt{StrId} y quiere resolverlo a la string,
+    pero el ingestor está ejecutando \texttt{intern} en paralelo.
+    ¿Hay riesgo de \emph{torn read}? ¿Qué garantiza la consistencia?
+\end{enumerate}
+\end{ejercicios}

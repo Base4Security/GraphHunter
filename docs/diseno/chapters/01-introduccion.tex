@@ -1,0 +1,164 @@
+\chapter{¿Qué es Graph Hunter?}
+\label{cap:intro}
+
+\begin{intuicion}
+Graph Hunter es un motor de \emph{threat hunting} basado en grafos
+temporales. Convierte \emph{logs} de seguridad (Sysmon, Sentinel,
+EVTX, Fortinet) en un grafo dirigido con tiempo, donde los \emph{nodos}
+son entidades (procesos, IPs, usuarios, archivos) y las \emph{aristas}
+son eventos temporales que las relacionan. Sobre ese grafo el analista
+expresa hipótesis (``buscame todos los \emph{User} que se autenticaron
+en un \emph{Host} que después se conectó a una \emph{IP} sospechosa
+en menos de 30~minutos'') en una DSL que el motor ejecuta como
+\emph{subgraph matching} con restricciones temporales.
+\end{intuicion}
+
+\section{Por qué un grafo y no un \emph{SIEM} clásico}
+
+Los \emph{SIEM} tradicionales son motores de búsqueda full-text sobre
+\emph{logs}: \texttt{username=admin AND host=db-01}. Funcionan cuando
+el analista sabe \emph{qué busca}. La debilidad aparece cuando la
+señal es \emph{multi-hop}: un usuario inocuo, un host comprometido,
+y una conexión saliente sospechosa. Cada uno por separado pasa los
+filtros; sólo la \emph{cadena} entre ellos delata el ataque.
+
+Modelar el grafo explícitamente permite expresar y matchear esas
+cadenas en una sola consulta. Donde el SIEM hace \texttt{n}
+\emph{joins} sobre \texttt{n} tablas — cada uno con su propio índice
+— el grafo recorre aristas en su \emph{adjacency list} y aplica
+filtros temporales \emph{in-line}.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=1.4cm,
+    every node/.style={font=\small},
+    entity/.style={draw=accent, thick, circle, minimum size=8mm,
+                   inner sep=1pt, fill=accentlight},
+    edge/.style={->, >=Latex, accent, thick}
+]
+\node[entity] (u) {\strut $u$};
+\node[entity, right=2.4cm of u] (h) {\strut $h$};
+\node[entity, right=2.4cm of h] (ip) {\strut $\mathit{ip}$};
+
+\draw[edge] (u) -- node[above]{\footnotesize\texttt{Auth}\,@\,$t_1$} (h);
+\draw[edge] (h) -- node[above]{\footnotesize\texttt{Connect}\,@\,$t_2$} (ip);
+
+\node[draw=accent, dashed, fit=(u)(h)(ip), inner sep=4mm,
+      label={[font=\footnotesize\itshape, accent]below:%
+             hipótesis: \texttt{User -[Auth]-> Host -[Connect]-> IP \{within=30m\}}}]{};
+\end{tikzpicture}
+\caption{Ejemplo mínimo: una hipótesis de dos saltos. El motor enumera
+todas las ternas $(u, h, \mathit{ip})$ del grafo donde existen las dos
+aristas con $t_1 < t_2$ y $t_2 - t_1 \leq 30$~minutos.}
+\label{fig:intro-2hop}
+\end{figure}
+
+\section{Pipeline en cuatro pasos}
+
+Graph Hunter está dividido en cuatro etapas que el analista atraviesa
+linealmente:
+
+\begin{enumerate}
+    \item \textbf{Ingesta}. Una fuente (\emph{Sysmon}, \emph{Sentinel},
+    \emph{EVTX}, CSV genérico) emite eventos. El parser produce
+    \emph{triples} \texttt{(source, relation, dest, timestamp,
+    metadata)} que el \emph{ingestor} consolida en el grafo.
+    \item \textbf{Hipótesis}. El analista escribe una expresión DSL.
+    El \emph{parser} la convierte en una \texttt{Hypothesis}
+    estructurada (cadena de \texttt{HypothesisStep}, predicados,
+    bindings, \emph{shape}).
+    \item \textbf{Matching}. El \emph{planner} elige el operador
+    físico adecuado (DFS legacy, LFTJ-K4, Yannakakis chain,
+    Yannakakis tree-walk) según la forma de la hipótesis y \emph{flags}
+    de \emph{env}. El operador devuelve \texttt{Vec<HuntResult>}.
+    \item \textbf{Scoring + paginación}. El \emph{anomaly scorer}
+    rankea los \emph{paths} por rareza; el \emph{frontend} paginación
+    sobre la \emph{cache} de resultados.
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.8cm and 0.9cm,
+    every node/.style={font=\footnotesize, align=center},
+    stage/.style={draw=accent, thick, rounded corners=2mm,
+                  minimum width=2.6cm, minimum height=1.0cm,
+                  fill=accentlight},
+    arr/.style={->, >=Latex, accent, thick}
+]
+\node[stage] (ingest) {Ingesta\\\textit{Sysmon, EVTX, CSV}};
+\node[stage, right=of ingest] (graph) {Grafo temporal\\\textit{en RAM + spill}};
+\node[stage, right=of graph] (parse) {Parser DSL\\\textit{Hypothesis AST}};
+\node[stage, right=of parse] (match) {Matcher\\\textit{Yannakakis $\bigm|$ DFS $\bigm|$ LFTJ}};
+\node[stage, right=of match] (score) {Scoring +\\paginación};
+
+\draw[arr] (ingest) -- (graph);
+\draw[arr] (graph) -- (parse);
+\draw[arr] (parse) -- (match);
+\draw[arr] (match) -- (score);
+
+\node[below=0.3cm of ingest, font=\footnotesize\itshape, accent]
+    {ev/sec $\Rightarrow$ aristas/sec};
+\node[below=0.3cm of graph, font=\footnotesize\itshape, accent]
+    {28~GB EVTX viable};
+\node[below=0.3cm of match, font=\footnotesize\itshape, accent]
+    {3-hop @ $|V|$=10K en 10~ms};
+\end{tikzpicture}
+\caption{Pipeline alto-nivel. Cada etapa tiene su propia hoja de ruta
+de optimizaciones; las tiers \emph{S} (\emph{small}), \emph{M}
+(\emph{medium}) y \emph{L} (\emph{large}) que cubre este libro
+afectan sobre todo a \emph{Matcher} y \emph{Grafo temporal}.}
+\label{fig:intro-pipeline}
+\end{figure}
+
+\section{Tesis transversal: \emph{plug-and-play} como promesa verificable}
+\label{sec:intro-plug-and-play}
+
+Antes de entrar al stack, conviene hacer explícita la \emph{tesis
+transversal} que ata todas las decisiones de diseño que vienen a
+continuación: \textbf{ninguna optimización entregada requiere que
+el usuario cambie su \emph{config}}. Cada \emph{flag} S/M/L que
+ships se setea \emph{default-on} al \emph{startup} del \emph{binary},
+cada \emph{cache} es transparente, cada índice se construye solo,
+cada índice grande se \emph{spills} a disco solo. El usuario abre
+la app, ve la pildora ``Perf: M+L1'' verde, y todo funciona.
+
+Esta restricción no es cosmética: es lo que hace que el motor sea
+auditable. Si después de un \emph{ship} de optimización el analista
+tuvo que setear \texttt{GRAPHHUNTER\_LFTJ\_PLANNER=1} para verla,
+la promesa se rompió --- la optimización no está realmente
+entregada, está \emph{disponible}. El capítulo~\ref{cap:plug-and-play}
+codifica la regla en cinco pasos concretos (default-on al startup,
+\emph{surface} en UI, \emph{soak window} para los \emph{flags}
+peligrosos, doc obliga, \emph{build capabilities} reflejadas en
+\texttt{cmd\_get\_perf\_status}). Cuando leas en los capítulos que
+siguen frases como ``X dispatcha automáticamente'' o ``Y se
+construye \emph{lazy} en el primer hunt'', son aplicaciones de
+esta misma regla.
+
+\section{Lo que cubre este libro}
+
+\begin{itemize}
+    \item Capítulo~\ref{cap:stack}: el \emph{stack} de \emph{crates}.
+    Quién depende de quién y por qué, con el diagrama de capas.
+    \item Capítulo~\ref{cap:datos}: el modelo de datos
+    (\texttt{Entity}, \texttt{Relation}, \texttt{CompactRelation},
+    el \emph{interner} de \texttt{StrId}, \texttt{HuntResult}).
+    \item Capítulo~\ref{cap:ingest}: el pipeline de ingesta y
+    finalización (\texttt{sort\_edges\_by\_timestamp}, \emph{spill},
+    \emph{streaming backend}).
+    \item Capítulo~\ref{cap:matcher}: el camino del \emph{matching}
+    operador-por-operador. DFS, LFTJ-K4, Yannakakis chain,
+    Yannakakis tree-walk. Cada uno con su algoritmo, sus
+    invariantes y su \emph{when-to-dispatch}.
+    \item Capítulo~\ref{cap:indexes}: NLF y k-hop reachability,
+    incluyendo el \emph{lazy build} y la \emph{sparse mmap-spill}.
+    \item Capítulo~\ref{cap:dsl}: la DSL, incluido el separador
+    \texttt{;} para \emph{shapes} no-cadena de L1 stage 3c.
+    \item Capítulo~\ref{cap:l3-future}: diseño de las stages
+    pendientes \emph{2b} (delta khop\_reach via Kankanamge) y
+    \emph{2c} (streaming como \emph{canonical store}).
+    \item Capítulo~\ref{cap:plug-and-play}: la promesa
+    \emph{plug-and-play} y cómo se materializa en el frontend.
+\end{itemize}

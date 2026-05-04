@@ -1,0 +1,226 @@
+\chapter{Instrumentación del frontend}
+\label{cap:frontend-instr}
+
+\begin{intuicion}
+La promesa plug-and-play (capítulo anterior) dice ``cada
+optimización se nota inmediatamente''. Para que ``se note'', el
+frontend tiene que mostrarla. La instrumentación que GraphHunter
+expone vive en tres canales: \texttt{cmd\_get\_perf\_status}
+(qué optimizaciones están activas), \texttt{cmd\_get\_memory\_status}
+(presión de memoria), y la respuesta de \texttt{run\_hunt\_batch}
+(cache hits del último batch). Las pildoras del toolbar resumen
+los tres en un vistazo. Este capítulo cierra el libro mostrando
+cómo se materializa la promesa.
+\end{intuicion}
+
+\section{Las pildoras del toolbar}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.4cm,
+    every node/.style={font=\scriptsize},
+    pill/.style={draw, rounded corners=4mm, minimum width=2.0cm,
+                 minimum height=0.7cm, font=\footnotesize}
+]
+\node[pill, draw=accent, fill=accentlight] (perf) {Perf: M+L1};
+\node[pill, draw=green!50!black, fill=green!10, right=of perf]
+    (memok) {Mem: 14\%};
+\node[pill, draw=orange!70!black, fill=orange!10, right=of memok]
+    (memwarn) {Mem: 78\%};
+\node[pill, draw=red!70!black, fill=red!10, right=of memwarn]
+    (memcrit) {Mem: 92\%};
+\end{tikzpicture}
+\caption{Pildoras del toolbar. La de \emph{perf} indica si los
+flags M+L1 están activos (verde) o si el usuario forzó el legacy
+path (gris). La de \emph{mem} cambia de verde a ámbar
+(\(\geq 75\%\) RSS/total) a rojo (\(\geq 90\%\)).}
+\label{fig:plug-pills}
+\end{figure}
+
+\section{\texttt{cmd\_get\_perf\_status}}
+
+El comando Tauri que el frontend invoca al mount:
+
+\begin{lstlisting}[language=Rust]
+#[tauri::command]
+fn cmd_get_perf_status() -> PerfStatus {
+    PerfStatus {
+        lftj_planner: env_bool("GRAPHHUNTER_LFTJ_PLANNER", true),
+        k4_lftj_marker: env_bool("GRAPHHUNTER_K4_LFTJ", true),
+        yannakakis: env_bool("GRAPHHUNTER_YANNAKAKIS", true),
+        // build capabilities
+        has_nauty: cfg!(feature = "symmetry-nauty"),
+        has_simd: cfg!(feature = "simd-intersect"),
+    }
+}
+\end{lstlisting}
+
+\noindent
+La struct se serializa a JSON y el frontend la lee:
+
+\begin{lstlisting}[language=Rust]
+type PerfStatus = {
+    lftj_planner: boolean;
+    k4_lftj_marker: boolean;
+    yannakakis: boolean;
+    has_nauty: boolean;
+    has_simd: boolean;
+};
+\end{lstlisting}
+
+\subsection{Render de la pildora}
+
+\filepath{apps/tauri/src/components/PerfPill.tsx}:
+
+\begin{itemize}
+    \item Si todos los flags estructurales (\texttt{lftj\_planner},
+    \texttt{yannakakis}) están \texttt{true}: pildora ``Perf: M+L1''
+    en verde acento.
+    \item Si alguno está \texttt{false}: pildora ``Perf: legacy''
+    en gris.
+    \item Tooltip on-hover: lista los flags individuales y su
+    estado actual.
+\end{itemize}
+
+\section{\texttt{cmd\_get\_memory\_status}}
+
+\begin{lstlisting}[language=Rust]
+#[tauri::command]
+fn cmd_get_memory_status() -> MemoryStatus {
+    let process = sysinfo::Process::current();
+    let host = sysinfo::System::new();
+    MemoryStatus {
+        rss_bytes: process.memory(),
+        host_total_bytes: host.total_memory(),
+        ratio: process.memory() as f64 / host.total_memory() as f64,
+    }
+}
+\end{lstlisting}
+
+\noindent
+El frontend lo polea cada 5 segundos y actualiza la pildora:
+
+\begin{itemize}
+    \item Ratio \(< 0.5\): verde, sin warning.
+    \item Ratio \(\in [0.75, 0.90)\): ámbar, ``mem alta''. Sugiere
+    cerrar otras apps o reducir el dataset.
+    \item Ratio \(\geq 0.90\): rojo, ``crítica''. Recomienda
+    \texttt{session\_save} y restart.
+\end{itemize}
+
+\noindent
+La idea: el analista ve la presión \emph{antes} de que el motor
+entre en swap (que serían minutos de UI freeze).
+
+\section{Telemetría adicional en \texttt{run\_hunt\_batch}}
+
+El endpoint \texttt{run\_hunt\_batch} (L2) ---para correr varios
+hunts en una pasada compartiendo bag/result caches--- retorna una
+respuesta extendida con cache counters:
+
+\begin{lstlisting}[language=Rust]
+pub struct RunHuntBatchResponse {
+    pub entries: Vec<RunHuntBatchEntry>,
+    pub indexes_were_warm: bool,
+    pub bag_cache_hits: usize,         // L2 stage 2
+    pub bag_cache_misses: usize,
+    pub result_cache_hits: usize,      // L2 stage 3a
+    pub last_prefix_resume_depth: usize,  // L2 stage 3b
+    pub prefix_cache_hits: usize,
+}
+\end{lstlisting}
+
+\noindent
+Cada campo es una métrica que el frontend muestra como tooltip
+sobre la pildora de perf. El analista que pasa el mouse ve:
+\begin{itemize}
+    \item ``Bag cache: 87\% hit ratio''
+    \item ``Result cache: 12 hits, 1 miss''
+    \item ``Last prefix resumed at depth 2''
+\end{itemize}
+
+\noindent
+Si los hits son altos, las optimizaciones L2 están trabajando. Si
+son cero, hay algo que investigar (¿hipótesis tan distintas que no
+comparten nada? ¿caches sub-dimensionados?).
+
+\section{Doc autocompliance}
+
+El procedimiento de agregar un flag nuevo:
+
+\begin{enumerate}
+    \item Implementar la optimización en \texttt{core}.
+    \item Agregar default-on en \filepath{apps/tauri/src-tauri/src/lib.rs}
+    y \filepath{apps/cli/src/main.rs}.
+    \item Extender \texttt{PerfStatus} con el nuevo campo.
+    \item Extender \texttt{PerfPill.tsx} para reflejar el flag.
+    \item Actualizar \filepath{08-env-vars.tex} y
+    \filepath{12-preguntas-frecuentes.tex}.
+    \item \texttt{make all} para regenerar PDFs.
+    \item Si pasa CI con los seis PDFs frescos $\Rightarrow$
+    merge.
+\end{enumerate}
+
+\noindent
+El último punto es self-enforcing: si la doc no se regeneró, CI
+falla.
+
+\section{El cierre del libro}
+
+Esta es la última pieza pedagógica del diseño. Los próximos pasos
+para el lector:
+
+\begin{itemize}
+    \item \emph{Manual} (libro paralelo): cómo el analista usa el
+    motor en su workflow diario.
+    \item \emph{Especificación}: contracts HTTP, MCP, FFI, formatos
+    de log soportados.
+    \item \emph{Arquitectura}: estructura de crates, ADRs,
+    decisiones de \emph{repo organization}.
+    \item \emph{Paper}: justificación académica con benchmarks y
+    comparaciones contra el estado del arte.
+\end{itemize}
+
+\noindent
+Este libro es la guía pedagógica que une los cinco. Si llegaste
+hasta acá, deberías poder leer cualquiera de los otros sin
+dificultad ---y, más importante, contribuir al motor con
+optimizaciones nuevas siguiendo los patrones que el libro documenta.
+
+\section{Resumen}
+
+\begin{itemize}
+    \item Tres comandos de instrumentación:
+    \texttt{cmd\_get\_perf\_status},
+    \texttt{cmd\_get\_memory\_status}, telemetría en
+    \texttt{run\_hunt\_batch}.
+    \item Pildoras del toolbar: perf (verde/gris), mem
+    (verde/ámbar/rojo).
+    \item Cache counters en batch: visible vía tooltip.
+    \item Procedimiento ``agregar un flag nuevo'' obliga a
+    actualizar PDFs; CI lo enforce.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Diseñá una pildora más para el toolbar:
+    ``Build: AVX2'' que indique si el binary tiene SIMD activado.
+    ¿Qué necesita en \texttt{PerfStatus}?
+
+    \item Si la pildora de mem se vuelve roja durante un hunt,
+    ¿qué debería hacer el frontend? Discutí: ¿abortar
+    automáticamente? ¿alertar y dejar al usuario decidir?
+
+    \item \starred{} El polling de memoria es cada 5 segundos.
+    ¿Por qué no más frecuente? ¿Por qué no menos?
+
+    \item Diseñá una métrica \emph{nueva} que valga la pena
+    exponer: por ejemplo, ``aristas/seg que está procesando el
+    ingest''. ¿Dónde la calculás? ¿Cómo la mostrás?
+
+    \item ¿Por qué la doc se regenera en CI y no manualmente
+    cuando el dev quiere? Pensá: ¿qué se rompe sin regeneración
+    automática?
+\end{enumerate}
+\end{ejercicios}

@@ -1,0 +1,242 @@
+\chapter{Preguntas frecuentes}
+\label{sec:man-faq}
+
+\section{¿Reemplaza a mi SIEM?}
+
+No. El SIEM es mejor para búsquedas textuales por regla y para
+alertas en tiempo real. GraphHunter es mejor para investigaciones
+que requieren razonar sobre estructura (quién-autenticó-dónde-
+conectó-adónde) sobre ventanas ya delimitadas. Los dos conviven.
+
+\section{¿Cuándo me conviene activar scoring?}
+
+Casi siempre. Los 5 componentes están calibrados para que un
+grafo ``normal'' de oficina produzca distribuciones razonables.
+Desactivarlo es útil si querés una pasada de exploración pura sin
+priorización.
+
+\section{¿Cuándo conviene activar el GNN threat?}
+
+Sólo si tenés un modelo ONNX entrenado para tu entorno. Sin
+modelo, \code{gnn_threat} devuelve 0 para todo y subir su peso
+degrada el score total. Si no sabés, dejalo en 0.
+
+\section{¿Puedo tener varias sesiones abiertas?}
+
+Sí, en ventanas distintas del app. Cada sesión tiene su propio
+grafo y su propio workspace. No se comparten tags ni notas entre
+sesiones.
+
+\section{¿El LLM ve mis datos?}
+
+Sólo los que vos le entregás explícitamente en el panel agéntico
+(muestras para proponer mappings). No pasa por él la ingesta
+productiva. Si usás backend remoto (OpenAI/Anthropic/Google), esas
+muestras salen por red; si usás backend local
+(\code{GRAPHHUNTER_LOCAL_MODEL_PATH}), quedan en tu máquina.
+
+\section{¿Qué pasa si ingesta un log corrupto?}
+
+Los eventos que el parser entiende pero violan invariantes van a
+la DLQ, no al grafo. Los eventos que ni siquiera parsean se loguean
+como warning y se descartan, con conteo visible en el progreso de
+ingesta.
+
+\section{¿Cómo interpretar un path con gnn\_threat = 0?}
+
+Significa que el GNN no está activo o no cargó modelo. No es un
+score de amenaza \emph{baja}, es \emph{no hay señal}. El score
+compuesto se apoya en los otros 4 componentes.
+
+\section{¿Qué pasa si cambio el mapping sobre datos ya ingeridos?}
+
+Los eventos ya están en el grafo con el mapping viejo. Cambiar el
+mapping afecta sólo eventos futuros. Si querés reprocesar,
+reingerí el archivo fuente.
+
+\section{¿Puedo mover una sesión entre máquinas?}
+
+Sí. \emph{Archivo \textrightarrow{} Exportar sesión} guarda un
+archivo comprimido con el grafo, catálogo, hunts, notas y tags.
+\emph{Importar sesión} lo restaura en la otra máquina. No se
+exportan credenciales ni logs del sistema.
+
+\section{¿Por qué el Host corporativo aparece con rarity alta?}
+
+Probablemente tu ventana de ingesta es corta y ese host no tiene
+mucha historia en el grafo. El \emph{entity rarity} se calcula
+sobre el grafo actual, no sobre conocimiento externo. Es una
+feature, no un bug: te obliga a pensar sobre qué entra al grafo.
+
+\section{¿Puedo compartir un hunt con un colega?}
+
+\begin{itemize}
+    \item La hipótesis es texto DSL; copiar y pegar alcanza.
+    \item Si querés los mismos resultados: exportar la sesión
+    (archivo).
+    \item Si querés reusar el scoring en una base compartida:
+    publicar el mapping (si es custom) al \code{mapping_library}
+    común.
+\end{itemize}
+
+\section{¿El grafo vive en disco?}
+
+Mientras la sesión está abierta, vive en RAM para performance. Al
+cerrar la sesión (o al exportar explícitamente), se persiste a
+disco en el directorio de datos del app. Abrir una sesión
+guardada la carga completa en RAM.
+
+\section{¿Qué diferencia hay entre k, window y min\_score?}
+
+\begin{itemize}
+    \item \code{k}: simplicidad estructural. Cota de la explosión
+    combinatoria del matcher.
+    \item \code{window}: separación temporal máxima entre eventos
+    del path.
+    \item \code{min_score}: umbral \emph{post-hoc} sobre el score
+    compuesto. No afecta el matching, sólo el filtrado de la
+    salida.
+\end{itemize}
+
+\section{¿Por qué algunos endpoints requieren una flag de entorno?}
+
+Acciones que publican fuera del app (IOCs a Sentinel, tickets a
+Jira) están detrás de un switch explícito para que nadie las
+dispare accidentalmente. La flag es la primera barrera; la
+confirmación por llamada, la segunda.
+
+\section{¿Mi hunt tarda mucho. Hay algo que pueda activar?}
+
+Sí. El \emph{matcher} acepta varias \emph{flags} de entorno
+\emph{opt-in} que activan rutas optimizadas incorporadas en la
+revisión \emph{M-track} de abril 2026. Probar (en orden de
+seguridad y \emph{lift}):
+
+\begin{itemize}
+    \item \code{GRAPHHUNTER_LFTJ_PLANNER=1}: si la hipótesis
+    tiene \emph{shape} de \(K_4\) (cuatro entidades en clique con
+    el mismo tipo y mismo tipo de relación entre todas),
+    la dispatcha al enumerador WCOJ que es órdenes de magnitud
+    más rápido.
+    \item \code{GRAPHHUNTER_YANNAKAKIS=1}: \emph{matcher} de
+    cadenas \emph{output-sensitive} con \emph{semi-join reducer}
+    de dos pasadas. Para cadenas largas con buena selectividad
+    elimina \emph{candidates} muertos antes de enumerar, así que
+    rinde mejor que el DFS cuando la mayoría de los \emph{starts}
+    no van a producir un \emph{match}.
+    \item \code{GRAPHHUNTER_SEMIJOIN=1}: poda \emph{candidate
+    sets} antes de entrar al DFS sobre cadenas heterogéneas.
+    \item \code{GRAPHHUNTER_AMAC=1}: \emph{interleaved DFS} con
+    \(K=8\) contextos en vuelo. Útil sobre todo en patrones de
+    \(\geq 3\) saltos donde la latencia de DRAM domina.
+    \item \code{GRAPHHUNTER_HUGEPAGES=1} (sólo Linux): reduce
+    \emph{TLB stalls} en grafos grandes.
+\end{itemize}
+
+Todas son seguras: si la \emph{shape} no aplica o la flag no está,
+se cae al \emph{path} legacy. Detalle completo en el libro
+\emph{Especificación}, capítulo \emph{Variables de entorno}, y los
+números medidos en \emph{Paper}, capítulo \emph{Evaluación}.
+
+\section{¿Por qué mi sesión guardada cambió de formato?}
+
+A partir de abril 2026, GraphHunter guarda las sesiones en un
+formato \emph{binario} (\emph{magic bytes} \code{GHS1}) en lugar
+del JSON anterior. Es transparente: las sesiones JSON existentes
+siguen abriendo normalmente (el motor detecta el formato por los
+primeros 4 bytes del archivo), pero al guardar de nuevo se
+escriben en binario. Beneficios:
+
+\begin{itemize}
+    \item $\sim 5\times$ más chico en disco.
+    \item $\sim 5\text{--}10\times$ más rápido para guardar y abrir.
+    \item \emph{Streaming} en ambos sentidos: la RAM al cargar deja
+    de ser proporcional al tamaño del log y queda acotada por el
+    \emph{buffer} de I/O ($\sim$8 MB). Crítico para sesiones EVTX
+    de 28 GB$+$ donde el JSON \emph{materializaba} todo el
+    documento en memoria al cargar.
+\end{itemize}
+
+Si necesitás compartir una sesión binaria con una versión vieja
+del cliente, abrila y volvé a guardarla con un cliente que todavía
+escriba JSON --- ese caso es raro y la migración inversa no
+está soportada.
+
+\section{¿Por qué mi sesión grande abre rápido pero el primer hunt tarda más?}
+
+A partir de abril 2026, los \emph{auxiliary indexes} (NLF y k-hop
+reachability) se construyen \emph{lazy} --- al \emph{primer hunt}
+en lugar de al cargar la sesión. Esto te permite ver el grafo y
+navegarlo apenas terminó el \emph{streaming load}, en vez de
+esperar 1--3 minutos a que se construyan los \emph{indexes} antes
+de mostrarte la UI.
+
+El primer \emph{hunt} sobre una sesión recién abierta paga el
+costo del \emph{build} ($\sim$30~s para NLF, $\sim$1--2~min para
+k-hop reachability en un EVTX de 28~GB). \emph{Hunts} subsiguientes
+son inmediatos --- los \emph{indexes} están en memoria
+(o en \emph{mmap-spilled tempfiles}) y se reutilizan.
+
+Si querés evitar el primer-hunt-lento, dispará un \emph{hunt}
+trivial apenas cargás la sesión: \code{User -[Auth]-> User} con
+\emph{window} amplia es suficiente para forzar el \emph{build} en
+\emph{background}.
+
+\section{¿Cómo escribo una hipótesis con forma de estrella o árbol?}
+
+A partir de abril 2026 la \emph{DSL} acepta el separador \code{;} para
+introducir cláusulas adicionales que comparten \emph{bindings} con
+cláusulas anteriores. Una estrella de 3 hojas centrada en \code{c}
+se escribe:
+
+\begin{verbatim}
+User c -[Auth]-> Host h1;
+c -[Auth]-> Host h2;
+c -[Auth]-> Host h3
+\end{verbatim}
+
+El primer \code{;} marca la hipótesis como \emph{shape}-\code{Graph} y
+el motor dispatcha automáticamente al \emph{tree-walk Yannakakis
+enumerator}. Las cadenas lineales clásicas (sin \code{;}) siguen
+parseándose exactamente como antes y dispatcheando al chain
+matcher.
+
+Después de un \code{;}, la cláusula puede arrancar de dos formas:
+
+\begin{itemize}
+    \item Una referencia \emph{bare} a un \emph{binding} declarado
+    antes (como \code{c} arriba). El motor hereda el \emph{type} del
+    \emph{binding} original.
+    \item Una declaración fresca \code{Type binding} (e.g.,
+    \code{; User u -[Auth]-> Host h}). Introduce un vértice
+    independiente.
+\end{itemize}
+
+Si el \emph{binding} referenciado no existe en cláusulas anteriores,
+el \emph{parser} retorna un error que lista los \emph{bindings}
+válidos para que ajustes el nombre.
+
+\section{¿Hay forma de correr varias hipótesis a la vez?}
+
+Sí: el endpoint \emph{Tauri} \code{cmd_run_hunt_batch} acepta una
+lista de hipótesis y las ejecuta secuencialmente sobre la misma
+sesión, \emph{pre-warming} los índices auxiliares (NLF y k-hop
+reachability) una vez antes de la primera consulta. Útil para:
+
+\begin{itemize}
+    \item Baterías de \emph{templates} ATT\&CK (decenas de
+    \emph{patterns} sobre el mismo \emph{stream} EDR).
+    \item Comparar varias hipótesis sobre la misma ventana
+    temporal.
+    \item Evitar el \emph{first-hunt-slow} en sesiones recién
+    cargadas: la primera entrada del \emph{batch} paga el
+    \emph{build} de los \emph{indexes} y el resto vuela.
+\end{itemize}
+
+Errores por hipótesis están aislados: una \emph{query} malformada
+en la posición $k$ falla esa entrada con un \code{error}, pero el
+resto del \emph{batch} sigue corriendo. La respuesta incluye un
+flag \code{indexesWereWarm} que dice si la \emph{batch} encontró
+los \emph{indexes} ya construidos (segunda \emph{batch} en
+adelante) o si los tuvo que construir (primera \emph{batch} tras
+\emph{open}).

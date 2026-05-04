@@ -1,0 +1,134 @@
+\chapter{Frontend y plug-and-play}
+\label{cap:plug-and-play}
+
+\begin{intuicion}
+La regla \emph{plug-and-play} dice: cada optimización S/M/L se
+activa por defecto al levantar el binario. Sin \emph{flags} a setear,
+sin \emph{config} a tocar, sin \emph{toggles} en la UI. El usuario
+levanta \texttt{npm run tauri dev} y todo lo que está \emph{shipped}
+se nota inmediatamente. Este capítulo documenta cómo se materializa
+esa promesa.
+\end{intuicion}
+
+\section{Flags default-on al \emph{startup}}
+
+\filepath{apps/tauri/src-tauri/src/lib.rs} y
+\filepath{apps/cli/src/main.rs} corren un loop al inicio que setea
+flags si el usuario no las exportó:
+
+\begin{lstlisting}[language=Rust]
+for (key, default) in [
+    ("GRAPHHUNTER_LFTJ_PLANNER", "1"),  // M1 structural K_4
+    ("GRAPHHUNTER_K4_LFTJ", "1"),        // S3 name marker
+    ("GRAPHHUNTER_YANNAKAKIS", "1"),     // L1 stage 2/3
+] {
+    if std::env::var(key).is_err() {
+        unsafe { std::env::set_var(key, default) };
+    }
+}
+\end{lstlisting}
+
+Override con \texttt{KEY=0} sigue funcionando para usuarios que
+quieran el \emph{path} legacy (debugging, A/B comparison).
+
+\section{La pildora del toolbar}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.4cm,
+    every node/.style={font=\scriptsize},
+    pill/.style={draw, rounded corners=4mm, minimum width=2.0cm,
+                 minimum height=0.7cm, font=\footnotesize}
+]
+\node[pill, draw=accent, fill=accentlight] (perf) {Perf: M+L1};
+\node[pill, draw=green!50!black, fill=green!10, right=of perf]
+    (memok) {Mem: 14\%};
+\node[pill, draw=orange!70!black, fill=orange!10, right=of memok]
+    (memwarn) {Mem: 78\%};
+\node[pill, draw=red!70!black, fill=red!10, right=of memwarn]
+    (memcrit) {Mem: 92\%};
+\end{tikzpicture}
+\caption{Pildoras del \emph{toolbar}. La de \emph{perf} indica si
+los \emph{flags} M+L1 están activos (verde) o si el usuario forzó el
+\emph{legacy path} (gris). La de \emph{mem} cambia de verde a ámbar
+(\(\geq 75\%\) RSS/total) a rojo (\(\geq 90\%\)).}
+\label{fig:plug-pills}
+\end{figure}
+
+\subsection{Implementación}
+
+\filepath{apps/tauri/src-tauri/src/commands/perf.rs} expone
+\texttt{cmd\_get\_perf\_status} que retorna una struct con todos los
+flags resueltos. \filepath{apps/tauri/src-tauri/src/commands/memory.rs}
+expone \texttt{cmd\_get\_memory\_status} con RSS + host total +
+ratio.
+
+\filepath{apps/tauri/src/App.tsx} llama ambos comandos al \emph{mount}
+y polea el de memoria cada 5~s. Las pildoras del \emph{toolbar} se
+renderizan con \emph{data-attributes} que \texttt{App.css} mapea a
+los tres estados.
+
+\section{Telemetría adicional en \emph{batch}}
+
+El endpoint \texttt{run\_hunt\_batch} (L2) retorna una respuesta
+con tres \emph{cache counters} que el \emph{frontend} puede mostrar
+como \emph{tooltip} sobre la pildora de \emph{perf}:
+
+\begin{lstlisting}[language=Rust]
+pub struct RunHuntBatchResponse {
+    pub entries: Vec<RunHuntBatchEntry>,
+    pub indexes_were_warm: bool,
+    pub bag_cache_hits: usize,         // L2 stage 2
+    pub bag_cache_misses: usize,
+    pub result_cache_hits: usize,      // L2 stage 3a
+    pub last_prefix_resume_depth: usize,  // L2 stage 3b
+    pub prefix_cache_hits: usize,
+}
+\end{lstlisting}
+
+\section{Doc: ¿qué tocó el usuario?}
+
+La promesa \emph{plug-and-play} se hace verificable: si después de
+una optimización el usuario tuvo que cambiar algo (env var, config
+file, \emph{toggle}), la promesa se rompió. La regla quedó codificada
+en el \emph{memory feedback} \filepath{feedback\_perf\_plug\_and\_play.md}:
+
+\begin{enumerate}
+    \item \textbf{Default-on al \emph{startup}}: cada \emph{flag}
+    nuevo se setea en \texttt{lib.rs} y \texttt{main.rs} con
+    \texttt{if std::env::var(key).is\_err()}.
+    \item \textbf{Surface en UI}: extender
+    \texttt{cmd\_get\_perf\_status} y la pildora del toolbar.
+    \item \textbf{Default-off sólo con causa}: \emph{flags} que
+    reescriben el DFS \emph{hot loop} (AMAC, \emph{semi-join})
+    quedan opt-in durante un \emph{soak window}; cuando los
+    \emph{parity tests} aguantan \(\geq 1\) semana, se flipean.
+    \item \textbf{Doc obliga}: cada \emph{flip} actualiza
+    \filepath{08-env-vars.tex}, \filepath{12-preguntas-frecuentes.tex}
+    y \texttt{make all} para refrescar los 4 PDFs.
+    \item \textbf{Capabilities de \emph{build}}: \emph{Cargo features}
+    como \texttt{symmetry-nauty} se reflejan via constantes
+    \texttt{HAS\_NAUTY}-style en \texttt{cmd\_get\_perf\_status}.
+\end{enumerate}
+
+\section{El cierre del libro}
+
+Esta es la última pieza pedagógica del diseño. El resto de los libros
+GraphHunter (\emph{Arquitectura}, \emph{Especificación}, \emph{Manual},
+\emph{Paper}) profundizan en aspectos específicos:
+
+\begin{itemize}
+    \item \emph{Arquitectura}: el \emph{stack} de \emph{crates}, las
+    capas, las decisiones de \emph{layering}.
+    \item \emph{Especificación}: los \emph{contracts} de HTTP, MCP,
+    FFI, las variables de entorno, los formatos de \emph{log} aceptados.
+    \item \emph{Manual}: el \emph{user manual} para el analista ---
+    cómo se ingiere un dataset, cómo se escribe una hipótesis, cómo se
+    interpretan los resultados.
+    \item \emph{Paper}: la justificación académica con
+    \emph{benchmarks}, \emph{property tests}, y comparaciones contra
+    el estado del arte.
+\end{itemize}
+
+Este libro es la guía de diseño que los une.

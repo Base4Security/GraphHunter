@@ -1,0 +1,126 @@
+\chapter{Matcher SIMD: intersección AVX2}
+\label{sec:paper-simd}
+
+\section{Problema}
+
+Dado un grafo $G = (V, E)$ con $|V| \approx 10^5$ y una hipótesis
+que describe un patrón de longitud 2-4 hops con restricciones de
+tipo por nodo y arista, el objetivo es enumerar instancias del
+patrón. La fase \emph{candidate generation} se reduce a
+intersección de \emph{posting-lists}: el conjunto de vecinos de
+un nodo $u$ que cumplen tipo $\tau$ son ordenados por \code{u32}
+id, y el candidate-set del siguiente hop es la intersección con
+otra lista ordenada.
+
+El costo de la operación dominante no es el grafo: es la
+intersección de listas ordenadas, invocada en el orden de
+$O(\text{hops} \cdot |\text{frontier}|)$ veces por hunt. Una
+implementación escalar con branchy merge sufre de \emph{branch
+mispredictions} proporcionales al número de diferencias entre las
+listas.
+
+\section{Algoritmo}
+
+\filepath{libgraphmatch} implementa la intersección AVX2 sobre
+listas de \code{u32} alineadas a 32 bytes, en bloques de 8 elementos
+por lado.
+
+\begin{algorithm}[H]
+\caption{Intersección SIMD de posting-lists u32 ordenadas}
+\label{alg:paper-simd}
+\KwIn{$A, B$ listas u32 ordenadas, alineadas a 32B}
+\KwOut{$C = A \cap B$}
+$i \gets 0,\ j \gets 0,\ k \gets 0$\;
+\While{$i + 8 \le |A| \land j + 8 \le |B|$}{
+    $v_A \gets$ \texttt{\_mm256\_load\_si256}$(A + i)$\;
+    $v_B \gets$ \texttt{\_mm256\_load\_si256}$(B + j)$\;
+    $m \gets$ comparar cada elemento de $v_A$ contra los 8 de $v_B$ (todos vs todos)\;
+    extraer matches a $C$ con \texttt{\_mm256\_permutevar8x32\_epi32}\;
+    avanzar $i$ o $j$ según $\max(v_A) \lessgtr \max(v_B)$\;
+}
+\Comment{cola escalar}
+\While{$i < |A| \land j < |B|$}{
+    actualizar $C, i, j$ según comparación escalar\;
+}
+\Return $C$
+\end{algorithm}
+
+El kernel usa la identidad
+$a_i = b_j \iff \texttt{cmpeq}(v_A, \text{broadcast}(b_j))$ aplicada
+a los 8 elementos de $v_B$, recolectados en una máscara de 32 bits
+cuyos bits comprimen los matches. La tabla de shuffle se precomputa
+en \code{.rodata}. El runtime detecta AVX2 con
+\code{\_\_builtin\_cpu\_supports}; si no está, cae al camino
+escalar.
+
+\section{Equivalencia con la referencia DFS}
+
+Una implementación SIMD puede ser rápida y silenciosamente
+incorrecta: reordenamientos por carril, manejo de bordes, fallback
+parcial. Para blindar la equivalencia se mantiene una referencia
+DFS ingenua (\emph{ground truth}) y una \emph{property-based test}
+que genera grafos aleatorios y compara:
+
+\begin{equation}
+\forall G, \forall h \in \text{Hypothesis}:
+\quad \text{SIMD}(G, h) = \text{DFS}(G, h)
+\label{eq:paper-equiv}
+\end{equation}
+
+El test vive en
+\filepath{core/matcher-ffi/tests/equivalence_dfs_simd.rs} y genera
+grafos con hasta $10^3$ nodos con distribución de grados
+power-law para cubrir tanto hubs como nodos rare. La
+comparación es \emph{set-equality} sobre el conjunto de paths
+emitidos (sin orden). En CI corre con $10^4$ casos; localmente,
+$10^5$ sin falla reportada hasta la fecha.
+
+\section{Dominios de aplicación dentro del sistema}
+
+La intersección SIMD es invocada en tres subsistemas:
+
+\begin{itemize}
+    \item \textbf{Candidate generation} del matcher. El uso
+    dominante, responsable de $\sim$80\% del tiempo de hunt para
+    hipótesis con más de 2 hops.
+    \item \textbf{Dedup} de aristas en el ingestor. Dos eventos
+    pueden generar la misma arista lógica; deduplicar hash-sets
+    con $\sim 10^6$ elementos se beneficia de SIMD similar.
+    \item \textbf{Neighborhood concentration} en scoring: el
+    componente necesita intersectar el vecindario de cada nodo
+    del path.
+\end{itemize}
+
+\section{Throughput medido}
+
+Se reportan números ilustrativos de \code{benches/dedup_throughput}
+y \code{benches/hunt_latency} con criterio:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Benchmark & Escalar & SIMD AVX2 \\
+\midrule
+Intersección u32 (10k vs 10k) & 42 µs & 9 µs \\
+Dedup aristas (1M sets)        & 520 ms & 180 ms \\
+Hunt 3-hop, $|V|=10^4$         & 310 ms & 78 ms \\
+\bottomrule
+\end{tabular}
+\caption{Throughput relativo SIMD vs escalar. Los valores varían
+con $\pm 15\%$ entre corridas.}
+\label{tab:paper-bench-simd}
+\end{table}
+
+La ganancia no es uniforme: para listas \emph{tiny} ($<32$
+elementos) el costo de configurar vectores domina y el escalar
+gana. El dispatcher chequea umbral y selecciona.
+
+\section{Aislamiento FFI}
+
+El kernel C++ se importa a Rust vía \code{matcher-ffi} con el
+patrón descrito en cap.~\ref{sec:paper-ffi}. El código SIMD
+nunca es visible fuera de la crate \code{matcher-ffi}. Esto
+confina cualquier \emph{undefined behavior} del lado C++ a una
+frontera bien conocida.

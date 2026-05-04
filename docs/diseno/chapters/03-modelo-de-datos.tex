@@ -1,0 +1,158 @@
+\chapter{Modelo de datos}
+\label{cap:datos}
+
+\begin{intuicion}
+El grafo es un \emph{multigrafo dirigido temporal} sobre entidades.
+``Multi'' = puede haber varias aristas entre los mismos dos nodos
+(por ejemplo, el mismo proceso lanzando otro varias veces). ``Dirigido''
+= cada arista tiene origen y destino fijos, no son simétricas.
+``Temporal'' = cada arista lleva un \texttt{timestamp} y los algoritmos
+explotan ese orden. ``Sobre entidades'' = los nodos no son strings sueltos
+sino tuplas tipadas \texttt{(EntityType, identifier)}.
+\end{intuicion}
+
+\section{\texttt{Entity}, \texttt{Relation}, \texttt{StrId}}
+
+\begin{lstlisting}[language=Rust,caption={Tipos públicos del modelo. Los campos opcionales se omiten en el ejemplo para foco.}]
+pub struct Entity {
+    pub id: String,                 // ej. "10.0.0.42" o "lsass.exe"
+    pub entity_type: EntityType,    // ej. IP, Process, User
+    pub metadata: HashMap<...>,     // campos opcionales del log
+}
+
+pub struct Relation {
+    pub source_id: String,
+    pub dest_id: String,
+    pub rel_type: RelationType,     // ej. Auth, Connect, Spawn
+    pub timestamp: i64,             // segundos epoch
+    pub metadata: HashMap<...>,
+}
+\end{lstlisting}
+
+\texttt{Entity::id} y \texttt{Relation::source\_id}/\texttt{dest\_id}
+son \texttt{String}s humanos. Internamente, el motor los pasa por un
+\emph{interner} (\texttt{StringInterner}) que devuelve un
+\texttt{StrId} (\texttt{u32}) compacto. La \texttt{StringInterner}
+guarda cada string una sola vez en un \texttt{Vec<Arc<str>>};
+resoluciones futuras devuelven \texttt{Arc<str>} sin reasignación.
+
+\begin{intuicion}
+Pensá el \emph{interner} como una tabla de hash bidireccional con
+identidad estable. Cada string nuevo entra con un \texttt{StrId}
+secuencial; el motor pasa \texttt{StrId}s en lugar de \texttt{String}s
+durante todo el \emph{matching} (4~bytes vs.\ ~24~bytes/punter +
+\emph{heap} en cada copia). Sólo al \emph{emit} de un resultado se
+resuelven a \texttt{Arc<str>}.
+\end{intuicion}
+
+\section{\texttt{CompactRelation}: 32~bytes/arista}
+
+El \texttt{Relation} público (humano) pesa $\sim 200$~bytes en RAM.
+Para soportar EVTX de 28~GB ($\sim 100$M aristas) sin reventar la
+\emph{heap}, el motor usa un \texttt{CompactRelation} de 32~bytes:
+
+\begin{lstlisting}[language=Rust]
+#[repr(C)]
+pub struct CompactRelation {
+    pub timestamp: i64,           // 8 B
+    pub metadata_offset: u64,     // 8 B (offset al MetadataStore)
+    pub source_sid: StrId,        // 4 B
+    pub dest_sid: StrId,          // 4 B
+    pub ingested_at_delta: u32,   // 4 B (segundos desde INGEST_EPOCH_BASE)
+    pub dataset_tag: u16,         // 2 B
+    pub rel_type_tag: u8,         // 1 B
+    // 1 B padding implícito
+}
+\end{lstlisting}
+
+\texttt{metadata\_offset} es un \emph{handle} al
+\texttt{MetadataStore} \emph{append-only}; \texttt{0} significa
+``sin metadata'' y se chequea sin \emph{lookup}. El \texttt{u8} de
+\texttt{rel\_type\_tag} permite el \emph{matching} sin resolver el
+\texttt{enum} entero.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.4cm,
+    every node/.style={font=\footnotesize, align=center},
+    field/.style={draw=accent, thick, minimum width=1cm, minimum height=0.8cm,
+                  fill=accentlight}
+]
+\node[field, minimum width=2.2cm] (ts) {\texttt{timestamp}\\\scriptsize 8\,B};
+\node[field, right=of ts, minimum width=2.4cm] (mo) {\texttt{metadata\_offset}\\\scriptsize 8\,B};
+\node[field, right=of mo, minimum width=1.4cm] (src) {\texttt{src\_sid}\\\scriptsize 4\,B};
+\node[field, right=of src, minimum width=1.4cm] (dst) {\texttt{dst\_sid}\\\scriptsize 4\,B};
+\node[field, below=0.6cm of ts.south west, anchor=north west, minimum width=1.6cm] (ia) {\texttt{ingested\_at}\\\scriptsize 4\,B};
+\node[field, right=of ia, minimum width=1.0cm] (dt) {\texttt{ds\_tag}\\\scriptsize 2\,B};
+\node[field, right=of dt, minimum width=1.0cm] (rt) {\texttt{rel\_tag}\\\scriptsize 1\,B};
+\node[field, right=of rt, minimum width=0.9cm, fill=white, dashed] (pad) {pad\\\scriptsize 1\,B};
+\end{tikzpicture}
+\caption{\texttt{CompactRelation} en \texttt{\#[repr(C)]}: 32~bytes
+exactos, alineados a 8. El \emph{layout} se eligió para que un
+\texttt{\&[StreamEdge]} (que comparte \emph{layout} byte-a-byte) se
+mapee directamente a una región \emph{mmap} cuando el \emph{streaming
+backend} \emph{spills} a disco.}
+\label{fig:datos-compact}
+\end{figure}
+
+\section{Almacenamiento de aristas: \emph{streaming backend} con auto-spill}
+
+El motor mantiene las aristas en un \emph{streaming backend}
+per-vertex \emph{degree-adaptive}: \texttt{Inline} para grado $\leq 8$
+(en la struct misma, sin alloc), \texttt{Vec<StreamEdge>} para grado
+mayor. Cuando el budget global cruza el umbral
+(default $10^6$ aristas en \texttt{GraphHunter::new()},
+configurable vía \texttt{with\_memory\_budget\_edges}) el backend
+escribe un archivo \emph{round-numbered}, lo \emph{mmap}-ea, y
+swap-ea cada \texttt{NeighborList} a la variante \texttt{Mmap \{ handle,
+byte\_offset, len \}}. El \emph{sort} por \texttt{timestamp} se hace
+\emph{durante el write}, así que el archivo es \emph{matcher-ready}.
+Las búsquedas binarias \texttt{partition\_point} sobre la \emph{slice}
+funcionan indistintamente sobre la región \emph{Inline}, \emph{Vec}
+en RAM, o \emph{Mmap} de disco.
+
+\begin{enelcodigo}
+\filepath{core/graph-engine/src/streaming.rs}:
+\texttt{InMemoryStreamingBackend} con \texttt{append\_edge},
+\texttt{finalize}, \texttt{auto\_spill}, \texttt{neighbors\_arc},
+\texttt{for\_each\_edge}. Stage 2c part 2 eliminó el antiguo
+\texttt{SpillableEdgeStore} (heavy-logs~\#1/\#2) en favor de este
+diseño unificado --- el matcher \emph{hot path} y los $\sim$50
+\emph{readers} \emph{admin/aggregation} comparten un solo \emph{store}.
+\end{enelcodigo}
+
+\section{\texttt{HuntResult} y la migración a \texttt{Arc<str>}}
+
+Un \emph{hunt} produce \texttt{Vec<HuntResult>}, donde
+\texttt{HuntResult = Vec<Arc<str>>}. Cada elemento del \texttt{Vec}
+es un vértice del \emph{path} resuelto vía el \emph{interner}.
+
+\begin{intuicion}
+El cambio de \texttt{Vec<String>} a \texttt{Vec<Arc<str>>} (heavy-logs)
+parece menor pero ahorró $\sim 55\%$ del tiempo de \emph{cap-saturated
+benches}. \texttt{String::from(...)} \emph{aloca} bytes en \emph{heap};
+\texttt{Arc::clone(...)} sólo bumpea un contador atómico. En un
+\emph{hunt} con 10K resultados de 4~vértices cada uno, eso son 40K
+\emph{allocs} convertidos en 40K \emph{refcount bumps}.
+\end{intuicion}
+
+\section{Índices auxiliares}
+
+Sobre el grafo construido el motor mantiene dos índices que aceleran
+el \emph{matcher} pero no son la \emph{source of truth}:
+
+\begin{itemize}
+    \item \textbf{NLF} (\emph{Neighborhood Label Frequency}): para
+    cada vértice, cuántos vecinos salientes tiene de cada
+    \texttt{EntityType}. Permite descartar \emph{starts} cuyo
+    histograma no satisface el primer paso de la hipótesis.
+    \item \textbf{k-hop reachability}: bitmap de los tipos
+    alcanzables en a lo sumo \texttt{MAX\_DEPTH=4} saltos, más
+    \texttt{min\_first} y \texttt{max\_first} para gating temporal.
+\end{itemize}
+
+Ambos se construyen \emph{lazy} en el primer \emph{hunt} sobre la
+sesión (heavy-logs~\#3.5) y se invalidan / actualizan
+incrementalmente en cada \texttt{add\_relation} (L3 stage~2a).
+Capítulo~\ref{cap:indexes} entra en detalle.

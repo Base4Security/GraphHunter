@@ -1,0 +1,605 @@
+\documentclass[11pt,openany]{book}
+
+\input{preamble}
+
+\title{\bfseries GraphHunter\\[0.6em]\Large Algorithms Reference}
+\author{GraphHunter Engineering}
+\date{\today}
+
+\begin{document}
+
+\frontmatter
+\maketitle
+
+\begin{center}
+\vspace*{2em}
+\small
+\textit{A specification-style reference for the three numerical and
+graph routines at the core of GraphHunter: temporal depth-first
+search, five-component path anomaly scoring, and SIMD-accelerated
+sorted set intersection.}
+\end{center}
+
+\cleardoublepage
+\tableofcontents
+
+\mainmatter
+
+% ============================================================
+\chapter{Preliminaries}
+\label{chap:preliminaries}
+
+This document specifies three algorithms used in GraphHunter's core
+detection pipeline. Each chapter follows the same structure: a
+\textbf{problem statement} formalizing the input and output, an
+\textbf{algorithm} description in pseudocode, a \textbf{complexity}
+analysis, a list of \textbf{invariants} the implementation must
+satisfy, and \textbf{references} to the literature from which the
+techniques were drawn.
+
+The documents are \emph{specifications}, not code walkthroughs. Line
+numbers and function names drift as the codebase evolves; the math
+and the invariants do not. Each invariant is pinned by at least one
+property-based test in the Rust test suite; those tests are identified
+by their file name inside \texttt{core/graph-engine/tests/} or
+\texttt{core/matcher-ffi/tests/}.
+
+\section*{Notation}
+
+Throughout, $G = (V, E)$ denotes a directed, labeled, time-stamped
+graph. Each node $v \in V$ carries an entity type $\tau(v)$ drawn
+from a finite alphabet. Each edge $e = (u, v, r, t) \in E$ carries
+a source $u$, destination $v$, relation-type label $r$, and an
+integer timestamp $t \in \Z$.
+
+A \emph{hypothesis} $H = (s_1, s_2, \dots, s_k)$ is an ordered
+sequence of \emph{steps}; each step $s_i = (\tau^{\mathrm{o}}_i,
+r_i, \tau^{\mathrm{d}}_i, P_i)$ specifies an origin type, a
+relation type, a destination type, and a set of predicates on
+edge and destination metadata.
+
+A \emph{path} $\pi = v_0 \to v_1 \to \dots \to v_k$ is a sequence
+of $k+1$ nodes connected by $k$ edges; path indexing is zero-based.
+
+% ============================================================
+\chapter{Temporal Depth-First Search}
+\label{chap:dfs}
+
+\section{Problem}
+\label{sec:dfs:problem}
+
+\begin{problem}[Hypothesis matching with temporal causality]
+\label{prob:dfs}
+Given a graph $G$, a validated hypothesis $H = (s_1, \dots, s_k)$,
+an optional time window $[t_{\text{start}}, t_{\text{end}}]$, and a
+result cap $c \in \N$, enumerate up to $c$ paths
+$\pi = v_0 \to v_1 \to \dots \to v_k$ satisfying:
+\begin{enumerate}
+  \item \textbf{Type chain.} For every $i \in [1, k]$,
+        $\tau(v_{i-1}) = \tau^{\mathrm{o}}_i$ and
+        $\tau(v_i) = \tau^{\mathrm{d}}_i$. A wildcard type
+        (\textsc{Any}) matches all.
+  \item \textbf{Relation-type match.} There exists an edge
+        $(v_{i-1}, v_i, r, t_i) \in E$ with $r = r_i$, or
+        $r_i = \textsc{Any}$.
+  \item \textbf{Temporal causality.} $t_1 \le t_2 \le \dots \le t_k$.
+  \item \textbf{Time-window bound.} If the window is set, every
+        $t_i \in [t_{\text{start}}, t_{\text{end}}]$.
+  \item \textbf{$k$-simplicity.} The nodes $v_0, v_1, \dots, v_k$
+        are pairwise distinct.
+  \item \textbf{Predicate match.} The edge and destination metadata
+        satisfy every predicate in $P_i$.
+\end{enumerate}
+\end{problem}
+
+\section{Algorithm}
+\label{sec:dfs:algorithm}
+
+The matcher performs depth-first search with backtracking,
+parameterized by the current hypothesis step. The pseudocode below
+extends the standard DFS (Cormen \emph{et al.}~\cite{clrs} \S22.3)
+with a pattern pointer, a temporal guard, and predicate evaluation.
+
+\begin{algorithm}[H]
+\caption{\textsc{Search-Temporal-Pattern}$(G, H, [t_{\text{lo}}, t_{\text{hi}}], c)$}
+\label{alg:dfs}
+\Input{graph $G$; hypothesis $H$; window $[t_{\text{lo}}, t_{\text{hi}}]$; cap $c$}
+\Output{set $R$ of matching paths, with $\abs{R} \le c$; truncation flag}
+
+$R \gets \emptyset$; $\mathit{trunc} \gets \bot$\;
+$S \gets \set{v \in V : \tau(v) = \tau^{\mathrm{o}}_1 \lor \tau^{\mathrm{o}}_1 = \textsc{Any}}$\;
+\For{each $v \in S$}{
+  \If{$\abs{R} \ge c$}{$\mathit{trunc} \gets \top$; \textbf{break}\;}
+  \textsc{Dfs}$(v, 1, [v], \set{v})$\;
+}
+\KwReturn $(R, \mathit{trunc})$\;
+
+\BlankLine
+\SetKwFunction{Dfs}{Dfs}
+\SetKwProg{myproc}{Procedure}{}{}
+\myproc{\Dfs{$u, i, \pi, V_{\mathrm{seen}}$}}{
+  \If{$i > k$}{
+    $R \gets R \cup \set{\pi}$\;
+    \KwReturn\;
+  }
+  \For{each edge $(u, w, r, t) \in E$ in ascending $t$ order}{
+    \If{$\tau(w) \ne \tau^{\mathrm{d}}_i \land \tau^{\mathrm{d}}_i \ne \textsc{Any}$}{\textbf{continue}\;}
+    \If{$r \ne r_i \land r_i \ne \textsc{Any}$}{\textbf{continue}\;}
+    \If{$w \in V_{\mathrm{seen}}$}{\textbf{continue} \Comment*[r]{$k$-simplicity}}
+    \If{$\pi$ non-empty \textbf{and} $t < t_{\mathrm{last}}$}{\textbf{continue}\;}
+    \If{window set \textbf{and} $t \notin [t_{\text{lo}}, t_{\text{hi}}]$}{\textbf{continue}\;}
+    \If{predicates $P_i$ reject $(e, w)$}{\textbf{continue}\;}
+    \textsc{Dfs}$(w, i+1, \pi \cdot w, V_{\mathrm{seen}} \cup \set{w})$\;
+  }
+}
+\end{algorithm}
+
+The driver selects candidate start nodes by type, then launches
+\textsc{Dfs} from each. The procedure emits on success ($i > k$),
+otherwise recurses on every edge that satisfies the combined type,
+temporal, and predicate constraints. Backtracking unwinds the
+\emph{visited} set and the partial path in LIFO order.
+
+\section{Complexity}
+\label{sec:dfs:complexity}
+
+Let $n = \abs{V}$, $m = \abs{E}$, $k = \abs{H}$, and
+$b = \max_{v \in V} \degout_{\text{out}}(v)$.
+
+\begin{theorem}[Worst-case running time]
+\label{thm:dfs:worst}
+\textsc{Search-Temporal-Pattern} runs in $\bigO(n \cdot b^k)$ time
+and uses $\bigO(k)$ stack depth plus $\bigO(n)$ memory for the
+visited set.
+\end{theorem}
+
+\begin{proof}[Sketch]
+The outer loop over candidate start nodes is $\bigO(n)$. Each
+\textsc{Dfs} call at depth $i$ iterates at most $b$ edges and
+recurses at most $b$ times at depth $i+1$. Unfolding the recursion
+to depth $k$ yields $b^k$ work per start node. The stack depth is
+bounded by $k$, and \emph{visited} has $\bigO(n)$ entries.
+\end{proof}
+
+In practice, the type filter and the causality constraint reduce the
+effective branching factor to $b' \ll b$. On the \texttt{User-Auth-IP}
+benchmark with $n = 10{,}000$, observed wall time is $\approx 15\unit{ms}$,
+consistent with $b' \cdot k \approx 30$ edge visits per start node.
+
+\begin{remark}[Early termination]
+The enumeration stops once $\abs{R} = c$, at which point the caller
+receives $\mathit{trunc} = \top$. This caps wall time at the cost of
+result completeness; downstream code must treat the result set as a
+sample, not a census.
+\end{remark}
+
+\section{Invariants}
+\label{sec:dfs:invariants}
+
+The following invariants must hold for every call; violations are
+bugs, not edge cases.
+
+\begin{invariant}[Hypothesis well-formedness]
+\label{inv:dfs:hypo}
+$H$ has passed \textsc{Hypothesis.validate} before
+\textsc{Search-Temporal-Pattern} is invoked. In particular,
+$k \ge 1$ and $\tau^{\mathrm{d}}_i = \tau^{\mathrm{o}}_{i+1}$ for
+every $i \in [1, k-1]$.
+\end{invariant}
+
+\begin{invariant}[Visited-set well-balance]
+\label{inv:dfs:visited}
+Every insertion into $V_{\mathrm{seen}}$ is matched by a deletion
+along the backtracking path. In particular, on return to the driver
+loop, $V_{\mathrm{seen}} = \set{v}$ where $v$ is the current start.
+\end{invariant}
+
+\begin{invariant}[Path length and acyclicity]
+\label{inv:dfs:path}
+Every emitted $\pi \in R$ has $\abs{\pi} = k + 1$, and its nodes are
+pairwise distinct.
+\end{invariant}
+
+\begin{implnote}
+The invariants of Chapter~\ref{chap:dfs} are tested in
+\texttt{core/graph-engine/tests/parsers.rs} and
+\texttt{core/matcher-ffi/tests/simd\_matcher\_test.rs}. The equivalence
+between this DFS matcher and the SIMD implementation of
+Chapter~\ref{chap:simd} is pinned by
+\texttt{core/matcher-ffi/tests/equivalence\_proptest.rs}.
+\end{implnote}
+
+\section{References}
+\label{sec:dfs:refs}
+\begin{itemize}
+  \item T.~H.~Cormen, C.~E.~Leiserson, R.~L.~Rivest, C.~Stein.
+        \emph{Introduction to Algorithms}, 3rd ed., \S22.3.
+        MIT Press, 2009.~\cite{clrs}
+  \item R.~Tarjan. ``Depth-first search and linear graph
+        algorithms.'' \emph{SIAM J.\ Comput.}, 1(2), 1972.
+  \item W.~Fan, J.~Li, S.~Ma, N.~Tang, Y.~Wu, Y.~Wu. ``Graph Pattern
+        Matching: From Intractable to Polynomial Time.''
+        \emph{VLDB}, 2010.
+\end{itemize}
+
+% ============================================================
+\chapter{Path Anomaly Scoring}
+\label{chap:scoring}
+
+\section{Problem}
+\label{sec:scoring:problem}
+
+\begin{problem}[Weighted five-component anomaly score]
+\label{prob:scoring}
+Given a finalized graph $G$ augmented with observation counts, a
+path $\pi = v_0 \to \dots \to v_k$ produced by
+Algorithm~\ref{alg:dfs}, and a non-negative weight vector
+$w = (w_1, w_2, w_3, w_4, w_5)$, compute a composite anomaly score
+$S(\pi) \in [0, 1]$ and a breakdown
+$C(\pi) = (C_1, C_2, C_3, C_4, C_5) \in [0,1]^5$ of the five
+contributing components.
+\end{problem}
+
+\section{Components}
+\label{sec:scoring:components}
+
+Every component is bounded in $[0, 1]$ and averaged over the
+appropriate part of the path.
+
+\subsection{Entity rarity}
+\label{sec:scoring:er}
+
+For a node $v$ with observation count $\freq(v)$ and
+$\freq_{\max} = \max_v \freq(v)$,
+\[
+\mathrm{ER}(v) \;=\; \max\!\left(0, \; 1 - \frac{\ln \freq(v)}{\ln \freq_{\max}}\right),
+\]
+with $\mathrm{ER}(v) = 0$ when $\freq_{\max} = 1$ (degenerate case).
+Averaged over the path:
+\[
+C_1(\pi) = \frac{1}{\abs{\pi}} \sum_{v \in \pi} \mathrm{ER}(v).
+\]
+The logarithmic normalization flattens the heavy-tailed observation
+distributions we observe in production so that a single very-popular
+node does not crush the score dynamic range.
+
+\subsection{Edge rarity}
+\label{sec:scoring:edger}
+
+For a directed pair $(s, d)$ with co-occurrence count
+$\freq(s, d)$ and $\freq^{\mathrm{pair}}_{\max}$ the global maximum,
+\[
+\mathrm{EdgeR}(s, d) \;=\; \max\!\left(0, \; 1 - \frac{\ln \freq(s, d)}{\ln \freq^{\mathrm{pair}}_{\max}}\right),
+\]
+averaged over the $k = \abs{\pi} - 1$ consecutive pairs in $\pi$.
+
+\subsection{Neighborhood concentration}
+\label{sec:scoring:nc}
+
+Precomputed during \textsc{Finalize}$(G)$ and cached per node. The
+scalar $\mathrm{NC}(v) \in [0, 1]$ encodes the classical ``dense
+anomalous subgraph'' heuristic of Akoglu \emph{et al.}~\cite{akoglu}:
+nodes with few neighbors dominated by a single type score high;
+nodes embedded in diverse, populous neighborhoods score low.
+Averaged over the path.
+
+\subsection{Temporal novelty}
+\label{sec:scoring:tn}
+
+Given the first-seen timestamp $\tau_{\mathrm{first}}(v)$ and the
+graph-wide extrema $\tau_{\min}, \tau_{\max}$,
+\[
+\mathrm{TN}(v) \;=\; \frac{\tau_{\mathrm{first}}(v) - \tau_{\min}}{\tau_{\max} - \tau_{\min}},
+\]
+with $\mathrm{TN}(v) = 0$ when $\tau_{\max} = \tau_{\min}$ (all
+nodes seen at the same timestamp). Averaged over the path.
+
+\subsection{GNN threat}
+\label{sec:scoring:gnn}
+
+If a graph neural network has produced a threat-probability estimate
+$\mathrm{GNN}(v) \in [0, 1]$ per node, the fifth component is the
+path average of those probabilities. When the GNN cache is empty
+(no inference has run) the component is zero by convention, and the
+weight renormalization in \S\ref{sec:scoring:composite} absorbs the
+deficit by redistributing mass across the remaining components.
+
+\section{Composite}
+\label{sec:scoring:composite}
+
+The composite score is the weight-normalized convex combination
+\begin{equation}
+\label{eq:composite}
+S(\pi) \;=\; \frac{\sum_{i=1}^{5} w_i \cdot C_i(\pi)}{\sum_{i=1}^{5} w_i},
+\end{equation}
+clamped to $[0, 1]$. When $\sum_i w_i = 0$ the quotient would be
+undefined; the implementation returns $S(\pi) = 0$ explicitly in
+that branch. This is the invariant that prevents \texttt{NaN} from
+propagating into downstream sort comparators, where it would
+violate strict-weak ordering.
+
+\section{Invariants}
+\label{sec:scoring:invariants}
+
+\begin{invariant}[Boundedness]
+\label{inv:scoring:bound}
+For every $\pi$ and every non-negative $w$, $S(\pi) \in [0, 1]$ and
+$C_i(\pi) \in [0, 1]$ for $i \in \set{1, \dots, 5}$. No component
+ever returns $\mathtt{NaN}$ or $\pm\infty$.
+\end{invariant}
+
+\begin{invariant}[Zero-weights guard]
+\label{inv:scoring:zero}
+If $\sum_i w_i = 0$, then $S(\pi) = 0$.
+\end{invariant}
+
+\begin{invariant}[Un-finalized scorer]
+\label{inv:scoring:unfin}
+If \textsc{Finalize}$(G)$ has not been called, \textsc{Score-Path}
+returns $(0, \mathbf{0})$ irrespective of $\pi$. Callers use
+\textsc{Is-Finalized} as a gate.
+\end{invariant}
+
+\begin{theorem}[Entity-rarity monotonicity]
+\label{thm:scoring:monotone}
+Let $a, b \in V$ satisfy $\freq(a) \le \freq(b)$ and
+$\tau_{\mathrm{first}}(a) = \tau_{\mathrm{first}}(b)$. Then
+$\mathrm{ER}(a) \ge \mathrm{ER}(b)$.
+\end{theorem}
+
+\begin{proof}
+$\mathrm{ER}(v) = 1 - \ln \freq(v) / \ln \freq_{\max}$ is
+non-increasing in $\freq(v)$ because $\ln$ is non-decreasing and
+$\ln \freq_{\max} > 0$ whenever $\freq_{\max} > 1$. The
+$\max(0, \cdot)$ clamp preserves the ordering.
+\end{proof}
+
+\begin{implnote}
+Invariants~\ref{inv:scoring:bound}--\ref{inv:scoring:unfin} and
+Theorem~\ref{thm:scoring:monotone} are pinned by the property tests
+in \texttt{core/graph-engine/tests/anomaly\_proptest.rs}, running
+256 cases per property across randomized weight vectors and
+observation distributions.
+\end{implnote}
+
+\section{Trade-offs}
+\label{sec:scoring:tradeoffs}
+
+\begin{itemize}
+  \item \textbf{Averaging masks outliers.} A single extremely-rare
+        node on a long path gets averaged down by its common
+        neighbors. Alternatives (max-over-path, quantile) break the
+        monotonicity property and complicate paginated consumers.
+  \item \textbf{Log normalization assumes Zipfian distributions.}
+        If observation counts are roughly uniform, $C_1$ and $C_2$
+        collapse to near zero.
+  \item \textbf{First-seen is spoofable.} An attacker aware of the
+        scoring can backdate $\tau_{\mathrm{first}}(v)$ on a fresh
+        node to suppress $C_4$. Mitigation is out of scope; ingestion
+        must cross-check against an append-only audit log.
+\end{itemize}
+
+\section{References}
+\label{sec:scoring:refs}
+\begin{itemize}
+  \item L.~Akoglu, H.~Tong, D.~Koutra. ``Graph-based anomaly detection
+        and description: a survey.'' \emph{DMKD} 29(3), 2015.~\cite{akoglu}
+  \item V.~Chandola, A.~Banerjee, V.~Kumar. ``Anomaly detection: a
+        survey.'' \emph{ACM Computing Surveys} 41(3), 2009.
+  \item L.~Akoglu, M.~McGlohon, C.~Faloutsos. ``OddBall: Spotting
+        Anomalies in Weighted Graphs.'' \emph{PAKDD}, 2010.
+\end{itemize}
+
+% ============================================================
+\chapter{SIMD-Accelerated Sorted Set Intersection}
+\label{chap:simd}
+
+\section{Problem}
+\label{sec:simd:problem}
+
+\begin{problem}[Sorted set intersection]
+\label{prob:simd}
+Given two strictly ascending arrays $A[0 \mathinner{\ldotp\ldotp} m)$ and
+$B[0 \mathinner{\ldotp\ldotp} n)$ of 32-bit unsigned integers, compute either
+\begin{itemize}[leftmargin=2em]
+  \item $\textsc{Intersect}(A, B, \mathit{out})$: write the sorted
+        intersection $A \cap B$ into $\mathit{out}$ and return
+        $\abs{A \cap B}$; or
+  \item $\textsc{Intersect-Count}(A, B)$: return $\abs{A \cap B}$
+        without materializing the output (used when the caller
+        only needs the count for pruning).
+\end{itemize}
+\end{problem}
+
+A temporal variant \textsc{Intersect-Temporal} additionally filters
+matches whose associated timestamp lies outside a window
+$[t_{\text{lo}}, t_{\text{hi}}]$. Used by the matcher of
+Chapter~\ref{chap:dfs} when narrowing candidate edges.
+
+\section{Dispatch}
+\label{sec:simd:dispatch}
+
+A static feature-detection routine selects one of four variants at
+first call and memoizes the choice in an atomic global:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabularx}{\linewidth}{l l l X}
+\toprule
+\textbf{ISA} & \textbf{Variant} & \textbf{Lane width} & \textbf{Intrinsic family} \\
+\midrule
+AVX-512 & scalar fallback (for now) & --- & --- \\
+AVX2    & \textsc{Intersect-Avx2}    & $8 \times \code{uint32}$ & \code{\_mm256\_cmpeq\_epi32}, \code{\_mm256\_movemask\_epi8} \\
+SSE4.2  & scalar fallback            & --- & --- \\
+NEON    & scalar fallback            & --- & --- \\
+Other   & \textsc{Intersect-Scalar}  & 1 & --- \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Branch prediction eliminates the dispatch cost after the first few
+invocations.
+
+\section{Scalar variant}
+\label{sec:simd:scalar}
+
+The two-pointer merge, for reference.
+
+\begin{algorithm}[H]
+\caption{\textsc{Intersect-Scalar}$(A, B, \mathit{out})$}
+\label{alg:simd:scalar}
+\Input{sorted arrays $A[0 \mathinner{\ldotp\ldotp} m)$, $B[0 \mathinner{\ldotp\ldotp} n)$}
+\Output{count $k = \abs{A \cap B}$; $\mathit{out}[0 \mathinner{\ldotp\ldotp} k)$ holds the intersection}
+$i \gets 0$; $j \gets 0$; $k \gets 0$\;
+\While{$i < m$ \KwAnd $j < n$}{
+  \lIf{$A[i] = B[j]$}{$\mathit{out}[k] \gets A[i]$; $k \gets k+1$; $i \gets i+1$; $j \gets j+1$}
+  \lElseIf{$A[i] < B[j]$}{$i \gets i+1$}
+  \lElse{$j \gets j+1$}
+}
+\KwReturn $k$\;
+\end{algorithm}
+
+Running time is $\Theta(m + n)$ in both the best and worst cases.
+
+\section{AVX2 variant}
+\label{sec:simd:avx2}
+
+The AVX2 specialization follows the broadcast--compare--movemask
+scheme of Schlegel, Gubichev, and Neumann~\cite{schlegel}. Let
+$V = 8$ be the AVX2 lane count.
+
+\begin{algorithm}[H]
+\caption{\textsc{Intersect-Avx2}$(A, B, \mathit{out})$}
+\label{alg:simd:avx2}
+\Input{sorted arrays $A[0 \mathinner{\ldotp\ldotp} m)$, $B[0 \mathinner{\ldotp\ldotp} n)$, with strictly increasing values}
+\Output{count $k$; $\mathit{out}[0 \mathinner{\ldotp\ldotp} k)$ holds the intersection}
+$i \gets 0$; $j \gets 0$; $k \gets 0$\;
+\While{$i + V \le m$ \KwAnd $j < n$}{
+  $\mathbf{v}_A \gets \textsc{Load-256}(A + i)$ \Comment*[r]{8 lanes of $A$}
+  $a_{\max} \gets A[i + V - 1]$\;
+  \While{$j < n$ \KwAnd $B[j] \le a_{\max}$}{
+    $\mathbf{v}_B \gets \textsc{Broadcast-256}(B[j])$\;
+    $\mathbf{c} \gets \mathbf{v}_A \stackrel{?}{=} \mathbf{v}_B$ \Comment*[r]{lane-wise equality}
+    $M \gets \textsc{Movemask}(\mathbf{c})$\;
+    \lIf{$M \ne 0$}{$\mathit{out}[k] \gets B[j]$; $k \gets k + 1$}
+    $j \gets j + 1$\;
+  }
+  $i \gets i + V$\;
+}
+\textbf{scalar tail} for $i \ge m - V + 1$ \;
+\KwReturn $k$\;
+\end{algorithm}
+
+Because both arrays are strictly ascending, at most one lane of
+$\mathbf{c}$ can be nonzero per broadcast; the $\textsc{Movemask}$
+result therefore encodes a simple ``hit or miss.'' The scalar tail
+ensures no out-of-bounds load when $m \not\equiv 0 \pmod{V}$.
+
+\section{Complexity}
+\label{sec:simd:complexity}
+
+Let $m, n$ be the input sizes and $k = \abs{A \cap B}$ the output
+size.
+
+\begin{theorem}[AVX2 asymptotics]
+\label{thm:simd:avx2}
+\textsc{Intersect-Avx2} runs in $\bigO(m + n)$ time. Empirically,
+the constant factor is $3$--$4\times$ smaller than
+\textsc{Intersect-Scalar} on uniform-density inputs, and up to
+$6$--$8\times$ smaller when one array is sparse relative to the
+other (the inner $B$-loop executes multiple broadcasts per outer
+$A$-step).
+\end{theorem}
+
+\begin{remark}[Pathological case]
+When every $B[j] < \max(\mathbf{v}_A)$ for nearly every outer step,
+the inner loop can traverse the full length of $B$ per outer
+iteration, degenerating toward $\bigO(m \cdot n)$. The matcher
+sidesteps this by invoking intersection with the smaller array as
+the outer loop.
+\end{remark}
+
+\section{Invariants}
+\label{sec:simd:invariants}
+
+\begin{invariant}[Input well-formedness]
+\label{inv:simd:sorted}
+$A$ and $B$ are each strictly ascending with no duplicates.
+Violation causes silent duplicates in the output; the matcher's
+adjacency-list builder guarantees this property upstream.
+\end{invariant}
+
+\begin{invariant}[Output capacity]
+\label{inv:simd:capacity}
+The caller allocates $\mathit{out}$ with room for at least
+$\min(m, n)$ elements.
+\end{invariant}
+
+\begin{invariant}[No SIMD overread]
+\label{inv:simd:bounds}
+The vectorized loop processes only full $V$-lane vectors; the tail
+falls back to scalar. No unaligned \code{loadu} reads past the end
+of $A$ or $B$, so the algorithm never takes a page fault beyond the
+allocated regions.
+\end{invariant}
+
+\begin{invariant}[Thread-safety]
+\label{inv:simd:thread}
+The ISA selection is written once behind an atomic flag; the
+specialized variants are pure functions. Safe to call concurrently
+from multiple matcher threads.
+\end{invariant}
+
+\begin{invariant}[ABI stability]
+\label{inv:simd:abi}
+The Rust bridge asserts \code{gm\_abi\_version() == EXPECTED\_ABI\_VERSION}
+at first call via \code{std::sync::Once}. Silent drift in the
+dispatch table layout therefore fails loudly at initialization
+rather than at runtime with memory corruption.
+\end{invariant}
+
+\begin{implnote}
+The full SIMD matcher is tested end-to-end (not intersection alone)
+by \texttt{core/matcher-ffi/tests/equivalence\_proptest.rs}, which
+enumerates random small graphs and hypotheses and requires the DFS
+and SIMD result sets to be identical. A bug in
+\textsc{Intersect-Avx2} surfaces there as a missing path.
+\end{implnote}
+
+\section{References}
+\label{sec:simd:refs}
+\begin{itemize}
+  \item B.~Schlegel, A.~Gubichev, T.~Neumann. ``Fast Sorted-Set
+        Intersection using SIMD Instructions.'' \emph{ADMS},
+        2011.~\cite{schlegel}
+  \item D.~Lemire, O.~Kurz, C.~Rupp. ``Fast random integer generation
+        in an interval.'' \emph{ACM TOMS} 45(1), 2019.
+  \item \emph{Intel 64 and IA-32 Architectures Software Developer's
+        Manual}, Vol.\ 2B, \S\code{VPCMPEQD}, \code{VPMOVMSKB}.
+\end{itemize}
+
+% ============================================================
+\backmatter
+
+\chapter*{Bibliography}
+\addcontentsline{toc}{chapter}{Bibliography}
+\begin{thebibliography}{9}
+  \bibitem{clrs}
+    T.~H.~Cormen, C.~E.~Leiserson, R.~L.~Rivest, C.~Stein.
+    \emph{Introduction to Algorithms}, 3rd ed. MIT Press, 2009.
+
+  \bibitem{akoglu}
+    L.~Akoglu, H.~Tong, D.~Koutra.
+    ``Graph-based anomaly detection and description: a survey.''
+    \emph{Data Mining and Knowledge Discovery}, 29(3):626--688, 2015.
+
+  \bibitem{schlegel}
+    B.~Schlegel, A.~Gubichev, T.~Neumann.
+    ``Fast Sorted-Set Intersection using SIMD Instructions.''
+    \emph{International Workshop on Accelerating Data Management
+    Systems Using Modern Processor and Storage Architectures
+    (ADMS)}, 2011.
+\end{thebibliography}
+
+\end{document}

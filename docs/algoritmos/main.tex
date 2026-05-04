@@ -1,0 +1,82 @@
+\documentclass[11pt,openany]{book}
+
+\input{preamble}
+
+\title{\Huge\bfseries Graph Hunter\\[0.4em]\color{accent}\Large Algoritmos}
+\author{Lucas Sotomayor\\Base4Security}
+\date{Mayo 2026}
+
+\begin{document}
+
+\frontmatter
+\maketitle
+
+\input{front/00-prefacio}
+\input{front/01-convenciones}
+
+\tableofcontents
+
+\mainmatter
+
+\part{Fundamentos}
+\input{chapters/01-threat-hunting}
+\input{chapters/02-grafos-temporales}
+\input{chapters/03-subgraph-matching}
+\input{chapters/04-joins-y-grafos}
+\input{chapters/05-sistemas-y-memoria}
+
+\part{Arquitectura del motor}
+\input{chapters/06-pipeline-cuatro-pasos}
+\input{chapters/07-stack-de-crates}
+
+\part{Modelo de datos}
+\input{chapters/08-entity-relation}
+\input{chapters/09-string-interner}
+\input{chapters/10-compact-relation}
+\input{chapters/12-hunt-result-arc-str}
+
+\part{Pipeline de ingesta}
+\input{chapters/13-anatomia-del-ingest}
+\input{chapters/14-streaming-mirror}
+\input{chapters/15-finalize-y-sort}
+\input{chapters/16-incremental-nlf}
+
+\part{El matcher, paso a paso}
+\input{chapters/17-dfs-baseline}
+\input{chapters/18-naive-matching}
+\input{chapters/19-prune-nlf}
+\input{chapters/20-prune-khop}
+\input{chapters/21-wcoj-y-agm}
+\input{chapters/22-lftj-k4}
+\input{chapters/23-hipergrafos-y-aciclidad}
+\input{chapters/24-yannakakis-chain}
+\input{chapters/25-yannakakis-tree-walk}
+\input{chapters/26-planner}
+
+\part{Índices auxiliares en profundidad}
+\input{chapters/27-diseno-indices-auxiliares}
+\input{chapters/28-nlf-en-detalle}
+\input{chapters/29-khop-en-detalle}
+
+\part{La DSL}
+\input{chapters/30-disenando-una-dsl-chica}
+\input{chapters/31-sintaxis-chain}
+\input{chapters/32-sintaxis-graph}
+\input{chapters/33-ast-al-matcher}
+
+\part{Diseño futuro (L3)}
+\input{chapters/34-por-que-khop-delta-es-dificil}
+\input{chapters/35-delta-wcoj-propagation}
+\input{chapters/36-streaming-canonical-store}
+
+\part{Plug-and-play como tesis transversal}
+\input{chapters/37-promesa-plug-and-play}
+\input{chapters/38-frontend-instrumentation}
+
+\appendix
+\input{appendices/A-notacion}
+\input{appendices/B-glosario}
+\input{appendices/C-soluciones}
+\input{appendices/D-bibliografia}
+
+\end{document}

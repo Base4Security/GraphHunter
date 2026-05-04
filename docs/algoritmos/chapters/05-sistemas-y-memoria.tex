@@ -1,0 +1,379 @@
+\chapter{Sistemas y memoria}
+\label{cap:sistemas}
+
+\begin{intuicion}
+Los algoritmos de matching que vamos a estudiar son inteligentes,
+pero la mitad del rendimiento real del motor sale de decisiones de
+\emph{layout} de memoria: \texttt{CompactRelation} pesa 32~bytes en
+vez de 200 porque cada arista que cabe en la \emph{cache} es una que
+no espera a la RAM; el \emph{streaming backend} usa \emph{mmap}
+porque transferir 28~GB del disco al heap es inviable; el \emph{lazy
+build} de NLF y \emph{khop\_reach} usa \texttt{OnceLock} porque la
+inicialización doble bajo concurrencia es un bug clásico. Este
+capítulo da los fundamentos de sistemas que esas decisiones invocan.
+Si ya sabés qué es una \emph{cache line}, qué garantiza un
+\emph{atomic}, y por qué un \emph{branch mispredict} cuesta ciclos,
+podés saltearlo. Si no, leélo: el resto del libro lo asume.
+\end{intuicion}
+
+\section{La jerarquía de memoria}
+
+Una operación aritmética en un núcleo de CPU moderno cuesta
+\(\sim 1\) ciclo. Acceder a la RAM cuesta \(\sim 200\) ciclos. Esa
+diferencia ---\emph{un orden de magnitud y medio}--- es lo que
+manda toda la conversación sobre \emph{layout} de datos. Para
+amortiguar, las CPUs tienen una jerarquía de \emph{caches}:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Nivel} & \textbf{Tamaño típico} & \textbf{Latencia (ciclos)} & \textbf{Latencia (ns)} \\
+\midrule
+Registros        & 100 B             & 0           & 0 \\
+L1 cache         & 32--64 KB         & 4--5        & 1 \\
+L2 cache         & 256 KB--1 MB      & 10--12      & 3 \\
+L3 cache         & 8--32 MB          & 30--40      & 12 \\
+RAM principal    & 16--128 GB        & 200--300    & 100 \\
+SSD NVMe         & 1--2 TB           & \(\sim 10^5\) & 30--80 \(\mu\)s \\
+HDD              & 8--16 TB          & \(\sim 10^7\) & 4--10 ms \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+La regla de oro: si tus datos caben en L2, los algoritmos
+``inteligentes'' rinden lo que prometen. Si no caben, la latencia de
+RAM domina y la ``inteligencia'' algorítmica importa menos que la
+\emph{locality} de acceso.
+
+\subsection{Cache lines}
+
+La CPU no transfiere bytes individuales entre RAM y cache: transfiere
+\emph{cache lines} de 64~bytes (en x86\_64 e ARM modernos). Acceder a
+un solo byte trae los 63 contiguos ``gratis''. Eso tiene dos
+implicaciones:
+
+\begin{enumerate}
+    \item \textbf{Datos contiguos son rápidos.} Iterar un
+    \texttt{Vec<u32>} de 1000 elementos toca \(1000 \cdot 4 / 64 =
+    62.5\) cache lines. El siguiente elemento ya está cargado cuando
+    el anterior se procesa (la \emph{prefetch} unit lo trae).
+    \item \textbf{Datos esparcidos son lentos.} Iterar un
+    \texttt{HashMap<u32, u32>} de 1000 elementos toca, en el peor
+    caso, 1000 cache lines distintas (cada \emph{bucket} en una
+    región distinta de RAM). \(60\times\) más cache misses, mismo
+    trabajo lógico.
+\end{enumerate}
+
+\begin{enelcodigo}
+Esta es la justificación de fondo de por qué
+\texttt{CompactRelation} es 32 bytes (\emph{half} de una cache line:
+dos aristas por línea). En el DFS hot loop, iterar
+\texttt{neighbors\_of(v)} carga 32 aristas por cada 16 cache lines
+---versus el \texttt{Relation} público de \(\sim 200\) bytes que
+cargaría 32 aristas en \(\sim 100\) cache lines.
+\filepath{core/graph-engine/src/types.rs}.
+\end{enelcodigo}
+
+\subsection{Branch prediction}
+
+Las CPUs modernas no esperan a que un \texttt{if} se evalúe para
+decidir qué instrucción cargar. Predicen el resultado y lo ejecutan
+\emph{especulativamente}; si la predicción acierta, ganaron 10--20
+ciclos; si falla, descartan el trabajo y empiezan de nuevo (penalty
+de 15--25 ciclos en x86\_64).
+
+\begin{itemize}
+    \item Loops contables (\texttt{for i in 0..n}): predicción casi
+    perfecta. Branch barato.
+    \item Branches dependientes de datos
+    impredecibles (\texttt{if data[i] > threshold}): mispredicts
+    frecuentes si los datos son aleatorios.
+    \item Hot loops con muchos \texttt{if} anidados: cada
+    \texttt{if} es una oportunidad de mispredict; los \emph{loops}
+    apretados con un solo branch son de oro.
+\end{itemize}
+
+\begin{nota}
+Esta es la razón por la que el inner loop del DFS de GraphHunter está
+diseñado como una sola pasada lineal sobre un \emph{slice} contiguo
+de \texttt{CompactRelation}, con los predicados temporales reducidos
+a comparaciones de \texttt{i64} y los predicados de tipo a
+comparaciones de \texttt{u8}. Los branches que quedan son
+predecibles por la distribución típica de los datos (la mayoría de
+las aristas pasan los filtros tempranos).
+\end{nota}
+
+\subsection{SIMD}
+
+Las CPUs x86\_64 e ARM tienen instrucciones que operan sobre 4, 8 o
+16 valores a la vez (\emph{SIMD}: Single Instruction, Multiple Data).
+Para problemas que se mapean naturalmente a operaciones por elemento
+---\emph{intersección de conjuntos ordenados}, por ejemplo--- el
+\emph{lift} versus la versión escalar es proporcional al ancho del
+vector.
+
+GraphHunter usa SIMD vía \texttt{libgraphmatch} para la
+intersección \emph{multi-way} en LFTJ-K\(_4\)
+(capítulo~\ref{cap:lftj}): \(N(a) \cap N(b) \cap N(c)\) sobre
+adyacencias ordenadas. Con AVX2, intersecta 8 \texttt{u32}s por
+ciclo; con AVX-512, 16.
+
+\section{Memoria virtual y mmap}
+
+\subsection{Memoria virtual: la abstracción del SO}
+
+Los procesos no ven la RAM física directamente. Ven un \emph{address
+space} virtual de 64~bits que el kernel mapea on-demand a páginas
+físicas (típicamente 4~KB cada una). Beneficios:
+
+\begin{itemize}
+    \item Cada proceso cree que tiene 16 EB de memoria.
+    \item El SO mueve páginas entre RAM y \emph{swap} sin que el
+    proceso se entere.
+    \item Las regiones de archivos pueden \emph{mapearse} al address
+    space (mmap): el archivo en disco aparece como bytes accesibles
+    con punteros.
+\end{itemize}
+
+\subsection{mmap}
+
+\begin{definition}[Memory-mapped file]
+Una región mmap es una asociación entre un rango de páginas
+virtuales y un rango de bytes en un archivo. Acceder a una página no
+residente dispara un \emph{page fault}: el kernel lee los 4~KB del
+archivo, los pone en una página física libre, y reanuda la
+ejecución.
+\end{definition}
+
+Tres garantías importantes:
+
+\begin{enumerate}
+    \item \textbf{Lazy loading.} El archivo no se lee hasta que el
+    proceso accede a una página. Mapear un archivo de 28~GB ocupa
+    \emph{nada} de RAM; sólo registra un descriptor.
+    \item \textbf{Cache compartida con el page cache del SO.} Las
+    páginas leídas viven en el \emph{page cache}; otros procesos que
+    mapean el mismo archivo las comparten.
+    \item \textbf{Backpressure automático.} Si el sistema necesita
+    RAM, el kernel descarta páginas mmap-resident
+    (sin escribir nada al disco si están \emph{clean}); el próximo
+    acceso las relee. Es \emph{free swap} para datos read-only.
+\end{enumerate}
+
+\begin{advertencia}
+El acceso aleatorio sobre mmap es lento si dispara muchos page
+faults (cada uno cuesta \(\sim 100\,000\) ciclos). El acceso
+\emph{secuencial} es rápido porque el kernel hace
+\emph{readahead}: cuando ve un patrón secuencial, pre-carga las
+próximas páginas en background. Por eso GraphHunter ordena las
+aristas por \texttt{(source\_sid, timestamp)} antes de hacer spill:
+los \emph{accesses} del matcher son secuenciales por construcción.
+\end{advertencia}
+
+\begin{enelcodigo}
+\filepath{core/graph-engine/src/streaming.rs}: el \emph{streaming
+backend} aplica el mismo principio. Cuando el budget global
+(default $10^6$ aristas) se cruza, cada \emph{per-vertex slice}
+se vuelca sortado por timestamp a un archivo temporal y la
+\texttt{NeighborList} de cada vértice swap-ea a la variante
+\texttt{Mmap}. Los lookups siguientes van vía puntero al archivo;
+el SO decide qué páginas viven en RAM.
+\end{enelcodigo}
+
+\section{Concurrencia: atomics, locks, y wait-free}
+
+\subsection{Lectura concurrente: el problema}
+
+GraphHunter es multi-thread: el ingestor escribe aristas mientras
+los matchers de varios transports leen. La pregunta es: ¿cómo
+evitamos que un \emph{reader} vea estado a medio escribir?
+
+Tres estrategias clásicas:
+
+\begin{enumerate}
+    \item \textbf{Mutex.} Un solo thread tiene acceso a la vez.
+    Simple, correcto, pero serializa todo: si hay 100 readers, 99
+    están esperando.
+    \item \textbf{Read-Write lock (\texttt{RwLock}).} Múltiples
+    readers concurrentes, un único writer exclusivo. Mejor para
+    workloads read-heavy.
+    \item \textbf{Wait-free.} Los readers nunca bloquean: ven
+    siempre un \emph{snapshot consistente} aunque el writer esté
+    activo. Implementación típica: el writer construye una nueva
+    versión y publica el puntero atómicamente; los readers ven la
+    versión vieja o la nueva, nunca un estado intermedio.
+\end{enumerate}
+
+\subsection{Operaciones atómicas}
+
+Las CPUs ofrecen instrucciones que ejecutan
+\emph{lectura-modificación-escritura} sobre una palabra de memoria
+sin que otro thread pueda interrumpir. Las primitivas más comunes:
+
+\begin{itemize}
+    \item \texttt{load}/\texttt{store} atómicos: leer o escribir una
+    palabra de modo que ningún reader vea ``mitad de un valor''.
+    \item \texttt{compare\_and\_swap (CAS)}: ``si el valor actual es
+    \(x\), reemplazalo por \(y\), todo de una''. Devuelve el valor
+    viejo (o un \emph{success} flag).
+    \item \texttt{fetch\_add}: incrementar atómicamente, devolver el
+    valor previo. Útil para \emph{counters} compartidos.
+\end{itemize}
+
+Las atómicas son \(\sim 5\)--\(20\times\) más caras que sus
+contrapartes no-atómicas, pero son \(100\times\) más baratas que un
+\texttt{Mutex} bajo contención.
+
+\subsection{Memory ordering}
+
+\begin{advertencia}
+Acá hay una sutileza profunda: una CPU moderna \emph{reordena}
+operaciones de memoria para ganar performance. Sin garantías
+explícitas, un thread puede ver las escrituras de otro
+\emph{en orden distinto al que se ejecutaron}. Las atómicas vienen
+con un parámetro de \emph{memory ordering} (\texttt{Relaxed},
+\texttt{Acquire}, \texttt{Release}, \texttt{SeqCst}) que controla
+qué reordenamientos están permitidos. Usar \texttt{Relaxed} cuando
+hace falta \texttt{Acquire/Release} es un bug clásico que NO se
+manifiesta en hardware débil (x86) pero sí en ARM.
+\end{advertencia}
+
+GraphHunter usa \texttt{OnceLock} (de la stdlib de Rust) para los
+índices \emph{lazy-built}: el primer thread que llama
+\texttt{ensure\_nlf()} construye el índice; los demás ven el
+resultado vía un \texttt{Acquire} load del puntero. Sin \emph{double
+init}, sin \emph{tornados} de constructores.
+
+\subsection{Wait-free para el streaming backend}
+
+El \emph{streaming backend} (capítulo~\ref{cap:streaming-mirror})
+soporta \emph{wait-free reads} via una estructura
+\emph{degree-adaptive}: cada vértice tiene un \texttt{NeighborList}
+que es \texttt{Inline}, \texttt{Vec}, o \texttt{Btree} según su
+grado. El writer publica nuevas aristas vía un puntero atómico; el
+reader ve el snapshot que existía cuando entró. Sin lock.
+
+\section{Layout de datos en Rust}
+
+\subsection{\texttt{\#[repr(C)]} y predictibilidad}
+
+Por defecto, el compilador de Rust puede reordenar los campos de un
+\texttt{struct} para minimizar padding. Eso ahorra memoria en algunos
+casos, pero rompe la asunción de que el \texttt{struct} se mapea
+directamente a un buffer binario.
+
+\texttt{\#[repr(C)]} fuerza el orden declarado y las reglas de
+alineación de C: cada campo va exactamente donde el programador
+quiere, con padding explícito si hace falta. Esto permite:
+
+\begin{itemize}
+    \item Mapear \texttt{Vec<CompactRelation>} directamente a un
+    archivo mmap: los bytes en disco son los bytes en memoria.
+    \item Pasar \texttt{CompactRelation} por FFI a C/C++ sin
+    \emph{marshalling}.
+    \item Razonar sobre el tamaño exacto (32 bytes, no ``alguna vez
+    24 alguna vez 40 según versión del compilador'').
+\end{itemize}
+
+\begin{ejemplo}
+Sin \texttt{repr(C)}:
+\begin{lstlisting}[language=Rust]
+struct Bad {
+    flag: u8,        // 1 B
+    timestamp: i64,  // 8 B
+    sid: u32,        // 4 B
+}
+\end{lstlisting}
+El compilador puede ordenar como \texttt{(timestamp, sid, flag)} para
+ahorrar padding ---o no---. Tamaño: 16 B (con padding) o 24 B
+(reordenado). Impredecible.
+
+Con \texttt{repr(C)}:
+\begin{lstlisting}[language=Rust]
+#[repr(C)]
+struct Good {
+    timestamp: i64,  // offset 0,  8 B
+    sid: u32,        // offset 8,  4 B
+    flag: u8,        // offset 12, 1 B
+    _pad: [u8; 3],   // offset 13, 3 B padding explícito
+}
+\end{lstlisting}
+Total: 16 B exactos. Layout estable a través de versiones del
+compilador. El programador eligió.
+\end{ejemplo}
+
+\subsection{\texttt{Arc<str>} y \emph{refcounting}}
+
+\texttt{Arc<T>} (\emph{atomic reference count}) es un puntero
+compartido que mantiene un contador atómico de cuántos dueños
+tiene. Clonar un \texttt{Arc} no copia los datos; sólo bumpea el
+contador (un \texttt{fetch\_add} atómico, \(\sim 5\) ns). Cuando el
+último dueño se va, los datos se liberan.
+
+\texttt{Arc<str>} es la versión para strings: una sola copia del
+texto en heap, refcount atómico, clonado barato. La diferencia
+con \texttt{String::clone()} (que copia los bytes) es del orden de
+\emph{decenas a cientos de nanosegundos por clone} ---suficiente para
+explicar el \(55\%\) de mejora en cap-saturated benches que motivó
+el cambio de \texttt{HuntResult = Vec<String>} a
+\texttt{Vec<Arc<str>>} (capítulo~\ref{cap:hunt-result}).
+
+\section{Cómo todo esto vuelve en el resto del libro}
+
+Los conceptos de este capítulo aparecen explícitamente en:
+
+\begin{itemize}
+    \item Capítulo~\ref{cap:compact-relation}: \texttt{CompactRelation}
+    32 B, \texttt{repr(C)}, half-cache-line.
+    \item Capítulo~\ref{cap:streaming-mirror}: el \emph{streaming
+    backend} con auto-spill, mmap, y page cache.
+    \item Capítulo~\ref{cap:hunt-result}: migración a
+    \texttt{Vec<Arc<str>>}, refcount versus alloc.
+    \item Capítulo~\ref{cap:streaming-mirror}: streaming backend
+    wait-free, \texttt{neighbors\_snapshot}.
+    \item Capítulo~\ref{cap:incremental-nlf}: \texttt{OnceLock} y
+    el patrón \emph{lazy build}.
+    \item Capítulo~\ref{cap:lftj}: SIMD intersection en LFTJ.
+\end{itemize}
+
+\noindent
+Cuando aparezcan, vamos a referirnos de vuelta a este capítulo
+sin re-derivar las definiciones.
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Una \emph{cache line} es de 64 B. Tu \texttt{struct}
+    tiene 48 B útiles. Si lo declarás directo, dos instancias
+    consecutivas comparten una cache line. ¿Bueno o malo? Pensalo
+    bajo dos escenarios: (a) acceso secuencial; (b) acceso aleatorio
+    desde threads distintos. (Pista: \emph{false sharing}.)
+
+    \item Calculá: en una iteración secuencial de un
+    \texttt{Vec<CompactRelation>} con 100M elementos, ¿cuántos cache
+    line transfers son necesarios? Si la latencia efectiva es 100 ns
+    por línea y el prefetch oculta el 90\%, ¿cuánto tarda en total?
+
+    \item \starred{} ¿Por qué un \texttt{HashMap<K, V>} no tiene
+    \emph{locality}? Diseñá una alternativa con
+    \emph{open addressing} y \emph{linear probing} y argumentá si
+    sería mejor o peor para una cache.
+
+    \item Un mutex bajo contención cuesta $\sim$1\,$\mu$s por
+    operación. Una atómica $\sim$10 ns. Si tu workload tiene 10K
+    operaciones por segundo en 8 threads concurrentes, ¿cuál es la
+    sobrecarga total con mutex? ¿Y con atómica? ¿Cambia la
+    conclusión si las operaciones son \(99\%\) reads?
+
+    \item Imaginá que \texttt{CompactRelation} pesara 24 bytes en vez
+    de 32. Calculá: (a) cuántas aristas caben en L1 (32 KB); (b)
+    cuánta memoria total ocuparían 100M aristas. ¿Por qué crees que
+    el motor eligió 32 y no 24?
+
+    \item Mapeás un archivo de 100~GB con mmap en una máquina de
+    16~GB de RAM. ¿Funciona? ¿Qué pasa si el matcher hace un
+    \emph{random access} sobre todo el archivo? ¿Cómo cambia la
+    respuesta si el acceso es secuencial?
+\end{enumerate}
+\end{ejercicios}

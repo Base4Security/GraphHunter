@@ -36,6 +36,8 @@
 - [Architecture](#architecture)
 - [HTTP API & MCP (AI integration)](#http-api--mcp-ai-integration)
 - [Installation](#installation)
+- [Local LLM (optional, agentic ingest)](#local-llm-optional-agentic-ingest)
+- [Docker (reproducible Linux build)](#docker-reproducible-linux-build)
 - [SIMD acceleration](#simd-acceleration)
 - [Usage](#usage)
 - [Demo Data & Try It](#demo-data--try-it)
@@ -146,9 +148,16 @@ Graph Hunter can use **GNN-based threat classification** via ONNX models (e.g. f
 
 ## Architecture
 
-Graph Hunter is split into a **Rust core** (domain logic, parsing, graph, search), a **Tauri + React** desktop app (UI and persistence), and optional **graph-hunter-mcp** for AI assistants. The core holds all business logic; the app exposes commands, session state, and an HTTP API.
+Graph Hunter is split into a **Rust core** (domain logic, parsing, graph, search), a **Tauri + React** desktop app (UI and persistence), and the optional **`@graphhunter/mcp`** server (under `platform/mcp/`) for AI assistants. The core holds all business logic; the app exposes commands, session state, and an HTTP API.
 
-**Full details** (directory layout, core modules, app structure, data flow): [Architecture](https://graphhunter.readthedocs.io/en/latest/reference/architecture.html) in the documentation.
+**Documentation (Spanish, LaTeX → PDF).** Four books under `docs/`:
+
+- `docs/arquitectura/` — internal architecture, shearing layers, 7 ADRs.
+- `docs/especificacion/` — external surfaces: HTTP API, MCP tools, DSL grammar, C ABI, OCSF target, env vars.
+- `docs/manual/` — operator/analyst guide: install, ingest, hunt, explorer, tags, export, integrations.
+- `docs/paper/` — internal research report: contributions (shearing layers, SIMD matcher, composite scoring, typestate FFI, model gate GNN, agentic ingestor), evaluation, limitations.
+
+Build: `cd docs && make all` (requires `xelatex` + `biber`). CI job `.github/workflows/docs.yml` builds the four PDFs on every push touching `docs/**` and uploads them as artifacts.
 
 ---
 
@@ -185,6 +194,51 @@ cargo test
 cd app
 npm run tauri build
 ```
+
+---
+
+## Local LLM (optional, agentic ingest)
+
+Graph Hunter ships an optional **on-device LLM** for the agentic ingest path: when the deterministic field-mapping heuristic can't decide how to map a column (ambiguous names, mixed types, vendor-specific formats), the system falls back to a **local Phi-3-mini Q4** model running via [`candle`](https://github.com/huggingface/candle). The model output is constrained at decode time against the VRL subset grammar so what comes out parses by construction. **No data leaves your machine** — there's no API key, no remote endpoint.
+
+The default build ships the **mock backend**, which is enough for the demos. To enable the real model:
+
+1. **Download weights & tokenizer** (~2.2 GB, one-time):
+
+   ```bash
+   bash scripts/download-model.sh
+   ```
+
+2. **Build with the candle feature:**
+
+   ```bash
+   export GRAPHHUNTER_LOCAL_MODEL_PATH="$PWD/target/models/Phi-3-mini-4k-instruct-q4.gguf"
+   cd platform/api && cargo build --features local-llm-candle
+   ```
+
+3. The first inference call loads the model into RAM (~5 s once); subsequent calls run CPU-only at roughly 6–15 tokens/sec. If `GRAPHHUNTER_LOCAL_MODEL_PATH` is unset or invalid, the system silently falls back to the mock backend — the agentic loop keeps working.
+
+The candle backend is **off by default** so the headline binary stays small and the supply chain stays minimal.
+
+### Constrained decoding (`xgrammar` feature)
+
+When the `xgrammar` feature on `graph_hunter_constrained_decode` is on, the agentic ingest path masks decoder logits against a Lark grammar at `platform/constrained-decode/grammars/vrl_subset.lark` so the LLM emits VRL that parses by construction — no retry loops, no malformed code. The grammar, the post-hoc `VrlSubsetValidator`, and the deterministic `field_config_to_vrl` compiler form a tested triangle (see `tests/grammar_roundtrip.rs`). Spec: [`docs/spec/vrl-subset-grammar.md`](docs/spec/vrl-subset-grammar.md).
+
+---
+
+## Docker (reproducible Linux build)
+
+A minimal `Dockerfile` at the repo root builds the cross-platform `platform/*` crates against `rust:1.88-slim-bookworm` (1.88+ is required by `time@0.3.47` pulled transitively by `evtx`; llguidance / toktrie demand 1.87 when the `xgrammar` feature is on; edition 2024 needs 1.85+). No Tauri, no AVX2/x86 SIMD, no GNN model — just the auditable agentic core.
+
+```bash
+docker build -t graphhunter:dev .
+docker run --rm graphhunter:dev cargo test \
+    --manifest-path platform/constrained-decode/Cargo.toml --features xgrammar
+docker run --rm graphhunter:dev cargo test \
+    --manifest-path platform/api/Cargo.toml --test agentic_ambiguous_fields
+```
+
+CI runs the same crates on a `[ubuntu-latest, macos-latest]` matrix (see `.github/workflows/ci.yml`'s `platform-matrix` job) so a regression on either platform fails before merge.
 
 ---
 
@@ -248,7 +302,7 @@ Three attack simulation datasets are included in `demo_data/`:
 
 **Quick run:**
 
-1. Start the app: `npm run tauri dev` (from `app/`).
+1. Start the app: `npm run tauri dev` (from `apps/tauri/`).
 2. Create or select a session; choose **Auto-detect** (or a specific format), then load a demo file.
 3. Open **Hunt Mode** and build a hypothesis, e.g.:
    - `User →[Execute]→ Process →[Write]→ File` (malware drop)
@@ -299,15 +353,15 @@ The engine provides temporal pattern matching (DFS with causal monotonicity), ti
 
 When the desktop app is running with a session loaded, it exposes an **HTTP API** on **127.0.0.1:37891** (configurable via `GRAPHHUNTER_API_PORT`). This allows external tools to query the graph (entity types, search, expand nodes, run hunts, create notes) without using the UI. The API is protected by **token authentication**: at startup the app prints `GRAPHHUNTER_API_TOKEN=<uuid>` to the console; clients (e.g. the MCP server) must send this token (e.g. via `Authorization: Bearer <token>` or the `GRAPHHUNTER_API_TOKEN` env var) or requests return **401 Unauthorized**.
 
-The **graph-hunter-mcp** package is an **MCP (Model Context Protocol) server** that turns these operations into tools for AI assistants (e.g. Claude Code). You can ask the AI to hunt for malicious paths, expand nodes, or summarize findings while the app holds the session and graph.
+The **`@graphhunter/mcp`** package (under [`platform/mcp/`](platform/mcp/)) is an **MCP (Model Context Protocol) server** that turns these operations into tools for AI assistants (e.g. Claude Code). You can ask the AI to hunt for malicious paths, expand nodes, or summarize findings while the app holds the session and graph.
 
 | Prerequisite | Description |
 |--------------|-------------|
 | App running | Start the Tauri app and load or create a session with data. |
 | API token | Copy `GRAPHHUNTER_API_TOKEN` from the app startup log into your MCP config `env` so the MCP can authenticate. |
-| MCP config | Add the `graph-hunter-mcp` server to your MCP client pointing at the app’s API URL. |
+| MCP config | Add the `graph-hunter-mcp` binary (shipped by `@graphhunter/mcp`) to your MCP client pointing at the app’s API URL. |
 
-**Quick setup:** See **[graph-hunter-mcp/README.md](graph-hunter-mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required).
+**Quick setup:** See **[platform/mcp/README.md](platform/mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required). The older [`graph-hunter-mcp/`](graph-hunter-mcp/) package stays on disk for one release cycle for operators pinning the 1.3.0 binary.
 
 ---
 

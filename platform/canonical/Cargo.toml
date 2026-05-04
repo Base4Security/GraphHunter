@@ -1,0 +1,27 @@
+[package]
+name = "graph_hunter_canonical"
+version = "0.1.0"
+edition = "2024"
+description = "OCSF v1.4 + Provenance Extension canonical view for Graph Hunter. Pure projection from (Entity, Relation, Entity) triples to an auditable canonical form."
+license = "GPL-3.0"
+
+[lib]
+name = "graph_hunter_canonical"
+path = "src/lib.rs"
+
+[dependencies]
+# Core types Entity/Relation/EntityType/RelationType live here; the canonical
+# view is a pure projection over them, never a parallel graph representation.
+graph_hunter_core = { path = "../../core/graph-engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+# Validates produced OCSF events against the checked-in schema subset.
+jsonschema = { version = "0.18", default-features = false }
+# The F4 fixture suite exercises all three shipping parsers
+# (Sysmon/Sentinel in core; FortiAnalyzer in platform/parsers) through
+# the canonical projection. Dev-only — parsers remain invisible to
+# non-test callers of this crate.
+graph_hunter_parsers = { path = "../parsers" }

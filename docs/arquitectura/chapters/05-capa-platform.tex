@@ -1,0 +1,130 @@
+\chapter{Capa de plataforma}
+\label{sec:capa-platform}
+
+\filepath{platform/} agrupa nueve crates Rust y un paquete
+TypeScript. Tienen en común ser \emph{superficies versionables}: lo
+que publican es contrato público visto por consumidores internos o
+externos.
+
+\section{\filepath{platform/api} — la fachada única}
+
+\code{GraphHunterApi} es el objeto central. Todos los consumidores
+(Tauri, CLI, MCP, cualquier proceso embedder) obtienen una
+instancia de esta struct y llaman métodos organizados por dominio:
+
+\begin{itemize}
+    \item \code{hunt::run_hunt}, \code{hunt::expand_node}
+    \item \code{ingest::ingest_events}, \code{ingest::stream}
+    \item \code{export::to_ocsf}, \code{export::to_iocs}
+    \item \code{session::create}, \code{session::load},
+    \code{session::save}
+    \item \code{sentinel::connect}, \code{sentinel::stream}
+    \item \code{agentic::run}, \code{agentic::review},
+    \code{agentic::drift}
+    \item \code{mapping_library::save},
+    \code{mapping_library::apply}
+    \item \code{dlq::list}, \code{dlq::retry}
+    \item \code{invariants::check}
+\end{itemize}
+
+Son 55 endpoints HTTP cuando el Tauri los expone, y 54 tools MCP
+cuando se exponen vía ese transporte. Pero la \emph{lógica} vive
+una sola vez, en \filepath{platform/api}. ADR-001 formaliza esta
+regla: la API es canónica; ninguna otra capa reimplementa parcial
+ni ``mejora'' por dentro.
+
+Esta decisión rompió el ciclo lógico que existía antes del
+rediseño (\filepath{platform/api} $\to$ \filepath{apps/cli} $\to$
+\filepath{core}). Hoy \filepath{apps/cli} es un cliente más de la
+API, igual que Tauri.
+
+\section{\filepath{platform/dsl}}
+
+El DSL de hipótesis. La gramática actual acepta cadenas como:
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+IP -[Connect]-> Host -[Auth]-> User {k=3}
+\end{lstlisting}
+
+La gramática vive en \filepath{grammar/v1.rs}. Un trait
+\code{DslExtension} permite registrar nuevos tipos de entidad,
+predicados y operadores sin modificar el parser base. ADR-005
+detalla el esquema de versionado.
+
+\section{\filepath{platform/parsers}}
+
+Hogar del trait \code{LogParser} con siete implementaciones:
+sysmon, sentinel, generic CSV, FortiAnalyzer, Cognito, IIS y un
+parser fallback. La decisión de qué parser usar se toma en
+\filepath{platform/api::format_registry}.
+
+\section{\filepath{platform/sources}}
+
+Trait \code{LogSource} para fuentes en vivo: Sentinel, Defender
+XDR, Data Lake, y archivos locales. Es la contraparte ``pull'' de
+\filepath{platform/parsers} (que trabaja sobre bytes) y vive
+separada para poder reemplazarla sin tocar el parseo.
+
+\section{\filepath{platform/canonical}}
+
+Proyección OCSF v1.4 del modelo interno. Es la forma canónica que
+se exporta hacia SIEMs externos o hacia el IOC exporter. La
+dualidad ``modelo interno rico / modelo externo canónico''
+permite evolucionar el interno sin cambiar el contrato público.
+
+\section{\filepath{platform/vrl}}
+
+Compilador de \code{FieldConfig} a VRL (Vector Remap Language). Se
+usa en el camino de ingesta cuando la fuente viene con un mapeo
+declarativo de campos. Contrato estable hacia clientes que comparten
+configuraciones (ver \filepath{platform/api::mapping_library}).
+
+\section{\filepath{platform/constrained-decode}}
+
+Guardrail para salidas de LLM. Impone una gramática a la generación
+(JSON strict, DSL de hipótesis, canonical query) para evitar que el
+modelo produzca texto inválido. Vive aquí porque es una superficie
+pública vista por el sistema agentic.
+
+\section{\filepath{platform/siem}}
+
+Streaming desde Sentinel y Elastic. Se extrajo de \filepath{apps/cli}
+para romper el ciclo que describe ADR-001. Hoy lo consumen tanto
+\filepath{platform/api} (para hacer ingest continuo desde el Tauri)
+como \filepath{apps/cli} (para ingesta batch desde terminal).
+
+\section{\filepath{platform/local-llm}}
+
+Trait \code{LocalLlm} con backends \code{mock} y \code{candle}.
+Permite al sistema agentic correr sin dependencias externas. Es
+superficie extensible: agregar un backend nuevo es implementar el
+trait, no tocar a los consumidores.
+
+\section{\filepath{platform/mcp} (TypeScript)}
+
+Servidor MCP con 54 tools organizadas en 10 dominios. No compila
+junto a los crates Rust: tiene su propio \filepath{package.json} y
+build (\code{npm run build}). Cada tool es un cliente HTTP liviano
+contra \filepath{platform/api}. ADR-004 formaliza el contrato
+\code{Tool<I, O>} y el versionado por tool.
+
+\section{Qué tienen en común}
+
+Los nueve crates Rust de \filepath{platform/} comparten tres
+rasgos:
+
+\begin{itemize}
+    \item \textbf{Traits como contrato}: cada crate publica al menos
+    un trait que define su extensibilidad (\code{LogParser},
+    \code{LogSource}, \code{DslExtension}, \code{LocalLlm},
+    \code{Tool} en el caso MCP).
+    \item \textbf{DTOs versionados}: los tipos que cruzan fronteras
+    (entre procesos o entre la API y el exterior) viven en
+    \filepath{platform/api/src/dto/v1/} con compatibilidad semver.
+    \item \textbf{Cero dependencia sobre aplicaciones}: un crate de
+    plataforma nunca pide algo de \filepath{apps/}.
+\end{itemize}
+
+Esta uniformidad es lo que hace que el sistema se extienda sin
+regresiones: un nuevo parser se añade en \filepath{platform/parsers}
+sin que eso fuerce tocar ni el núcleo ni las aplicaciones.

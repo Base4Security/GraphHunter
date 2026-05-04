@@ -1,0 +1,267 @@
+\chapter{Yannakakis: cadena}
+\label{cap:yannakakis-chain}
+
+\begin{intuicion}
+Yannakakis (1981) tiene dos partes: \emph{semi-join reducer} y
+\emph{enumerator}. El reducer baja por el join tree (hojas $\to$
+raíz) y sube (raíz $\to$ hojas), eliminando en cada paso las
+tuplas que no participan de ningún match completo. El enumerator
+después recorre las tuplas que sobrevivieron y enumera el join
+final ---ya sin desperdicio. Para hipótesis con shape \emph{chain},
+el join tree es lineal, las dos pasadas son simples filtros, y el
+algoritmo termina en \(O(\)input + output\()\). Este capítulo lo
+desarrolla con un ejemplo concreto y prueba la correctitud.
+\end{intuicion}
+
+\section{Setup: \emph{bags} y la chain}
+
+Antes de Yannakakis, el motor materializa las relaciones de la
+hipótesis como \emph{bags}. Para una chain
+\((L_0^V \to_{L_0^E} L_1^V \to_{L_1^E} \dots \to_{L_{n-1}^E} L_n^V)\),
+\(\mathrm{bag}_i\) contiene las aristas:
+\[
+B_i = \{(u, v, \tau) : (u, v, \tau) \in \E,\;
+                     \mathrm{type}(u) = L_i^V,\;
+                     \mathrm{type}_E(\cdot) = L_i^E,\;
+                     \mathrm{type}(v) = L_{i+1}^V\}.
+\]
+
+\noindent
+Cada \(B_i\) es la lista de aristas que podrían llenar el paso
+\(i\). El join chain es:
+\[
+B_0 \bowtie_{B_0.\mathrm{dest} = B_1.\mathrm{origin}} B_1
+   \bowtie_{B_1.\mathrm{dest} = B_2.\mathrm{origin}} \dots
+   \bowtie_{B_{n-2}.\mathrm{dest} = B_{n-1}.\mathrm{origin}} B_{n-1}.
+\]
+
+\section{La semi-join reducer}
+
+La idea: filtrar cada \(B_i\) hasta que sólo queden aristas que
+participan de \emph{algún} match completo.
+
+\subsection{Pasada bottom-up}
+
+\begin{algorithm}[H]
+\caption{Pasada 1 (bottom-up): de \(B_{n-1}\) hacia \(B_0\)}
+\For{\(i\) from \(n - 2\) \textbf{down to} \(0\)}{
+    \(\texttt{live\_origins} \leftarrow \{r.\mathrm{origin} : r \in B_{i+1}\}\)\;
+    \(B_i \leftarrow \{r \in B_i : r.\mathrm{dest} \in \texttt{live\_origins}\}\)\;
+}
+\end{algorithm}
+
+\noindent
+Después de esta pasada: cada arista de \(B_i\) tiene su
+\texttt{dest} matched con al menos una arista de \(B_{i+1}\). Es
+decir, hay una continuación posible hacia adelante.
+
+\subsection{Pasada top-down}
+
+\begin{algorithm}[H]
+\caption{Pasada 2 (top-down): de \(B_0\) hacia \(B_{n-1}\)}
+\For{\(i\) from \(1\) \textbf{to} \(n - 1\)}{
+    \(\texttt{live\_dests} \leftarrow \{r.\mathrm{dest} : r \in B_{i-1}\}\)\;
+    \(B_i \leftarrow \{r \in B_i : r.\mathrm{origin} \in \texttt{live\_dests}\}\)\;
+}
+\end{algorithm}
+
+\noindent
+Después de esta pasada: cada arista de \(B_i\) tiene su
+\texttt{origin} matched con al menos una arista de \(B_{i-1}\) que
+sobrevivió. Hay una continuación posible hacia atrás.
+
+\subsection{Diagrama}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.3cm,
+    every node/.style={font=\scriptsize, align=center},
+    bag/.style={draw=accent, thick, rounded corners=1mm,
+                minimum width=2.4cm, minimum height=1cm,
+                fill=accentlight}
+]
+\node[bag] (b0) {$B_0$\\\itshape User--Auth--Host};
+\node[bag, right=of b0] (b1) {$B_1$\\\itshape Host--Connect--IP};
+\node[bag, right=of b1] (b2) {$B_2$\\\itshape IP--Beacon--Domain};
+
+\draw[->, >=Latex, accent, thick, dashed] (b1.south) to[out=-90,in=-90, looseness=1.2] node[below, yshift=-0.2cm]{semi-join} (b0.south);
+\draw[->, >=Latex, accent, thick, dashed] (b2.south) to[out=-90,in=-90, looseness=1.2] (b1.south);
+\draw[->, >=Latex, accent!60, thick] (b0.north) to[out=90,in=90, looseness=1.2] node[above, yshift=0.2cm]{semi-join} (b1.north);
+\draw[->, >=Latex, accent!60, thick] (b1.north) to[out=90,in=90, looseness=1.2] (b2.north);
+\end{tikzpicture}
+\caption{Las dos pasadas del semi-join reducer. Bottom-up
+(flechas dashed abajo) elimina rows cuyo \texttt{dest} no aparece
+como \texttt{origin} en el siguiente bag; top-down (flechas
+arriba) hace lo simétrico. Después, toda row sobreviviente
+participa de al menos un full join.}
+\label{fig:semijoin-passes}
+\end{figure}
+
+\section{Enumerar lo que quedó}
+
+\begin{algorithm}[H]
+\caption{Yannakakis chain matcher}
+\KwIn{\(B_0, B_1, \dots, B_{n-1}\) (bags reducidos)}
+\KwOut{Vec<HuntResult>}
+\For{cada \texttt{row} en \(B_0\)}{
+    \texttt{walk}(\texttt{row.origin}, \texttt{row.dest}, \texttt{row.timestamp}, \(1\))\;
+}
+\BlankLine
+\Comment{\texttt{walk(prev\_dest, curr\_dest, t\_first, step)}}
+\If{\(\mathrm{step} = n\)}{
+    \texttt{emit}(path acumulado)\;
+    \Return\;
+}
+\For{cada \(r \in B_{\mathrm{step}}\) con \(r.\mathrm{origin} = \mathrm{prev\_dest}\)}{
+    chequear ventana temporal y monotonicidad\;
+    \texttt{walk}(\(r.\mathrm{origin}, r.\mathrm{dest}, t_{\mathrm{first}}, \mathrm{step} + 1\))\;
+}
+\end{algorithm}
+
+\noindent
+La enumeración es esencialmente un DFS, \emph{pero} sobre los bags
+ya reducidos. Cada arista que el walk considera está garantizada
+de participar en algún match (por las dos pasadas previas), así que
+el walk \emph{nunca} explora ramas muertas.
+
+\section{Correctitud}
+
+\begin{theorem}[Yannakakis chain correcto]
+Después de las dos pasadas semi-join, el conjunto de matches
+enumerados por \texttt{walk} es exactamente el join completo
+\(B_0 \bowtie B_1 \bowtie \dots \bowtie B_{n-1}\).
+\end{theorem}
+
+\begin{proof}[Idea]
+Soundness: cada \texttt{emit} corresponde a una secuencia de
+aristas \((r_0, r_1, \dots, r_{n-1})\) con \(r_i.\mathrm{dest} =
+r_{i+1}.\mathrm{origin}\) (chequeado en el walk) y cada \(r_i \in
+B_i\) (porque iteramos sobre los bags). Eso es exactamente la
+definición de \(\bowtie\).
+
+Completeness: cualquier match \((r_0, \dots, r_{n-1})\) del join
+original tiene cada \(r_i\) que \emph{sobrevivió} la pasada bottom-up
+(porque tenía continuación a \(r_{i+1}\)) y la top-down (porque
+había \(r_{i-1}\)). Por lo tanto cada \(r_i\) sigue en \(B_i\)
+después del reducer; \texttt{walk} los enumera. \(\square\)
+\end{proof}
+
+\section{Análisis de complejidad}
+
+\subsection{Costo del semi-join reducer}
+
+Cada pasada itera todas las aristas de cada bag una vez:
+\(O(\sum_i |B_i|) = O(|\E|_{\text{relevantes}})\). El conjunto
+\texttt{live\_origins} (resp. \texttt{live\_dests}) se construye
+con un \texttt{HashSet} en una pasada lineal, y los chequeos
+\texttt{r.dest \(\in\) live\_origins} son \(O(1)\).
+
+Total: \(O(|\E|_{\text{relevantes}})\) por pasada, dos pasadas
+\(\Rightarrow\) \(O(|\E|)\) total.
+
+\subsection{Costo del enumerator}
+
+Cada path completo (cada match) toma \(O(n)\) trabajo (push +
+emit). En total \(O(n \cdot |Q_{\text{out}}|)\). Para hipótesis
+chain con \(n\) chico (\(\leq 6\)), \(O(|Q_{\text{out}}|)\).
+
+\subsection{Total}
+
+\(O(|\E| + |Q_{\text{out}}|)\). Lineal en input + output. Es la
+promesa de Yannakakis para \(\alpha\)-acíclicas.
+
+\section{Comparación con DFS}
+
+DFS para la misma hipótesis:
+
+\begin{itemize}
+    \item Itera $|Q_{\text{out}}|$ paths exitosos.
+    \item Itera además todos los paths fallidos (que el reducer
+    eliminó).
+\end{itemize}
+
+\noindent
+En grafos donde la mayoría de los paths parciales no se completan
+(filtro temporal, etiquetas selectivas), el DFS gasta mucho en
+exploración inútil. Yannakakis lo evita haciendo el chequeo de
+``hay continuación'' como semi-join lineal antes de entrar al
+walk.
+
+\subsection{Ejemplo concreto}
+
+Hipótesis chain de 3, \(|B_0| = 10^4\), \(|B_1| = 10^5\), \(|B_2|
+= 10^6\), \(|Q_{\text{out}}| = 10^3\) (matches reales).
+
+\begin{itemize}
+    \item DFS: explora \(\sim 10^4 \cdot 10 \cdot 10 = 10^6\) paths
+    parciales (asumiendo grado promedio 10 en cada paso).
+    \item Yannakakis: 2 pasadas \(O(|\E|_{\text{relevantes}}) =
+    O(10^6)\). Después enumera \(10^3\) paths.
+\end{itemize}
+
+\noindent
+Mismo orden de magnitud en CPU total, pero Yannakakis paga el costo
+en operaciones simples (semi-join lineal con HashSet) en vez de
+recursión profunda con \emph{branch mispredictions} y
+\emph{cache misses}. Bench típico: \(2\times\) más rápido para
+hipótesis con muchos paths fallidos.
+
+\section{Cuando Yannakakis pierde}
+
+\begin{itemize}
+    \item \textbf{Hipótesis con cap saturado}: si el motor produce
+    \(\geq 10\,000\) results, el costo del enumerator domina; el
+    semi-join reducer es overhead constante. DFS con cap-aware
+    early-exit es comparable.
+    \item \textbf{Hipótesis con muy pocos starts}: si NLF + k-hop
+    ya filtraron hasta dejar 10 starts válidos, el costo del DFS
+    desde 10 starts es trivial; el semi-join sobre todo el grafo
+    es caro innecesariamente.
+\end{itemize}
+
+\noindent
+El \emph{planner} (capítulo~\ref{cap:planner}) usa estos
+heurísticos para decidir cuándo dispatchar Yannakakis vs DFS.
+
+\section{Resumen}
+
+\begin{itemize}
+    \item Yannakakis chain: dos pasadas semi-join (bottom-up +
+    top-down) + enumerator.
+    \item Después del reducer, cada arista en cada bag participa
+    de algún match completo. El enumerator no explora ramas muertas.
+    \item Complejidad: \(O(|\E| + |Q_{\text{out}}|)\). Lineal en
+    input + output.
+    \item Gana sobre DFS cuando hay muchos paths parciales que se
+    abortan; pierde cuando NLF + k-hop ya filtraron al 90\%.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Para la hipótesis
+    \texttt{User -[Auth]-> Host -[Connect]-> IP} con \(|B_0| =
+    1000\), \(|B_1| = 5000\), y los matches finales son 50, calculá
+    cuántas filas sobreviven a cada pasada del reducer en el peor
+    caso.
+
+    \item Implementá la pasada bottom-up con un \texttt{HashSet}
+    auxiliar. ¿Cuál es la complejidad de espacio?
+
+    \item \starred{} Demostrá: si después de la pasada bottom-up
+    \(B_0\) queda vacío, entonces \(Q\) está vacío (no hay matches).
+    ¿Es \emph{cierto el converse}?
+
+    \item Diseñá un ejemplo donde la pasada top-down NO elimina
+    ninguna fila adicional (es no-op). ¿Cuándo ocurre?
+
+    \item Compará Yannakakis chain con DFS bien-podado para la
+    hipótesis del ejercicio 1. ¿Cuántos paths visita cada uno?
+    ¿Bajo qué condiciones gana cada uno?
+
+    \item Si la hipótesis tiene un predicado complejo en uno de
+    los pasos (\texttt{HAVING count(distinct)} \(>\) 5), ¿cómo lo
+    integrás en Yannakakis chain? ¿Antes, durante, o después del
+    reducer?
+\end{enumerate}
+\end{ejercicios}

@@ -1,0 +1,260 @@
+\chapter{Yannakakis: \emph{tree-walk}}
+\label{cap:yannakakis-tree}
+
+\begin{intuicion}
+Yannakakis chain (capítulo anterior) sirve para hipótesis cuya
+\emph{shape} es una cadena lineal. Para hipótesis \emph{shape
+graph} ---estrellas, árboles, cualquier hipergrafo
+\(\alpha\)-acíclico no-cadena--- el join tree ya no es una línea
+sino un árbol propio. El \emph{tree-walk} enumerator camina ese
+árbol manteniendo un \emph{binding} (mapa de variables a vértices)
+y, en cada nodo del árbol, decide qué \emph{bag} consultar según
+qué variable comparte con su padre. Este capítulo explica el
+algoritmo, muestra un ejemplo con una estrella, y discute el
+contraste con el chain enumerator.
+\end{intuicion}
+
+\section{El setup: variables, bindings, join tree}
+
+Para una hipótesis \emph{shape graph}, los pasos no se relacionan
+posicionalmente sino vía \emph{variables} explícitas:
+
+\begin{lstlisting}
+User c -[Auth]-> Host h1; c -[Auth]-> Host h2; c -[Auth]-> Host h3
+\end{lstlisting}
+
+\noindent
+Aquí \(c\) es una \texttt{VarId} compartida entre los tres pasos,
+mientras \(h_1, h_2, h_3\) son \texttt{VarId}s independientes. La
+hipótesis tiene 4 variables y 3 pasos.
+
+El \emph{binding} es un \texttt{Vec<Option<StrId>>} indexado por
+\texttt{VarId}; arranca \texttt{None} en todas las posiciones, y
+el tree-walk lo va llenando.
+
+\section{El join tree para \emph{shape graph}}
+
+El planner (capítulo~\ref{cap:planner}) construye el join tree con
+GYO + BFS desde una hiperarista \emph{root}. Para la estrella de
+arriba:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    every node/.style={draw=accent, thick, rectangle, rounded corners=1mm,
+                       minimum size=8mm, fill=accentlight, font=\small}
+]
+\node (s0) at (0, 1) {step 0};
+\node (s1) at (-2, -0.5) {step 1};
+\node (s2) at (2, -0.5) {step 2};
+
+\draw[accent, thick] (s0) -- node[pos=0.5, fill=white, draw=none, font=\scriptsize]{$c$} (s1);
+\draw[accent, thick] (s0) -- node[pos=0.5, fill=white, draw=none, font=\scriptsize]{$c$} (s2);
+\end{tikzpicture}
+\caption{Join tree para
+\texttt{c -[Auth]-> h1; c -[Auth]-> h2; c -[Auth]-> h3}. Tres
+nodos (uno por step), conexión etiquetada con la \emph{shared
+variable} con el padre (todos comparten \(c\) con step 0, que es
+la root).}
+\label{fig:tree-walk-jointree}
+\end{figure}
+
+\subsection{La estructura \texttt{JoinTree}}
+
+\begin{lstlisting}[language=Rust]
+pub struct JoinTree {
+    pub nodes: Vec<usize>,            // step indices, en orden de visita BFS
+    pub parent: Vec<Option<usize>>,   // parent[i]: índice en `nodes` del padre
+    pub shared_var: Vec<VarId>,       // variable compartida con el padre
+}
+
+pub struct StepBag {
+    pub rows: Vec<StepRow>,                // todas las aristas del bag
+    pub by_origin: HashMap<StrId, Vec<usize>>, // index: origin → indices en rows
+    pub by_dest:   HashMap<StrId, Vec<usize>>, // index: dest   → indices en rows
+}
+\end{lstlisting}
+
+\noindent
+Cada \texttt{StepBag} tiene dos índices auxiliares: \texttt{by\_origin}
+y \texttt{by\_dest}. Esto permite consultas eficientes en cualquier
+sentido (a diferencia del chain enumerator, que sólo necesita
+\texttt{by\_origin}).
+
+\section{El algoritmo}
+
+\begin{algorithm}[H]
+\caption{Tree-walk enumerator (versión simplificada)}
+\KwIn{\texttt{JoinTree}, \texttt{bags: Vec<StepBag>}, \texttt{binding} (todo \texttt{None})}
+\KwOut{Vec<HuntResult>}
+\(\mathrm{recurse}(\mathrm{node\_idx} = 0)\)\;
+\BlankLine
+\Comment{\texttt{recurse(node\_idx)}}
+\If{\(\mathrm{node\_idx} = |\mathrm{nodes}|\)}{
+    \texttt{emit}(binding resuelto a Vec<Arc<str>>)\;
+    \Return\;
+}
+\(\mathrm{step} \leftarrow \mathrm{nodes[node\_idx]}\)\;
+\(\mathrm{edge} \leftarrow \mathrm{hypergraph.edges[step]}\)\;
+\Switch{\((\mathrm{binding[edge.origin]}, \mathrm{binding[edge.dest]})\)}{
+    \Case{\((\mathrm{Some}(o), \_)\)}{candidates \(\leftarrow \mathrm{by\_origin[step][o]}\)}
+    \Case{\((\mathrm{None}, \mathrm{Some}(d))\)}{candidates \(\leftarrow \mathrm{by\_dest[step][d]}\)}
+    \Case{\((\mathrm{None}, \mathrm{None})\)}{candidates \(\leftarrow \mathrm{bags[step].rows}\) (root)}
+}
+\For{\(\mathrm{row} \in \mathrm{candidates}\)}{
+    intentar bind(edge.origin, row.origin) y bind(edge.dest, row.dest)\;
+    \(\mathrm{recurse}(\mathrm{node\_idx} + 1)\)\;
+    \texttt{unbind} si correspondía\;
+}
+\end{algorithm}
+
+\section{Por qué el switch (origin\_bound, dest\_bound)}
+
+La diferencia clave con el chain enumerator: en una cadena sabemos
+que \(B_{i+1}.\mathrm{origin} = B_i.\mathrm{dest}\) por la convención
+posicional, así que el lookup es siempre \texttt{by\_origin}. En
+una estrella o árbol, la \emph{shared variable} con el padre puede
+aparecer como \texttt{origin} o como \texttt{dest} de la arista del
+step actual.
+
+\begin{ejemplo}[Estrella revisitada]
+Hipótesis:
+\texttt{c -[Auth]-> h1; c -[Auth]-> h2; c -[Auth]-> h3}.
+
+\begin{itemize}
+    \item Step 0: arista \texttt{c -[Auth]-> h1}. Su \texttt{origin}
+    es \(c\), su \texttt{dest} es \(h_1\). Como root, ambas
+    variables están \texttt{None}; iteramos \texttt{bags[0].rows}
+    enteros. Cada iteración bind \(c \leftarrow \mathrm{row.origin}\)
+    y \(h_1 \leftarrow \mathrm{row.dest}\).
+    \item Step 1: arista \texttt{c -[Auth]-> h2}. Su \texttt{origin}
+    es \(c\) (ya bound desde step 0), su \texttt{dest} es \(h_2\)
+    (None). El switch dispatcha al caso
+    \((\mathrm{Some}(o), \mathrm{None})\): candidates =
+    \texttt{by\_origin[1][\(o\)]} con \(o = \mathrm{binding[c]}\).
+    Iteramos esos rows, bind \(h_2 \leftarrow \mathrm{row.dest}\).
+    \item Step 2: análogo a step 1, bind \(h_3\).
+    \item En el caso base (\(\mathrm{node\_idx} = 3\)), emit el path
+    completo (\(c, h_1, h_2, h_3\)).
+\end{itemize}
+\end{ejemplo}
+
+\subsection{Caso \((\mathrm{None}, \mathrm{Some}(d))\)}
+
+¿Cuándo aparece este caso? Cuando un step tiene su \texttt{dest}
+bound pero no su \texttt{origin}. Por ejemplo, una hipótesis
+``árbol invertido'':
+
+\begin{lstlisting}
+Host h -[Inbound]-> User u1; Host h2 -[Inbound]-> u1
+\end{lstlisting}
+
+\noindent
+Acá \(u_1\) (en el dest) es la shared variable. Step 0 bind \(h\)
+y \(u_1\); step 1 tiene \(\mathrm{dest} = u_1\) (already bound)
+y \(\mathrm{origin} = h_2\) (None). Lookup vía
+\texttt{by\_dest[1][\(u_1\)]}.
+
+\subsection{Caso \((\mathrm{Some}, \mathrm{Some})\)}
+
+Step donde tanto origin como dest ya están bound. El motor consulta
+si la arista \emph{específica} existe (lookup determinista, no
+iteración). Si existe, recursa; si no, fail-fast.
+
+\section{Bindings y unbinding}
+
+\begin{lstlisting}[language=Rust]
+fn bind(
+    binding: &mut Vec<Option<StrId>>,
+    var: VarId,
+    sid: StrId,
+) -> bool {
+    match binding[var.0] {
+        None => { binding[var.0] = Some(sid); true }
+        Some(existing) => existing == sid,  // ya bound: chequear igualdad
+    }
+}
+
+fn unbind(
+    binding: &mut Vec<Option<StrId>>,
+    var: VarId,
+    was_just_bound: bool,
+) {
+    if was_just_bound {
+        binding[var.0] = None;
+    }
+}
+\end{lstlisting}
+
+\noindent
+Cada \texttt{bind} en el \texttt{recurse} loop es ``si la variable
+ya estaba bound, chequear que coincide; si no, bind y marcar para
+unbind al volver''. El \texttt{unbind} restaura sólo lo que se
+acaba de bind ---\emph{no} desbinde lo que ya estaba bound desde
+arriba---.
+
+\section{Análisis}
+
+Igual que Yannakakis chain, la complejidad es
+\(O(|\E_{\text{relevantes}}| + |Q_{\text{out}}|)\). El reducer
+(no mostrado en detalle aquí) reduce los bags como en chain; el
+tree-walk recorre el join tree sin visitas duplicadas.
+
+\section{Cuándo se dispatcha}
+
+GraphHunter dispatcha al tree-walk cuando:
+
+\begin{enumerate}
+    \item La hipótesis tiene \texttt{shape == HypothesisShape::Graph}.
+    \item El planner verifica \(\alpha\)-aciclicidad
+    (capítulo~\ref{cap:hipergrafos}) ---debería ser cierto si la DSL
+    valida correctamente, pero el chequeo es defensivo.
+    \item El feature flag \texttt{GRAPHHUNTER\_YANNAKAKIS} está
+    on (default).
+\end{enumerate}
+
+\noindent
+Si la hipótesis es shape graph pero \emph{cíclica} (\(K_3\),
+\(K_4\)), Yannakakis no aplica; el planner cae a LFTJ-K\(_4\) (si
+es \(K_4\)) o al DFS legacy.
+
+\section{Resumen}
+
+\begin{itemize}
+    \item Tree-walk enumerator es la versión de Yannakakis para
+    shape graph: walk recursivo sobre el join tree, con
+    binding/unbinding.
+    \item En cada step, el lookup se decide por
+    \texttt{(origin\_bound, dest\_bound)}: dispatch a
+    \texttt{by\_origin}, \texttt{by\_dest}, o iteración completa
+    de bag (root).
+    \item Complejidad lineal en input + output.
+    \item Aplica para hipótesis \(\alpha\)-acíclicas no-cadena
+    (estrellas, árboles).
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Para la hipótesis
+    \texttt{User c -[Auth]-> Host h1; c -[Auth]-> Host h2}
+    en un grafo donde \(c\) tiene 100 vecinos \texttt{Host}, ¿cuántos
+    matches enumera el tree-walk? ¿Cuál es la cota teórica?
+
+    \item Construí el join tree para la hipótesis
+    \texttt{Process p1 -[Spawn]-> Process p2 -[Spawn]-> Process p3; p1 -[Spawn]-> Process p4}.
+    ¿Qué shape es?
+
+    \item \starred{} ¿Cuándo aparece el caso
+    \((\mathrm{Some}, \mathrm{Some})\) en el switch? Diseñá una
+    hipótesis donde aparezca y explicá qué chequea.
+
+    \item Si en vez de mantener dos índices (\texttt{by\_origin} y
+    \texttt{by\_dest}) por bag, mantuviéramos sólo
+    \texttt{by\_origin}, ¿qué cambia? ¿En qué casos sería más
+    lento?
+
+    \item Compará tree-walk con DFS bien-podado para una hipótesis
+    de estrella \(c \to (h_1, h_2, h_3, h_4, h_5)\). ¿Cuál gana?
+    ¿Por qué?
+\end{enumerate}
+\end{ejercicios}

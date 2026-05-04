@@ -1,0 +1,148 @@
+\chapter{Métricas del código}
+\label{sec:metricas}
+
+Snapshot al \textbf{2026-04-24} (post-cierre de Fase 4). Las
+métricas se reproducen con los comandos indicados al pie de cada
+tabla y se verifican en CI.
+
+\section{Líneas por crate}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}llr@{}}
+\toprule
+Capa & Crate & LOC \\
+\midrule
+core       & \filepath{core/graph-engine}           & 29\,347 \\
+core       & \filepath{core/matcher-ffi}            &    829 \\
+core       & \filepath{core/gnn}                    &  1\,399 \\
+\addlinespace
+platform   & \filepath{platform/api}                & 15\,408 \\
+platform   & \filepath{platform/canonical}          &  1\,001 \\
+platform   & \filepath{platform/constrained-decode} &    443 \\
+platform   & \filepath{platform/dsl}                &  1\,716 \\
+platform   & \filepath{platform/local-llm}          &    297 \\
+platform   & \filepath{platform/parsers}            &  2\,658 \\
+platform   & \filepath{platform/siem}               &    744 \\
+platform   & \filepath{platform/sources}            &  4\,266 \\
+platform   & \filepath{platform/vrl}                &    707 \\
+\addlinespace
+apps       & \filepath{apps/cli}                    &    610 \\
+apps       & \filepath{apps/tauri/src-tauri}        &  5\,117 \\
+\midrule
+\multicolumn{2}{l}{\textbf{Total Rust}}              & \textbf{72\,184} \\
+\addlinespace
+C++        & \filepath{libgraphmatch/}              & 12\,787 \\
+TypeScript & \filepath{platform/mcp/src/}           &  1\,975 \\
+\bottomrule
+\end{tabular}
+\caption{LOC por crate/paquete (incluye código fuente, no tests ni
+benches fuera de \filepath{src/}).}
+\label{tab:loc}
+\end{table}
+
+\textbf{Reproducción}: \code{find <crate>/src -name "*.rs" | xargs
+wc -l}.
+
+\section{Tests por crate}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lr@{}}
+\toprule
+Crate & Archivos en \filepath{tests/} \\
+\midrule
+\filepath{core/graph-engine}            & 22 \\
+\filepath{core/matcher-ffi}             &  2 \\
+\filepath{platform/api}                 & 12 \\
+\filepath{platform/canonical}           &  1 \\
+\filepath{platform/constrained-decode}  &  2 \\
+\filepath{platform/dsl}                 &  1 \\
+\filepath{platform/vrl}                 &  1 \\
+\bottomrule
+\end{tabular}
+\caption{Archivos de test de integración por crate. Tests unitarios
+embebidos en \filepath{src/} (\code{\#[cfg(test)] mod tests}) no
+están contabilizados aquí.}
+\label{tab:tests}
+\end{table}
+
+\textbf{Reproducción}: \code{find <crate>/tests -name "*.rs" | wc -l}.
+
+\section{Propiedades formales con property-testing}
+
+\begin{itemize}
+    \item Equivalencia DFS $\leftrightarrow$ SIMD en
+    \filepath{core/matcher-ffi/tests/equivalence_dfs_simd.rs}
+    (proptest).
+    \item Roundtrip DSL parse $\to$ render $\to$ parse en
+    \filepath{platform/dsl/tests/roundtrip.rs} (proptest).
+    \item Invariantes de anomaly scoring en
+    \filepath{core/graph-engine/tests/anomaly_proptest.rs}.
+\end{itemize}
+
+\section{Ciclos arquitectónicos}
+
+\textbf{Cero ciclos} en \code{cargo metadata}. Se verifica con:
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+cargo metadata --format-version 1 --no-deps | \
+  jq '[.packages[] | {name, deps: [.dependencies[].name]}]' | \
+  # construir DAG
+  # detectar SCCs (Tarjan)
+\end{lstlisting}
+
+El CI ejecuta esta verificación en cada push a main.
+
+\section{Aristas entre capas}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}llr@{}}
+\toprule
+Dirección & Estado & Conteo \\
+\midrule
+\filepath{apps} $\to$ \filepath{platform} & Correcto &  3 \\
+\filepath{platform} $\to$ \filepath{core} & Correcto & 11 \\
+\filepath{core} $\to$ \filepath{libgraphmatch} & Correcto (build.rs) &  1 \\
+\filepath{core} $\to$ \filepath{platform} & \textbf{Deuda} &  2 \\
+\filepath{apps} $\to$ \filepath{core} & Correcto (sólo tipos) &  2 \\
+\filepath{platform} $\to$ \filepath{apps} & Prohibido &  0 \\
+\filepath{core} $\to$ \filepath{apps} & Prohibido &  0 \\
+\bottomrule
+\end{tabular}
+\caption{Aristas entre capas del grafo de dependencias. Las dos de
+``deuda'' están descritas en el capítulo \ref{sec:deudas}.}
+\label{tab:layer-edges}
+\end{table}
+
+\section{Benchmarks definidos}
+
+\begin{itemize}
+    \item \filepath{core/graph-engine/benches/hunt_latency.rs}:
+    latencia de \code{run_hunt} sobre grafos de tamaño creciente.
+    \item \filepath{core/graph-engine/benches/dedup_throughput.rs}:
+    throughput del interner bajo carga concurrente.
+\end{itemize}
+
+Los resultados concretos no se fijan en este documento — varían
+con hardware. CI compara contra baseline histórica y bloquea
+regresiones $>$ 15\%.
+
+\section{Cambios respecto al pre-rediseño}
+
+Para contextualizar la evolución:
+
+\begin{itemize}
+    \item \textbf{Ciclos}: 1 (API $\to$ CLI $\to$ core) $\to$ 0.
+    \item \textbf{Aristas indebidas}: 4 $\to$ 2.
+    \item \textbf{Crates}: 4 $\to$ 14 (la separación hizo explícitas
+    fronteras que estaban implícitas).
+    \item \textbf{LOC en el core}: no se comparan 1:1 porque el
+    core antiguo agregaba piezas que ahora viven en plataforma; la
+    comparación útil es ``tamaño del algoritmo puro tras la
+    limpieza'' contra ``tamaño del core de plataforma mezclada''.
+\end{itemize}

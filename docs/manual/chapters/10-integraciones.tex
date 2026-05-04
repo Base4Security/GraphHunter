@@ -1,0 +1,142 @@
+\chapter{Integraciones}
+\label{sec:man-integraciones}
+
+\section{Azure Sentinel}
+
+\subsection{Ingesta streaming}
+
+\emph{Integraciones \textrightarrow{} Sentinel \textrightarrow{}
+Conectar}. Te pide:
+
+\begin{itemize}
+    \item \code{AZURE_TENANT_ID}, \code{AZURE_CLIENT_ID},
+    \code{AZURE_CLIENT_SECRET} — para un Service Principal con
+    permisos \emph{Reader} en el workspace.
+    \item \code{SENTINEL_WORKSPACE_ID}.
+    \item Una query KQL (ej.\ \code{SigninLogs | where
+    TimeGenerated > ago(24h)}).
+\end{itemize}
+
+Click \emph{Conectar} y la sesión empieza a recibir eventos en
+vivo. Podés cerrar la conexión con \emph{Desconectar}.
+
+\subsection{Publish IOCs}
+
+Requiere \code{GRAPHHUNTER_IOC_PUBLISH_ENABLED=1} en el entorno
+del daemon. Los IOCs se publican como \emph{Threat Intelligence
+Indicators} en el workspace.
+
+\subsection{Estado}
+
+\emph{Integraciones \textrightarrow{} Sentinel \textrightarrow{}
+Status} muestra: conexión activa, eventos recibidos, última query,
+errores de API.
+
+\section{MCP (Model Context Protocol)}
+
+GraphHunter expone su API como tools MCP. Esto permite que Cursor,
+Claude Code, Claude Desktop u otros clientes compatibles accedan
+al grafo vivo desde su asistente.
+
+\subsection{Setup}
+
+En tu cliente MCP (ej.\ \filepath{.cursor/mcp.json}):
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+{
+  "mcpServers": {
+    "graphhunter": {
+      "command": "node",
+      "args": ["/path/to/graph-hunter-mcp/dist/src/index.js"],
+      "env": {
+        "GRAPHHUNTER_API_URL": "http://127.0.0.1:37891",
+        "GRAPHHUNTER_API_TOKEN": "<uuid del app startup>"
+      }
+    }
+  }
+}
+\end{lstlisting}
+
+Copiá el UUID que el app imprime al arrancar. Sin token, el MCP se
+niega a arrancar (salvo que fijes
+\code{GRAPHHUNTER_MCP_ALLOW_NO_TOKEN=1}, sólo para dev).
+
+\subsection{Qué podés pedir}
+
+Ejemplos de prompts para el asistente:
+
+\begin{itemize}
+    \item ``Buscá todas las IPs externas que se conectaron en la
+    última hora.''
+    \item ``¿Qué relaciones existen en el grafo entre \code{alice}
+    y \code{web-01}?''
+    \item ``Corre el hunt \code{User -[Auth]-> Host -[Connect]->
+    Host \{k=3\}} y explicame el top 5.''
+\end{itemize}
+
+El asistente traduce tu pedido a las tools MCP apropiadas
+(\code{search_entities}, \code{run_hunt}, etc.).
+
+\subsection{Debug}
+
+Si el asistente no ve las tools:
+
+\begin{itemize}
+    \item Verificar que el MCP server arrancó sin errores
+    (\code{GRAPHHUNTER_MCP_DEBUG=1} para logs verbosos).
+    \item Verificar que el app está corriendo y el token está
+    sincronizado.
+    \item Reiniciar el cliente MCP (a veces hay que bajar y subir
+    Cursor).
+\end{itemize}
+
+\section{AI backends (LLM)}
+
+GraphHunter usa LLM para el carril agéntico (parser\_generate,
+revisión de mappings). Backend configurable:
+
+\begin{itemize}
+    \item \textbf{Local GGUF}: setear
+    \code{GRAPHHUNTER_LOCAL_MODEL_PATH=/ruta/modelo.gguf}. Óptimo
+    para ambientes air-gapped o con datos sensibles.
+    \item \textbf{Remoto (OpenAI, Anthropic, Google)}: configurar
+    las credenciales del proveedor (\code{OPENAI_API_KEY}, etc.) y
+    elegir el backend en \emph{Settings \textrightarrow{} LLM
+    Backend}.
+\end{itemize}
+
+El LLM nunca ve eventos de producción — sólo muestras explícitas
+que vos le entregás en el panel agéntico.
+
+\section{GeoIP (MaxMind)}
+
+Para \emph{enrich\_ip}: bajar GeoLite2 o GeoIP2 City de MaxMind y
+apuntar \code{GRAPHHUNTER_GEOIP_DB=/ruta/GeoLite2-City.mmdb}. El
+enriquecimiento es opt-in por llamada; no se auto-enriquece la
+ingesta.
+
+\section{Tickets (Jira / ServiceNow)}
+
+\subsection{Jira}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+JIRA_BASE_URL=https://tuorg.atlassian.net
+JIRA_EMAIL=tu@email.com
+JIRA_API_TOKEN=<token>
+JIRA_PROJECT_KEY=SEC
+JIRA_ISSUE_TYPE=Task        # opcional, default "Task"
+GRAPHHUNTER_TICKET_PUBLISH_ENABLED=1
+\end{lstlisting}
+
+\subsection{ServiceNow}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+SERVICENOW_INSTANCE=tuorg.service-now.com
+SERVICENOW_USERNAME=user
+SERVICENOW_PASSWORD=<password>
+SERVICENOW_TABLE=incident   # opcional, default "incident"
+GRAPHHUNTER_TICKET_PUBLISH_ENABLED=1
+\end{lstlisting}
+
+Cada llamada a \emph{Crear ticket} requiere \code{confirm:true} o
+\code{dry_run:true}. Doble barrera: env var + confirmación.

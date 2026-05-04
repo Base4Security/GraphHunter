@@ -1,0 +1,296 @@
+\chapter{El \emph{streaming backend}: \emph{canonical store}}
+\label{cap:streaming-mirror}
+
+\begin{intuicion}
+\texttt{add\_relation} hace un \emph{single write} al
+\texttt{streaming} backend ---el almacenamiento canónico desde
+stage 2c part 2 (capítulo~\ref{cap:streaming-canonical}). El
+backend es una estructura \emph{degree-adaptive per-vértice}
+(\texttt{Inline} para grado bajo, \texttt{Vec<StreamEdge>} para
+grado alto, \texttt{Mmap} para vértices spilled a disco) con
+\emph{auto-spill incremental} cuando el budget global cruza un
+umbral. Lecturas son \emph{zero-copy}: el matcher hot-path toma
+\texttt{neighbors\_arc(sid)} + \texttt{guard.read()} +
+\texttt{as\_slice()} y consume un \texttt{\&[StreamEdge]} con la
+misma forma que el legacy \texttt{\&[CompactRelation]}. Este
+capítulo explica el shape degree-adaptive y la mecánica del
+auto-spill; el capítulo siguiente analiza cómo se hizo el migrate
+del matcher para que la antigua copia paralela
+(\texttt{SpillableEdgeStore}) pudiera eliminarse.
+\end{intuicion}
+
+\section{Por qué un \emph{streaming backend} y no un \texttt{Vec}}
+
+La forma natural de un edge store sería un \texttt{Vec<CompactRelation>}
+sortable + binary-searchable. Eso fue el \texttt{SpillableEdgeStore}
+legacy. Tiene tres limitaciones para los consumers actuales:
+
+\begin{itemize}
+    \item \textbf{Sólo binary-searchable post-\texttt{finalize}}:
+    durante ingesta el slice no está sorted, así que un matcher
+    incremental que querría re-evaluar una hipótesis con cada
+    arista nueva no puede usar \texttt{partition\_point} sobre el
+    rango temporal.
+    \item \textbf{No expone \emph{per-vertex} access barato}: cada
+    \texttt{get\_edges(sid)} hace un \emph{HashMap lookup}; los
+    consumers que iteran muchos vértices de un grafo (NLF build,
+    khop\_reach build) pagan ese lookup por vértice.
+    \item \textbf{Spill-to-disk one-shot}: spillea cuando el buffer
+    cruza un umbral, pero post-spill no acepta más writes hasta el
+    próximo finalize. No sirve para \emph{ingesta continua}.
+\end{itemize}
+
+El \emph{streaming backend} resuelve los tres simultáneamente:
+per-vertex \emph{slot} en un \texttt{HashMap<StrId, Arc<RwLock<NeighborList>>>},
+\emph{auto-spill incremental} con archivos round-numbered, y un
+\emph{per-vertex slice} sorted-by-timestamp post-\texttt{finalize}
+que el matcher consume con \texttt{partition\_point} igual que el
+viejo store.
+
+\section{La estructura: \texttt{NeighborList} degree-adaptive}
+
+Cada vértice del streaming backend tiene una \texttt{NeighborList}
+con tres variantes:
+
+\begin{lstlisting}[language=Rust]
+pub enum NeighborList {
+    Inline(SmallVec<[StreamEdge; 8]>),    // <= 8 aristas
+    Vec(Vec<StreamEdge>),                  // > 8 aristas, in-RAM
+    Mmap { handle: Arc<MmapHandle>,        // spilled
+           byte_offset: usize, len: usize },
+}
+\end{lstlisting}
+
+\noindent
+La elección depende del estado del vértice:
+
+\begin{itemize}
+    \item \textbf{Inline}: 8 aristas \emph{en la propia struct}, sin
+    indirección. Cero allocs para vértices de grado bajo (la mayoría
+    en grafos scale-free). Cabe en una cache line.
+    \item \textbf{Vec}: cuando el grado pasa 8, se promueve a
+    \texttt{Vec<StreamEdge>}. Un alloc, acceso secuencial óptimo.
+    El matcher hot-path lee el slice contiguo con
+    \texttt{partition\_point} para acotar ventanas temporales en
+    \(O(\log d)\) por frame.
+    \item \textbf{Mmap}: cuando el budget total cruza el umbral
+    (default 1\,M aristas, configurable vía
+    \texttt{with\_memory\_budget\_edges}), todas las
+    \texttt{NeighborList} \emph{Inline}/\emph{Vec} se vuelcan a un
+    archivo memory-mapped sorted-by-timestamp y los slots pasan a
+    \texttt{Mmap \{ handle, byte\_offset, len \}}. El \texttt{Arc<MmapHandle>}
+    mantiene el archivo mapeado mientras quede al menos una
+    referencia. Lecturas siguen siendo zero-copy: \texttt{as\_slice()}
+    sobre \texttt{Mmap} proyecta el rango como \texttt{\&[StreamEdge]}.
+\end{itemize}
+
+\subsection{Por qué este shape y no la antigua \texttt{Btree}}
+
+Una iteración previa del diseño tenía una variante \texttt{Btree}
+para hubs (>128 aristas) que daba \(O(\log d)\) en queries por
+ventana temporal. Se eliminó en \emph{stage 2c part 2} a favor de
+\texttt{Vec} contiguo con \texttt{partition\_point}: el matcher
+sostiene un slice borrowed sobre toda la duración del frame del DFS
+con prefetch lookahead, y un \texttt{BTreeMap} no puede exponer un
+slice contiguo. La pérdida algorítmica (\(O(d)\) lineal vs
+\(O(\log d)\)) en queries por ventana se materializa solo en
+consumers de \texttt{iter\_window} que ningún path de producción
+usaba; el matcher hot-path tiene su propio \texttt{partition\_point}
+sobre el slice \emph{Vec}/\emph{Mmap} que sigue dando \(O(\log d)\).
+
+En grado bajo, \texttt{Inline} elimina el header del Vec (24~B)
++ heap alloc + indirección — para 1~M vértices con grado 1, eso son
+24~MB salvados.
+
+\section{Promotion + auto-spill}
+
+Las transiciones entre variantes son atómicas; cada \texttt{append\_edge}
+recorre tres puntos:
+
+\begin{lstlisting}[language=Rust]
+fn append_edge(&mut self, edge: StreamEdge) {
+    match self {
+        NeighborList::Inline(sv) if sv.len() < 8 => {
+            sv.push(edge);
+        }
+        NeighborList::Inline(sv) => {
+            // promote to Vec
+            let mut v: Vec<StreamEdge> = sv.iter().copied().collect();
+            v.push(edge);
+            *self = NeighborList::Vec(v);
+        }
+        NeighborList::Vec(v) => {
+            v.push(edge);
+        }
+        NeighborList::Mmap { .. } => {
+            // post-spill write: copy out, append, swap
+            let mut v: Vec<StreamEdge> = self.as_slice().to_vec();
+            v.push(edge);
+            *self = NeighborList::Vec(v);
+        }
+    }
+}
+\end{lstlisting}
+
+\noindent
+\emph{Inline \(\to\) Vec}: O(8) memcpy una vez por vértice cuando
+cruza grado 8. Amortizado O(1).
+
+\emph{Vec \(\to\) Mmap}: no es per-vertex sino un evento
+\emph{global} disparado por el budget tracker
+\texttt{edges\_since\_last\_spill}. El backend hace \texttt{auto\_spill()}
+que sortea cada per-vertex Vec por timestamp, escribe un archivo
+round-numbered, y swap-ea cada slot a \texttt{Mmap}. Costo: O(E)
+bytes de I/O secuencial, una vez por round.
+
+\emph{Mmap \(\to\) Vec}: O(d) memcpy out of mmap al primer write
+post-spill sobre ese vértice. Producción no escribe post-spill
+en el caso normal (toda la ingesta termina antes de que el
+analista corra hunts), así que es cold path.
+
+\section{Wait-free reads: \texttt{neighbors\_snapshot}}
+
+La pieza interesante: el matcher quiere leer
+\texttt{NeighborList} mientras el ingestor escribe. Las opciones
+clásicas:
+
+\begin{itemize}
+    \item \texttt{Mutex}: serializa todo. Lento bajo lectura
+    intensiva.
+    \item \texttt{RwLock}: múltiples readers, pero el writer
+    bloquea a todos los readers. Si la promotion es lenta, el
+    matcher se traba.
+    \item \emph{Wait-free}: los readers nunca bloquean. Esquema
+    típico: el writer construye el nuevo estado en un buffer
+    separado y publica el puntero atómicamente; los readers ven el
+    puntero viejo o el nuevo, nunca un estado intermedio.
+\end{itemize}
+
+\noindent
+El streaming backend implementa la tercera opción usando
+\texttt{ArcSwap<NeighborList>}: cada vértice tiene un puntero
+atómico a su \texttt{Arc<NeighborList>}. \texttt{neighbors\_snapshot}
+hace un \texttt{load} atómico del puntero y devuelve el
+\texttt{Arc} clonado:
+
+\begin{lstlisting}[language=Rust]
+pub fn neighbors_snapshot(&self, sid: StrId) -> Arc<NeighborList> {
+    self.per_vertex[sid.0 as usize].load_full()
+}
+\end{lstlisting}
+
+\noindent
+El matcher ahora tiene su propia copia (refcount-shared) del
+\texttt{NeighborList} que existía en el momento del
+\texttt{load\_full()}. El writer puede seguir publicando nuevas
+versiones; el matcher ve la suya \emph{consistente} hasta que
+descarte el \texttt{Arc}.
+
+\subsection{Costo}
+
+\begin{itemize}
+    \item Reader: 1 load atómico + 1 \texttt{Arc::clone}
+    (\texttt{fetch\_add}) = $\sim 10$~ns total. Sin bloqueo.
+    \item Writer: construir nuevo estado (puede ser $O(\deg)$ por
+    promotion), 1 store atómico para publicar. El reader que vino
+    \emph{antes} del store ve la versión vieja; el reader que vino
+    \emph{después}, la nueva. No hay raza visible.
+\end{itemize}
+
+\subsection{Memory reclamation}
+
+El reto de wait-free es \emph{cuándo liberar} el estado viejo. Si
+un reader todavía tiene un \texttt{Arc} a la versión vieja, el
+writer no puede liberarla. \texttt{ArcSwap} resuelve esto con
+\emph{deferred drop}: el viejo \texttt{Arc} se desreferencia al
+liberar el \texttt{ArcSwap}; el reader es responsable de soltar su
+clone cuando termine. El refcount atómico hace el resto.
+
+\section{¿Cómo se usa hoy?}
+
+Post stage 2c part 2 el streaming backend es \emph{el} edge store.
+Cinco \emph{ingest paths} comparten un solo helper
+\texttt{push\_to\_streaming}: \texttt{add\_relation},
+\texttt{add\_relations\_batch}, \texttt{replay\_relations},
+\texttt{compact\_before}'s rebuild,
+\texttt{remove\_entities\_and\_relations\_by\_dataset}'s rebuild.
+
+Lectores production:
+
+\begin{itemize}
+    \item \textbf{Matcher hot path} (\texttt{dfs\_match\_smart},
+    \texttt{dfs\_match\_iterative}, \texttt{edge\_range\_sid},
+    AMAC pair): \texttt{neighbors\_arc(sid) + read guard +
+    as\_slice()}. Slice borrowed sobre toda la duración del frame
+    del DFS, con \texttt{partition\_point} para acotar ventanas
+    temporales.
+    \item \textbf{Index builds} (NLF, khop\_reach, lftj,
+    yannakakis): \texttt{neighbors\_arc} per-vertex preserva cache
+    locality sobre los acumuladores indexados por \texttt{v\_idx}.
+    \item \textbf{Aggregaciones admin} (anomaly scorer warm-up,
+    temporal heatmap, timeline data, schema cache fingerprint):
+    \texttt{streaming.for\_each\_edge(closure)} con un solo
+    \emph{outer guard} para todo el sweep.
+    \item \textbf{Live-tail UI} (\texttt{cmd\_get\_recent\_edges})
+    y telemetría (\texttt{cmd\_get\_ingest\_stats}): consumers
+    delta-aware originales que sobrevivieron la migración.
+\end{itemize}
+
+\begin{enelcodigo}
+\filepath{core/graph-engine/src/streaming.rs} expone el módulo
+completo: \texttt{InMemoryStreamingBackend} con
+\texttt{append\_edge}, \texttt{finalize}, \texttt{auto\_spill},
+\texttt{neighbors\_arc}, \texttt{for\_each\_edge},
+\texttt{for\_each\_vertex}, \texttt{consolidate}, \texttt{clear}.
+El antiguo \texttt{spill.rs} con \texttt{SpillableEdgeStore} se
+eliminó (stage 2c part 2 cleanup).
+\end{enelcodigo}
+
+\section{Resumen}
+
+\begin{itemize}
+    \item Streaming backend = el \emph{único} edge store, per-vertex
+    con \texttt{NeighborList} \emph{degree-adaptive}:
+    \texttt{Inline} ($\leq 8$), \texttt{Vec} (resto in-RAM),
+    \texttt{Mmap} (post-spill).
+    \item Auto-spill incremental dispara cuando el budget global
+    (default $10^6$ aristas) cruza el umbral; sortea cada slice
+    \emph{durante el write}, así el archivo es matcher-ready.
+    \item \emph{Post-spill} writes promueven \texttt{Mmap} \(\to\)
+    \texttt{Vec} sólo en el vértice tocado: cold path, una memcpy
+    out of mmap.
+    \item Lecturas son zero-copy via \texttt{neighbors\_arc + read
+    guard + as\_slice}: el matcher hot-path sostiene el slice
+    sobre toda la duración del frame, igual que el legacy
+    \texttt{\&[CompactRelation]}.
+    \item \texttt{StreamEdge} es layout-compatible con
+    \texttt{CompactRelation} (\texttt{\#[repr(C)]}, mismo orden),
+    así que los $\sim$50 readers del antiguo dual-write iteran el
+    nuevo slice con field-access idéntico.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Para un grafo de 1~M vértices distribuidos
+    como power-law (\(\alpha = 2\)), estimá: cuántos vértices van a
+    cada variante (\texttt{Inline}, \texttt{Vec}, \texttt{Btree}) y
+    el ahorro de memoria vs usar \texttt{Vec} para todos.
+
+    \item ¿Por qué la promotion es $O(\deg)$ \emph{una vez} por
+    umbral cruzado y no $O(\deg)$ por insert? Mostrá la cuenta
+    amortizada.
+
+    \item \starred{} Diseñá un escenario donde \texttt{ArcSwap}
+    falla (algo no es wait-free como prometido). (Pista: pensá en
+    backpressure si los readers no descartan los Arcs viejos.)
+
+    \item Compará: 1 millón de \texttt{neighbors\_snapshot} con
+    \texttt{ArcSwap} vs con \texttt{RwLock<NeighborList>}. Tiempo y
+    contention. ¿Cuándo gana cada uno?
+
+    \item Si el motor migra a streaming como source of truth
+    (stage 2c), el matcher hot loop pasa de iterar un slice
+    contiguo a iterar una \texttt{NeighborList} variant. ¿Qué
+    riesgo de regresión hay? ¿Para qué tipo de hipótesis?
+\end{enumerate}
+\end{ejercicios}

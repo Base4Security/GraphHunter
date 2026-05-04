@@ -1,0 +1,19 @@
+[package]
+name = "graph_hunter_dsl"
+version = "0.1.0"
+edition = "2024"
+description = "Hypothesis DSL parser + the types/hypothesis modules it produces. Extracted from graph_hunter_core per F2.12. Bundles types.rs + hypothesis.rs + dsl.rs as a single crate because the three form a tight dependency unit and splitting them requires a deeper foundation layer than the shearing goal calls for. No inbound dep on graph_hunter_core; core re-exports these under the original paths to keep the ~140 call sites source-compatible."
+license = "GPL-3.0"
+
+[lib]
+name = "graph_hunter_dsl"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# F3.2: property-based testing for `format ∘ parse ∘ format` idempotence
+# over the subset of `Hypothesis` that `format_hypothesis` preserves.
+# Off the release build path; only pulled for `cargo test`.
+proptest = "1"

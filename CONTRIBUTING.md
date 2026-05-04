@@ -29,8 +29,8 @@ Thank you for your interest in contributing. This document explains how to get s
 ## Code conventions
 
 - **Rust (graph_hunter_core):** Domain logic lives in the core library. Parsers implement the `LogParser` trait; tests live in the `mod tests` block in `lib.rs`. See [.claude/CLAUDE.md](.claude/CLAUDE.md) for parser pattern, test naming, and error handling.
-- **Tauri (app/src-tauri):** Thin command layer over the core. Commands are prefixed with `cmd_`; add new formats via a match arm in `cmd_load_data` and a corresponding parser import.
-- **Frontend (app/src):** Functional React components, TypeScript types in `types.ts`, Tauri `invoke<>` for backend calls. Icons from `lucide-react` with `size={14}` for consistency.
+- **Tauri (apps/tauri/src-tauri):** Thin command layer over the core. Commands are prefixed with `cmd_`; add new formats via a match arm in `cmd_load_data` and a corresponding parser import.
+- **Frontend (apps/tauri/src):** Functional React components, TypeScript types in `types.ts`, Tauri `invoke<>` for backend calls. Icons from `lucide-react` with `size={14}` for consistency.
 
 Full conventions (parser checklist, frontend patterns, Git) are documented in [.claude/CLAUDE.md](.claude/CLAUDE.md).
 
@@ -38,10 +38,10 @@ Full conventions (parser checklist, frontend patterns, Git) are documented in [.
 
 1. Implement `LogParser` in `graph_hunter_core/src/<format>.rs`.
 2. Register the module and parser in `graph_hunter_core/src/lib.rs`.
-3. Add a format branch in `app/src-tauri/src/lib.rs` in `cmd_load_data`.
-4. Add the format option in `app/src/components/IngestPanel.tsx`.
+3. Add a format branch in `apps/tauri/src-tauri/src/lib.rs` in `cmd_load_data`.
+4. Add the format option in `apps/tauri/src/components/IngestPanel.tsx`.
 5. Add demo data under `demo_data/` and tests in `graph_hunter_core/src/lib.rs`.
-6. Run `cargo test`, `npx tsc --noEmit`, and `cargo check` in `app/src-tauri`.
+6. Run `cargo test`, `npx tsc --noEmit`, and `cargo check` in `apps/tauri/src-tauri`.
 
 ## Submitting changes
 

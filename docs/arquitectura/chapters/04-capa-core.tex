@@ -1,0 +1,152 @@
+\chapter{Capa de núcleo}
+\label{sec:capa-core}
+
+\filepath{core/} contiene tres crates: \filepath{graph-engine},
+\filepath{matcher-ffi} y \filepath{gnn}. Juntos definen el motor
+algorítmico del sistema.
+
+\section{\filepath{core/graph-engine}}
+
+Es el crate más grande del repositorio. Agrupa:
+
+\begin{itemize}
+    \item \textbf{Modelo de grafo}: multigrafo temporal dirigido
+    sobre entidades (\code{Entity}) y relaciones (\code{Relation}).
+    Un nodo es una tupla \code{(type, value)} —
+    \code{(IP, "10.0.0.3")} — y una arista es una tupla
+    \code{(source, type, target, timestamp, attrs)}. La
+    conservación del tiempo es una invariante: toda arista tiene un
+    \code{t} y los algoritmos se apoyan en ordenamiento monotónico.
+    \item \textbf{DFS temporal guiado por score}: iterativo (sin
+    recursión), poda por score parcial. Es la ruta por defecto
+    cuando \filepath{libgraphmatch} no está disponible o la
+    hipótesis es pequeña. La equivalencia con el matcher SIMD se
+    verifica con property tests (\filepath{tests/equivalence_dfs_simd.rs}
+    en \filepath{core/matcher-ffi}).
+    \item \textbf{Anomaly scoring}: cinco componentes formalmente
+    definidos en \filepath{scoring/components.rs}. Cada uno produce
+    un valor en $[0, 1]$ y la composición se hace con pesos
+    normalizados. Ver el libro Paper para fórmulas.
+    \item \textbf{Interner}: deduplicación de strings compartidos
+    (\code{SymbolId}) con un único backend.
+    \item \textbf{Invariantes de hipótesis}: predicados que validan
+    forma de la hipótesis (treewidth, \code{k}-simplicity, shape
+    catalog) antes de ejecutarla.
+    \item \textbf{Ingest pipeline}: coverage, cancellation,
+    métricas, enrichment — el plumbing que convierte un flujo de
+    eventos en un grafo consistente.
+    \item \textbf{Planner de operadores físicos}
+    (\filepath{src/planner.rs}): inspecciona la hipótesis y elige
+    entre el DFS general y \emph{fast-paths} estructurales. Hoy
+    detecta \(K_4\) homogéneo (\emph{6 pasos}, \emph{tipo de
+    entidad y relación constantes}, \emph{sin predicados}) y
+    rutea a \code{search\_temporal\_pattern\_k4\_lftj}; el
+    \emph{enum} \code{DispatchPlan} está diseñado para crecer a
+    \(K_5\), \(C_6\) y \emph{shapes} más complejas sin tocar
+    \emph{call-sites}. La detección estructural complementa al
+    detector legacy por \emph{name marker} de S3.
+    \item \textbf{Indice de \emph{$k$-hop label reachability}}
+    (\filepath{src/khop\_reach.rs}): \emph{bitmap} \(9\)-bit por
+    vértice indicando qué tipos de entidad son alcanzables en a lo
+    sumo \code{MAX\_DEPTH=4} saltos, con extensión M2 que guarda
+    \(\min/\max\) \emph{first-edge timestamp} por tipo para
+    descartar \emph{starts} cuya ventana temporal no permite
+    alcanzar el destino. Costa $\sim 144$~bytes/vértice, falla
+    siempre conservadora.
+    \item \textbf{Análisis de simetría \emph{nauty}}
+    (\filepath{src/nauty\_symmetry.rs}, \emph{cfg(unix) +
+    feature symmetry-nauty}): FFI a \code{nauty-Traces-sys} para
+    computar \(\mathrm{Aut}(Q)\) de \emph{pattern graphs}
+    arbitrarios y emitir \emph{partial-order constraints}
+    \emph{chain} \(v_0 < v_1 < \ldots < v_{k-1}\) por órbita
+    (cota Grochow-Kellis, RECOMB 2007). En \emph{Windows} y sin
+    \emph{feature} retorna lista vacía
+    (\emph{soundness-preserving no-op}).
+    \item \textbf{LFTJ + \emph{canonical operators}}
+    (\filepath{src/lftj.rs}): núcleo \emph{Worst-Case Optimal
+    Join} (Veldhuizen ICDT 2014) sobre \code{MaterializedCsrTrie};
+    cuenta y enumera triángulos, \(K_4\), \(K_5\) y \(C_6\)
+    dirigidos. Cada \emph{shape} expone una sibling
+    \emph{canonical} con \emph{symmetry-breaking} \emph{hardcoded}
+    (cadena para cliques, \emph{star-from-min} para \(C_6\)) que
+    elimina el factor \(|\mathrm{Aut}|\) de redundancia, y una
+    \emph{rayon-parallel} \(\_par\) para los dos modos.
+\end{itemize}
+
+En cifras: aprox.\ 45\,000 líneas de Rust, el conjunto de tests más
+denso del repositorio (benches de criterion, proptest para
+equivalencia, proptest para propiedades de anomaly).
+
+\section{\filepath{core/matcher-ffi}}
+
+Fachada segura para \filepath{libgraphmatch}. Este crate es el
+\emph{único} punto donde existe un bloque \code{extern "C"} en Rust;
+nada más en el repositorio cruza la frontera FFI directamente.
+
+Tres tipos principales:
+
+\begin{itemize}
+    \item \code{GmGraph<S: State>}, con \code{State} $\in$
+    \code{\{Building, Finalized\}}. Typestate: no se puede ejecutar
+    una búsqueda contra un grafo que aún no ha sido finalizado, y el
+    compilador lo rechaza.
+    \item \code{GmMatcher}: dueño de la memoria del matcher C++,
+    liberada deterministicamente en \code{Drop} (RAII).
+    \item \code{GmResults}: iterador de matches con liberación RAII.
+\end{itemize}
+
+El crate expone también dos utilidades de chequeo en load-time:
+\code{gm_abi_version()} (entero monotónico emitido por
+\filepath{libgraphmatch}) y \code{gm_simd_isa()} (enum
+\code{Scalar | AVX2 | AVX512}). Si la ABI no coincide con lo
+esperado, el binario falla inmediatamente al iniciar; mejor un
+crash ruidoso que resultados silenciosamente incorrectos.
+
+ADR-002 (apéndice \ref{sec:adrs}) cubre las decisiones detalladas.
+
+\section{\filepath{core/gnn}}
+
+Scorer basado en inferencia ONNX. Está organizado en subdirectorios
+según estabilidad:
+
+\begin{itemize}
+    \item \filepath{v1/}: v1 estable con \code{K_MAX = 32},
+    \code{D_NODE = 16}, 5 clases. Se compila por defecto.
+    \item \filepath{v2/}: v2 experimental detrás de
+    \code{feature = "gnn-v2-experimental"}. Añade dimensiones para
+    contexto de identidad en la nube. El modelo no está entrenado
+    sobre todos los datasets objetivo.
+    \item \filepath{common/model_gate.rs}: \emph{model gate} — un
+    cargador que valida el archivo del modelo antes de habilitar
+    inferencia (checksum, firma, dimensiones esperadas). Si la
+    validación falla, el GNN queda deshabilitado pero el binario
+    sigue corriendo; anomaly score se computa sin el quinto
+    componente.
+\end{itemize}
+
+ADR-003 registra el aislamiento detrás del gate y la razón del
+feature flag.
+
+\section{Invariantes que defiende el núcleo}
+
+Desde el punto de vista del resto del sistema, el núcleo garantiza:
+
+\begin{enumerate}
+    \item \textbf{Grafo bien formado}: nunca hay aristas apuntando
+    a nodos inexistentes, los timestamps son crecientes dentro de
+    una hipótesis, los símbolos están internados una única vez.
+    \item \textbf{Equivalencia de motores}: DFS y SIMD devuelven el
+    mismo conjunto de matches para la misma entrada
+    (property-tested).
+    \item \textbf{Scores en $[0, 1]$}: toda componente es
+    normalizada; la composición es convexa.
+    \item \textbf{FFI sin panics cruzados}: cualquier panic en Rust
+    se propaga por el stack antes de cruzar la frontera C; cualquier
+    error del C++ se mapea a \code{Result} antes de salir del crate.
+    \item \textbf{Reproducibilidad}: dado el mismo grafo, la misma
+    hipótesis y el mismo modelo GNN, se produce el mismo ranking.
+\end{enumerate}
+
+El núcleo hereda el nombre del libro Brand: es el \emph{structure}.
+Cambia lento; cuando cambia, exige pruebas formales; y todo el
+resto del sistema descansa sobre sus invariantes.

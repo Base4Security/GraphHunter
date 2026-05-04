@@ -1,0 +1,183 @@
+\chapter{El \emph{matcher}, tier por tier}
+\label{cap:matcher}
+
+\begin{intuicion}
+Llamar a \texttt{search\_temporal\_pattern} no ejecuta un solo
+algoritmo --- ejecuta el operador físico que el \emph{planner} eligió
+para esa hipótesis. Hay cuatro hoy, ordenados por especificidad y
+\emph{lift} esperado: \emph{LFTJ-K4} (sólo cuando la hipótesis es un
+\(K_4\) homogéneo), \emph{Yannakakis chain}, \emph{Yannakakis tree-walk}
+(\emph{shape} \texttt{Graph}), y el \emph{DFS legacy} como
+\emph{fallback}. Este capítulo explica cuándo se elige cada uno y por
+qué.
+\end{intuicion}
+
+\section{El \emph{planner}}
+
+\begin{lstlisting}[language=Rust]
+pub enum DispatchPlan {
+    DfsMatch,    // default, generic
+    K4Lftj,      // M1/S3, sólo K_4 homogéneo
+    Yannakakis,  // L1, α-acíclica + flag GRAPHHUNTER_YANNAKAKIS
+}
+
+pub fn plan(hypothesis: &Hypothesis) -> DispatchPlan {
+    if name_marker_dispatch(hypothesis)   { return K4Lftj; }
+    if structural_dispatch(hypothesis)    { return K4Lftj; }
+    if yannakakis_dispatch(hypothesis)    { return Yannakakis; }
+    DfsMatch
+}
+\end{lstlisting}
+
+\begin{itemize}
+    \item \texttt{name\_marker\_dispatch}: la \emph{back-compat} S3.
+    Si el nombre de la hipótesis contiene la cadena ``k4-clique'' y
+    \texttt{GRAPHHUNTER\_K4\_LFTJ=1}, ruta al LFTJ.
+    \item \texttt{structural\_dispatch} (M1): detecta una hipótesis
+    de exactamente 6 pasos homogéneos (mismo \texttt{EntityType},
+    misma \texttt{RelationType}, sin predicados) sin requerir la
+    palabra mágica.
+    \item \texttt{yannakakis\_dispatch} (L1): cualquier hipótesis
+    \(\alpha\)-acíclica con \texttt{GRAPHHUNTER\_YANNAKAKIS=1}.
+    Ambas \emph{shapes} \texttt{Chain} y \texttt{Graph} aplican.
+\end{itemize}
+
+\section{LFTJ-K4: el \emph{worst-case-optimal join} para cliques}
+
+Para una hipótesis \(K_4\) (cuatro vértices, las seis aristas
+dirigidas entre todos los pares), el DFS recursivo escala como
+\(O(m \cdot \deg^3)\) en el peor caso. \emph{Leapfrog Triejoin}
+(Veldhuizen ICDT 2014) se queda en el \emph{AGM bound} \(m^{\rho^*} =
+m^2\) — es \emph{worst-case optimal}.
+
+\begin{intuicion}
+La idea es construir un \emph{trie} sobre las aristas indexado por
+\texttt{(source, dest)} y usar \emph{multi-way intersection} en lugar
+de \emph{nested loop}. Para \(K_4\), una vez fijado un par
+\((a, b)\), el conjunto de \(c\)s que extiende a un triángulo es
+\(N(a) \cap N(b)\) (\emph{intersect SIMD}); el conjunto de \(d\)s que
+completa el \(K_4\) es \(\{c\} \cap N(a) \cap N(b) \cap N(c)\).
+\end{intuicion}
+
+\begin{enelcodigo}
+\filepath{core/graph-engine/src/lftj.rs} y
+\filepath{core/graph-engine/src/lftj\_query.rs}. Versiones canónicas
+(con \emph{symmetry breaking} hardcoded) en M3++ entregaron el corte
+adicional \(|\mathrm{Aut}|\)-veces.
+\end{enelcodigo}
+
+\section{DFS legacy con \emph{prunes}}
+
+Cuando ningún operador especializado dispatcha, el motor cae al DFS
+recursivo de toda la vida. Pero el DFS de hoy lleva tres \emph{prunes}
+acumulados:
+
+\begin{enumerate}
+    \item \textbf{NLF}: descarta \emph{starts} cuyo histograma de
+    vecinos no satisface el primer paso.
+    \item \textbf{k-hop reachability (D5/M2)}: descarta \emph{starts}
+    desde los que no puede haber un camino de longitud
+    \(\leq \mathrm{MAX\_DEPTH}\) al \texttt{dest\_type} final, dentro
+    de la ventana temporal.
+    \item \textbf{B9 \emph{symmetry breaking}} para hipótesis
+    palindrómicas.
+\end{enumerate}
+
+Cada \emph{prune} se aplica antes del DFS principal. Capítulo~\ref{cap:indexes}
+detalla cómo se construyen.
+
+\section{Yannakakis chain (L1 stage 2)}
+
+Para cualquier hipótesis \(\alpha\)-acíclica con \emph{shape}
+\texttt{Chain}, el motor materializa los \emph{bags} y corre la
+\emph{semi-join reducer} de dos pasadas antes de enumerar:
+
+\begin{algorithm}[H]
+\caption{Yannakakis chain matcher}
+\KwIn{\texttt{bags}: \([B_0, B_1, \ldots, B_{n-1}]\)}
+\KwOut{\texttt{Vec<HuntResult>}}
+\tcc{Pasada 1 (bottom-up).}
+\For{$i$ from $n-2$ \textbf{down to} $0$}{
+    \texttt{live\_origins} $\leftarrow \{r.\mathrm{origin} : r \in B_{i+1}\}$\;
+    $B_i \leftarrow \{r \in B_i : r.\mathrm{dest} \in \texttt{live\_origins}\}$\;
+}
+\tcc{Pasada 2 (top-down).}
+\For{$i$ from $1$ \textbf{to} $n-1$}{
+    \texttt{live\_dests} $\leftarrow \{r.\mathrm{dest} : r \in B_{i-1}\}$\;
+    $B_i \leftarrow \{r \in B_i : r.\mathrm{origin} \in \texttt{live\_dests}\}$\;
+}
+\tcc{Enumerate.}
+\For{cada \texttt{row} en $B_0$}{
+    \texttt{walk}(\texttt{row.origin}, \texttt{row.dest},
+                 \texttt{row.timestamp}, $1$)\;
+}
+\end{algorithm}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.3cm,
+    every node/.style={font=\scriptsize},
+    bag/.style={draw=accent, thick, rounded corners=1mm,
+                minimum width=2.4cm, minimum height=1cm,
+                fill=accentlight, align=center}
+]
+\node[bag] (b0) {$B_0$\\\itshape User--Auth--Host};
+\node[bag, right=of b0] (b1) {$B_1$\\\itshape Host--Connect--IP};
+\node[bag, right=of b1] (b2) {$B_2$\\\itshape IP--Beacon--Domain};
+
+\draw[->, >=Latex, accent, thick, dashed] (b1.south) to[out=-90,in=-90, looseness=1.2] node[below, yshift=-0.2cm]{semi-join} (b0.south);
+\draw[->, >=Latex, accent, thick, dashed] (b2.south) to[out=-90,in=-90, looseness=1.2] (b1.south);
+\draw[->, >=Latex, accent!60, thick] (b0.north) to[out=90,in=90, looseness=1.2] node[above, yshift=0.2cm]{semi-join} (b1.north);
+\draw[->, >=Latex, accent!60, thick] (b1.north) to[out=90,in=90, looseness=1.2] (b2.north);
+\end{tikzpicture}
+\caption{Las dos pasadas del \emph{semi-join reducer}. Bottom-up
+elimina \emph{rows} cuyo \emph{dest} no aparece como \emph{origin} en
+el siguiente \emph{bag}; top-down hace lo simétrico. Después de las
+dos pasadas, toda \emph{row} sobreviviente participa de al menos un
+\emph{full join}.}
+\label{fig:matcher-semijoin}
+\end{figure}
+
+\section{Yannakakis tree-walk (L1 stage 3b)}
+
+Para \emph{shape} \texttt{Graph} (estrellas, árboles, cualquier
+\(\alpha\)-acíclico no-cadena), el \emph{enumerator} camina el
+\emph{join tree} construido por GYO. Mantiene un
+\texttt{binding: Vec<Option<StrId>>} indexado por \texttt{VarId}; en
+cada nodo del árbol consulta el \emph{bag} correspondiente a través
+del \emph{shared variable} con el padre.
+
+\begin{algorithm}[H]
+\caption{Tree-walk enumerator}
+\KwIn{\texttt{join\_tree}, \texttt{bags}, \texttt{binding} (todo \texttt{None})}
+\KwOut{\texttt{Vec<HuntResult>}}
+\texttt{recurse}(\texttt{node\_idx} = 0)\;
+\BlankLine
+\Comment{\texttt{recurse(node\_idx)}}
+\If{\texttt{node\_idx} == \texttt{join\_tree.nodes.len()}}{
+    \texttt{emit}(\texttt{binding} resuelto a \texttt{Vec<Arc<str>>})\;
+    \Return
+}
+\texttt{step} $\leftarrow$ \texttt{join\_tree.nodes[node\_idx]}\;
+\texttt{edge} $\leftarrow$ \texttt{hypergraph.edges[step]}\;
+\Switch{\texttt{(binding[edge.origin], binding[edge.dest])}}{
+    \Case{\texttt{(Some(o), \_)}}{candidates $\leftarrow$ \texttt{by\_origin[step][o]}}
+    \Case{\texttt{(None, Some(d))}}{candidates $\leftarrow$ \texttt{by\_dest[step][d]}}
+    \Case{\texttt{(None, None)}}{candidates $\leftarrow$ \texttt{bags[step].rows} (root)}
+}
+\For{\texttt{row} \textbf{in} candidates}{
+    intentar \texttt{bind(edge.origin, row.origin)} y \texttt{bind(edge.dest, row.dest)}\;
+    \texttt{recurse(node\_idx + 1)}\;
+    \texttt{unbind} si correspondía\;
+}
+\end{algorithm}
+
+\begin{intuicion}
+La diferencia clave con el \emph{chain enumerator}: en una cadena
+sabemos que \texttt{bag[i+1].origin == bag[i].dest} por la convención
+posicional, así que el \emph{lookup} es siempre \emph{by\_origin}. En
+una estrella, el \emph{shared variable} con el padre puede aparecer
+en cualquiera de los dos lados; por eso el \emph{tree-walk} mantiene
+ambos índices y dispatcha por \texttt{(origin\_bound, dest\_bound)}.
+\end{intuicion}

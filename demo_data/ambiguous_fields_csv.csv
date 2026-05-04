@@ -1,0 +1,11 @@
+timestamp,actor,target,action,value,data,extra,host,policy_id,severity
+2024-01-15T10:00:00Z,alice,WS-01,login,a3f7c2,{"src":"10.0.0.1"},,DC-01,42,low
+2024-01-15T10:00:05Z,svc-account,db-prod-04,query,e98d11,{"rows":3},query=SELECT,SRV-02,42,info
+2024-01-15T10:01:00Z,powershell.exe,bob,spawn,5d41402abc4b2a76,{},parent=cmd.exe,WS-02,1001,medium
+2024-01-15T10:01:30Z,bob,evil-c2.attacker.com,connect,1d4c8f,{"port":4443},tls=v1.2,WS-02,2,high
+2024-01-15T10:02:00Z,charlie,reddit.com,visit,2a1e9b7,{"bytes":50000},ua=chrome,WS-03,42,low
+2024-01-15T10:02:30Z,alice,evil-c2.attacker.com,connect,4f4c93,{"port":8080},tls=v1.0,WS-01,2,high
+2024-01-15T10:03:00Z,dave,google.com,visit,a3f7c2,{"bytes":1000},ua=firefox,SRV-01,42,low
+2024-01-15T10:03:30Z,admin,DC-01,rdp,c0a801c8,{"src":"192.168.1.200"},,DC-01,55,medium
+2024-01-15T10:04:00Z,alice,SRV-FILES,smb,9b74c9,{"share":"finance"},,WS-01,77,info
+2024-01-15T10:04:30Z,unknown,127.0.0.1,loopback,,,,localhost,,info

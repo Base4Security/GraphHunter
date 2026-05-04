@@ -1,0 +1,255 @@
+\chapter{NLF incremental}
+\label{cap:incremental-nlf}
+
+\begin{intuicion}
+NLF (\emph{Neighborhood Label Frequency}, capítulo
+\ref{cap:nlf-detalle} en detalle) es un índice auxiliar:
+\(\NLF(v, L)\) cuenta cuántos vecinos salientes de \(v\) tienen
+etiqueta \(L\). El motor lo usa para podar \emph{starts} antes del
+DFS. Hasta stage 2a, cualquier \texttt{add\_relation} \emph{post}-NLF-built
+invalidaba la tabla entera (\texttt{OnceLock::new()}), forzando un
+rebuild $O(|E|)$ en el próximo hunt. Para ingestas continuas
+(Sentinel pulling cada 30~s), eso significaba rebuild en cada hunt
+y se perdía el beneficio del lazy build. Stage 2a cambió la
+política: ahora el motor intenta \emph{actualizar} la NLF
+incrementalmente, y sólo invalida cuando físicamente no puede
+mutar (mmap-spilled read-only).
+\end{intuicion}
+
+\section{El problema}
+
+Lifecycle típico antes de stage 2a:
+
+\begin{enumerate}
+    \item Carga sesión 28~GB. \texttt{sort\_edges\_by\_timestamp}.
+    NLF queda \texttt{None}.
+    \item Primer hunt $\Rightarrow$ \texttt{ensure\_nlf()} construye
+    NLF (\(O(|E|)\), $\sim$30~s).
+    \item Hunt termina, NLF resident en heap.
+    \item Sentinel pulling: nuevo batch de eventos llega.
+    \texttt{add\_relation} ejecuta varias veces.
+    \item Cada \texttt{add\_relation} hace
+    \texttt{self.nlf = OnceLock::new()} (invalidación).
+    \item Próximo hunt $\Rightarrow$ \texttt{ensure\_nlf()}
+    reconstruye desde cero (otros 30~s).
+\end{enumerate}
+
+\noindent
+Si el ciclo se repite cada 30~s (típico de Sentinel pulling), el
+motor pasa la mitad del tiempo construyendo NLF. El \emph{lazy
+build} no salva nada; es como si fuera \emph{eager} con extra
+overhead.
+
+\section{La solución: \texttt{try\_record\_edge}}
+
+Cuando \texttt{add\_relation} corre con NLF ya construida, en vez
+de invalidar, intenta sumar \(+1\) al contador correspondiente:
+
+\begin{lstlisting}[language=Rust]
+impl NlfTable {
+    pub fn try_record_edge(
+        &self,
+        src_sid: StrId,
+        dst_tag: u8,
+    ) -> bool {
+        if dst_tag as usize >= NLF_TYPE_COUNT {
+            return true;  // no-op, dst_tag fuera de rango
+        }
+        let slice = self.counts.heap_slice_mut();
+        let Some(slice) = slice else {
+            return false;  // backing es mmap-spilled, no se puede mutar
+        };
+        if let Some(row) = slice.get_mut(src_sid.index()) {
+            row[dst_tag as usize] = row[dst_tag as usize].saturating_add(1);
+        }
+        true
+    }
+}
+\end{lstlisting}
+
+Lo que devuelve:
+
+\begin{itemize}
+    \item \texttt{true}: la mutación se aplicó, o no era necesaria
+    (dst\_tag fuera de rango). NLF queda \emph{viva y consistente}.
+    \item \texttt{false}: el backing es \emph{mmap-spilled}
+    (read-only post build). El caller debe invalidar y aceptar el
+    rebuild en el próximo hunt.
+\end{itemize}
+
+\subsection{Algoritmo: \texttt{add\_relation} post stage 2a}
+
+\begin{algorithm}[H]
+\caption{\texttt{add\_relation} con NLF incremental}
+\KwIn{\texttt{src\_sid}, \texttt{dst\_sid}, \texttt{dst\_tag}, \texttt{rel\_type\_tag}, etc.}
+push al \texttt{edge\_store} y al \texttt{streaming} (siempre)\;
+\BlankLine
+\If{\texttt{nlf} \emph{está construida}}{
+    \If{\texttt{nlf.try\_record\_edge(src\_sid, dst\_tag)} \(=\) \texttt{true}}{
+        \tcc{Saturating add sobre el heap-backed counts. NLF queda viva.}
+    }
+    \Else{
+        \tcc{Backing es mmap-spilled (read-only). Invalidar y dejar que se reconstruya en el próximo hunt.}
+        \texttt{nlf} \(\leftarrow\) \texttt{OnceLock::new()}\;
+    }
+}
+\Else{
+    \tcc{Nunca se construyó: nada que invalidar.}
+}
+\end{algorithm}
+
+\section{¿Por qué \emph{saturating add}?}
+
+\texttt{NlfTable} guarda contadores \texttt{u32}. Un saturating add
+se queda en \texttt{u32::MAX} en vez de overflowar. Para grafos
+realistas (max degree $\sim$10\(^6\)), no se llega ni cerca.
+Pero la convención garantiza que \emph{ningún mutation produce
+counts incorrectos} ---el peor caso es ``count overestimado'' que
+es \emph{soundness-safe} (capítulo~\ref{cap:nlf-detalle}: NLF puede
+sobre-aproximar sin generar falsos negativos).
+
+\section{¿Por qué \texttt{heap\_slice\_mut} y no acceso directo?}
+
+El \texttt{NlfTable} usa \texttt{IndexBacking<[u32; NLF\_TYPE\_COUNT]>}
+internamente. Ese tipo encapsula la dualidad heap/mmap:
+
+\begin{lstlisting}[language=Rust]
+pub enum IndexBacking<T: Pod> {
+    Heap(Vec<T>),
+    Mmap { file: File, map: Mmap, slice: &'static [T] },
+}
+
+impl<T: Pod> IndexBacking<T> {
+    pub fn heap_slice_mut(&mut self) -> Option<&mut [T]> {
+        match self {
+            Self::Heap(v) => Some(v.as_mut_slice()),
+            Self::Mmap { .. } => None,  // read-only
+        }
+    }
+}
+\end{lstlisting}
+
+\noindent
+Cuando NLF está \emph{heap-resident} (lo más común), la mutación es
+directa. Cuando se spilled a mmap por exceder budget, no se puede
+mutar in-place ---el archivo es read-only---.
+
+\subsection{Por qué no se hace mmap-mut}
+
+Una alternativa: abrir el mmap en modo \texttt{MmapMut}, mutar in-place,
+\texttt{flush()}, volver a read-only. Tres razones por las que no
+lo hacemos hoy:
+
+\begin{enumerate}
+    \item \textbf{Latencia.} Cada \texttt{add\_relation} pagaría
+    el remap overhead ($\sim$1~ms en Linux, $\sim$3~ms en Windows).
+    Para batch ingest de 50K rows/sec, eso son 50K remaps/sec
+    ---inviable.
+    \item \textbf{Concurrencia.} Si los matchers están leyendo el
+    mmap mientras el ingestor remapea, hay race condition. Resolver
+    requiere un \texttt{RwLock} alrededor del mmap, neutralizando
+    el wait-free reads.
+    \item \textbf{Frecuencia.} Los grafos que llegan a mmap-spilled
+    son grafos \emph{grandes} (>1 GB de NLF, $\sim$100~M
+    vértices). En esos, los rebuild son raros porque rara vez se
+    reciben nuevas aristas \emph{post-finalize} (la sesión típica
+    es ``cargar dataset, hacer hunts, cerrar''). El caso del
+    Sentinel pulling es para grafos chico-medianos donde NLF cabe
+    en heap.
+\end{enumerate}
+
+\noindent
+La política actual ---incremental cuando heap, invalidar cuando
+mmap--- es la mejor relación complejidad/beneficio.
+
+\section{Soundness}
+
+\begin{theorem}[try\_record\_edge preserva NLF correcta]
+Sea \(G_t\) el estado del grafo después de \(t\) llamadas a
+\texttt{add\_relation}, y sea \(\NLF^{op}_t(v, L)\) el valor
+guardado en la tabla en ese momento. Si todas las llamadas a
+\texttt{try\_record\_edge} devuelven \texttt{true} y NLF estaba
+construida correctamente sobre \(G_0\), entonces para todo \(v, L\):
+\[
+\NLF^{op}_t(v, L) = \NLF_{G_t}(v, L)
+\]
+salvo cuando \(\NLF_{G_t}(v, L) > 2^{32}-1\), en cuyo caso
+\(\NLF^{op}_t = 2^{32}-1\) (saturated).
+\end{theorem}
+
+\begin{proof}[Idea]
+Inducción sobre \(t\). Base: \(t = 0\), por hipótesis.
+Paso: si la \(t\)-ésima \texttt{add\_relation} es la arista
+\((u, v, L_v, \tau)\) con \(L_v = \mathrm{type}(v)\), entonces
+\(\NLF_{G_t}(u, L_v) = \NLF_{G_{t-1}}(u, L_v) + 1\) y todos los
+demás \(\NLF\) quedan iguales. La función \texttt{try\_record\_edge}
+hace exactamente \texttt{slice[u][L\_v] += 1} (saturating). Por la
+hipótesis inductiva, slice estaba correcto en \(t-1\); sigue
+correcto en \(t\). \(\square\)
+\end{proof}
+
+\section{El impacto medible}
+
+Antes de stage 2a (Sentinel pulling cada 30~s, 100~hunts/h):
+
+\begin{itemize}
+    \item Cada hunt: $\sim$30~s rebuild NLF + $\sim$100~ms hunt =
+    30.1~s.
+    \item 100 hunts/h $\Rightarrow$ 50~min/h gastados en rebuilds.
+\end{itemize}
+
+\noindent
+Después de stage 2a (mismo workload, NLF heap-resident):
+
+\begin{itemize}
+    \item \texttt{add\_relation} paga $\sim$50~ns extra por
+    \texttt{try\_record\_edge}. 50K rows/sec $\Rightarrow$ 2.5~ms/sec
+    de overhead. Negligible.
+    \item Cada hunt: $\sim$100~ms (sin rebuild).
+    \item 100 hunts/h $\Rightarrow$ 10~s/h en hunts.
+\end{itemize}
+
+\noindent
+Reducción de $\sim$300\(\times\) en el tiempo gastado.
+
+\section{Resumen}
+
+\begin{itemize}
+    \item Antes de stage 2a: cualquier \texttt{add\_relation}
+    post-NLF-built invalidaba la tabla entera $\Rightarrow$ rebuild
+    en cada hunt para ingestas continuas.
+    \item \texttt{try\_record\_edge} aplica $+1$ saturating al
+    contador correspondiente cuando el backing es heap.
+    \item Falla (devuelve \texttt{false}) sólo cuando el backing
+    es mmap-spilled; ahí cae a invalidación + rebuild.
+    \item Soundness garantizada por inducción: la mutación es
+    exactamente lo que un rebuild produciría.
+    \item Impacto: ingestas continuas con hunts cada minuto pasan de
+    ``50 min/h en rebuilds'' a ``negligible''.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Si \texttt{NLF\_TYPE\_COUNT = 9} y cada
+    contador es \texttt{u32}, ¿cuánta memoria ocupa NLF para un
+    grafo de $10^7$ vértices? ¿Y para $10^8$?
+
+    \item ¿Por qué saturating add y no overflow check + error?
+    Discutí: ¿qué tipo de bug puede ocurrir si un contador
+    overflowa silenciosamente?
+
+    \item \starred{} Considerá un grafo donde NLF es heap-resident
+    pero la presión de memoria empuja a otra estructura
+    (\emph{khop\_reach}) a spillearse. ¿Eso afecta a NLF? ¿Y al
+    revés?
+
+    \item Diseñá una variante \texttt{try\_record\_edge\_mmap}
+    que SÍ funcione sobre mmap-spilled (con remap, etc.). ¿Cuál es
+    el costo? ¿Cuándo valdría la pena?
+
+    \item Si el motor decide invalidar (caso mmap-spilled), el
+    próximo hunt paga rebuild $O(|E|)$. ¿Qué pasa si llegan
+    \texttt{add\_relation} adicionales \emph{durante} el rebuild?
+    Pensá la concurrencia.
+\end{enumerate}
+\end{ejercicios}

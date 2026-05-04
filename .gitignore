@@ -28,6 +28,7 @@ demo_data/mega_dataset_1gb.json
 # Other artifacts
 **/target/
 **/node_modules/
+apps/tauri/dist/
 app/dist/
 graph-hunter-mcp/dist/
 docs/_build/
@@ -40,5 +41,25 @@ spikes/
 
 # Confidential incident reports — keep out of VCS
 CSIRT-Report-*.md
+docs/_archive/incidents/*.md
+!docs/_archive/incidents/.gitkeep
 
-latex/
+# LaTeX build artifacts (keep .tex, ignore compile output)
+docs/**/*.aux
+docs/**/*.log
+docs/**/*.out
+docs/**/*.toc
+docs/**/*.lof
+docs/**/*.lot
+docs/**/*.idx
+docs/**/*.ilg
+docs/**/*.ind
+docs/**/*.bbl
+docs/**/*.bcf
+docs/**/*.blg
+docs/**/*.run.xml
+docs/**/*.synctex.gz
+docs/**/*.fdb_latexmk
+docs/**/*.fls
+docs/**/*.pdf
+docs/**/out.txt

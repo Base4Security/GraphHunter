@@ -1,0 +1,280 @@
+\chapter{NLF en detalle}
+\label{cap:nlf-detalle}
+
+\begin{intuicion}
+Capítulo~\ref{cap:prune-nlf} introdujo NLF como prune; este
+capítulo muestra cómo está implementado por dentro: layout
+\texttt{[u32; 9]} por vértice, \texttt{IndexBacking} para la
+dualidad heap/mmap, builder \(O(|\E|)\) en una pasada, e
+incremental update detallado más allá del overview de
+\ref{cap:incremental-nlf}. Es el primer índice ``simple'' del
+motor; entender su implementación a fondo es buena preparación para
+el más complejo (k-hop, próximo capítulo).
+\end{intuicion}
+
+\section{Layout}
+
+\begin{lstlisting}[language=Rust]
+const NLF_TYPE_COUNT: usize = 9;  // tag de EntityType en [0, 9)
+
+pub struct NlfTable {
+    counts: IndexBacking<[u32; NLF_TYPE_COUNT]>,
+}
+\end{lstlisting}
+
+\noindent
+La estructura es trivial: una tabla con \(|\V|\) filas, cada fila
+es \texttt{[u32; 9]} (36 bytes). El \texttt{IndexBacking} (visto
+en el capítulo anterior) decide si vive en heap o en mmap.
+
+\subsection{Por qué \texttt{[u32; 9]} y no \texttt{HashMap<EntityType, u32>}}
+
+Un \texttt{HashMap} sería más flexible pero terrible en
+performance. \(N \cdot \texttt{HashMap}\) implica:
+
+\begin{itemize}
+    \item Por cada lookup, hash + bucket walk + compare. \(\sim 30\)
+    ciclos.
+    \item Memoria: $\sim$48 B por bucket + factor de carga
+    (\emph{load factor}) típico 0.7. Para 9 entries por vértice:
+    $\sim$72 B/vértice. Versus 36 B del array.
+    \item Locality: los buckets están dispersos en heap; iterar
+    el HashMap toca cache lines aleatorias.
+\end{itemize}
+
+\noindent
+El array fijo \texttt{[u32; 9]}:
+
+\begin{itemize}
+    \item Lookup: indexación directa, 1 ciclo.
+    \item Memoria: 36 B per row, contiguous.
+    \item Locality: una fila entera entra en una cache line (con
+    20 B de margen para los siguientes 5 rows).
+\end{itemize}
+
+\noindent
+Trade-off: el array fija 9 tipos. Si en el futuro se agrega un
+décimo \texttt{EntityType}, hay que crecer el array (cambio
+breaking de schema). El equipo decidió que la fijación de tipos es
+un commitment razonable.
+
+\section{El builder}
+
+\begin{algorithm}[H]
+\caption{\texttt{NlfTable::build}}
+\KwIn{grafo \(G\) (sealed)}
+\KwOut{\texttt{NlfTable}}
+\(\mathrm{counts} \leftarrow \mathrm{IndexBacking::heap\_zeros}(|\V|)\)\;
+\For{cada \texttt{cr} en \texttt{G.edge\_store.iter\_all()}}{
+    \(\mathrm{src} \leftarrow \mathrm{cr.source\_sid.index()}\)\;
+    \(L \leftarrow \mathrm{cr.dest\_type\_tag()}\)\;
+    \If{\(L < \texttt{NLF\_TYPE\_COUNT}\)}{
+        \(\mathrm{counts}[\mathrm{src}][L] \leftarrow \mathrm{counts}[\mathrm{src}][L].\mathrm{saturating\_add}(1)\)\;
+    }
+}
+\Return \texttt{NlfTable\{ counts \}}\;
+\end{algorithm}
+
+\noindent
+Una pasada secuencial sobre \texttt{edge\_store} (que ya está
+sorted, capítulo~\ref{cap:finalize}). Cada iteración: índice
+directo + saturating add. \(O(|\E|)\) total.
+
+Costo en hardware: para \(|\E| = 10^8\), \(\sim 30\) segundos
+(memoria-bound, $\sim$3 MB/s de actualizaciones). El \texttt{lazy
+build} (capítulo~\ref{cap:finalize}) lo difiere al primer hunt
+que consulta NLF.
+
+\subsection{¿Por qué \texttt{dest\_type\_tag} y no \texttt{source\_type\_tag}?}
+
+NLF cuenta \emph{vecinos salientes} de un vértice por tipo destino.
+La fila se indexa por source (de la arista), pero la columna se
+indexa por tipo del destino. Es lo que el prune del primer paso
+necesita: ``¿\(s\) tiene vecinos del tipo que el primer paso
+exige?''.
+
+Una variante alternativa: NLF \emph{simétrica} que indexa por
+ambos pares. El motor no la implementa porque las hipótesis suelen
+ser direccionadas (origen $\rightarrow$ destino) y la simetría
+duplicaría el costo sin beneficio claro.
+
+\section{Lookup: \texttt{can\_match}}
+
+\begin{lstlisting}[language=Rust]
+impl NlfTable {
+    pub fn can_match(
+        &self,
+        sid: StrId,
+        required: &[(u8, u32)],   // (dest_type_tag, min_count)
+    ) -> bool {
+        let row = self.counts.get(sid.index());
+        let Some(row) = row else { return false };  // sid out of range
+        required.iter().all(|&(tag, min)| {
+            tag as usize >= NLF_TYPE_COUNT || row[tag as usize] >= min
+        })
+    }
+}
+\end{lstlisting}
+
+\noindent
+\(O(|\text{required}|)\) que es \(\leq |\Lc_V| = 9\). Para
+hipótesis chain (un solo destination type), es \(O(1)\).
+
+\subsection{Cómo lo invoca el matcher}
+
+El DFS llama \texttt{can\_match} para cada candidate start:
+
+\begin{lstlisting}[language=Rust]
+let nlf = graph.ensure_nlf();
+let required = collect_required_destinations(&hypothesis);
+for sid in candidate_starts {
+    if !nlf.can_match(sid, &required) {
+        continue;  // skip this start
+    }
+    // ... DFS desde sid
+}
+\end{lstlisting}
+
+\noindent
+Para grafos con \(|\V_{L_0^V}| = 10^5\) candidates, son \(10^5\)
+calls a \texttt{can\_match}: $\sim$1 ms total. El ahorro en DFS
+descartado suele ser de varios segundos.
+
+\section{Memoria}
+
+\begin{itemize}
+    \item Heap-resident: \(|\V| \cdot 36\)~B. Para \(|\V| = 10^7\):
+    360 MB. Para \(10^8\): 3.6 GB.
+    \item mmap-spilled: misma memoria total, pero residente en
+    disco con paginación on-demand.
+    \item Budget default: 1 GB. Triggeará spill alrededor de \(|\V|
+    = 28 \cdot 10^6\).
+\end{itemize}
+
+\subsection{Cuándo spillea}
+
+\begin{lstlisting}[language=Rust]
+const NLF_BUDGET_BYTES: usize = 1 << 30;  // 1 GB
+
+pub fn build(graph: &GraphHunter) -> Result<Self, Error> {
+    let n_vertices = graph.vertex_count();
+    let counts = IndexBacking::build_with_budget(
+        n_vertices,
+        NLF_BUDGET_BYTES,
+        |v| populate_counts(v, graph),
+    )?;
+    Ok(Self { counts })
+}
+\end{lstlisting}
+
+\noindent
+\texttt{build\_with\_budget} (capítulo~\ref{cap:indices-auxiliares})
+decide al final del populate: si los bytes acumulados exceden el
+budget, vuelca a archivo y mmapea read-only.
+
+\section{Incremental update revisitado}
+
+Capítulo~\ref{cap:incremental-nlf} introdujo \texttt{try\_record\_edge}:
+
+\begin{lstlisting}[language=Rust]
+impl NlfTable {
+    pub fn try_record_edge(
+        &self,
+        src_sid: StrId,
+        dst_tag: u8,
+    ) -> bool {
+        if dst_tag as usize >= NLF_TYPE_COUNT {
+            return true;  // no-op
+        }
+        let slice = self.counts.heap_slice_mut();
+        let Some(slice) = slice else {
+            return false;  // mmap-spilled
+        };
+        if let Some(row) = slice.get_mut(src_sid.index()) {
+            row[dst_tag as usize] = row[dst_tag as usize].saturating_add(1);
+        }
+        true
+    }
+}
+\end{lstlisting}
+
+\noindent
+La \emph{interior mutability} ---el método toma \texttt{\&self} no
+\texttt{\&mut self}--- requiere que \texttt{IndexBacking::heap\_slice\_mut}
+también la soporte. La implementación real usa
+\texttt{UnsafeCell<Vec<...>>} con un invariante:
+``\texttt{try\_record\_edge} se llama sólo desde el ingestor, que
+es single-threaded; los matchers concurrentes leen vía
+\texttt{counts.get()} que es read-only''.
+
+\begin{advertencia}
+Este patrón \emph{interior mutability single-writer} es seguro pero
+delicado. Si en el futuro se permite ingest multi-threaded, el
+invariante se rompe y hay que envolver en un \texttt{RwLock}. El
+test de \texttt{Loom} (model checker para concurrencia)
+verifica el invariante actual.
+\end{advertencia}
+
+\section{¿Y si en el futuro hace falta más resolución?}
+
+NLF actual cuenta cardinalidad por tipo destino. No considera:
+
+\begin{itemize}
+    \item \textbf{Tipo de arista}. Si el primer paso es
+    \texttt{Auth}, NLF no distingue entre vecinos vía Auth o vía
+    Spawn. Si quisiéramos distinguir, sería ``NLP''
+    (\emph{Neighborhood Label Profile}): \texttt{[u32; 9 \(\times\) |RelType|]}
+    por vértice. Memoria \(\sim 15\times\) más.
+    \item \textbf{Ventana temporal}. NLF cuenta todos los vecinos
+    independiente del tiempo. Para descartar starts cuyas aristas
+    están todas fuera de la ventana, el k-hop temporal sirve
+    (capítulo~\ref{cap:khop-detalle}).
+    \item \textbf{Doble-hop counting}. ``Cuántos vecinos-de-vecinos
+    de tipo X tiene este vértice''. Sería caro de mantener
+    (\(O(|\V| \cdot \deg)\) memoria); k-hop bit aproxima la
+    pregunta más débil ``¿hay alguno?''.
+\end{itemize}
+
+\noindent
+Cada extensión es un trade-off memoria-versus-discriminación. La
+versión actual gana en simplicidad y resuelve el caso del 80\% de
+los hunts.
+
+\section{Resumen}
+
+\begin{itemize}
+    \item NLF: \texttt{[u32; 9]} por vértice. 36 B/row. Index
+    directo, 1 ciclo de lookup.
+    \item Builder: una pasada \(O(|\E|)\) sobre edge\_store.
+    Saturating add para evitar overflow silencioso.
+    \item Lookup \texttt{can\_match}: \(O(|\text{required}|)\),
+    típico $\leq$ 9 ops.
+    \item Memoria: 36 B \(\cdot |\V|\); spillea a mmap arriba de
+    $\sim$28M vertices con budget 1 GB.
+    \item Incremental update \texttt{try\_record\_edge}: interior
+    mutability single-writer, atomic-free porque el invariante de
+    GraphHunter lo permite.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Calculá la memoria de NLF para un grafo
+    \(|\V| = 5 \cdot 10^7\). ¿Spillea con budget 1 GB?
+
+    \item ¿Por qué \texttt{can\_match} usa \texttt{.all()} en vez
+    de \texttt{.any()}? Pensá: ¿qué quiere chequear el matcher en
+    el caso multi-required?
+
+    \item \starred{} Diseñá una variante NLP (Neighborhood Label
+    Profile) que distinga por tipo de arista. ¿Cuánta memoria? ¿Qué
+    cambios al builder?
+
+    \item Si el motor cambia el patrón de ingest a multi-thread,
+    ¿qué se rompe en \texttt{try\_record\_edge}? Diseñá la versión
+    safe usando \texttt{AtomicU32} ---¿qué se gana, qué se pierde?
+
+    \item Imaginá que el budget de NLF baja a 100 MB (laptop con
+    poca RAM). ¿A partir de qué $|\V|$ spillea? ¿Cómo afecta el
+    rendimiento del prune?
+\end{enumerate}
+\end{ejercicios}

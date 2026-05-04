@@ -1,0 +1,287 @@
+\chapter{Poda con \emph{k-hop reachability}}
+\label{cap:prune-khop}
+
+\begin{intuicion}
+NLF es un prune \emph{local}: chequea sólo el primer paso. Para
+hipótesis multi-hop, querríamos descartar starts desde los que
+\emph{no se puede llegar} al tipo destino final, sin importar qué
+tan lejos. \emph{k-hop reachability} es exactamente eso: para cada
+vértice \(v\) y cada tipo \(L\), un bit que dice ``existe un camino
+de longitud \(\leq \texttt{MAX\_DEPTH}\) desde \(v\) a algún
+vértice de tipo \(L\)''. Bit cero $\Rightarrow$ \(v\) no genera
+match cuya hipótesis exija ese tipo. La extensión temporal
+(\(\mathrm{min\_first}\), \(\mathrm{max\_first}\)) agrega el
+chequeo de ventana: si la primera arista del camino más temprano
+desde \(v\) cae fuera de la ventana del hunt, también se descarta.
+Este capítulo formaliza el índice y la poda.
+\end{intuicion}
+
+\section{Definición}
+
+\begin{definition}[k-hop reachability]
+Sea \(\texttt{MAX\_DEPTH}\) una constante (en GraphHunter, \(4\)) y
+\(L \in \Lc_V\) un tipo destino. Para \(v \in \V\):
+\[
+\bits[v][L] = 1 \iff \exists\,\text{walk}\;v = v_0, v_1, \dots, v_k\;
+\text{con}\;k \leq \texttt{MAX\_DEPTH},\;\mathrm{type}(v_k) = L.
+\]
+\end{definition}
+
+\noindent
+La estructura concreta: \(\bits[v]\) es un \texttt{u16}, un bit por
+\texttt{EntityType} (tag 0 a 8 ocupan 9 bits; los 7 restantes
+quedan libres para extensiones futuras).
+
+\begin{nota}
+\(\bits\) es \emph{independiente del tipo de arista y del
+timestamp}. Es una sobre-aproximación: ``\emph{podría} haber un
+camino que cumpla''. Si bit es 1, el matcher no descarta; si es 0,
+descarta seguro (porque ningún camino existe).
+\end{nota}
+
+\section{El prune}
+
+\begin{algorithm}[H]
+\caption{Prune k-hop al inicio del DFS}
+\KwIn{starts candidatos \(\V_{L_0^V}\), hipótesis \(H\) con tipo destino final \(L_k^V\)}
+\KwOut{starts filtrados}
+\(L \leftarrow L_k^V.\mathrm{tag}\)\;
+filtered \(\leftarrow \emptyset\)\;
+\For{\(s \in \V_{L_0^V}\)}{
+    \If{\(\bits[s] \,\&\, (1 \ll L)\)}{
+        filtered.push(s)\;
+    }
+}
+\Return filtered\;
+\end{algorithm}
+
+\noindent
+Operación \emph{bitwise}: una sola instrucción de CPU
+(\texttt{and} + comparación con cero). Para \(10^6\) starts, son
+\(10^6\) operaciones de palabra, que es $\sim$1~ms.
+
+\section{Soundness}
+
+\begin{theorem}[k-hop prune sound]
+Si la hipótesis \(H\) tiene longitud \(k \leq \texttt{MAX\_DEPTH}\)
+y exige tipo destino \(L_k^V\), entonces:
+\[
+\bits[s][L_k^V.\mathrm{tag}] = 0 \implies s\;\text{no es origen de ningún match}.
+\]
+\end{theorem}
+
+\begin{proof}
+Por contradicción. Si existe match \(\sigma\) con \(\sigma(p_0) =
+s\), entonces existe un walk \(s = v_0, v_1, \dots, v_k\) con
+\(\mathrm{type}(v_k) = L_k^V\) y \(k \leq \texttt{MAX\_DEPTH}\)
+(por hipótesis). Por definición de \(\bits\), eso implica
+\(\bits[s][L_k^V] = 1\), contradicción. \(\square\)
+\end{proof}
+
+\subsection{Cuando \(k > \texttt{MAX\_DEPTH}\)}
+
+Si la hipótesis es más larga que \(\texttt{MAX\_DEPTH}\), el prune
+\emph{NO se aplica}: no podemos garantizar que un walk más largo no
+exista aunque \(\bits = 0\). El motor en ese caso saltea el prune
+y va al DFS directo.
+
+En la práctica, \(\texttt{MAX\_DEPTH} = 4\) cubre el 95\% de las
+hipótesis de threat hunting reales. Las hipótesis de longitud
+\(\geq 5\) son raras (los analistas las escriben pero el matcher
+les advierte que pueden ser lentas).
+
+\section{Extensión temporal}
+
+NLF y k-hop básico ignoran el tiempo. Para hipótesis con
+\texttt{WITHIN}, querríamos descartar starts cuya \emph{primera
+arista útil} caiga fuera de la ventana. La extensión D5/M2 agrega
+dos matrices más:
+
+\begin{definition}[\(\mathrm{min\_first}\), \(\mathrm{max\_first}\)]
+\[
+\mathrm{min\_first}[v][L] = \min \{\tau_0 : v \rightsquigarrow_{\leq \texttt{MAX\_DEPTH}} L\;\text{con primer edge}\;(\cdot,\cdot,\tau_0)\}
+\]
+\[
+\mathrm{max\_first}[v][L] = \max \{\tau_0 : \dots\}
+\]
+\end{definition}
+
+\noindent
+Es decir: \(\mathrm{min\_first}[v][L]\) es el menor \emph{first edge
+timestamp} entre todos los caminos de \(v\) a algún vértice de tipo
+\(L\); \(\mathrm{max\_first}\) es el mayor.
+
+\subsection{El prune temporal}
+
+\begin{theorem}[Prune temporal sound]
+Sea la hipótesis con ventana
+\([t_{\mathrm{lo}}, t_{\mathrm{hi}})\). Si:
+\[
+\mathrm{min\_first}[v][L] \geq t_{\mathrm{hi}} \quad \text{or} \quad
+\mathrm{max\_first}[v][L] < t_{\mathrm{lo}},
+\]
+entonces ningún walk de \(v\) al tipo \(L\) tiene su primer
+\emph{edge} en la ventana.
+\end{theorem}
+
+\begin{proof}
+Si \(\mathrm{min\_first}[v][L] \geq t_{\mathrm{hi}}\): todo walk
+desde \(v\) tiene \(\tau_0 \geq t_{\mathrm{hi}}\), fuera de la
+ventana por arriba. Si \(\mathrm{max\_first}[v][L] < t_{\mathrm{lo}}\):
+todo walk tiene \(\tau_0 < t_{\mathrm{lo}}\), fuera por abajo.
+En ambos casos, ningún walk válido existe. \(\square\)
+\end{proof}
+
+\subsection{Cuándo aplica}
+
+El prune temporal se activa cuando la hipótesis tiene
+\texttt{WITHIN}:
+
+\begin{itemize}
+    \item Hipótesis sin \texttt{WITHIN}: la ventana es
+    \([-\infty, +\infty)\); ningún start se descarta por tiempo.
+    \item Hipótesis con \texttt{WITHIN 30m} y un \emph{anchor time}
+    explícito: el matcher chequea \(\mathrm{min/max\_first}\)
+    versus la ventana.
+\end{itemize}
+
+\section{Storage layout: dense + sparse}
+
+El layout naive sería: \(|\V| \times |\Lc_V|\) tabla densa para
+cada uno de \(\bits\), \(\mathrm{min\_first}\),
+\(\mathrm{max\_first}\). Para \(|\V| = 10^8\) vértices y
+\(|\Lc_V| = 9\):
+
+\begin{itemize}
+    \item \(\bits\): \(10^8 \times 2\)~B (\texttt{u16}) = \(200\)~MB.
+    \item \(\mathrm{min\_first}\): \(10^8 \times 9 \times 8\)~B
+    (\texttt{i64}) = \(7.2\)~GB.
+    \item \(\mathrm{max\_first}\): otros \(7.2\)~GB.
+\end{itemize}
+
+\noindent
+Total: \(\sim 14.6\)~GB. Inviable.
+
+La observación clave: \emph{muchos vértices no tienen aristas
+salientes}. Para esos, \(\mathrm{min/max\_first}\) no aporta info
+(no hay caminos). El layout \emph{sparse} guarda esas filas sólo
+para vértices con \texttt{outdeg} > 0:
+
+\begin{itemize}
+    \item \(\bits\): denso \(|\V| \times 2\)~B.
+    \item \(\mathrm{rank}\): \(|\V| \times 4\)~B (\texttt{u32}).
+    \texttt{rank[v] = NO\_RANK} si \(\outdeg(v) = 0\); si no, indexa
+    una fila en las matrices sparse.
+    \item \(\mathrm{min\_first}\): sparse \(|\text{ranked}| \times 9
+    \times 8\)~B.
+    \item \(\mathrm{max\_first}\): igual.
+\end{itemize}
+
+\noindent
+Para grafos típicos donde \(\sim 30\%\) de los vértices tienen
+\texttt{outdeg} > 0 (\emph{ranked}):
+
+\begin{itemize}
+    \item \(\bits\): \(200\)~MB.
+    \item \(\mathrm{rank}\): \(400\)~MB.
+    \item \(\mathrm{min/max\_first}\) sparse: \(2 \times 30 \cdot 10^6
+    \times 72\)~B = \(\sim 4.3\)~GB.
+\end{itemize}
+
+\noindent
+Total: \(\sim 4.9\)~GB. Tres veces menos que el dense.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.4cm,
+    every node/.style={font=\footnotesize, align=left},
+    box/.style={draw=accent, thick, rounded corners=1mm,
+                minimum height=1.4cm, minimum width=4.2cm,
+                fill=accentlight}
+]
+\node[box] (bits) {\texttt{bits: Vec<u16>}\\\scriptsize dense, 2\,B/vertex\\\scriptsize 200\,MB @ 100M vértices};
+\node[box, right=of bits] (rank) {\texttt{rank: Vec<u32>}\\\scriptsize dense, 4\,B/vertex\\\scriptsize 400\,MB @ 100M};
+\node[box, below=of bits] (mn) {\texttt{min\_first: IndexBacking<[i64;9]>}\\\scriptsize sparse, 72\,B/ranked\\\scriptsize 2.16\,GB @ 30M ranked};
+\node[box, right=of mn] (mx) {\texttt{max\_first: IndexBacking<[i64;9]>}\\\scriptsize sparse, 72\,B/ranked\\\scriptsize 2.16\,GB @ 30M ranked};
+\end{tikzpicture}
+\caption{\texttt{KHopReach} layout. Dense ($|\V|$) para \texttt{bits}
+y \texttt{rank}; sparse (sólo vértices ranked) para
+\texttt{min\_first} y \texttt{max\_first}. Total: $\sim$4.9~GB en
+grafo de 100M vértices con 30\% \emph{outgoing-having}, vs $\sim$14.6~GB
+del layout dense.}
+\label{fig:khop-layout}
+\end{figure}
+
+\section{Construcción}
+
+El \(\bits\) se construye con BFS multi-pasada (BFS reverso desde
+todos los \emph{leaves} de cada tipo). El \(\mathrm{min/max\_first}\)
+se calcula durante la misma pasada.
+
+\begin{algorithm}[H]
+\caption{KHopReach build (BFS multi-source)}
+\KwIn{grafo \(G\)}
+\KwOut{\texttt{KHopReach\{ bits, rank, min\_first, max\_first \}}}
+\(\bits[v] \leftarrow 0\) para todo \(v\)\;
+\For{\(L \in \Lc_V\)}{
+    inicializar BFS desde todos los \(v\) con \(\mathrm{type}(v) = L\)\;
+    \For{distance \(d = 0, 1, \dots, \texttt{MAX\_DEPTH}\)}{
+        \For{cada vértice \(w\) en frontera \(d\)}{
+            \(\bits[w] \mathrel{|}\!= (1 \ll L)\)\;
+            actualizar \(\mathrm{min/max\_first}[w][L]\) con timestamps de las aristas reverse\;
+        }
+        avanzar frontera vía aristas reverse\;
+    }
+}
+\Return\;
+\end{algorithm}
+
+\noindent
+Costo: \(O(|\Lc_V| \cdot \texttt{MAX\_DEPTH} \cdot |\E|)\). Para
+\(|\Lc_V| = 9\), \(\texttt{MAX\_DEPTH} = 4\), \(|\E| = 10^8\): \(\sim
+3.6 \cdot 10^{10}\) operaciones, $\sim$1.5~min en hardware típico.
+Lazy build (capítulo~\ref{cap:finalize}) lo difiere al primer
+hunt.
+
+\section{Resumen}
+
+\begin{itemize}
+    \item k-hop reachability: \(\bits[v][L] = 1\) sii existe walk
+    de \(v\) al tipo \(L\) en \(\leq \texttt{MAX\_DEPTH}\) saltos.
+    \item Prune sound: \(\bits[v][L] = 0 \Rightarrow v\) no genera
+    match. No completo (sobre-aproxima).
+    \item Extensión temporal: \(\mathrm{min/max\_first}[v][L]\)
+    permite descartar starts cuya primera arista no cabe en la
+    ventana.
+    \item Layout dense + sparse para ahorrar memoria
+    (\(\sim 3\times\) vs dense puro).
+    \item Build \(O(|\Lc_V| \cdot \texttt{MAX\_DEPTH} \cdot |\E|)\),
+    lazy en \texttt{OnceLock}.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Para el grafo de la figura del capítulo
+    \ref{cap:grafos-temporales}, calculá \(\bits[v]\) para cada
+    vértice asumiendo \(\texttt{MAX\_DEPTH} = 2\).
+
+    \item ¿Por qué la cota \(\texttt{MAX\_DEPTH} = 4\)? ¿Qué se
+    rompe si la hipótesis es de longitud 5? ¿Y si fuera 6?
+
+    \item \starred{} Para una hipótesis con WITHIN=30m y un
+    anchor time específico, mostrá un ejemplo donde el prune
+    temporal descarta un start aunque el prune k-hop básico no lo
+    descarte.
+
+    \item Calculá la memoria del layout sparse para un grafo de
+    \(5 \cdot 10^7\) vértices con 50\% \emph{outgoing-having}.
+
+    \item Diseñá un caso adversarial donde el prune k-hop tenga
+    cero impacto (todos los starts pasan).
+
+    \item ¿Qué cambia si en vez de un solo bit por tipo guardáramos
+    \emph{cantidad} de caminos al tipo (no sólo si existe)?
+    Discutí pros y contras.
+\end{enumerate}
+\end{ejercicios}

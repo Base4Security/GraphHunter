@@ -194,4 +194,8 @@ const char* gm_simd_isa(void) {
     }
 }
 
+uint32_t gm_abi_version(void) {
+    return GM_ABI_VERSION;
+}
+
 } // extern "C"

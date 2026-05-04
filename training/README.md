@@ -322,8 +322,8 @@ python 04_validate_onnx.py --model ../models/provenance_gcn.onnx
 ### Opción B: Compilar con ml-scoring
 
 ```bash
-# Desde app/src-tauri/
-cd app/src-tauri
+# Desde apps/tauri/src-tauri/
+cd apps/tauri/src-tauri
 
 # Compilar con soporte ONNX (CPU)
 cargo build --release --features "graph_hunter_core/ml-scoring"

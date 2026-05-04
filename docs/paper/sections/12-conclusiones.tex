@@ -1,0 +1,84 @@
+\chapter{Conclusiones}
+\label{sec:paper-conc}
+
+\section{Síntesis}
+
+GraphHunter parte de una observación simple: la caza de amenazas
+es naturalmente relacional y los SIEMs la forzan a ser
+tabular. La arquitectura resultante no es un producto aislado;
+es la materialización de cinco disciplinas aplicadas
+simultáneamente:
+
+\begin{enumerate}
+    \item \emph{Shearing layers}. Las capas de cambio rápido no
+    inyectan presión sobre el núcleo. El mismo motor sirve
+    hoy y servirá mañana con distintas superficies.
+    \item \emph{Correctness por construcción}. El matcher SIMD tiene
+    una referencia DFS y una equivalencia property-tested. La
+    máquina de estados del FFI está en el sistema de tipos. Los
+    scores viven en $[0,1]$ por invariante.
+    \item \emph{Descomposición explicable}. El score de un path es
+    la suma ponderada de cinco señales que un analista puede
+    inspeccionar una por una. No hay caja negra.
+    \item \emph{Degradación segura}. El GNN es opcional. La
+    pérdida de conectividad a un LLM remoto no afecta la
+    ingesta productiva. El sistema funciona en el primer
+    día sin ajustes.
+    \item \emph{Determinismo con adaptación}. El ingestor agéntico
+    coloca al LLM offline, produciendo datos
+    (\code{FieldConfig}), no código. El código lo produce un
+    compilador determinístico. El humano aprueba, el drift
+    dispara re-review.
+\end{enumerate}
+
+\section{Qué aprendimos del rediseño}
+
+Tres lecciones merecen ser preservadas:
+
+\begin{itemize}
+    \item \textbf{El costo de una arista incorrecta es largo}. Los
+    dos \code{core}$\to$\code{platform} residuales cuestan cada
+    feature nueva. Invertir el tiempo en eliminarlos antes habría
+    ahorrado horas acumuladas.
+    \item \textbf{Los tests de equivalencia valen más que los de
+    ejemplo}. La equivalencia DFS$\leftrightarrow$SIMD atrapó
+    varios bugs sutiles de SIMD que ningún test unitario
+    tradicional habría expuesto.
+    \item \textbf{El LLM como compilador, no como traductor}. Poner
+    al LLM offline y detrás de un gate humano fue la decisión que
+    destrabó la ingesta adaptativa sin sacrificar determinismo.
+\end{itemize}
+
+\section{Trabajo futuro}
+
+\subsection*{Cortes concretos, alcance de un sprint}
+
+\begin{itemize}
+    \item Eliminar las dos aristas residuales
+    \code{core}$\to$\code{platform} (F2.11, F2.12).
+    \item Persistir \code{mapping_library} a disco con
+    compactación y retención configurable.
+    \item Training pipeline reproducible para GNN por vertical.
+\end{itemize}
+
+\subsection*{Investigación, alcance mayor}
+
+\begin{itemize}
+    \item Benchmarks comparativos formales contra SIEMs comerciales
+    con harness compartido.
+    \item Operadores probabilísticos en el DSL (cuantificadores
+    ``esta arista es inusual'') sin perder la composicionalidad.
+    \item Aprendizaje en línea de pesos de scoring a partir de
+    feedback del analista (tag IOC $\to$ reweighting).
+    \item Multi-tenant con aislamiento por sesión y políticas de
+    acceso.
+\end{itemize}
+
+\section{Cierre}
+
+La apuesta detrás del diseño es que razonar sobre grafos de
+actividad es la forma natural de investigar incidentes, y que un
+sistema que respeta esa forma gana en velocidad analítica lo que
+pierde en familiaridad con los paradigmas tabulares. Los
+próximos seis meses de uso en producción dirán si la apuesta
+paga.

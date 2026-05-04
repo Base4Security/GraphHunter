@@ -1,0 +1,201 @@
+\chapter{La promesa \emph{plug-and-play}}
+\label{cap:plug-and-play}
+
+\begin{intuicion}
+La regla \emph{plug-and-play} de GraphHunter dice: cada
+optimización entregada (S/M/L) se activa por defecto al levantar
+el binario. Sin flags a setear, sin config a tocar, sin toggles en
+la UI. El usuario abre la app y todo lo que está \emph{shipped}
+se nota inmediatamente. Esa restricción no es cosmética: hace que
+el motor sea \emph{auditable}. Si después de un ship de
+optimización el analista tuvo que setear
+\texttt{GRAPHHUNTER\_X=1} para verla, la promesa se rompió ---la
+optimización no está realmente entregada, está \emph{disponible}.
+Este capítulo codifica la regla en cinco pasos concretos y discute
+por qué es deliberada y no accidental.
+\end{intuicion}
+
+\section{La promesa, en una frase}
+
+\begin{quote}
+\itshape
+``Ninguna optimización entregada requiere que el usuario cambie su
+config.''
+\end{quote}
+
+\noindent
+Variantes equivalentes:
+
+\begin{itemize}
+    \item Cada flag S/M/L que ships se setea \emph{default-on} al
+    \emph{startup} del binary.
+    \item Cada cache es transparente.
+    \item Cada índice se construye solo (lazy build).
+    \item Cada índice grande se spills a disco solo.
+\end{itemize}
+
+\noindent
+El usuario abre la app, ve la pildora ``Perf: M+L1'' verde, y todo
+funciona.
+
+\section{Por qué la regla es deliberada}
+
+Sin la regla, el motor cae en un patrón de fail-mode común en
+software de seguridad: \emph{shipped pero no usado}. El equipo
+agrega una optimización, la testea, la merge ---pero el usuario
+nunca la activa porque:
+
+\begin{itemize}
+    \item No sabe que existe (no leyó el changelog).
+    \item Sabe que existe pero no sabe cómo activarla.
+    \item Sabe cómo activarla pero le da fiaca tocar config.
+    \item Tocó config, anduvo bien, pero después actualizó el
+    binary y el config volvió a defecto.
+\end{itemize}
+
+\noindent
+Default-on resuelve los cuatro casos: el código nuevo se activa
+sin acción del usuario.
+
+\section{La regla en cinco pasos}
+
+\subsection{Paso 1: default-on al startup}
+
+Cada flag nuevo se setea en \filepath{apps/tauri/src-tauri/src/lib.rs}
+y \filepath{apps/cli/src/main.rs} con:
+
+\begin{lstlisting}[language=Rust]
+for (key, default) in [
+    ("GRAPHHUNTER_LFTJ_PLANNER", "1"),  // M1 structural K_4
+    ("GRAPHHUNTER_K4_LFTJ", "1"),        // S3 name marker
+    ("GRAPHHUNTER_YANNAKAKIS", "1"),     // L1 stage 2/3
+] {
+    if std::env::var(key).is_err() {
+        unsafe { std::env::set_var(key, default) };
+    }
+}
+\end{lstlisting}
+
+\noindent
+Override con \texttt{KEY=0} sigue funcionando para usuarios que
+quieran el path legacy (debugging, A/B comparison).
+
+\subsection{Paso 2: surface en UI}
+
+Extender \texttt{cmd\_get\_perf\_status} para incluir el flag
+nuevo, y la pildora del toolbar para reflejarlo. El analista debe
+poder \emph{ver} qué optimizaciones están activas sin abrir
+DevTools ni leer logs (capítulo~\ref{cap:frontend-instr}).
+
+\subsection{Paso 3: default-off sólo con causa}
+
+Hay flags que NO son default-on (durante un período). Justifica
+sólo si:
+
+\begin{itemize}
+    \item El flag re-escribe el DFS hot loop (cambios estructurales
+    grandes).
+    \item Aún no hay parity tests aguantando \(\geq 1\) semana
+    estable.
+    \item Hay un riesgo conocido de regresión en algún workload.
+\end{itemize}
+
+\noindent
+En esos casos, el flag queda \emph{opt-in} durante un \emph{soak
+window}. Cuando los parity tests aguantan, se flipea a
+default-on.
+
+\subsection{Paso 4: doc obliga}
+
+Cada flip default-off $\to$ default-on actualiza:
+
+\begin{itemize}
+    \item \filepath{08-env-vars.tex} (libro Especificación).
+    \item \filepath{12-preguntas-frecuentes.tex} (libro Manual).
+    \item \texttt{make all} para refrescar los 6 PDFs.
+\end{itemize}
+
+\noindent
+Sin doc actualizado, el flip no se merge.
+
+\subsection{Paso 5: capabilities de build}
+
+Los \emph{Cargo features} (como \texttt{symmetry-nauty}) que
+agregan funcionalidad opcional al binary se reflejan via
+constantes \texttt{HAS\_NAUTY}-style en
+\texttt{cmd\_get\_perf\_status}. El frontend lee la capability y
+muestra el feature como ``disponible'' o ``desactivado en este
+build'' ---sin que el analista tenga que abrir
+\filepath{Cargo.toml}.
+
+\section{Cuándo se rompe la promesa}
+
+Casos reales en los que casi se rompió:
+
+\begin{itemize}
+    \item \textbf{LFTJ-K\(_4\) inicial (S3)}: requería
+    \texttt{GRAPHHUNTER\_K4\_LFTJ=1} \emph{y} que el nombre de la
+    hipótesis contuviera ``k4-clique''. Cumplía la cláusula 1
+    (default-on) pero el name marker era una barrera. Se mantuvo
+    por back-compat pero M1 (structural\_dispatch) lo dejó
+    redundante.
+    \item \textbf{Yannakakis L1}: el flag default-on. Pero hubo un
+    período donde el matcher Yannakakis tenía un bug en hipótesis
+    con predicados; el ``fix'' fue requerir
+    \texttt{GRAPHHUNTER\_YANNAKAKIS=0} para esos casos. \emph{No}
+    cumplía con la regla. Se revertió, se arregló el bug en el
+    operador, y el flag se restauró a default-on.
+\end{itemize}
+
+\noindent
+La regla obliga a \emph{arreglar el bug en el operador}, no a
+\emph{ofrecer un opt-out al usuario}.
+
+\section{Por qué \emph{auditable}}
+
+Plug-and-play hace al motor auditable: el equipo de Base4 puede
+demostrar a un auditor externo que el motor en producción usa las
+optimizaciones publicadas. Sin la regla, demostrar eso requeriría
+inspeccionar configs en cada deployment ---imposible a escala.
+
+Con la regla: el binary mismo es la prueba. ``Si lo bajaste, lo
+estás usando.''
+
+\section{Resumen}
+
+\begin{itemize}
+    \item Plug-and-play: cada optimización entregada se activa
+    por defecto al startup.
+    \item Cinco pasos: default-on al startup, surface en UI,
+    default-off sólo con causa, doc obliga, capabilities de build
+    reflejadas.
+    \item Justificada porque sin ella, optimizaciones quedan
+    \emph{shipped pero no usadas}.
+    \item Casos donde casi se rompió: LFTJ S3 (name marker),
+    Yannakakis bug temporal. Se priorizó arreglar el código
+    sobre ofrecer opt-out.
+    \item Auditabilidad: el binary mismo es la prueba.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Imaginá una nueva optimización: ``cache de
+    NLF compartido entre hipótesis similares''. ¿Cumple los cinco
+    pasos? Discutí qué necesita.
+
+    \item ¿Por qué el override \texttt{KEY=0} sigue funcionando?
+    ¿Es contradictorio con la promesa plug-and-play?
+
+    \item \starred{} Diseñá un test automatizado que verifique
+    ``ninguna optimización merge-eada requiere setear flag
+    manualmente''. ¿Qué chequearía?
+
+    \item Casos donde la regla \emph{no} aplica: optimizaciones
+    que sí necesitan opt-in del usuario por su naturaleza
+    (riesgosa, costosa). Pensá un ejemplo.
+
+    \item Si una optimización tiene un \emph{soak window} de 2
+    semanas, ¿qué métricas decidirían que ya está listo para
+    flip a default-on?
+\end{enumerate}
+\end{ejercicios}

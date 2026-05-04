@@ -1,0 +1,30 @@
+[package]
+name = "graph_hunter_local_llm"
+version = "0.1.0"
+edition = "2024"
+description = "Local-only LLM seam for the agentic slow lane: LocalLlm trait, PromptSpec/PromptTemplate, MockBackend default, Candle-backed Phi-3-mini-Q4 behind the `candle` feature."
+license = "GPL-3.0"
+
+[lib]
+name = "graph_hunter_local_llm"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+
+# Candle-backed real inference. Off by default — the mock keeps CI
+# green without a multi-GB model checkpoint on disk. With this feature
+# on AND `GRAPHHUNTER_LOCAL_MODEL_PATH` pointing at a `.gguf`,
+# `default_backend()` picks the candle path.
+candle-core = { version = "0.10", optional = true }
+candle-transformers = { version = "0.10", optional = true }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"], optional = true }
+tracing = { version = "0.1", optional = true }
+
+[features]
+default = []
+candle = ["dep:candle-core", "dep:candle-transformers", "dep:tokenizers", "dep:tracing"]
+
+[dev-dependencies]
+serde_json = "1"

@@ -1,0 +1,310 @@
+\chapter{\emph{Leapfrog Triejoin} para \(K_4\)}
+\label{cap:lftj}
+
+\begin{intuicion}
+\(K_4\) es el grafo completo de cuatro vértices: cada par de
+vértices está conectado por una arista, en cada dirección. El
+patrón \(K_4\) es \emph{el} ejemplo canónico donde el DFS naive
+escala como \(O(\deg^3)\) pero un \emph{worst-case-optimal join}
+puede alcanzar \(O(m^2)\). LFTJ (Leapfrog Triejoin, Veldhuizen
+2014) es la versión implementable. Este capítulo lo desarrolla con
+un ejemplo trabajado: arrancamos de un grafo chico, mostramos cómo
+se construye el trie, cómo funciona la \emph{leapfrog} sobre tres
+\emph{pointers}, y cómo el motor extrae los \(K_4\)s sin
+intermedios cuadráticos.
+\end{intuicion}
+
+\section{El patrón \(K_4\) en GraphHunter}
+
+\(K_4\) homogéneo en threat hunting: cuatro entidades del mismo
+tipo, cada par conectado en cada dirección por una arista del
+mismo tipo. Ejemplo:
+
+\begin{lstlisting}
+User -[Knows]-> User -[Knows]-> User -[Knows]-> User
+{shape=k4, all-types-equal}
+\end{lstlisting}
+
+\noindent
+``Cuatro usuarios mutuamente conectados por relación
+\texttt{Knows}'' es una hipótesis típica de detección de
+\emph{insider threat clusters}: grupos pequeños cohesionados de
+usuarios que se conocen entre sí, donde uno puede ser un atacante
+infiltrado en el grupo.
+
+\section{La estructura del problema}
+
+Un \(K_4\) tiene \(\binom{4}{2} \cdot 2 = 12\) aristas dirigidas
+(cada uno de los 6 pares en ambas direcciones). Pero por simetría
+de \(K_4\), el patrón se reduce a las 6 aristas no orientadas.
+Para encontrar todos los \(K_4\)s en un grafo, necesitamos cuatro
+vértices \((a, b, c, d)\) tales que existan las 6 aristas:
+\((a, b)\), \((a, c)\), \((a, d)\), \((b, c)\), \((b, d)\),
+\((c, d)\).
+
+\subsection{El DFS naive}
+
+El DFS naive arranca:
+\begin{enumerate}
+    \item Para cada \(a \in \V\) (\(O(n)\)):
+    \item Para cada \(b \in N^{+}(a)\) (\(O(\deg)\)):
+    \item Para cada \(c \in N^{+}(b)\) tal que \(c \in N^{+}(a)\)
+    (\(O(\deg)\) más chequeo \(O(\log \deg)\)):
+    \item Para cada \(d \in N^{+}(c)\) tal que \(d \in N^{+}(a) \cap
+    N^{+}(b)\) (\(O(\deg)\) más chequeo \(O(\log \deg)\)):
+\end{enumerate}
+
+\noindent
+Total: \(O(n \cdot \deg^3 \cdot \log \deg)\). Para grafos densos con
+\(\deg = O(\sqrt{m})\): \(O(n \cdot m^{1.5} \cdot \log m)\) \(\approx
+O(m \cdot m^{1.5}) = O(m^{2.5})\). Por encima del AGM bound
+(\(m^2\)).
+
+\subsection{El plan LFTJ}
+
+LFTJ ataca \emph{variable por variable} en lugar de
+\emph{relación por relación}:
+
+\begin{enumerate}
+    \item Variable \(a\): iterar todos los vértices del grafo.
+    \item Variable \(b\): para cada \(a\), iterar \(N^{+}(a)\).
+    \item Variable \(c\): para cada \((a, b)\), iterar
+    \(N^{+}(a) \cap N^{+}(b)\) (\textbf{intersección}).
+    \item Variable \(d\): para cada \((a, b, c)\), iterar
+    \(N^{+}(a) \cap N^{+}(b) \cap N^{+}(c)\) (\textbf{intersección triple}).
+\end{enumerate}
+
+\noindent
+El truco: las dos intersecciones se hacen por \emph{leapfrog} sobre
+los \emph{adjacency lists ordenados}. No materializamos los conjuntos.
+
+\section{La operación \emph{leapfrog}}
+
+\begin{definition}[Leapfrog intersection]
+Dadas \(k\) listas ordenadas \(L_1, L_2, \dots, L_k\), \emph{leapfrog
+intersection} mantiene \(k\) punteros (uno por lista) y avanza el
+puntero \emph{más atrasado} hasta superar al \emph{más adelantado},
+repitiendo hasta que todos estén alineados (o algún puntero se
+agote). Cuando todos coinciden, el valor es un elemento de la
+intersección; emite y avanza todos.
+\end{definition}
+
+\begin{algorithm}[H]
+\caption{Leapfrog intersection sobre \(k\) listas ordenadas}
+\KwIn{listas \(L_1, \dots, L_k\), cada una sorted}
+\KwOut{secuencia de valores en \(L_1 \cap \dots \cap L_k\)}
+\(p_i \leftarrow 0\) para todo \(i\) (punteros iniciales)\;
+\While{ningún \(p_i\) llegó al final}{
+    \(\mathrm{mx} \leftarrow \max_i L_i[p_i]\) (el más adelantado)\;
+    \For{cada \(i\)}{
+        avanzar \(p_i\) hasta que \(L_i[p_i] \geq \mathrm{mx}\) (binary search o linear scan)\;
+    }
+    \If{\(L_1[p_1] = L_2[p_2] = \dots = L_k[p_k]\)}{
+        \texttt{emit}\((L_1[p_1])\)\;
+        avanzar todos los punteros en 1\;
+    }
+}
+\end{algorithm}
+
+\begin{ejemplo}[Intersección leapfrog de 3 listas]
+\(L_1 = [1, 4, 7, 9, 12]\), \(L_2 = [2, 4, 6, 9, 11]\),
+\(L_3 = [4, 5, 9, 10, 12]\).
+
+\begin{itemize}
+    \item Step 1: punteros en \([1, 2, 4]\). \(\mathrm{mx} = 4\).
+    Avanzar \(p_1\) hasta \(\geq 4\): \(p_1 \to 4\). Avanzar \(p_2\)
+    hasta \(\geq 4\): \(p_2 \to 4\). \(p_3\) ya en 4. Match
+    $\Rightarrow$ \texttt{emit}(4). Avanzar todos: \([7, 6, 5]\).
+    \item Step 2: \(\mathrm{mx} = 7\). Avanzar \(p_2\) a \(9\),
+    \(p_3\) a \(9\). \(p_1\) avanza a \(9\). Match $\Rightarrow$
+    \texttt{emit}(9). Avanzar: \([12, 11, 10]\).
+    \item Step 3: \(\mathrm{mx} = 12\). Avanzar \(p_2\) a $\infty$
+    (lista agotada). Salir.
+\end{itemize}
+
+\noindent
+Resultado: \(\{4, 9\}\) en \(O(|L_1| + |L_2| + |L_3|) =
+O(15)\) operaciones.
+\end{ejemplo}
+
+\subsection{Por qué leapfrog es \(O(\sum |L_i|)\) y no peor}
+
+Cada paso del while avanza al menos un puntero. Cada puntero
+avanza a lo sumo \(|L_i|\) veces. Total de avances: \(\sum |L_i|\).
+Cada avance es \(O(\log |L_i|)\) si usás binary search, o
+\(O(|L_i|)\) en peor caso si usás linear scan amortizado a 1 por
+elemento.
+
+\subsection{SIMD intersection}
+
+GraphHunter usa SIMD vía \texttt{libgraphmatch} para acelerar la
+intersección de dos listas ordenadas: \texttt{\_mm256\_cmpeq\_epi32}
+compara 8 \texttt{u32}s a la vez. Para listas de \(10^4\) elementos,
+SIMD da \(\sim 4\)--\(8\times\) sobre la versión escalar.
+
+\begin{enelcodigo}
+\filepath{libgraphmatch/} (C++ con AVX2). El binding Rust en
+\filepath{core/matcher-ffi/}. La integración con LFTJ en
+\filepath{core/graph-engine/src/lftj.rs}.
+\end{enelcodigo}
+
+\section{El trie sobre las aristas}
+
+LFTJ requiere los conjuntos \(N^{+}(v)\) ordenados, indexados por
+\(v\). El \emph{streaming backend} ya entrega eso post-finalize:
+\texttt{neighbors\_arc(v) + read + as\_slice()} devuelve un slice
+contiguo de las salientes de \(v\) ordenadas por timestamp.
+
+Para LFTJ-K\(_4\) necesitamos las salientes ordenadas por
+\texttt{dest\_sid} (no por timestamp), porque el \emph{leapfrog}
+intersect en el espacio de \texttt{dest\_sid}. La construcción del
+trie LFTJ:
+
+\begin{lstlisting}[language=Rust]
+pub struct LftjTrie {
+    // Para cada source_sid, una lista sorted de dest_sids.
+    by_source: HashMap<StrId, Vec<StrId>>,
+}
+
+impl LftjTrie {
+    pub fn build(graph: &GraphHunter) -> Self {
+        let mut by_source: HashMap<StrId, Vec<StrId>> = HashMap::new();
+        graph.streaming.for_each_edge(|src_sid, edge| {
+            by_source.entry(src_sid).or_default().push(edge.dest_sid);
+        });
+        for vec in by_source.values_mut() {
+            vec.sort();
+            vec.dedup();
+        }
+        Self { by_source }
+    }
+
+    pub fn neighbors(&self, sid: StrId) -> &[StrId] {
+        self.by_source.get(&sid).map_or(&[], |v| v.as_slice())
+    }
+}
+\end{lstlisting}
+
+\noindent
+Build: \(O(|\E| \log |\E|)\). Para \(|\E| = 10^7\), \(\sim 3\)~s.
+
+\subsection{Overhead vs DFS}
+
+La construcción del trie es overhead que el DFS no paga. Para
+hipótesis donde el DFS bien-podado ya alcanza performance, ese
+overhead no se justifica. Por eso LFTJ-K\(_4\) sólo se dispatcha
+cuando el planner detecta la estructura \(K_4\) específica
+(capítulo~\ref{cap:planner}).
+
+\section{LFTJ para \(K_4\): el algoritmo completo}
+
+\begin{algorithm}[H]
+\caption{LFTJ-K\(_4\) (versión simplificada, sin symmetry breaking)}
+\KwIn{\texttt{LftjTrie} \(T\)}
+\KwOut{Vec<HuntResult>: tuplas \((a, b, c, d)\)}
+\For{\(a \in \V\)}{
+    \(N_a \leftarrow T.\mathrm{neighbors}(a)\)\;
+    \For{\(b \in N_a\)}{
+        \(N_b \leftarrow T.\mathrm{neighbors}(b)\)\;
+        \(N_{a \cap b} \leftarrow \texttt{leapfrog\_intersect}(N_a, N_b)\)\;
+        \For{\(c \in N_{a \cap b}\)}{
+            \(N_c \leftarrow T.\mathrm{neighbors}(c)\)\;
+            \(N_{a \cap b \cap c} \leftarrow \texttt{leapfrog\_intersect}(N_a, N_b, N_c)\)\;
+            \For{\(d \in N_{a \cap b \cap c}\)}{
+                \texttt{emit}\((a, b, c, d)\)\;
+            }
+        }
+    }
+}
+\end{algorithm}
+
+\subsection{Análisis: \(O(m^2)\)}
+
+El análisis de NPRR/LFTJ aplica directo: el trabajo total es
+\(O(\sum_{(a,b)} |N_a| + |N_b| + \sum_{(a,b,c)} |N_a| + |N_b| + |N_c|)\),
+que se demuestra (vía \emph{Loomis-Whitney inequality}) acotado
+por \(O(m^2)\). Detalles en Veldhuizen 2014; lo crucial para el
+lector es:
+
+\begin{itemize}
+    \item DFS: \(O(m^{2.5})\) en peor caso.
+    \item LFTJ: \(O(m^2)\) en peor caso.
+    \item Ratio: \(\sqrt{m}\). Para \(m = 10^4\), eso son
+    \(100\times\); para \(m = 10^6\), \(1000\times\).
+\end{itemize}
+
+\section{Symmetry breaking}
+
+\(K_4\) tiene grupo de simetría \(S_4\) de orden 24: cada
+\(K_4\) genuino se enumera 24 veces si no se hace nada (las 24
+permutaciones de los 4 vértices). Para evitarlo, LFTJ-K\(_4\)
+agrega la restricción de orden:
+\[
+a < b < c < d
+\]
+\noindent
+sobre los \texttt{StrId}s. Esto reduce el output a una sola
+representación por \(K_4\), ahorrando factor 24.
+
+\begin{nota}
+Este \emph{symmetry breaking} es válido sólo para
+\(K_4\)\emph{homogéneo} (misma etiqueta en cada vértice). Si los
+vértices tuvieran etiquetas distintas (por ejemplo, dos
+\texttt{User} y dos \texttt{Host}), las simetrías serían menores y
+el orden tendría que respetar las etiquetas.
+\end{nota}
+
+\section{Cuándo LFTJ-K\(_4\) gana en la práctica}
+
+Bench típico: grafo \(10^7\) aristas, \(\sim 100\) \(K_4\)s reales.
+
+\begin{itemize}
+    \item DFS naive: $\sim$30 s (300 ms si bien-podado).
+    \item LFTJ: $\sim$5 ms (más 3 s de build de trie one-time).
+\end{itemize}
+
+\noindent
+LFTJ gana \(60\times\) sobre el DFS bien-podado en hunt time. El
+build de trie se amortiza si el usuario corre múltiples hunts de
+\(K_4\) sobre el mismo grafo (típico).
+
+\section{Resumen}
+
+\begin{itemize}
+    \item LFTJ resuelve subgraph matching variable-por-variable
+    con \emph{leapfrog intersection} sobre tries.
+    \item Para \(K_4\): \(O(m^2)\) versus \(O(m^{2.5})\) del DFS.
+    \item GraphHunter implementa LFTJ-K\(_4\) específicamente,
+    con SIMD intersection vía \texttt{libgraphmatch}.
+    \item Symmetry breaking (\(a < b < c < d\)) ahorra factor 24
+    cuando el patrón es homogéneo.
+    \item Trade-off: build de trie one-time vs hunts más rápidos;
+    se amortiza con múltiples hunts.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Calculá: para un grafo \(G(1000, 0.05)\)
+    Erdős-Rényi, ¿cuántos \(K_4\)s hay en expectation? Compará con
+    el AGM bound \(m^2\).
+
+    \item Implementá leapfrog intersection sobre dos listas
+    ordenadas con búsqueda binaria. ¿Cuál es la complejidad
+    asintótica? ¿Y el peor caso?
+
+    \item \starred{} Demostrá que el DFS bien-podado para \(K_4\)
+    no puede mejorar a \(O(m^2)\) en peor caso (sin información
+    estructural extra).
+
+    \item Diseñá un grafo donde LFTJ-K\(_4\) sea estrictamente peor
+    que DFS. (Pista: ¿qué pasa si el trie es huge pero hay pocos
+    \(K_4\)s? ¿Y el costo del build?)
+
+    \item ¿Por qué la \emph{symmetry breaking} (\(a < b < c < d\))
+    no se generaliza directo al caso heterogéneo (mezcla de
+    \texttt{User} y \texttt{Host})? ¿Qué cambiaría?
+
+    \item ¿Cómo se extendería LFTJ a \(K_5\)? ¿Cuál es la
+    complejidad esperada? ¿Vale la pena implementarlo?
+\end{enumerate}
+\end{ejercicios}

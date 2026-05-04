@@ -1,0 +1,474 @@
+\chapter{Glosario}
+\label{ap:glosario}
+
+Términos técnicos del libro, ordenados alfabéticamente. La columna
+``Cap.'' apunta al capítulo donde se define o desarrolla.
+
+\renewcommand{\arraystretch}{1.3}
+
+\noindent
+\textbf{A}
+
+\begin{description}
+    \item[\(\alpha\)-aciclicidad] Propiedad de un hipergrafo que se
+    reduce a vacío mediante el algoritmo GYO. Equivalente a la
+    existencia de un \emph{join tree}. Es la condición necesaria
+    para que Yannakakis funcione en \(O(\)input + output\()\).
+    Cap.~\ref{cap:hipergrafos}.
+
+    \item[\(\AGM\) bound] Cota Atserias-Grohe-Marx (2008): para
+    todo join \(Q\) con relaciones de tamaño \(\leq m\), el output
+    es \(\leq m^{\rhostar(Q)}\). Cap.~\ref{cap:joins-y-grafos}.
+
+    \item[\texttt{add\_relation}] Función que agrega una arista al
+    grafo. Idempotente para entidades, append para relaciones;
+    \emph{single-write} al \texttt{streaming} backend (post stage 2c
+    part 2 \emph{rip-out} del antiguo dual-write).
+    Cap.~\ref{cap:ingest-anatomy}.
+
+    \item[\texttt{Arc<str>}] Atomic reference-counted pointer a una
+    string en heap. Permite clonado por refcount bump
+    (\(\sim 5\) ns) en lugar de byte copy. La elección que destrabó
+    el 55\% en cap-saturated benches. Cap.~\ref{cap:hunt-result}.
+\end{description}
+
+\noindent
+\textbf{B}
+
+\begin{description}
+    \item[Bag (\(B_i\))] Lista de aristas que matchean el step
+    \(i\) de una hipótesis. Materializadas por Yannakakis chain
+    antes del semi-join reducer. Cap.~\ref{cap:yannakakis-chain}.
+
+    \item[Backtracking] Patrón \texttt{push}/\texttt{recurse}/\texttt{pop}
+    que mantiene una pila de bindings durante el DFS, restaurándola
+    al volver de cada rama. Cap.~\ref{cap:dfs-baseline}.
+
+    \item[Binding] Identificador en la DSL que referencia un
+    vértice (\texttt{u}, \texttt{c}, \texttt{h1}). Internamente se
+    convierte a \texttt{VarId} numérico. Caps.~\ref{cap:dsl-chain},
+    \ref{cap:ast}.
+
+    \item[{\(\bits[v]\)}] Bitmap \texttt{u16} indexado por
+    \texttt{EntityType}: bit \(L\) prendido sii existe walk de
+    \(v\) a algún vértice de tipo \(L\) en
+    \(\leq \texttt{MAX\_DEPTH}\) saltos.
+    Caps.~\ref{cap:prune-khop}, \ref{cap:khop-detalle}.
+
+    \item[Branch prediction] Mecanismo de la CPU para anticipar el
+    resultado de un \texttt{if} y ejecutar especulativamente. Costo
+    de mispredict: 15--25 ciclos. Justifica diseño de hot loops
+    con pocos branches dependientes de datos. Cap.~\ref{cap:sistemas}.
+\end{description}
+
+\noindent
+\textbf{C}
+
+\begin{description}
+    \item[Cache line] Unidad de transferencia entre RAM y CPU
+    cache. 64 B en x86\_64 modernos. Justifica el tamaño 32 B de
+    \texttt{CompactRelation} (dos por línea).
+    Caps.~\ref{cap:sistemas}, \ref{cap:compact-relation}.
+
+    \item[Cap (de hunt)] Cantidad máxima de \texttt{HuntResult}s
+    que un hunt produce. Default 10\,000. Truncate explícito para
+    evitar que un hub explote la salida. Cap.~\ref{cap:hunt-result}.
+
+    \item[Cascade budget] Umbral en \emph{Delta WCOJ Propagation}
+    que aborta la propagación si visited supera el threshold
+    (default 100K). Protege contra hubs patológicos.
+    Cap.~\ref{cap:delta-wcoj}.
+
+    \item[\texttt{CompactRelation}] Estructura interna de arista,
+    32 bytes \texttt{\#[repr(C)]}, dos por cache line, mmap-friendly.
+    Cap.~\ref{cap:compact-relation}.
+\end{description}
+
+\noindent
+\textbf{D}
+
+\begin{description}
+    \item[Default-on] Convención plug-and-play: cada flag
+    de optimización ships con su default a 1, sin requerir acción
+    del usuario. Cap.~\ref{cap:plug-and-play}.
+
+    \item[Delta WCOJ Propagation] Algoritmo de
+    Kankanamge-Sahu-Mhedhbi-Salihoglu (SIGMOD 2017) para
+    actualización incremental de k-hop reachability.
+    Cap.~\ref{cap:delta-wcoj}.
+
+    \item[DFS] Depth-first search. El algoritmo baseline del
+    matcher; opera con backtracking y prunes (NLF, k-hop, symmetry
+    breaking). Cap.~\ref{cap:dfs-baseline}.
+
+    \item[\texttt{DispatchPlan}] Enum del planner:
+    \texttt{DfsMatch}, \texttt{K4Lftj}, \texttt{Yannakakis}.
+    Cap.~\ref{cap:planner}.
+
+    \item[Dual-write] Patrón actual de
+    \texttt{add\_relation}: escribe al \texttt{edge\_store} y al
+    streaming backend. Stage 2c (futuro) lo elimina.
+    Caps.~\ref{cap:streaming-mirror}, \ref{cap:streaming-canonical}.
+\end{description}
+
+\noindent
+\textbf{E}
+
+\begin{description}
+    \item[\texttt{Entity}] Tipo público de nodo del grafo: \(\{
+    \texttt{id: String}, \texttt{entity\_type: EntityType},
+    \texttt{metadata} \}\). Cap.~\ref{cap:entity-relation}.
+
+    \item[\texttt{EntityType}] Enum de 9 variantes (\texttt{User},
+    \texttt{Host}, \texttt{Process}, \texttt{IP}, \texttt{File},
+    \texttt{Domain}, \texttt{Service}, \texttt{Resource},
+    \texttt{Group}, más \texttt{Other}). Tag numérico explícito
+    para indexación. Cap.~\ref{cap:entity-relation}.
+\end{description}
+
+\noindent
+\textbf{F}
+
+\begin{description}
+    \item[Falsos positivos del prune] El prune deja pasar
+    candidatos que el matcher después descarta. Inevitable bajo
+    sobre-aproximación; el matcher absorbe el costo.
+    Cap.~\ref{cap:indices-auxiliares}.
+
+    \item[Finalize (\texttt{sort\_edges\_by\_timestamp})]
+    Función que cierra el grafo: ordena aristas por
+    \((\texttt{source\_sid}, \texttt{timestamp})\), marca sealed,
+    resetea índices a \texttt{None} para lazy build.
+    Cap.~\ref{cap:finalize}.
+
+    \item[Fractional edge cover number (\(\rhostar\))] Mínimo total
+    de pesos en una cobertura fraccionaria del hipergrafo. Determina
+    el AGM bound. Cap.~\ref{cap:joins-y-grafos}.
+\end{description}
+
+\noindent
+\textbf{G}
+
+\begin{description}
+    \item[GYO] Algoritmo de reducción de hipergrafo (Graham 1979,
+    Yu-Ozsoyoglu 1979) que detecta \(\alpha\)-aciclicidad por
+    aplicación repetida de dos reglas (eliminar atributo aislado,
+    eliminar hiperarista contenida). Cap.~\ref{cap:hipergrafos}.
+
+    \item[Grafo dirigido temporal etiquetado] Tupla
+    \((\V, \E, \mathrm{type}_V, \mathrm{type}_E, t)\). El modelo
+    matemático sobre el que opera GraphHunter.
+    Cap.~\ref{cap:grafos-temporales}.
+\end{description}
+
+\noindent
+\textbf{H}
+
+\begin{description}
+    \item[\texttt{HAVING}] Cláusula trailing de la DSL para
+    agregaciones (\texttt{count(distinct binding) >= N}).
+    Cap.~\ref{cap:dsl-chain}.
+
+    \item[Hipergrafo de la consulta] Estructura
+    \((\mathcal{A}, F)\) donde \(\mathcal{A}\) son los atributos y
+    \(F\) las relaciones (cada una hiperarista). Permite aplicar
+    GYO. Cap.~\ref{cap:hipergrafos}.
+
+    \item[Homomorfismo] Función \(\sigma : V_P \to \V\) que
+    respeta etiquetas y aristas, pero \emph{puede colapsar}
+    distintos vértices del patrón al mismo vértice del grafo.
+    Cap.~\ref{cap:subgraph-matching}.
+
+    \item[\texttt{HuntResult}] Tipo público del resultado de un
+    hunt: \texttt{Vec<Arc<str>>}, secuencia de identidades del path
+    encontrado. Cap.~\ref{cap:hunt-result}.
+
+    \item[\texttt{Hypothesis}] Struct AST de la DSL: \texttt{steps},
+    \texttt{shape}, \texttt{k\_simplicity}, \texttt{aggregations},
+    \texttt{window\_seconds}. Cap.~\ref{cap:ast}.
+\end{description}
+
+\noindent
+\textbf{I}
+
+\begin{description}
+    \item[Idempotencia] \texttt{add\_entity} es idempotente: agregar
+    la misma entity dos veces no la duplica. Cap.~\ref{cap:entity-relation}.
+
+    \item[\texttt{IndexBacking<T>}] Wrapper genérico
+    heap-resident / mmap-spilled para tablas grandes. Reusado por
+    NLF y k-hop. Cap.~\ref{cap:indices-auxiliares}.
+
+    \item[Ingest] El pipeline log $\to$ grafo. Tres etapas:
+    \texttt{LogSource}, \texttt{LogParser}, \texttt{GraphWriter}.
+    Cap.~\ref{cap:ingest-anatomy}.
+
+    \item[Invariante] Propiedad que se mantiene después de cada
+    operación. El motor las testea con property tests.
+
+    \item[Isomorfismo (subgraph)] Embedding inyectivo: los
+    distintos vértices del patrón mapean a vértices distintos del
+    grafo. Cap.~\ref{cap:subgraph-matching}.
+\end{description}
+
+\noindent
+\textbf{J}
+
+\begin{description}
+    \item[Join (natural)] Operación relacional que junta dos tablas
+    matcheando los valores de las columnas compartidas.
+    Cap.~\ref{cap:joins-y-grafos}.
+
+    \item[Join tree] Árbol cuyos nodos son las relaciones del join,
+    tal que para cada atributo, el conjunto de relaciones que lo
+    contienen forma un sub-árbol conexo. Existe sii el hipergrafo
+    es \(\alpha\)-acíclico. Cap.~\ref{cap:hipergrafos}.
+\end{description}
+
+\noindent
+\textbf{K}
+
+\begin{description}
+    \item[\(K_4\)] Grafo completo de 4 vértices, las
+    \(\binom{4}{2} \cdot 2 = 12\) aristas dirigidas. El patrón
+    canónico para LFTJ. Cap.~\ref{cap:lftj}.
+
+    \item[\(k\)-simplicidad] Cota: ningún vértice se repite más de
+    \(k\) veces en el path. Default \(k = 1\) (path simple).
+    Cap.~\ref{cap:grafos-temporales}.
+
+    \item[\texttt{KHopReach}] Estructura del índice k-hop
+    reachability: \texttt{bits} dense, \texttt{rank} dense,
+    \texttt{min/max\_first} sparse. Cap.~\ref{cap:khop-detalle}.
+\end{description}
+
+\noindent
+\textbf{L}
+
+\begin{description}
+    \item[Lazy build] Patrón en el que un índice se construye al
+    primer consumer que lo necesita, no eagerly al
+    sealing. Implementado vía \texttt{OnceLock<T>}. Caps.~\ref{cap:finalize},
+    \ref{cap:indices-auxiliares}.
+
+    \item[Leapfrog intersection] Operación central de LFTJ.
+    Mantiene \(k\) punteros sobre listas ordenadas, avanzando el
+    más atrasado hasta superar al más adelantado.
+    Cap.~\ref{cap:lftj}.
+
+    \item[LFTJ] Leapfrog Triejoin (Veldhuizen ICDT 2014). WCOJ
+    implementable que GraphHunter aplica para \(K_4\).
+    Cap.~\ref{cap:lftj}.
+
+    \item[\texttt{LogParser}] Trait que convierte un chunk crudo
+    en \texttt{Vec<ParsedTriple>}. Cap.~\ref{cap:ingest-anatomy}.
+
+    \item[\texttt{LogSource}] Trait que entrega chunks de una
+    fuente (Sentinel, Defender, EVTX, NDJSON local).
+    Cap.~\ref{cap:ingest-anatomy}.
+\end{description}
+
+\noindent
+\textbf{M}
+
+\begin{description}
+    \item[\texttt{MAX\_DEPTH}] Profundidad máxima del índice k-hop
+    reachability. En GraphHunter, 4. Cap.~\ref{cap:prune-khop}.
+
+    \item[\texttt{MetadataStore}] Almacenamiento append-only de
+    metadata de aristas, accedido vía
+    \texttt{CompactRelation::metadata\_offset}.
+    Cap.~\ref{cap:compact-relation}.
+
+    \item[\(\mathrm{min\_first}\), \(\mathrm{max\_first}\)] Matrices
+    sparse (\(|\V_{\text{ranked}}| \times |\Lc_V|\)) que guardan
+    los timestamps extremos del primer edge de algún camino
+    \(v \rightsquigarrow L\). Cap.~\ref{cap:khop-detalle}.
+
+    \item[mmap (memory-mapped file)] Asociación entre páginas
+    virtuales y bytes de un archivo en disco. Permite leer
+    archivos sin alocar RAM proporcional. Cap.~\ref{cap:sistemas}.
+
+    \item[Multigrafo] Grafo donde puede haber varias aristas entre
+    el mismo par de vértices (con distintos timestamps o
+    metadata). El modelo correcto para threat hunting.
+    Cap.~\ref{cap:grafos-temporales}.
+\end{description}
+
+\noindent
+\textbf{N}
+
+\begin{description}
+    \item[\texttt{NeighborList}] Estructura per-vértice del
+    streaming backend: enum con tres variantes
+    (\texttt{Inline}, \texttt{Vec}, \texttt{Btree}) según degree.
+    Cap.~\ref{cap:streaming-mirror}.
+
+    \item[\texttt{NLF} (\(\NLF\))] Neighborhood Label Frequency.
+    \(\NLF(v, L)\) cuenta vecinos salientes de \(v\) de tipo \(L\).
+    Caps.~\ref{cap:prune-nlf}, \ref{cap:nlf-detalle}.
+\end{description}
+
+\noindent
+\textbf{O}
+
+\begin{description}
+    \item[\texttt{OnceLock<T>}] Primitiva stdlib de Rust para
+    inicialización lazy thread-safe exactamente-una. Backbone del
+    lazy build. Cap.~\ref{cap:finalize}.
+\end{description}
+
+\noindent
+\textbf{P}
+
+\begin{description}
+    \item[Path simple] Walk donde todos los vértices son distintos.
+    Equivalente a 1-simplicidad. Cap.~\ref{cap:grafos-temporales}.
+
+    \item[Planner] Función \texttt{plan(hypothesis)} que devuelve
+    \texttt{DispatchPlan}. Cap.~\ref{cap:planner}.
+
+    \item[Plug-and-play] Promesa transversal: cada optimización
+    entregada está activa por defecto sin acción del usuario.
+    Cap.~\ref{cap:plug-and-play}.
+
+    \item[Predicate] Restricción sobre un campo de metadata o un
+    vértice. Cap.~\ref{cap:dsl-chain}.
+
+    \item[Prune] Filtro que descarta candidatos antes del DFS para
+    reducir trabajo. NLF, k-hop, symmetry breaking.
+    Caps.~\ref{cap:prune-nlf}, \ref{cap:prune-khop}.
+\end{description}
+
+\noindent
+\textbf{R}
+
+\begin{description}
+    \item[\texttt{rank}] Array dense (\texttt{Vec<u32>}) que
+    indexa la fila sparse de \texttt{min/max\_first}.
+    \texttt{NO\_RANK} si \(\outdeg = 0\).
+    Cap.~\ref{cap:khop-detalle}.
+
+    \item[\texttt{Relation}] Tipo público de arista del grafo.
+    Cap.~\ref{cap:entity-relation}.
+
+    \item[\texttt{repr(C)}] Atributo de Rust que fuerza layout
+    estable estilo C: orden declarado, padding explícito,
+    alineación predecible. Cap.~\ref{cap:compact-relation}.
+\end{description}
+
+\noindent
+\textbf{S}
+
+\begin{description}
+    \item[Saturating add] Operación aritmética que se queda en
+    \texttt{u32::MAX} en vez de overflowar. Convención de NLF.
+    Cap.~\ref{cap:incremental-nlf}.
+
+    \item[Scale-free] Distribución de grado power-law: la mayoría
+    de los vértices tienen grado bajo, una minoría tiene grado
+    alto (hubs). Caracteriza los grafos reales de threat hunting.
+    Cap.~\ref{cap:naive-matching}.
+
+    \item[Semi-join (\(R \ltimes S\))] Filas de \(R\) cuya
+    \emph{join key} aparece en \(S\). La operación central del
+    Yannakakis reducer. Cap.~\ref{cap:yannakakis-chain}.
+
+    \item[Shape (de hipótesis)] \texttt{HypothesisShape::Chain}
+    o \texttt{HypothesisShape::Graph}. Determina el sub-matcher
+    de Yannakakis. Cap.~\ref{cap:dsl-graph}.
+
+    \item[SIMD] Single Instruction, Multiple Data. Instrucciones
+    AVX2/AVX-512 para operar sobre 8/16 \texttt{u32}s en una sola
+    instrucción. GraphHunter las usa via \texttt{libgraphmatch}
+    para LFTJ intersection. Caps.~\ref{cap:sistemas}, \ref{cap:lftj}.
+
+    \item[Soundness (de prune)] El prune nunca descarta candidatos
+    válidos. Garantizada por sobre-aproximación del índice.
+    Cap.~\ref{cap:indices-auxiliares}.
+
+    \item[\texttt{streaming backend}]
+    \texttt{InMemoryStreamingBackend} per-vertex \emph{degree-adaptive}
+    (\texttt{Inline} / \texttt{Vec} / \texttt{Mmap}) con auto-spill
+    incremental. \emph{Canonical edge store} desde stage 2c part 2;
+    reemplazó al antiguo \texttt{SpillableEdgeStore}.
+    Caps.~\ref{cap:streaming-mirror}, \ref{cap:streaming-canonical}.
+
+    \item[\texttt{StringInterner}] Tabla bidireccional
+    \texttt{String} $\leftrightarrow$ \texttt{StrId}. Backing con
+    \texttt{Arc<str>}. Cap.~\ref{cap:interner}.
+
+    \item[Streaming backend] Mirror per-vértice del grafo
+    optimizado para wait-free reads. Hoy mirror del edge\_store;
+    futura source of truth. Cap.~\ref{cap:streaming-mirror}.
+
+    \item[Subgraph matching] Encontrar todas las formas de embeber
+    un patrón \(P\) en un grafo \(G\). NP-completo en general,
+    tractable con etiquetas + ventana temporal + prunes.
+    Cap.~\ref{cap:subgraph-matching}.
+
+    \item[Symmetry breaking] Restricción adicional (e.g.\
+    \(a < b < c < d\)) que evita enumerar la misma estructura por
+    cada permutación de sus simetrías. Cap.~\ref{cap:lftj}.
+\end{description}
+
+\noindent
+\textbf{T}
+
+\begin{description}
+    \item[Tree-walk enumerator] Versión de Yannakakis para shape
+    graph: walk recursivo sobre el join tree con switch
+    \texttt{(origin\_bound, dest\_bound)}.
+    Cap.~\ref{cap:yannakakis-tree}.
+
+    \item[Trie] Estructura de árbol indexada por prefijos. Usada
+    por LFTJ para soportar leapfrog intersection.
+    Cap.~\ref{cap:lftj}.
+
+    \item[\texttt{try\_record\_edge}] Función de NLF que aplica
+    un saturating-add incremental cuando el backing es heap;
+    devuelve \texttt{false} si está mmap-spilled.
+    Cap.~\ref{cap:incremental-nlf}.
+\end{description}
+
+\noindent
+\textbf{V}
+
+\begin{description}
+    \item[\texttt{VarId}] Índice numérico para variables (bindings)
+    en una hipótesis. Único por hipótesis.
+    Cap.~\ref{cap:ast}.
+\end{description}
+
+\noindent
+\textbf{W}
+
+\begin{description}
+    \item[Walk] Secuencia de vértices conectados por aristas, donde
+    los vértices \emph{pueden repetirse}. Distinto de path simple.
+    Cap.~\ref{cap:grafos-temporales}.
+
+    \item[Wait-free reads] Garantía de que los lectores nunca
+    bloquean. El streaming backend lo logra con
+    \texttt{ArcSwap<NeighborList>}. Cap.~\ref{cap:streaming-mirror}.
+
+    \item[\texttt{WITHIN}] Cláusula trailing de la DSL que define
+    la ventana temporal \(\Delta t\). Cap.~\ref{cap:dsl-chain}.
+
+    \item[Worst-case-optimal join (WCOJ)] Algoritmo de join cuyo
+    tiempo se ajusta al \(\AGM\) bound (\(O(m^{\rhostar})\)). LFTJ
+    es uno; los joins binarios secuenciales clásicos no.
+    Cap.~\ref{cap:wcoj}.
+\end{description}
+
+\noindent
+\textbf{Y}
+
+\begin{description}
+    \item[Yannakakis] Algoritmo de Yannakakis (1981) para joins
+    \(\alpha\)-acíclicos: semi-join reducer en dos pasadas +
+    enumeración. \(O(\)input + output\()\). Caps.~\ref{cap:yannakakis-chain},
+    \ref{cap:yannakakis-tree}.
+\end{description}
+
+\cleardoublepage

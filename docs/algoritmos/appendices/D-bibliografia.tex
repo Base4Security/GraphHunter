@@ -1,0 +1,157 @@
+\chapter{Bibliografía}
+\label{ap:bibliografia}
+
+Referencias citadas en el libro, agrupadas por tema. Las URLs se
+incluyen cuando el paper está disponible públicamente.
+
+\section*{Joins, AGM bound, WCOJ}
+
+\begin{description}
+    \item[Atserias, Grohe, Marx (2008)] \emph{Size Bounds and Query
+    Plans for Relational Joins}. FOCS 2008. La derivación
+    original del AGM bound. Cap.~\ref{cap:joins-y-grafos}.
+
+    \item[Ngo, Porat, R\'e, Rudra (2012)] \emph{Worst-case Optimal
+    Join Algorithms}. PODS 2012. NPRR, el primer algoritmo WCOJ
+    que alcanza el bound. Cap.~\ref{cap:wcoj}.
+
+    \item[Veldhuizen (2014)] \emph{Triejoin: A Simple,
+    Worst-Case Optimal Join Algorithm}. ICDT 2014. La versión
+    implementable de WCOJ que GraphHunter usa para \(K_4\).
+    Cap.~\ref{cap:lftj}.
+
+    \item[Ngo, Porat, R\'e, Rudra (2018)] \emph{Worst-case Optimal
+    Join Algorithms: Techniques, Results, and Open Problems}. PODS
+    2018. Survey de WCOJ y resultados posteriores; lectura
+    recomendada para profundizar. Cap.~\ref{cap:wcoj}.
+
+    \item[Yannakakis (1981)] \emph{Algorithms for Acyclic Database
+    Schemes}. VLDB 1981. El paper original del semi-join reducer
+    para joins \(\alpha\)-acíclicos. Caps.~\ref{cap:hipergrafos},
+    \ref{cap:yannakakis-chain}.
+\end{description}
+
+\section*{\(\alpha\)-aciclicidad y hipergrafos}
+
+\begin{description}
+    \item[Beeri, Fagin, Maier, Yannakakis (1983)] \emph{On the
+    Desirability of Acyclic Database Schemes}. JACM 30(3). Definición
+    formal de las distintas variantes de aciclicidad
+    (\(\alpha\), \(\beta\), \(\gamma\)) y sus propiedades.
+    Cap.~\ref{cap:hipergrafos}.
+
+    \item[Graham (1979)] \emph{On the Universal Relation}. Reporte
+    técnico Univ. of Toronto. La regla GYO de eliminación. Junto
+    con Yu-Ozsoyoglu (1979), las dos referencias del algoritmo.
+    Cap.~\ref{cap:hipergrafos}.
+\end{description}
+
+\section*{Subgraph matching y graph databases}
+
+\begin{description}
+    \item[Cordella, Foggia, Sansone, Vento (2004)] \emph{A
+    (Sub)Graph Isomorphism Algorithm for Matching Large Graphs}.
+    IEEE Trans.\ PAMI 26(10). VF2: el algoritmo clásico de subgraph
+    isomorphism con podas. Referencia para comparar con DFS bien-podado.
+    Cap.~\ref{cap:dfs-baseline}.
+
+    \item[He, Singh (2008)] \emph{Graphs-at-a-time: Query Language
+    and Access Methods for Graph Databases}. SIGMOD 2008. Introduce
+    el concepto de NLF como prune para subgraph matching. Cap.~\ref{cap:prune-nlf}.
+
+    \item[Kankanamge, Sahu, Mhedhbi, Salihoglu (2017)] \emph{Graphflow:
+    An Active Graph Database}. SIGMOD 2017. La técnica de Delta
+    WCOJ Propagation que GraphHunter adoptará en stage 2b.
+    Cap.~\ref{cap:delta-wcoj}.
+
+    \item[Sun, Wang, Wang, Shao, Li (2012)] \emph{Efficient Subgraph
+    Matching on Billion Node Graphs}. VLDB 2012. \emph{neighborhood
+    label profile} (NLP) y otras heurísticas; complementa NLF.
+    Cap.~\ref{cap:prune-nlf}.
+\end{description}
+
+\section*{Sistemas, layout, performance}
+
+\begin{description}
+    \item[Drepper (2007)] \emph{What Every Programmer Should Know
+    About Memory}. Reporte técnico Red Hat. La referencia
+    canónica de cache lines, branch prediction, y jerarquía de
+    memoria. Cap.~\ref{cap:sistemas}.
+
+    \item[Patterson, Hennessy] \emph{Computer Organization and
+    Design}. MK Publishers. Libro de texto: arquitectura de CPU,
+    pipeline, memoria virtual. Background completo si se quiere
+    profundizar. Cap.~\ref{cap:sistemas}.
+
+    \item[Lea (2000)] \emph{A Memory Allocator}. Doug Lea's malloc;
+    referencia para entender por qué allocs chicos cuestan
+    \(\sim 65\) ns con allocadores modernos. Cap.~\ref{cap:hunt-result}.
+\end{description}
+
+\section*{Threat hunting}
+
+\begin{description}
+    \item[Sqrrl Team (2017)] \emph{Hunt Evil: Your Practical Guide
+    to Threat Hunting}. Sqrrl Data Inc. Manual operacional de
+    threat hunting; complemento al libro \emph{Manual} de
+    GraphHunter. Cap.~\ref{cap:threat-hunting}.
+
+    \item[Bianchi, Costantino (2024)] \emph{A Survey on Threat
+    Hunting Techniques}. Computer Communications. Survey reciente
+    de las prácticas de la industria. Cap.~\ref{cap:threat-hunting}.
+\end{description}
+
+\section*{Documentación interna de GraphHunter}
+
+\begin{description}
+    \item[\texttt{docs/diseno/diseno.pdf}] \emph{Diseño completo}
+    (resumen ejecutivo). El compañero de este libro: 25 páginas,
+    asume conocimiento del dominio. Útil como referencia rápida
+    una vez completado este libro.
+
+    \item[\texttt{docs/arquitectura/arquitectura.pdf}] \emph{Arquitectura}.
+    Estructura de crates, layering, ADRs, decisiones de
+    \emph{repo organization}. Cap.~\ref{cap:stack}.
+
+    \item[\texttt{docs/especificacion/especificacion.pdf}] \emph{Especificación}.
+    HTTP API, MCP tools, DSL, C ABI, formatos de log, env vars.
+    Cap.~\ref{cap:ast}.
+
+    \item[\texttt{docs/manual/manual.pdf}] \emph{Manual del operador}.
+    Instalación, ingesta, hunt mode, exploración, integraciones.
+
+    \item[\texttt{docs/paper/paper.pdf}] \emph{Paper interno de
+    investigación}. Justificación académica con benchmarks y
+    comparaciones contra el estado del arte.
+
+    \item[\texttt{docs/perf/release-profile.md}] Bisección del
+    \texttt{[profile.release]} de Cargo (LTO, target-cpu) en el
+    Galaxy Book4. Cap.~\ref{cap:sistemas}.
+
+    \item[\texttt{docs/perf/hunt-result-shape.md}] Investigación
+    del bench que motivó la migración a \texttt{Vec<Arc<str>>}.
+    Cap.~\ref{cap:hunt-result}.
+\end{description}
+
+\section*{Lecturas adicionales recomendadas}
+
+Para profundizar en temas específicos:
+
+\begin{description}
+    \item[Aberger, Lamb, Tu, N\"otzli, Olukotun, R\'e (2017)]
+    \emph{EmptyHeaded: A Relational Engine for Graph Processing}.
+    ACM TODS 42(4). Implementación de WCOJ en producción para
+    grafos.
+
+    \item[Khamis, Ngo, Suciu (2017)] \emph{What Do Shannon-type
+    Inequalities, Submodular Width, and Disjunctive Datalog Have
+    To Do With One Another?} PODS 2017. Generalización del AGM
+    bound a queries con disjunción.
+
+    \item[Olteanu, Z\'avodn\'y (2015)] \emph{Size Bounds for
+    Factorised Representations of Query Results}. ACM TODS 40(1).
+    Representaciones factorizadas; relevante para entender por
+    qué Yannakakis no alcanza el AGM en general.
+\end{description}
+
+\cleardoublepage

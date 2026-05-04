@@ -1,0 +1,256 @@
+\chapter{Threat hunting y por qué grafos}
+\label{cap:threat-hunting}
+
+\begin{intuicion}
+\emph{Threat hunting} es el oficio de buscar atacantes que ya están
+adentro de la red, antes de que detonen. Los \emph{SIEM} clásicos
+(\emph{Security Information and Event Management}) son motores de
+búsqueda full-text sobre \emph{logs}: andan bien cuando uno sabe qué
+buscar (``decime todos los logins de \texttt{admin}''), pero fallan
+cuando la señal es \emph{multi-hop}: un usuario inocuo, una máquina
+levemente sospechosa, una conexión saliente extraña. Cada evento por
+separado no dispara nada; sólo la \emph{cadena} entre ellos delata al
+atacante. Modelar el ambiente como un grafo dirigido temporal hace
+que esa cadena sea \emph{expresable} en una sola consulta y
+\emph{ejecutable} sin recorrer joins manuales.
+\end{intuicion}
+
+\section{¿Qué busca un \emph{threat hunter}?}
+
+Imaginá una empresa con 5.000 empleados, 3.000 hosts, una semana de
+\emph{logs} de Windows Sysmon, Sentinel y Fortinet. En esa semana
+hubo:
+
+\begin{itemize}
+    \item $\sim$10 millones de logins exitosos.
+    \item $\sim$20 millones de procesos lanzados.
+    \item $\sim$80 millones de conexiones de red salientes.
+\end{itemize}
+
+\noindent
+La pregunta del \emph{threat hunter} no es ``¿quién se logueó hoy?''
+(la respuesta sería decenas de miles de filas y ninguna sería
+sospechosa por sí misma). La pregunta es:
+
+\begin{quote}
+\itshape
+``¿Hay algún usuario que se autenticó en un host que después,
+en menos de 30~minutos, se conectó a una IP nunca vista antes en
+nuestra red, y desde esa IP hubo \emph{beaconing} regular en las
+horas siguientes?''
+\end{quote}
+
+Esta es una hipótesis \textbf{de tres saltos} (\emph{usuario},
+\emph{host}, \emph{IP destino}) con \textbf{restricciones temporales}
+(``en menos de 30~minutos'') y \textbf{predicados de comportamiento}
+(``IP nunca vista antes'', ``\emph{beaconing} regular''). Cada uno de
+los eventos por separado pasa los filtros del SIEM como ruido normal.
+La cadena no.
+
+\begin{ejemplo}
+Un caso real (en GraphHunter, lo llamamos el ``Sysmon W0'').
+
+\begin{itemize}
+    \item \(t_0\): el usuario \texttt{m.gomez} se loguea en
+    \texttt{db-01} con credenciales válidas. Login normal: ese
+    usuario se loguea acá todos los lunes para sacar reportes.
+    \item \(t_0 + 7\,\text{min}\): \texttt{db-01} establece una
+    conexión TCP saliente a \texttt{185.159.X.Y:443}. Conexión TLS
+    válida, certificado emitido por una CA legítima. La IP no figura
+    en la \emph{baseline} de los últimos 30~días.
+    \item \(t_0 + 11\,\text{min}\): la conexión se mantiene activa
+    con tráfico bajo y regular, $\sim$2~KB cada 60~segundos. Pasa el
+    \emph{IDS} sin alertar.
+\end{itemize}
+
+Cada uno de esos tres eventos es \emph{individualmente} normal. La
+cadena ---usuario válido, host de DB, IP nueva, beacon de bajo
+volumen--- es la firma de un \emph{C2} reverse-shell que un atacante
+plantó la semana anterior. Para detectarlo, el SIEM tendría que
+correr tres queries y \emph{joinar} los resultados a mano.
+GraphHunter lo encuentra con una sola hipótesis.
+\end{ejemplo}
+
+\section{Por qué un SIEM clásico no alcanza}
+
+Los SIEM operan sobre el modelo \emph{tabla por fuente}: una tabla
+para Sysmon, una para Sentinel, una para Fortinet. Cada tabla tiene
+sus columnas y sus índices. Una consulta full-text es eficiente sobre
+una tabla. Pero ``cadena de tres saltos'' significa
+\emph{tres joins} entre tres tablas distintas, donde el atributo que
+los une es a veces explícito (\texttt{username}, \texttt{host\_id}) y
+a veces implícito (la IP que aparece como \texttt{remote\_ip} en una
+conexión saliente debe matchear con la IP que aparece como
+\texttt{src\_ip} en el log del firewall).
+
+Tres problemas concretos:
+
+\begin{enumerate}
+    \item \textbf{Joins multi-tabla son caros.} Cada \emph{join}
+    requiere un índice; el optimizador del SIEM hace lo mejor que
+    puede pero la cardinalidad explota. Para tres tablas con 20M
+    filas cada una, un \emph{nested-loop join} naive es \(8 \times
+    10^{21}\) comparaciones.
+    \item \textbf{Filtros temporales son post-join.} El SIEM
+    materializa primero el producto cartesiano, después aplica el
+    \texttt{WHERE t2 - t1 \(\leq\) 30~min}. Para cuando el filtro
+    actúa, el optimizador ya gastó memoria en filas que iban a
+    descartarse.
+    \item \textbf{La hipótesis no se expresa en una línea.} Escribir
+    el join de tres tablas en SQL requiere $\sim$15 líneas, con
+    \texttt{JOIN \dots ON \dots AND}, alias, \emph{sub-queries} para
+    el ``IP nunca vista antes''. La hipótesis \emph{conceptual} es de
+    tres saltos; la representación SQL no lo refleja.
+\end{enumerate}
+
+\begin{nota}
+Esto no es una crítica al SIEM como producto. Los SIEM están
+optimizados para \emph{detección por reglas} (``alertame si veo
+\texttt{evt\_id=4625} con más de 5 fallas en 1~minuto'') ---ahí
+brillan. Lo que no resuelven bien es la \emph{caza}: encontrar
+cadenas que el atacante diseñó precisamente para no disparar reglas
+individuales.
+\end{nota}
+
+\section{El cambio de modelo: de tablas a grafo temporal}
+
+GraphHunter modela la misma información ---usuarios, hosts, procesos,
+IPs, conexiones, autenticaciones--- como un \textbf{grafo dirigido
+temporal}:
+
+\begin{itemize}
+    \item Los \textbf{nodos} son entidades: \texttt{User},
+    \texttt{Host}, \texttt{Process}, \texttt{IP},
+    \texttt{File}, \texttt{Domain}.
+    \item Las \textbf{aristas} son eventos temporales: ``\texttt{User}
+    se autenticó en \texttt{Host} en \(t_1\)'',
+    ``\texttt{Host} se conectó a \texttt{IP} en \(t_2\)''.
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=1.4cm,
+    every node/.style={font=\small},
+    entity/.style={draw=accent, thick, circle, minimum size=10mm,
+                   inner sep=1pt, fill=accentlight},
+    edge/.style={->, >=Latex, accent, thick}
+]
+\node[entity] (u) {\strut $u$};
+\node[entity, right=2.6cm of u] (h) {\strut $h$};
+\node[entity, right=2.6cm of h] (ip) {\strut $\mathit{ip}$};
+\node[entity, right=2.6cm of ip] (d) {\strut $d$};
+
+\draw[edge] (u) -- node[above]{\footnotesize\texttt{Auth}\,@\,$t_1$} (h);
+\draw[edge] (h) -- node[above]{\footnotesize\texttt{Connect}\,@\,$t_2$} (ip);
+\draw[edge] (ip) -- node[above]{\footnotesize\texttt{Beacon}\,@\,$t_3$} (d);
+
+\node[below=1.2cm of h, font=\footnotesize\itshape, accent, align=center]
+{hipótesis: \texttt{User -[Auth]-> Host -[Connect]-> IP -[Beacon]-> Domain}\\
+ \texttt{WITHIN 30m \{first\_seen\_ip < t1 - 30d\}}};
+\end{tikzpicture}
+\caption{El ejemplo Sysmon W0 representado como grafo. Cada arista
+lleva un \emph{timestamp}; la hipótesis exige
+\(t_1 < t_2 < t_3\) y \(t_3 - t_1 \leq 30\)~minutos.}
+\label{fig:tx-w0}
+\end{figure}
+
+La pregunta de antes ---``¿hay alguna cadena de tres saltos con
+estas restricciones?''--- se vuelve, en este modelo,
+\emph{enumerar todos los caminos del grafo} que matchean cierta forma
+y cumplen ciertos predicados. El motor que lo hace se llama un
+\emph{subgraph matching engine}; el capítulo~\ref{cap:subgraph-matching}
+lo define con precisión.
+
+\section{Por qué la representación importa}
+
+Tres ventajas concretas del modelo de grafo:
+
+\begin{enumerate}
+    \item \textbf{La hipótesis se escribe igual que se piensa.} La
+    DSL de GraphHunter (capítulo~\ref{cap:dsl-chain}) deja escribir:
+    \begin{lstlisting}
+User -[Auth]-> Host -[Connect]-> IP -[Beacon]-> Domain WITHIN 30m
+    \end{lstlisting}
+    Una línea. La estructura del texto refleja la estructura del
+    \emph{path} buscado.
+
+    \item \textbf{El \emph{join} es local.} Recorrer ``vecinos
+    salientes de \(v\) con etiqueta \texttt{Connect}'' es \(O(\deg(v))\)
+    en una \emph{adjacency list}. No hay producto cartesiano. El
+    matcher avanza arista por arista y descarta caminos en cuanto
+    violan una restricción temporal o un predicado.
+
+    \item \textbf{Las restricciones temporales son \emph{in-line}.}
+    Cuando el matcher elige una arista \((h, \mathit{ip}, t_2)\) para
+    extender el \emph{path} parcial \((u, h, t_1)\), chequea
+    \(t_1 < t_2\) y \(t_2 - t_1 \leq 30\)~min \emph{antes} de
+    recursar. Las ramas que violan la ventana mueren temprano.
+\end{enumerate}
+
+\section{Pero modelar como grafo no es magia}
+
+Hay tres preguntas que el resto del libro responde:
+
+\begin{enumerate}
+    \item \textbf{¿De dónde sale el grafo?} Un \emph{log} de Sysmon
+    es texto JSON; convertirlo a vértices y aristas es la
+    \emph{ingesta} (Parte~IV).
+    \item \textbf{¿Cómo se almacena un grafo de 100M aristas en una
+    notebook con 16~GB de RAM?} Spoiler: con un \texttt{CompactRelation}
+    de 32~bytes por arista, \emph{spill} a disco vía mmap, e índices
+    auxiliares \emph{lazy} (Partes~III y~VI).
+    \item \textbf{¿Cómo se ejecuta el subgraph matching en sub-10~ms
+    sobre eso?} Con un zoológico de operadores ---DFS recursivo con
+    \emph{prunes}, LFTJ-K\(_4\), Yannakakis chain, Yannakakis
+    tree-walk--- y un \emph{planner} que elige el adecuado
+    (Parte~V).
+\end{enumerate}
+
+\section{Qué viene}
+
+El próximo capítulo formaliza los grafos temporales: definiciones
+precisas de vértice, arista, etiqueta, \emph{path}, \emph{walk},
+ventana temporal, monotonicidad. El capítulo~\ref{cap:subgraph-matching}
+formaliza el problema de \emph{subgraph matching}, distingue
+isomorfismo de homomorfismo, y muestra por qué es NP-duro en
+general. El capítulo~\ref{cap:joins-y-grafos} construye la conexión
+con \emph{joins} relacionales (también desde cero) y deriva el AGM
+bound, que es la pieza teórica que justifica los algoritmos
+\emph{worst-case-optimal}. El capítulo~\ref{cap:sistemas} cierra la
+Parte~I con los fundamentos de sistemas (\emph{cache lines},
+\emph{branch prediction}, mmap, atomics) que justifican las
+decisiones de \emph{layout} y memoria del motor.
+
+Una vez completados esos cinco capítulos, el resto del libro
+construye el motor pieza por pieza, con todas las definiciones ya
+disponibles.
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Escribí en una sola frase ---en castellano, sin
+    DSL--- una hipótesis de \emph{lateral movement} de cuatro saltos.
+    Identificá los tipos de los vértices y las relaciones entre ellos.
+
+    \item Para la hipótesis del ejemplo Sysmon W0, ¿qué predicados
+    tendría que evaluar el motor para descartar usuarios legítimos?
+    Listá al menos tres y explicá si cada uno es local al vértice o
+    requiere mirar la \emph{baseline} histórica.
+
+    \item \starred{} Considerá un \emph{SIEM} clásico con tres
+    tablas de 20M filas cada una. Si el optimizador elige un
+    \emph{nested-loop join} naive para una consulta de tres saltos,
+    ¿cuántas comparaciones hace en el peor caso? ¿Y si elige un
+    \emph{hash join} con cada índice cargado en memoria?
+
+    \item Pensá en una hipótesis multi-hop sobre tu propio dominio
+    (web, mobile, e-commerce, IoT) que sea fácil de expresar como
+    grafo y difícil de expresar como query SQL. Escribí ambos.
+
+    \item Imaginá que tu grafo tiene \(10^{8}\) aristas. ¿Cuánta
+    memoria ocuparía si cada arista ocupara 200 bytes (un
+    \texttt{Relation} ``humano'' con strings)? ¿Y si pesara 32 bytes?
+    ¿Por qué no se puede almacenar todo el log original y armar el
+    grafo \emph{on-demand}?
+\end{enumerate}
+\end{ejercicios}

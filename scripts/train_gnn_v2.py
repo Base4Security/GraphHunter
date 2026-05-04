@@ -41,6 +41,7 @@ corpus + seed produce byte-identical ONNX weights.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -130,7 +131,7 @@ class NdjsonCorpus(Dataset):
         return self.examples[idx]
 
 
-def train(corpus_path, output_path, epochs=50, lr=1e-3, seed=42, batch_size=32):
+def train(corpus_path, output_path, epochs=50, lr=1e-3, seed=42, batch_size=32, trained_on="synthetic"):
     torch.manual_seed(seed)
     ds = NdjsonCorpus(corpus_path)
     if len(ds) == 0:
@@ -142,6 +143,7 @@ def train(corpus_path, output_path, epochs=50, lr=1e-3, seed=42, batch_size=32):
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
 
+    last_acc = 0.0
     for epoch in range(epochs):
         total, correct, running_loss = 0, 0, 0.0
         for x, y in loader:
@@ -154,7 +156,8 @@ def train(corpus_path, output_path, epochs=50, lr=1e-3, seed=42, batch_size=32):
             preds = logits.argmax(dim=1)
             correct += (preds == y).sum().item()
             total += y.size(0)
-        print(f"epoch {epoch+1:03d}  loss={running_loss/total:.4f}  acc={correct/total:.3f}")
+        last_acc = correct / total if total else 0.0
+        print(f"epoch {epoch+1:03d}  loss={running_loss/total:.4f}  acc={last_acc:.3f}")
 
     # Export to ONNX.
     model.eval()
@@ -171,6 +174,38 @@ def train(corpus_path, output_path, epochs=50, lr=1e-3, seed=42, batch_size=32):
     )
     print(f"exported {output_path}")
 
+    # F4.6 — write the ADR-003 sidecar metadata. The Rust-side gate
+    # (`graph_hunter_gnn::common::model_gate`) reads this file at load
+    # time and refuses the model if `trained_on=="synthetic"` without
+    # the `gnn-v2-experimental` feature or if accuracy is below 0.80.
+    sidecar = metadata_sidecar_for(output_path)
+    metadata = {
+        "version": "v2",
+        "trained_on": trained_on,
+        "validation_accuracy": round(last_acc, 4),
+        "class_labels": CLASSES,
+        "input_shape": {"k_max": K_MAX, "d_node": D_NODE_V2},
+        "sha256": sha256_of(output_path),
+    }
+    with open(sidecar, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, sort_keys=False)
+        f.write("\n")
+    print(f"wrote sidecar {sidecar}")
+
+
+def metadata_sidecar_for(onnx_path):
+    """Path-matches the Rust gate: `<stem>.metadata.json` next to the `.onnx`."""
+    p = Path(onnx_path)
+    return p.with_suffix(".metadata.json")
+
+
+def sha256_of(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
 
 def main():
     p = argparse.ArgumentParser()
@@ -180,8 +215,28 @@ def main():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument(
+        "--trained-on",
+        choices=["synthetic", "production", "mixed"],
+        default="synthetic",
+        help=(
+            "Declared training corpus for the sidecar metadata. The Rust "
+            "gate (ADR-003) rejects `synthetic` unless the "
+            "`gnn-v2-experimental` feature is active. Flip to "
+            "`production`/`mixed` once the model has been retrained on "
+            "real AAD/M365 data."
+        ),
+    )
     args = p.parse_args()
-    train(args.corpus, args.output, args.epochs, args.lr, args.seed, args.batch_size)
+    train(
+        args.corpus,
+        args.output,
+        args.epochs,
+        args.lr,
+        args.seed,
+        args.batch_size,
+        args.trained_on,
+    )
 
 
 if __name__ == "__main__":

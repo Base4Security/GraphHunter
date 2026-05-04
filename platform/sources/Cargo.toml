@@ -1,0 +1,23 @@
+[package]
+name = "graph_hunter_sources"
+version = "0.1.0"
+edition = "2024"
+description = "Log source abstractions + Azure connectors (Log Analytics, Data Lake v2, Defender XDR). Extracted from graph_hunter_core per F2.11 — the `LogSource` trait, token cache, HTTP client, backoff, and quota now live here so the core graph engine doesn't carry the connector surface. No inbound dep on graph_hunter_core; the module was self-contained apart from `aad_training_export.rs`, which is GNN training plumbing and stays in core."
+license = "GPL-3.0"
+
+[lib]
+name = "graph_hunter_sources"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "macros"] }

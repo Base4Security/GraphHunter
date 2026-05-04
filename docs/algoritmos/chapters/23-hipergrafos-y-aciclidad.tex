@@ -1,0 +1,326 @@
+\chapter{Hipergrafos, \(\alpha\)-aciclicidad y \emph{join trees}}
+\label{cap:hipergrafos}
+
+\begin{intuicion}
+Hasta ahora vimos joins binarios (\(R \bowtie S\)) y joins
+multi-way ``planos''. Para entender Yannakakis necesitamos una
+herramienta más: el \emph{hipergrafo de la consulta}. Dado un join
+de \(n\) relaciones, su hipergrafo tiene los atributos como nodos y
+cada relación como una hiperarista (subset de atributos). La
+propiedad mágica es la \(\alpha\)-aciclicidad: si el hipergrafo de
+la consulta es \(\alpha\)-acíclico, existe un \emph{join tree} sobre
+las relaciones, y Yannakakis resuelve el join en tiempo lineal en
+input + output. Todas las cadenas, estrellas, árboles puros son
+\(\alpha\)-acíclicos. Triángulo, \(K_4\) y otros cíclicos no lo son.
+Este capítulo da las definiciones, muestra el algoritmo GYO de
+detección, y construye los join trees que el matcher de Yannakakis
+recorre.
+\end{intuicion}
+
+\section{Hipergrafos: del join al \emph{query graph}}
+
+\begin{definition}[Hipergrafo de una consulta]
+Dado un join \(Q = R_1 \bowtie R_2 \bowtie \dots \bowtie R_m\)
+sobre los atributos \(\mathcal{A} = \bigcup_l \mathrm{attrs}(R_l)\),
+su \emph{hipergrafo} es \(H(Q) = (\mathcal{A}, F)\) donde \(F =
+\{F_1, F_2, \dots, F_m\}\) y \(F_l = \mathrm{attrs}(R_l)\) (cada
+relación es una hiperarista).
+\end{definition}
+
+\begin{ejemplo}[Hipergrafo de una cadena de 3]
+\(Q = R(A, B) \bowtie S(B, C) \bowtie T(C, D)\).
+
+Hipergrafo: \(\mathcal{A} = \{A, B, C, D\}\), \(F = \{F_R = \{A,
+B\}, F_S = \{B, C\}, F_T = \{C, D\}\}\).
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    every node/.style={font=\small},
+    attr/.style={draw=accent, thick, circle, minimum size=8mm,
+                 fill=accentlight, inner sep=1pt},
+    edge/.style={draw=accent, thick, dashed}
+]
+\node[attr] (A) at (0,0) {A};
+\node[attr] (B) at (2,0) {B};
+\node[attr] (C) at (4,0) {C};
+\node[attr] (D) at (6,0) {D};
+
+\draw[edge, rounded corners] ($(A.north west) + (-0.3, 0.3)$) rectangle ($(B.south east) + (0.3, -0.3)$);
+\node[font=\scriptsize, accent] at (1, 0.6) {$F_R$};
+
+\draw[edge, rounded corners] ($(B.north west) + (-0.3, -0.5)$) rectangle ($(C.south east) + (0.3, -1.1)$);
+\node[font=\scriptsize, accent] at (3, -1.4) {$F_S$};
+
+\draw[edge, rounded corners] ($(C.north west) + (-0.3, 0.3)$) rectangle ($(D.south east) + (0.3, -0.3)$);
+\node[font=\scriptsize, accent] at (5, 0.6) {$F_T$};
+\end{tikzpicture}
+\caption{Hipergrafo de la cadena de 3 relaciones. Cada hiperarista
+(rectángulo dashed) es una relación. Los atributos compartidos
+(\(B\) entre \(F_R\) y \(F_S\); \(C\) entre \(F_S\) y \(F_T\))
+son los join keys.}
+\label{fig:hipergrafo-cadena}
+\end{figure}
+\end{ejemplo}
+
+\begin{ejemplo}[Hipergrafo del triángulo]
+\(Q = R(A, B) \bowtie S(B, C) \bowtie T(A, C)\).
+
+Hipergrafo: \(\mathcal{A} = \{A, B, C\}\), \(F = \{F_R = \{A, B\},
+F_S = \{B, C\}, F_T = \{A, C\}\}\).
+
+Cada par de hiperaristas comparte exactamente un atributo:
+\(F_R \cap F_S = \{B\}\), \(F_S \cap F_T = \{C\}\),
+\(F_R \cap F_T = \{A\}\). Eso forma un \emph{ciclo} en el sentido
+hipergráfico: \(F_R \to F_S\) (vía \(B\)), \(F_S \to F_T\) (vía
+\(C\)), \(F_T \to F_R\) (vía \(A\)).
+\end{ejemplo}
+
+\section{\(\alpha\)-aciclicidad}
+
+La definición clásica es operacional, vía el algoritmo GYO.
+
+\subsection{El algoritmo GYO}
+
+\begin{definition}[Reducción GYO]
+Dado un hipergrafo \(H = (\mathcal{A}, F)\), aplicar repetidamente
+las dos reglas:
+
+\begin{enumerate}
+    \item \textbf{Eliminar atributo aislado}: si un atributo
+    \(a \in \mathcal{A}\) aparece en exactamente una hiperarista
+    \(F_l\), eliminarlo de \(F_l\) y de \(\mathcal{A}\).
+    \item \textbf{Eliminar hiperarista contenida}: si una hiperarista
+    \(F_l\) está contenida en otra \(F_{l'}\) (\(F_l \subseteq
+    F_{l'}\)), eliminar \(F_l\).
+\end{enumerate}
+
+Si después de aplicar las reglas hasta no poder más, \(F = \emptyset\),
+el hipergrafo es \emph{\(\alpha\)-acíclico}. Si no, es cíclico.
+\end{definition}
+
+\begin{ejemplo}[GYO sobre la cadena]
+\(F_R = \{A, B\}\), \(F_S = \{B, C\}\), \(F_T = \{C, D\}\).
+
+\begin{itemize}
+    \item Atributo \(A\) aparece sólo en \(F_R\). Eliminarlo:
+    \(F_R = \{B\}\).
+    \item Atributo \(D\) aparece sólo en \(F_T\). Eliminarlo:
+    \(F_T = \{C\}\).
+    \item Ahora \(F_R = \{B\} \subseteq F_S = \{B, C\}\). Eliminar
+    \(F_R\).
+    \item Ahora \(F_T = \{C\} \subseteq F_S = \{B, C\}\). Eliminar
+    \(F_T\).
+    \item Quedó \(F = \{F_S\}\). Atributos \(B\) y \(C\) aparecen
+    sólo en \(F_S\); eliminarlos. \(F_S = \emptyset\); eliminar
+    \(F_S\).
+    \item \(F = \emptyset\). \textbf{Cadena es \(\alpha\)-acíclica.}
+\end{itemize}
+\end{ejemplo}
+
+\begin{ejemplo}[GYO sobre el triángulo]
+\(F_R = \{A, B\}\), \(F_S = \{B, C\}\), \(F_T = \{A, C\}\).
+
+\begin{itemize}
+    \item Atributo \(A\): aparece en \(F_R\) y \(F_T\). No
+    aislado.
+    \item \(B\): aparece en \(F_R\) y \(F_S\). No aislado.
+    \item \(C\): aparece en \(F_S\) y \(F_T\). No aislado.
+    \item No hay hiperarista contenida en otra (todas tienen 2
+    atributos distintos).
+    \item Ninguna regla aplica. \(F \neq \emptyset\). \textbf{Triángulo
+    es \(\alpha\)-cíclico.}
+\end{itemize}
+\end{ejemplo}
+
+\begin{nota}
+\(\alpha\)-aciclicidad NO coincide con la noción intuitiva de
+``ciclo en el grafo''. Hay hipergrafos que ``parecen tener ciclos''
+pero son \(\alpha\)-acíclicos en el sentido GYO. Y al revés.
+La definición es operacional y vale lo que vale para Yannakakis:
+si GYO reduce a vacío, Yannakakis funciona en lineal.
+\end{nota}
+
+\section{El \emph{join tree}}
+
+\begin{theorem}[Join tree iff \(\alpha\)-aciclicidad]
+Un hipergrafo \(H\) es \(\alpha\)-acíclico \emph{si y sólo si}
+existe un \emph{join tree}: un árbol \(T\) cuyos nodos son las
+hiperaristas \(F_l\), tal que para cualquier atributo \(a \in
+\mathcal{A}\), el conjunto de nodos \(\{F_l : a \in F_l\}\) forma
+un sub-árbol conexo de \(T\).
+\end{theorem}
+
+\begin{proof}[Idea]
+Forward: si \(H\) es \(\alpha\)-acíclico, GYO da un orden de
+eliminación; el join tree se construye conectando cada hiperarista
+eliminada a la que la ``contuvo'' en su eliminación. Backward: dado
+un join tree, GYO siempre puede reducir empezando por las hojas.
+\(\square\)
+\end{proof}
+
+\begin{ejemplo}[Join tree de la cadena]
+Para la cadena \(R(A, B) \bowtie S(B, C) \bowtie T(C, D)\), el
+join tree es:
+\[
+F_R \;\;-\!-\!-\;\; F_S \;\;-\!-\!-\;\; F_T
+\]
+\noindent
+\(B\) aparece en \(F_R\) y \(F_S\): conexo (camino directo). \(C\)
+aparece en \(F_S\) y \(F_T\): conexo. \(A\) aparece sólo en
+\(F_R\); \(D\) sólo en \(F_T\). Ambos sub-árboles triviales.
+\end{ejemplo}
+
+\begin{ejemplo}[Join tree de una estrella]
+\(Q = R_0(A, B_1) \bowtie R_1(A, B_2) \bowtie R_2(A, B_3)\) (tres
+relaciones que comparten el atributo central \(A\)).
+
+Join tree:
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    every node/.style={draw=accent, thick, rectangle, rounded corners=1mm,
+                       minimum size=7mm, fill=accentlight, font=\small}
+]
+\node (R0) at (0, 1) {$F_{R_0}$};
+\node (R1) at (-2, -0.5) {$F_{R_1}$};
+\node (R2) at (2, -0.5) {$F_{R_2}$};
+
+\draw[accent, thick] (R0) -- (R1);
+\draw[accent, thick] (R0) -- (R2);
+\end{tikzpicture}
+\caption{Join tree de una estrella de tres relaciones. \(A\) aparece
+en todas: sub-árbol = todo el árbol (conexo).}
+\end{figure}
+\end{ejemplo}
+
+\section{Por qué \(\alpha\)-aciclicidad importa}
+
+\begin{theorem}[Yannakakis 1981]
+Si \(H(Q)\) es \(\alpha\)-acíclico, el join \(Q\) puede computarse
+en tiempo \(O(|Q_{\mathrm{in}}| + |Q_{\mathrm{out}}|)\), donde
+\(|Q_{\mathrm{in}}| = \sum_l |R_l|\) y \(|Q_{\mathrm{out}}| = |Q|\).
+\end{theorem}
+
+\noindent
+Lineal en input + output. Compará con el AGM bound
+\(O(m^{\rhostar})\): para \(\alpha\)-acíclicas con
+\(\rhostar > 1\), Yannakakis es estrictamente mejor (no en peor caso
+porque output puede ser grande, pero el \emph{trabajo
+constructivo} es lineal).
+
+El truco es la \emph{semi-join reducer} en dos pasadas sobre el
+join tree (capítulo~\ref{cap:yannakakis-chain}): elimina del input
+todas las tuplas que no participan de ningún match completo,
+\emph{antes} de empezar a enumerar. Después la enumeración es
+trivial.
+
+\section{La pieza estructural en GraphHunter}
+
+\begin{itemize}
+    \item Hipótesis \emph{shape chain}: hipergrafo es cadena.
+    \(\alpha\)-acíclico. Yannakakis chain dispatcha
+    (capítulo~\ref{cap:yannakakis-chain}).
+    \item Hipótesis \emph{shape graph} con estructura de árbol /
+    estrella: hipergrafo \(\alpha\)-acíclico. Yannakakis tree-walk
+    dispatcha (capítulo~\ref{cap:yannakakis-tree}).
+    \item Hipótesis \emph{shape graph} con ciclos (\(K_3\), \(K_4\)):
+    cíclico. LFTJ dispatcha si es \(K_4\)
+    (capítulo~\ref{cap:lftj}); si no, fallback al DFS.
+\end{itemize}
+
+\noindent
+La detección de \(\alpha\)-aciclicidad ocurre en el \emph{planner}
+(capítulo~\ref{cap:planner}): aplica GYO al hipergrafo de la
+hipótesis. \(O(n_{\mathrm{atrs}} + n_{\mathrm{hipearistas}})\) que
+para hipótesis típicas (\(\leq 6\) pasos) es trivial.
+
+\section{Construcción concreta del join tree}
+
+Para shape graph en GraphHunter, el planner construye el join tree
+con un BFS sobre el hipergrafo a partir de una hiperarista
+\emph{root} (típicamente la del primer paso de la hipótesis):
+
+\begin{lstlisting}[language=Rust]
+pub struct JoinTree {
+    pub nodes: Vec<usize>,         // step indices (orden de visita)
+    pub parent: Vec<Option<usize>>, // parent[i] = padre en el árbol
+    pub shared_var: Vec<VarId>,    // variable compartida con el padre
+}
+
+impl JoinTree {
+    pub fn build(hyp: &Hypothesis) -> Self {
+        let hg = build_hypergraph(hyp);
+        let mut visited = HashSet::new();
+        let mut nodes = Vec::new();
+        let mut parent = Vec::new();
+        let mut shared_var = Vec::new();
+
+        let root = 0;  // first step
+        let mut queue = VecDeque::from([(root, None, None)]);
+        while let Some((node, p, sv)) = queue.pop_front() {
+            if visited.insert(node) {
+                nodes.push(node);
+                parent.push(p);
+                shared_var.push(sv.unwrap_or(VarId::None));
+                for (next, var) in hg.adjacent(node) {
+                    if !visited.contains(&next) {
+                        queue.push_back((next, Some(nodes.len() - 1), Some(var)));
+                    }
+                }
+            }
+        }
+
+        Self { nodes, parent, shared_var }
+    }
+}
+\end{lstlisting}
+
+\noindent
+El \texttt{enumerate\_tree} (capítulo~\ref{cap:yannakakis-tree})
+recorre estos nodos en orden y, en cada uno, decide qué \emph{bag}
+consultar según qué variables ya están bound.
+
+\section{Resumen}
+
+\begin{itemize}
+    \item Hipergrafo de una consulta: atributos como nodos,
+    relaciones como hiperaristas.
+    \item \(\alpha\)-aciclicidad: el algoritmo GYO reduce a vacío.
+    Operacionalmente, ``no hay ciclos en el sentido hipergráfico''.
+    \item Cadena, estrella, árboles: \(\alpha\)-acíclicos. Triángulo,
+    \(K_4\): cíclicos.
+    \item Join tree: existe sii \(\alpha\)-aciclicidad. Conexidad
+    de sub-árbol por atributo.
+    \item Yannakakis (capítulo siguiente) corre en \(O(\)input +
+    output\()\) sobre \(\alpha\)-acíclicos.
+    \item GraphHunter dispatcha Yannakakis chain o tree-walk para
+    hipótesis \(\alpha\)-acíclicas (chain o graph respectivamente);
+    LFTJ para \(K_4\) cíclico; DFS para todo lo demás.
+\end{itemize}
+
+\begin{ejercicios}
+\begin{enumerate}
+    \item \starred{} Aplicá GYO al hipergrafo de la hipótesis
+    \texttt{c -[Auth]-> h1; c -[Auth]-> h2; c -[Auth]-> h3}
+    (estrella de tres). ¿Es \(\alpha\)-acíclico?
+
+    \item Aplicá GYO al hipergrafo de \(K_4\) (6 hiperaristas
+    binarias). Mostrá que es cíclico.
+
+    \item \starred{} Construí un hipergrafo \(\alpha\)-acíclico
+    de 4 relaciones. ¿Cuántos posibles join trees existen?
+
+    \item ¿Por qué la noción de \(\alpha\)-aciclicidad NO
+    coincide con la de ``no hay ciclos en el grafo''? Construí un
+    contraejemplo: hipergrafo con ``ciclos visuales'' que es
+    \(\alpha\)-acíclico, y otro al revés.
+
+    \item ¿Cómo cambia el join tree de una hipótesis chain si la
+    hipótesis es ``mismo vértice repetido'' (cadena
+    \(p_0 \to p_1 \to p_2 \to p_0\))? ¿Sigue siendo \(\alpha\)-acíclico?
+
+    \item Si una hipótesis tiene 5 pasos en chain pura, ¿cuántos
+    nodos tiene el join tree? ¿Cuál es la altura del árbol?
+\end{enumerate}
+\end{ejercicios}

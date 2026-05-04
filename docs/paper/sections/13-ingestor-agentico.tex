@@ -1,0 +1,178 @@
+\chapter{Ingestor agéntico: LLM-as-compiler offline y drift-as-signal}
+\label{sec:paper-ingestor}
+
+\section{Problema}
+
+La ingesta productiva de logs tiene dos propiedades en tensión:
+debe ser \emph{determinística} (dos corridas del mismo batch
+producen la misma salida, byte-a-byte) y debe ser \emph{adaptable}
+(formatos nuevos aparecen, y los existentes evolucionan aguas
+arriba sin aviso). La práctica dominante resuelve la primera y
+abandona la segunda: un parser hardcodeado por formato, release del
+daemon por cada cambio, parser genérico heurístico como red de
+seguridad con pérdida de fidelidad silenciosa.
+
+GraphHunter resuelve las dos simultáneamente separando el sistema
+en tres carriles con perfiles distintos de determinismo, latencia y
+quién los opera. El presente capítulo describe el diseño, la
+matemática del contrato, y qué asume sobre el humano en el loop.
+
+\section{Decisión: tres carriles}
+
+\begin{itemize}
+    \item \textbf{Fast lane}. Un compilador determinístico
+    $\text{compile}: \text{FieldConfig} \to \text{VRL}$ emite
+    programas textuales con identidad estable
+    $\text{hash}(f) = \text{sha256}(\text{compile}(f))$. El runtime
+    ejecuta VRL por evento. Cero LLM, cero red, cero
+    nondeterminismo. El hash se estampa en cada evento canonical
+    (\code{provenance.mapping_hash}), cerrando la trazabilidad
+    dato$\leftrightarrow$lógica.
+    \item \textbf{Slow lane}. Un LLM actúa como \emph{compilador
+    asistente} offline: dado una muestra del formato y un target
+    canonical (OCSF v1.4), propone un \code{FieldConfig}. El output
+    del LLM son datos, no código. El código lo produce el compilador
+    VRL determinístico a partir de esos datos.
+    \item \textbf{Learning lane}. El fast lane emite métricas
+    estructurales baratas por batch (histogramas, cardinalidades,
+    ratios DLQ). Un monitor de drift compara contra el perfil
+    esperado del mapping activo; cuando supera umbral, abre
+    re-review en el slow lane sin detener la ingesta.
+\end{itemize}
+
+El contrato entre carriles es un par
+$(\text{FieldConfig}, \text{OCSFMapping})$: ambos datos, ambos
+versionados. Ningún carril llama a otro por función en tiempo real.
+El acoplamiento es por artefacto.
+
+\section{LLM como compilador, no como traductor}
+
+La literatura de ingesta con LLM se suele deslizar a una variante
+riesgosa: el LLM procesa eventos en caliente. Esto falla de
+manera predecible por tres razones:
+
+\begin{enumerate}
+    \item \textbf{Latencia}. Un LLM remoto agrega cientos de ms por
+    request. Un LLM local agrega decenas de ms. Para un stream de
+    miles de eventos por segundo, ninguno alcanza.
+    \item \textbf{Costo}. Por evento ingerido pagás un token-count.
+    A escala SIEM (millones de eventos/día), este costo es órdenes
+    de magnitud mayor que el compute determinístico.
+    \item \textbf{Superficie de falla}. Un LLM que parsea un batch
+    mal aplica el error a todos sus eventos. Sin gate humano, ese
+    error entra al grafo y contamina todo hunt posterior.
+\end{enumerate}
+
+La decisión de diseño: el LLM no ve eventos productivos. Ve
+muestras explícitas que el operador o el monitor de drift le
+entregan. Lo que produce son \emph{datos que describen una
+transformación} (el FieldConfig), no la transformación ejecutada.
+La ejecución la hace un compilador determinístico que no es un
+LLM.
+
+Esto es análogo a cómo un compilador optimizador corre offline y
+produce código que un runtime simple ejecuta en caliente. Aquí el
+compilador offline es un LLM asistido por humano; el runtime
+caliente es el VRL interpreter.
+
+\section{Drift como señal, no como error}
+
+Un cambio aguas arriba (nuevo campo, separador modificado, semántica
+movida) es, desde la perspectiva del ingestor, un cambio en la
+distribución empírica de la entrada. Si lo tratamos como
+\emph{error}, las opciones son dos: parar la ingesta (inaceptable en
+producción), o ingerir basura (inaceptable para análisis).
+
+Lo tratamos como \emph{señal}. Operacionalmente:
+
+\begin{itemize}
+    \item Cada batch $B$ genera un vector empírico
+    $\hat{P}(B) \in \mathbb{R}^k$ de estadísticas (histograma por
+    tipo, cardinalidad por campo, ratio DLQ, distribución de
+    timestamps).
+    \item El mapping $m$ en uso tiene un perfil esperado $P_m$
+    calculado sobre su ventana de calibración.
+    \item Una prueba Kolmogorov-Smirnov por campo, agregada por
+    max-divergencia, produce $d(B, P_m)$.
+    \item Si $d(B, P_m) > \tau$, se abre una \emph{propuesta de
+    re-review} — entrada en la cola del slow lane con el batch
+    anómalo adjunto. El fast lane sigue ingestando $B$ con el
+    mapping $m$.
+    \item El humano, con ayuda del LLM, decide si el mapping debe
+    evolucionar. En el caso afirmativo, publish\_mapping emite un
+    nuevo $m'$ con hash distinto; el fast lane recoge $m'$ en el
+    siguiente batch.
+\end{itemize}
+
+Esto invierte el esquema tradicional. En lugar de parar para
+aprender, aprendemos mientras seguimos ingestando. El costo es que
+durante el período de drift detectado pero no aprobado, el grafo
+recibe eventos con mapping potencialmente degradado; la mitigación
+es que $\tau$ se configura bajo y la ventana de revisión es
+minutos-horas, no días.
+
+\section{Propiedades formales}
+
+Sea $f \in \text{FieldConfig}$ y $e$ un evento crudo. Escribamos
+$\text{run}(f, e) = \text{vrl\_run}(\text{compile}(f), e)$ para la
+salida canonical del fast lane.
+
+\begin{description}
+    \item[Determinismo.] Para todo $f$, $e$:
+    $\text{run}(f, e)$ depende sólo de $f$ y $e$. La misma entrada
+    produce idéntico output en corridas distintas y máquinas
+    distintas.
+    \item[Trazabilidad.] Cada evento canonical lleva
+    $\text{hash}(f)$ en su campo \code{provenance.mapping\_hash}. A
+    partir del hash se recupera $f$ desde la mapping library; a
+    partir de $f$ se reconstruye $\text{compile}(f)$; ejecutar
+    sobre el evento crudo original reproduce el canonical.
+    \item[Gate humano.] Toda transición
+    $m \to m'$ en la mapping library es mediada por aprobación
+    humana (\code{agentic_review_approve}). No hay camino
+    automático LLM$\to$productivo.
+    \item[No-block.] El learning lane no detiene el fast lane. Si
+    el LLM falla, se cae la red, o el humano tarda, el fast lane
+    sigue ejecutando el $m$ vigente.
+\end{description}
+
+Las cuatro propiedades son arquitectónicas, no validadas
+empíricamente en este reporte. La evaluación cuantitativa
+(latencia del fast lane comparada con parsers hardcoded, accuracy
+del LLM en inferir FieldConfig, tasa de verdaderos/falsos
+positivos del drift monitor) es trabajo futuro y se reporta en
+capítulos separados cuando haya números.
+
+\section{Trabajo relacionado}
+
+El uso del LLM como compilador asistido tiene precedentes en
+\emph{code synthesis} (Copilot, Codex) y \emph{schema matching} con
+transformers. La diferencia aquí es que el compilador humano-LLM
+produce \emph{datos tipados} (\code{FieldConfig}), no código de
+programa; y la ejecución en caliente es determinística sobre esos
+datos.
+
+Drift detection sobre streams tiene tradición en machine learning
+de producción (ADWIN, Page-Hinkley). El aporte de GraphHunter es
+aplicar estas métricas no a predicciones sino a \emph{forma
+estructural} (histogramas de tipo, cardinalidades) como proxy
+barato de cambio de schema.
+
+OCSF como target canonical es adopción de un estándar externo; el
+aporte de GraphHunter es usarlo como \emph{lingua franca} entre
+mappings heterogéneos y el motor de grafo.
+
+\section{Limitaciones y trabajo futuro}
+
+\begin{itemize}
+    \item El fast lane usa un intérprete VRL embebido; la sustitución
+    por la crate \code{vrl} upstream es follow-up de performance.
+    \item No hay evaluación cuantitativa aún. Los números de
+    latencia, accuracy LLM, y drift precision/recall se reportan
+    cuando el sistema lleve tiempo suficiente en producción.
+    \item El umbral $\tau$ de drift es global; idealmente sería
+    por-campo y auto-ajustable a partir de señal de false-positive.
+    \item El gate humano es el ancla de seguridad; también es el
+    cuello de botella. Optimizar la UX de review agéntica es
+    trabajo de producto, no de arquitectura.
+\end{itemize}

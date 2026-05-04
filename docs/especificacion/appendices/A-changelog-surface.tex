@@ -1,0 +1,105 @@
+\chapter{Historial de cambios de superficie}
+\label{app:spec-changelog}
+
+\section{Política de versiones}
+
+\textbf{HTTP API} y \textbf{MCP tools} tienen ciclo independiente.
+Cada una sigue semver:
+
+\begin{itemize}
+    \item \textbf{Mayor}: cambio incompatible (remoción de
+    endpoint/tool, cambio de shape).
+    \item \textbf{Menor}: agregado compatible (nuevo endpoint, campo
+    opcional).
+    \item \textbf{Patch}: corrección sin cambio de shape.
+\end{itemize}
+
+El DSL tiene su propio versionado (\code{v1} estable, \code{v2}
+experimental detrás de feature flag). La C ABI tiene versión
+entera monotónica (\code{gm_abi_version()}).
+
+\section{v1.0 — baseline estable}
+
+Corresponde al cierre del rediseño shearing-layers. Lo que entra a
+v1.0:
+
+\textbf{HTTP API}: 62 endpoints de producto + \code{/} + \code{/metrics}.
+Todos los listados en cap.~\ref{sec:api-http} son \code{stable}
+salvo:
+
+\begin{itemize}
+    \item \code{POST /publish_iocs_to_sentinel} — \code{experimental}
+    (gated por feature flag).
+    \item \code{POST /file_ticket} — \code{experimental} (gated por
+    feature flag).
+    \item \code{POST /kql} — \code{experimental} (depende de credenciales
+    externas).
+\end{itemize}
+
+\textbf{MCP tools}: 55 tools en 10 dominios. Todas \code{stable}
+salvo:
+
+\begin{itemize}
+    \item \code{integrations.publish_iocs_to_sentinel}.
+    \item \code{integrations.file_ticket}.
+    \item \code{scoring.enable_anomaly_scoring} cuando
+    \code{w5_gnn_threat > 0}.
+\end{itemize}
+
+\textbf{DSL}: gramática v1 (ver cap.~\ref{sec:dsl}).
+
+\textbf{C ABI}: \code{gm_abi_version() = 1}.
+
+\section{Compromisos v1}
+
+\begin{itemize}
+    \item Un endpoint \code{stable} no se elimina ni cambia de
+    método/path dentro de v1. Se puede agregar campo opcional nuevo
+    al request o response.
+    \item Una tool MCP \code{stable} no cambia su \code{inputSchema}
+    de forma incompatible dentro de v1.
+    \item Una hipótesis DSL válida en v1 sigue parseando igual en
+    toda la rama v1.
+    \item \code{gm_abi_version()} cambia si y sólo si hay cambio
+    incompatible en la C ABI.
+\end{itemize}
+
+\section{Qué queda fuera de v1}
+
+\begin{itemize}
+    \item \textbf{Agentic slow-lane} — \code{agentic_*} endpoints y
+    tools. Interfaces funcionan pero se considera
+    \code{experimental} mientras no se cierre el backend de LLM
+    local.
+    \item \textbf{GNN v2} — model gate y
+    \code{scoring.explain_score.threat_class} sólo son relevantes si
+    el usuario provee modelo ONNX. Sin modelo, comportamiento es
+    estable (devuelve 0.0).
+    \item \textbf{DSL v2} — operadores temporales explícitos
+    (\code{before}, \code{within}) detrás del feature
+    \code{dsl-v2-experimental}.
+\end{itemize}
+
+\section{Tags git de release}
+
+\begin{itemize}
+    \item \code{platform/api-v1.0.0} — primer tag estable de la API
+    HTTP.
+    \item \code{platform/mcp-v1.0.0} — primer tag estable del
+    servidor MCP.
+    \item \code{libgraphmatch-v1.0.0} — C ABI congelada en
+    \code{gm_abi_version() = 1}.
+\end{itemize}
+
+El workspace raíz sigue semver de producto (versión del desktop
+app), independiente de estos.
+
+\section{Fuente canónica}
+
+El listado \emph{vivo} de endpoints es \code{GET /v1/schema}. Si hay
+discrepancia entre este documento y la respuesta del daemon, el
+daemon gana; este documento se actualiza en el siguiente release.
+
+Para tools MCP, el listado canónico es
+\code{GET /v1/mcp/schema} (emitido por el servidor MCP) o
+\filepath{platform/mcp/src/registry.ts} en el código fuente.

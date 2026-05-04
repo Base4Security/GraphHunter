@@ -1,0 +1,79 @@
+[package]
+name = "graph-hunter-app"
+version = "1.0.0"
+edition = "2024"
+
+[lib]
+name = "graph_hunter_app_lib"
+# Removed "staticlib" from crate-type (was previously ["staticlib",
+# "cdylib", "rlib"]). Tauri v2 only needs "cdylib" (for the runtime
+# entry point) and "rlib" (for Rust tests / the main binary's link).
+# The "staticlib" output was producing a ~1.5 GB .lib file on every
+# build — a disk-pressure foot-gun on constrained dev machines. Add
+# it back if a non-Rust consumer ever needs to statically link the
+# library.
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "5"
+memmap2 = "0.9"
+graph_hunter_core = { path = "../../../core/graph-engine", features = ["geoip"] }
+# GNN inference lives in its own crate per F2.14 (see core/gnn). Tauri
+# activates `ml-scoring` here so NpuScorer + ort are pulled into the
+# build; platform/api's own `ml-scoring` feature forwards into this
+# same crate.
+graph_hunter_gnn = { path = "../../../core/gnn", features = ["ml-scoring"] }
+graph_hunter_cli = { path = "../../cli" }
+graph_hunter_api = { path = "../../../platform/api", features = ["ml-scoring"] }
+# Concrete LogParser impls lifted out of core per F2.10 (Cognito,
+# FortiAnalyzer, IIS W3C). `extract_fields_header` now lives here.
+graph_hunter_parsers = { path = "../../../platform/parsers" }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+dotenvy = "0.15"
+axum = { version = "0.7", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors"] }
+evtx = { version = "0.11", default-features = false }
+memchr = "2"
+rayon = "1"
+rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Heavy-logs #4: process and host memory probe for the soft-ceiling
+# telemetry. `sysinfo` is the Rust ecosystem default; we pull only
+# the system+process feature so the dep stays light and doesn't drag
+# in disk/network monitors we don't need.
+sysinfo = { version = "0.32", default-features = false, features = ["system", "windows"] }
+# mimalloc is the global allocator for the desktop binary (declared in
+# main.rs). The cdylib path used by Tauri's mobile/runtime targets keeps
+# the host allocator — only the binary's `#[global_allocator]` is active.
+mimalloc = { version = "0.1", default-features = false }
+
+# Azure streaming smoke test (Phase 8 frontend validation)
+# These are transitive through graph_hunter_core; declared explicitly so
+# azure_streaming_smoke.rs can use them by name. Small / already-compiled.
+async-trait = "0.1"
+futures = "0.3"
+bytes = "1"
+tempfile = "3"
+subtle = "2"
+
+[features]
+# Opt-in: enable with --features simd. Runtime falls back to pure-Rust DFS when AVX2 is unavailable.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+# Propagates to BOTH graph_hunter_core (the matcher) AND graph_hunter_api.
+# Without the api-crate propagation, the `#[cfg(feature = "simd")]` switch
+# in `GraphHunterApi::run_hunt` (which routes to `search_temporal_pattern_simd`)
+# stays OFF even when Tauri is built with `--features simd`, silently
+# dropping back to the scalar matcher.
+simd = ["graph_hunter_api/simd"]

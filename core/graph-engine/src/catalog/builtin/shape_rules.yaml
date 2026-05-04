@@ -1,0 +1,77 @@
+# Canonical (src_type, rel_type, dst_type) triples emitted by the 7 built-in
+# parsers. Hand-derived from parser source 2026-04-22 (Win 2 D2).
+#
+# `rules`      — allowed shapes where src != dst.
+# `singletons` — allowed self-loop shapes (src == dst) emitted by the
+#                generic parser as a fallback when only one entity
+#                field is present on a row. P3 (identity coherence)
+#                whitelists these so the checker distinguishes mapping
+#                bugs from the deliberate "keep the node visible even
+#                without a peer" pattern.
+#
+# User-defined rel_types (`RelationType::Other(_)`) and the `Any`
+# wildcard are always accepted without a rule; this catalog targets
+# only the concrete shipped relations.
+
+rules:
+  # ── Auth (user/host/ip) ─────────────────────────────────────────
+  - { src: User, rel: Auth,    dst: Host }
+  - { src: User, rel: Auth,    dst: IP }
+  - { src: User, rel: Auth,    dst: User }    # Cognito principal→target
+  - { src: IP,   rel: Auth,    dst: Host }    # IIS W3C remote auth
+  - { src: Host, rel: Auth,    dst: User }
+  - { src: Host, rel: Auth,    dst: Host }
+
+  # ── Execute ─────────────────────────────────────────────────────
+  - { src: User,    rel: Execute, dst: Process }
+  - { src: Host,    rel: Execute, dst: Process }
+  - { src: Process, rel: Execute, dst: Process }
+  - { src: Process, rel: Execute, dst: Host }
+  - { src: Process, rel: Execute, dst: File }
+  - { src: User,    rel: Execute, dst: File }
+
+  # ── Spawn (parent→child process) ────────────────────────────────
+  - { src: Process, rel: Spawn, dst: Process }
+
+  # ── Connect (network) ───────────────────────────────────────────
+  - { src: IP,      rel: Connect, dst: IP }
+  - { src: IP,      rel: Connect, dst: Host }
+  - { src: Host,    rel: Connect, dst: IP }
+  - { src: Host,    rel: Connect, dst: Host }
+  - { src: Process, rel: Connect, dst: IP }
+  - { src: Process, rel: Connect, dst: Host }
+  - { src: Process, rel: Connect, dst: File }   # sysmon FileStream
+  - { src: URL,     rel: Connect, dst: URL }
+
+  # ── DNS ─────────────────────────────────────────────────────────
+  - { src: Host,    rel: DNS, dst: Domain }
+  - { src: Process, rel: DNS, dst: Domain }
+  - { src: Host,    rel: DNS, dst: IP }
+
+  # ── Read (file/handle access) ───────────────────────────────────
+  - { src: Process, rel: Read, dst: File }
+  - { src: User,    rel: Read, dst: File }
+  - { src: Process, rel: Read, dst: Host }
+  - { src: Process, rel: Read, dst: Process }   # sysmon ProcessAccess
+
+  # ── Write ───────────────────────────────────────────────────────
+  - { src: Process, rel: Write, dst: File }
+  - { src: Process, rel: Write, dst: Process }
+
+  # ── Modify ──────────────────────────────────────────────────────
+  - { src: Process, rel: Modify, dst: File }
+  - { src: Process, rel: Modify, dst: Registry }
+
+  # ── Delete ──────────────────────────────────────────────────────
+  - { src: Process, rel: Delete, dst: File }
+  - { src: Process, rel: Delete, dst: Host }    # sysmon ProcessTerminated
+
+singletons:
+  - { entity: Host,     rel: Connect }
+  - { entity: Process,  rel: Execute }
+  - { entity: User,     rel: Auth }
+  - { entity: IP,       rel: Connect }
+  - { entity: Domain,   rel: DNS }
+  - { entity: File,     rel: Write }
+  - { entity: URL,      rel: Connect }
+  - { entity: Registry, rel: Modify }

@@ -1,0 +1,154 @@
+\chapter{Hipótesis y DSL}
+\label{sec:man-dsl}
+
+\section{La idea}
+
+Una \emph{hipótesis} es una pregunta sobre el grafo expresada en
+términos de entidades y relaciones. El DSL describe ``formas''
+que el sistema busca:
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+Entity -[Relation]-> Entity
+\end{lstlisting}
+
+Leída como ``una \code{Entity} conectada por una \code{Relation} a
+otra \code{Entity}''. El resultado son todos los paths concretos
+del grafo que encajan.
+
+\section{Sintaxis mínima}
+
+\subsection{Un solo paso}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+User -[Auth]-> Host
+\end{lstlisting}
+
+Busca usuarios que se autenticaron en algún host.
+
+\subsection{Cadena de pasos}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+User -[Auth]-> Host -[Connect]-> Host {k=3}
+\end{lstlisting}
+
+Usuario que autenticó contra un host, y desde ese host se abrió
+una conexión a otro. \code{k=3} es una cota de simplicidad: acota
+la explosión combinatoria limitando longitud o ramificación.
+
+\subsection{Comodín}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+* -[Execute]-> Process
+\end{lstlisting}
+
+Cualquier entidad que ejecutó un proceso. Útil cuando no sabés de
+dónde mirar.
+
+\subsection{Predicados}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+Process {name="cmd.exe"} -[Spawn]-> Process {name="powershell.exe"}
+\end{lstlisting}
+
+Restringe los nodos por propiedad. Comparadores: \code{=},
+\code{!=}, \code{>}, \code{<}, \code{>=}, \code{<=},
+\code{like} (strings).
+
+\subsection{Ventana temporal}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+Host -[DNS]-> Domain {matches_regex(value, "^[a-f0-9]{32}\.")}
+{window=1h}
+\end{lstlisting}
+
+Limita la separación máxima entre eventos del path. Unidades:
+\code{s}, \code{m}, \code{h}, \code{d}.
+
+\section{Catálogo built-in}
+
+Tipos de entidad: \code{IP}, \code{Host}, \code{User},
+\code{Process}, \code{File}, \code{Domain}, \code{Registry},
+\code{URL}, \code{Service}, más el comodín \code{*}.
+
+Relaciones: \code{Auth}, \code{Connect}, \code{Execute},
+\code{Read}, \code{Write}, \code{DNS}, \code{Modify},
+\code{Spawn}, \code{Delete}, \code{*}.
+
+Predicados: \code{in_subnet(ip, cidr)},
+\code{matches_regex(field, pattern)}, \code{is_weekend()},
+\code{within_hours(start, end)}, \code{tag(name)}.
+
+Para la gramática formal completa ver el libro de Especificación,
+cap.\ \emph{DSL}.
+
+\section{Ejemplos clásicos}
+
+\subsection{Lateral movement}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+User -[Auth]-> Host -[Connect]-> Host
+  {window=30m, k=3}
+\end{lstlisting}
+
+\subsection{Exfiltración sospechosa}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+Process -[Read]-> File
+  -[Connect]-> IP {not in_subnet(value, "10.0.0.0/8")}
+  {window=1h}
+\end{lstlisting}
+
+Proceso que lee un archivo y después se conecta a una IP externa
+dentro de una hora.
+
+\subsection{Cadena de spawning Office}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+Process {name="winword.exe"}
+  -[Spawn]-> Process {name="cmd.exe"}
+  -[Spawn]-> Process {name="powershell.exe"}
+\end{lstlisting}
+
+\subsection{DNS tunneling}
+
+\begin{lstlisting}[basicstyle=\ttfamily\small]
+Host -[DNS]-> Domain
+  {matches_regex(value, "^[a-f0-9]{32}\.")}
+  {window=1h}
+\end{lstlisting}
+
+\section{Buenas y malas hipótesis}
+
+\textbf{Buenas}:
+
+\begin{itemize}
+    \item Específicas sobre tipos y relaciones (no comodín en
+    todo).
+    \item Con \code{k} y \code{window} acotadas.
+    \item Con predicados que descartan casos comunes (ej.\ excluir
+    subnet corporativa para mirar tráfico externo).
+\end{itemize}
+
+\textbf{Malas}:
+
+\begin{itemize}
+    \item \code{* -[*]-> *} — devuelve todo el grafo, no informa.
+    \item Sin \code{k} ni \code{window} sobre un grafo grande —
+    puede tomar minutos o fallar por presión de memoria.
+    \item Demasiado restrictivas — cero resultados; considerá
+    relajar un predicado y revisar.
+\end{itemize}
+
+\section{Validar sin ejecutar}
+
+En la UI, botón \emph{Parse} al lado de \emph{Run}. El servidor
+valida la sintaxis y devuelve el AST si es válida, con la línea y
+columna del error si no. Útil para hipótesis largas antes de
+comprometerte a correrlas.
+
+\section{Guardar hipótesis}
+
+Una hipótesis útil se puede convertir en regla Sigma para
+portarla a otros sistemas (\code{Hunt \textrightarrow{} Save as
+Sigma}). También podés guardarla en la librería de hunts compartidos
+de la sesión para reuso.

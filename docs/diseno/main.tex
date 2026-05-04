@@ -1,0 +1,40 @@
+\documentclass[11pt,openany]{book}
+
+\input{preamble}
+
+\title{\Huge\bfseries Graph Hunter\\[0.4em]\color{accent}\Large Diseño completo}
+\author{Lucas Sotomayor\\Base4Security}
+\date{Abril 2026}
+
+\begin{document}
+
+\frontmatter
+\maketitle
+
+\begin{flushleft}
+\textbf{¿Qué es este libro?}\\
+Este libro es la guía pedagógica del diseño completo de Graph Hunter,
+desde el modelo de datos hasta la pila de optimizaciones de \emph{matching}
+de las tiers \emph{S}, \emph{M} y \emph{L} entregadas en abril 2026.
+A diferencia del libro \emph{Arquitectura} (que documenta la estructura
+de \emph{crates}), del libro \emph{Especificación} (que enumera \emph{wire
+contracts}), y del libro \emph{Manual} (que enseña al analista a usarlo),
+este libro toma decisiones algorítmicas y las explica con \emph{intuición},
+\emph{diagramas} y \emph{pseudocódigo} antes de entrar al código.
+\end{flushleft}
+
+\tableofcontents
+
+\mainmatter
+
+\input{chapters/01-introduccion}
+\input{chapters/02-stack-arquitectonico}
+\input{chapters/03-modelo-de-datos}
+\input{chapters/04-pipeline-ingest}
+\input{chapters/05-matcher-tier-by-tier}
+\input{chapters/06-indexes}
+\input{chapters/07-dsl}
+\input{chapters/08-l3-future-design}
+\input{chapters/09-frontend-y-plug-and-play}
+
+\end{document}

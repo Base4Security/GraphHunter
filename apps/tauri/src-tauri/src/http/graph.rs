@@ -1,0 +1,351 @@
+//! Graph query endpoints: search, expand, subgraph, events, schema lookups.
+
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde::Deserialize;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::AppState;
+use graph_hunter_api::GraphHunterApi;
+
+use super::helpers::{
+    api_response, build_subgraph_for_ids, err_json, mcp_emit_view, neighborhood_to_subgraph,
+    ok_json,
+};
+
+pub(super) async fn handler_entity_types(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    api_response(api.get_entity_types_in_graph(
+        graph_hunter_api::dto::entity::SessionOnly::default(),
+    ))
+}
+
+pub(super) async fn handler_relation_schema(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    // Response shape:
+    //   { "entries": [...], "_meta": { "compute_ms": N, "cache_hit": bool } }
+    // Wall-clock is measured here (at the transport edge) so the number
+    // reflects what a client would observe; `cache_hit` comes from the
+    // core and is authoritative. Used by the MCP transport to let
+    // Claude distinguish cached from uncached calls without having to
+    // run the request twice.
+    let start = std::time::Instant::now();
+    match api.get_relation_schema_with_cache_info(
+        graph_hunter_api::dto::entity::SessionOnly::default(),
+    ) {
+        Ok((entries, cache_hit)) => {
+            let compute_ms = start.elapsed().as_millis() as u64;
+            ok_json(serde_json::json!({
+                "entries": entries,
+                "_meta": {
+                    "compute_ms": compute_ms,
+                    "cache_hit": cache_hit,
+                },
+            }))
+        }
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct SearchQuery {
+    // `q` is optional on the wire so a missing param produces our own
+    // structured 400 JSON instead of axum's plain-text "failed to
+    // deserialize query string" response — which the MCP client
+    // surfaces as "did not return JSON" and looks like a transport break.
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(rename = "type")]
+    type_filter: Option<String>,
+    limit: Option<usize>,
+}
+
+pub(super) async fn handler_search(
+    State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<SearchQuery>,
+) -> Response {
+    match api.search_entities(graph_hunter_api::dto::graph_ops::SearchEntitiesRequest {
+        session: None,
+        query: q.q.unwrap_or_default(),
+        type_filter: q.type_filter,
+        limit: q.limit,
+    }) {
+        Ok(v) => {
+            let node_ids: Vec<String> = v.iter().map(|r| r.id.clone()).collect();
+            if !node_ids.is_empty() {
+                if let Ok(sg) = build_subgraph_for_ids(api.as_ref(), &node_ids) {
+                    mcp_emit_view(state.as_ref(), sg);
+                }
+            }
+            ok_json(v)
+        }
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ExpandQuery {
+    node_id: String,
+    max_hops: Option<usize>,
+    max_nodes: Option<usize>,
+}
+
+pub(super) async fn handler_expand(
+    State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<ExpandQuery>,
+) -> Response {
+    let api_clone = api.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            api_clone.expand_node(graph_hunter_api::dto::graph_ops::ExpandNodeRequest {
+                session: None,
+                node_id: q.node_id,
+                max_hops: q.max_hops,
+                max_nodes: q.max_nodes,
+                filter: None,
+            })
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok(hood))) => {
+            let sg = neighborhood_to_subgraph(&hood);
+            mcp_emit_view(state.as_ref(), sg);
+            ok_json(hood)
+        }
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Ok(Err(e)) => err_json(format!("Task error: {}", e)),
+        Err(_) => err_json("Expand timed out after 60 seconds"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct NodeDetailsQuery {
+    node_id: String,
+}
+
+pub(super) async fn handler_node_details(
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<NodeDetailsQuery>,
+) -> Response {
+    let api_clone = api.clone();
+    let node_id = q.node_id.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || {
+            api_clone.get_node_details(graph_hunter_api::dto::entity::NodeScopedRequest {
+                session: None,
+                node_id,
+            })
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok(v))) => ok_json(v),
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        },
+        Ok(Err(e)) => err_json(format!("Task error: {}", e)),
+        Err(_) => err_json("Node details timed out after 30 seconds"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct SubgraphBody {
+    node_ids: Vec<String>,
+}
+
+pub(super) async fn handler_subgraph(
+    State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<SubgraphBody>,
+) -> Response {
+    let api_clone = api.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            api_clone.get_subgraph(graph_hunter_api::dto::graph_ops::SubgraphRequest {
+                session: None,
+                node_ids: body.node_ids,
+            })
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok(sg))) => {
+            mcp_emit_view(state.as_ref(), sg.clone());
+            ok_json(sg)
+        }
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Ok(Err(e)) => err_json(format!("Task error: {}", e)),
+        Err(_) => err_json("Subgraph query timed out after 60 seconds"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct EventsQuery {
+    node_id: String,
+}
+
+pub(super) async fn handler_events_for_node(
+    State(state): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<EventsQuery>,
+) -> Response {
+    let api_clone = api.clone();
+    let node_id = q.node_id.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            let edges = api_clone.get_events_for_node(
+                graph_hunter_api::dto::graph_ops::EventsForNodeRequest {
+                    session: None,
+                    node_id: node_id.clone(),
+                },
+            )?;
+            // Build subgraph for the event participants to update the frontend map
+            let mut ids: HashSet<String> = HashSet::new();
+            ids.insert(node_id);
+            for e in &edges {
+                ids.insert(e.source.clone());
+                ids.insert(e.target.clone());
+            }
+            let node_ids: Vec<String> = ids.into_iter().collect();
+            let sg = if !node_ids.is_empty() {
+                build_subgraph_for_ids(api_clone.as_ref(), &node_ids).ok()
+            } else {
+                None
+            };
+            Ok::<_, graph_hunter_api::ApiError>((edges, sg))
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok((edges, sg)))) => {
+            if let Some(sg) = sg {
+                mcp_emit_view(state.as_ref(), sg);
+            }
+            ok_json(edges)
+        }
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Ok(Err(e)) => err_json(format!("Task error: {}", e)),
+        Err(_) => err_json("Events query timed out after 60 seconds"),
+    }
+}
+
+pub(super) async fn handler_graph_summary(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    api_response(api.get_graph_summary(
+        graph_hunter_api::dto::geoip::GraphSummaryRequest::default(),
+    ))
+}
+
+pub(super) async fn handler_entity_type_counts(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    api_response(api.get_entity_type_counts(
+        graph_hunter_api::dto::entity::SessionOnly::default(),
+    ))
+}
+
+pub(super) async fn handler_path_nodes(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    api_response(api.get_path_nodes(
+        graph_hunter_api::dto::entity::SessionOnly::default(),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct EventsPaginatedQuery {
+    node_id: String,
+    page: Option<usize>,
+    page_size: Option<usize>,
+    sort_by: Option<String>,
+}
+
+pub(super) async fn handler_events_paginated(
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<EventsPaginatedQuery>,
+) -> Response {
+    let api_clone = api.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            api_clone.get_events_paginated(
+                graph_hunter_api::dto::graph_ops::EventsPaginatedRequest {
+                    session: None,
+                    node_id: q.node_id,
+                    page: q.page.unwrap_or(0),
+                    page_size: q.page_size,
+                    sort_by: q.sort_by,
+                },
+            )
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok(v))) => ok_json(v),
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Ok(Err(e)) => err_json(format!("Task error: {e}")),
+        Err(_) => err_json("Events query timed out"),
+    }
+}
+
+pub(super) async fn handler_expand_grouped(
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<ExpandQuery>,
+) -> Response {
+    let api_clone = api.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::task::spawn_blocking(move || {
+            api_clone.expand_node_grouped(graph_hunter_api::dto::graph_ops::ExpandNodeRequest {
+                session: None,
+                node_id: q.node_id,
+                max_hops: q.max_hops,
+                max_nodes: q.max_nodes,
+                filter: None,
+            })
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(Ok(v))) => ok_json(v),
+        Ok(Ok(Err(e))) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Ok(Err(e)) => err_json(format!("Task error: {e}")),
+        Err(_) => err_json("Expand grouped timed out"),
+    }
+}

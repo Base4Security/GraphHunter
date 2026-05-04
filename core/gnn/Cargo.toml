@@ -1,0 +1,35 @@
+[package]
+name = "graph_hunter_gnn"
+version = "0.1.0"
+edition = "2024"
+description = "GNN inference + training-corpus adapters extracted from graph_hunter_core per F2.14. Bundles gnn_bridge (feature extraction), npu_scorer (ONNX Runtime inference), and aad_training_export. The v1/, common/, v2/ subfolders are placeholders for the ADR-003 split; right now the active implementation is flat at the crate root (see lib.rs)."
+license = "GPL-3.0"
+
+[lib]
+name = "graph_hunter_gnn"
+path = "src/lib.rs"
+
+[features]
+default = []
+# ONNX Runtime inference backend. Mirrors the former core feature and is
+# forwarded from graph_hunter_core::ml-scoring so downstream crates that
+# used to write `graph_hunter_core/ml-scoring` keep working unchanged.
+ml-scoring = ["ort", "ndarray"]
+directml = []
+# F4.5 (ADR-003). Compile-time gate for the experimental v2 GNN. When
+# this flag is OFF, the v2 module does not compile and no code path can
+# attempt to load a v2 model. When it is ON, `common::model_gate` runs
+# at load time and still rejects synthetic-only models unless additional
+# opt-in at runtime is granted. Production builds must NEVER enable this.
+gnn-v2-experimental = ["ml-scoring"]
+
+[dependencies]
+graph_hunter_core = { path = "../graph-engine" }
+ahash = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Pinned to rc.11 to match Tauri's Cargo.lock resolution. rc.12 changed
+# the Session::builder() API to require a mutable binding, which would
+# need a source fix. Revisit when we decide to upgrade.
+ort = { version = "=2.0.0-rc.11", optional = true }
+ndarray = { version = "0.17", optional = true }
