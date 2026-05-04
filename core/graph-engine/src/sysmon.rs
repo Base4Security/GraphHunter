@@ -9,7 +9,7 @@ use crate::relation::Relation;
 use crate::types::{EntityType, RelationType};
 
 /// Typed Sysmon event row used by the direct-typed fast path
-/// (`SysmonJsonParser::try_parse_typed`). Every field is `Option`
+/// (`SysmonJsonParser::try_parse_typed_with_scratch`). Every field is `Option`
 /// + `borrow`ed from the input scratch buffer for zero-copy
 /// deserialization through `simd_json::serde::from_slice`. The
 /// fields cover the union of what every implemented EventID needs
@@ -915,13 +915,17 @@ impl SysmonJsonParser {
     /// handlers on the same input. Adding more variants is a
     /// mechanical extension of `SysmonEventTyped` + a new arm
     /// here.
-    fn try_parse_typed(line: &str) -> Option<Vec<ParsedTriple>> {
-        // simd-json mutates its input buffer in place. Allocate a
-        // line-scoped buffer; the deserialized fields will reference
-        // it via `&'a str`, so the buffer must outlive `event` (it
-        // does — both live until end of this fn).
-        let mut buf = line.as_bytes().to_vec();
-        let event: SysmonEventTyped<'_> = simd_json::serde::from_slice(&mut buf).ok()?;
+    ///
+    /// `scratch` is a caller-supplied Vec<u8> reused across every
+    /// line a rayon worker handles — saves one heap allocation per
+    /// line vs the prior `to_vec()` per line.
+    fn try_parse_typed_with_scratch(
+        line: &str,
+        scratch: &mut Vec<u8>,
+    ) -> Option<Vec<ParsedTriple>> {
+        scratch.clear();
+        scratch.extend_from_slice(line.as_bytes());
+        let event: SysmonEventTyped<'_> = simd_json::serde::from_slice(scratch).ok()?;
         let event_id = event.event_id?;
         let timestamp = event
             .utc_time
@@ -1108,27 +1112,31 @@ impl LogParser for SysmonJsonParser {
 
         // NDJSON fast path: fuse line-parse and event-parse into a
         // single rayon pipeline. Each worker tries the typed path
-        // first (`try_parse_typed`); on miss falls through to the
-        // legacy `Value` path which handles every EventID. The
-        // typed path skips the HashMap construction + per-field
-        // probe overhead of the Value path and is dramatically
-        // faster for the highest-volume Sysmon events (EventID 1).
+        // first; on miss falls through to the legacy `Value` path
+        // which handles every EventID. `map_init` gives each worker
+        // a single `Vec<u8>` scratch buffer that survives across
+        // every line that worker handles — saves one heap
+        // allocation per line vs the prior `to_vec()` per line.
         trimmed
             .par_lines()
             .filter(|l| !l.trim().is_empty())
-            .flat_map_iter(|line| {
-                if let Some(triples) = Self::try_parse_typed(line) {
-                    return triples.into_iter();
-                }
-                let mut buf = line.as_bytes().to_vec();
-                let event = simd_json::serde::from_slice::<Value>(&mut buf)
-                    .ok()
-                    .or_else(|| serde_json::from_str(line).ok());
-                event
-                    .map(|e| Self::parse_event(&e))
-                    .unwrap_or_default()
-                    .into_iter()
-            })
+            .map_init(
+                || Vec::<u8>::with_capacity(2048),
+                |scratch, line| {
+                    if let Some(triples) =
+                        Self::try_parse_typed_with_scratch(line, scratch)
+                    {
+                        return triples;
+                    }
+                    scratch.clear();
+                    scratch.extend_from_slice(line.as_bytes());
+                    let event = simd_json::serde::from_slice::<Value>(scratch)
+                        .ok()
+                        .or_else(|| serde_json::from_str(line).ok());
+                    event.map(|e| Self::parse_event(&e)).unwrap_or_default()
+                },
+            )
+            .flat_map_iter(|v| v.into_iter())
             .collect()
     }
 
