@@ -25,8 +25,10 @@ struct SysmonEventTyped<'a> {
     event_time: Option<&'a str>,
     #[serde(rename = "@timestamp", default, borrow)]
     timestamp_at: Option<&'a str>,
+    // Event 1, 7, 11 — process anchor.
     #[serde(rename = "Image", default, borrow)]
     image: Option<&'a str>,
+    // Event 1.
     #[serde(rename = "User", default, borrow)]
     user: Option<&'a str>,
     #[serde(rename = "Computer", default, borrow)]
@@ -39,6 +41,35 @@ struct SysmonEventTyped<'a> {
     parent_process_id: Option<u64>,
     #[serde(rename = "CommandLine", default, borrow)]
     command_line: Option<&'a str>,
+    // Event 3 — network connection.
+    #[serde(rename = "Hostname", default, borrow)]
+    hostname: Option<&'a str>,
+    #[serde(rename = "SourceHostname", default, borrow)]
+    source_hostname: Option<&'a str>,
+    #[serde(rename = "SourceIp", default, borrow)]
+    source_ip: Option<&'a str>,
+    #[serde(rename = "SourcePort", default, borrow)]
+    source_port: Option<&'a str>,
+    #[serde(rename = "DestinationIp", default, borrow)]
+    destination_ip: Option<&'a str>,
+    #[serde(rename = "DestinationPort", default, borrow)]
+    destination_port: Option<&'a str>,
+    #[serde(rename = "DestinationHostname", default, borrow)]
+    destination_hostname: Option<&'a str>,
+    #[serde(rename = "Protocol", default, borrow)]
+    protocol: Option<&'a str>,
+    // Event 7 — image load.
+    #[serde(rename = "ImageLoaded", default, borrow)]
+    image_loaded: Option<&'a str>,
+    #[serde(rename = "Signed", default, borrow)]
+    signed: Option<&'a str>,
+    #[serde(rename = "SignatureStatus", default, borrow)]
+    signature_status: Option<&'a str>,
+    #[serde(rename = "Hashes", default, borrow)]
+    hashes: Option<&'a str>,
+    // Event 11 — file create.
+    #[serde(rename = "TargetFilename", default, borrow)]
+    target_filename: Option<&'a str>,
 }
 
 /// Parser for Sysmon, Windows Security, PowerShell, and Winlogbeat events exported as JSON.
@@ -873,16 +904,17 @@ impl SysmonJsonParser {
 }
 
 impl SysmonJsonParser {
-    /// Direct-typed parser for the most common Sysmon EventIDs.
-    /// Returns `Some(triples)` on a successful typed parse;
-    /// `None` falls back to the legacy `Value`-based path. Saves
-    /// the HashMap construction + per-field probe cost that the
-    /// `parse_event(Value)` path pays.
+    /// Direct-typed parser for the highest-volume Sysmon EventIDs
+    /// (1, 3, 7, 11). Returns `Some(triples)` on a successful typed
+    /// parse; `None` falls back to the legacy `Value`-based path
+    /// (other EventIDs). Saves the HashMap construction + per-field
+    /// probe cost that `parse_event(Value)` pays.
     ///
-    /// Today handles EventID 1 (Process Create) only — the highest-
-    /// volume Sysmon event by far. Other IDs fall through to the
-    /// legacy parser. Adding more variants is a mechanical extension
-    /// of the field set.
+    /// Field semantics mirror the legacy `parse_*` per EventID:
+    /// the typed handlers produce identical triples to the Value
+    /// handlers on the same input. Adding more variants is a
+    /// mechanical extension of `SysmonEventTyped` + a new arm
+    /// here.
     fn try_parse_typed(line: &str) -> Option<Vec<ParsedTriple>> {
         // simd-json mutates its input buffer in place. Allocate a
         // line-scoped buffer; the deserialized fields will reference
@@ -891,20 +923,26 @@ impl SysmonJsonParser {
         let mut buf = line.as_bytes().to_vec();
         let event: SysmonEventTyped<'_> = simd_json::serde::from_slice(&mut buf).ok()?;
         let event_id = event.event_id?;
-        if event_id != 1 {
-            // Only EventID 1 is implemented in the typed fast path.
-            // Returning None here forces the caller to dispatch via
-            // the legacy Value-based parser, which handles every
-            // other EventID. The scratch `buf` is dropped on return;
-            // the next line gets its own.
-            return None;
-        }
         let timestamp = event
             .utc_time
             .or(event.event_time)
             .or(event.timestamp_at)
             .and_then(Self::parse_timestamp)
             .unwrap_or(0);
+        match event_id {
+            1 => Self::typed_process_create(&event, timestamp),
+            3 => Self::typed_network_connection(&event, timestamp),
+            7 => Self::typed_image_load(&event, timestamp),
+            11 => Self::typed_file_create(&event, timestamp),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn typed_process_create(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
         let mut triples = Vec::with_capacity(2);
         let mut child = Entity::new(image, EntityType::Process);
@@ -932,6 +970,85 @@ impl SysmonJsonParser {
             triples.push((parent, rel, child));
         }
         Some(triples)
+    }
+
+    #[inline]
+    fn typed_network_connection(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let dest_ip = event.destination_ip?;
+        let source_name = event
+            .computer
+            .or(event.hostname)
+            .or(event.source_hostname)
+            .unwrap_or("unknown-host");
+        let mut source = Entity::new(source_name, EntityType::Host);
+        if let Some(s) = event.source_ip {
+            source.metadata.insert("source_ip".into(), s.into());
+        }
+        if let Some(s) = event.source_port {
+            source.metadata.insert("source_port".into(), s.into());
+        }
+        let mut dest = Entity::new(dest_ip, EntityType::IP);
+        if let Some(s) = event.destination_port {
+            dest.metadata.insert("dest_port".into(), s.into());
+        }
+        if let Some(s) = event.destination_hostname {
+            dest.metadata.insert("hostname".into(), s.into());
+        }
+        if let Some(s) = event.protocol {
+            dest.metadata.insert("protocol".into(), s.into());
+        }
+        let mut rel = Relation::new(&source.id, &dest.id, RelationType::Connect, timestamp);
+        if let Some(image) = event.image {
+            rel.metadata.insert("image".into(), image.into());
+        }
+        let mut triples = vec![(source, rel, dest.clone())];
+        if let Some(image) = event.image {
+            let process = Entity::new(image, EntityType::Process);
+            let rel2 = Relation::new(&process.id, &dest.id, RelationType::Connect, timestamp);
+            triples.push((process, rel2, dest));
+        }
+        Some(triples)
+    }
+
+    #[inline]
+    fn typed_image_load(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let image = event.image?;
+        let image_loaded = event.image_loaded?;
+        let process = Entity::new(image, EntityType::Process);
+        let mut file = Entity::new(image_loaded, EntityType::File);
+        if let Some(s) = event.signed {
+            file.metadata.insert("signed".into(), s.into());
+        }
+        if let Some(s) = event.signature_status {
+            file.metadata.insert("signature_status".into(), s.into());
+        }
+        if let Some(s) = event.hashes {
+            file.metadata.insert("hashes".into(), s.into());
+        }
+        let rel = Relation::new(&process.id, &file.id, RelationType::Read, timestamp);
+        Some(vec![(process, rel, file)])
+    }
+
+    #[inline]
+    fn typed_file_create(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let image = event.image?;
+        let target = event.target_filename?;
+        let process = Entity::new(image, EntityType::Process);
+        let mut file = Entity::new(target, EntityType::File);
+        if let Some(s) = event.hashes {
+            file.metadata.insert("hashes".into(), s.into());
+        }
+        let rel = Relation::new(&process.id, &file.id, RelationType::Write, timestamp);
+        Some(vec![(process, rel, file)])
     }
 
     /// Decodes the input into a `Vec<Value>` using the same JSON-array +
