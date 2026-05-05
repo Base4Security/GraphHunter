@@ -386,8 +386,12 @@ impl GraphHunterApi {
                 (t, s, false)
             };
             self.record_parse_skips(dataset_id.as_str(), None, &stats);
+            let events: Vec<graph_hunter_core::RawIngestEvent> = triples
+                .into_iter()
+                .map(graph_hunter_core::RawIngestEvent::from_parsed_triple)
+                .collect();
             let (ne, nr) = graph
-                .insert_triples(triples, Some(dataset_id.as_str()))
+                .insert_raw_events(events, Some(dataset_id.as_str()))
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             run_full_scoring(&mut graph);
             // An empty ParseStats (rows_seen == 0) means the parser didn't
@@ -689,8 +693,12 @@ impl GraphHunterApi {
                 let parser = ConfigurableParser::new(req.config.clone());
                 let (triples, stats) = parser.parse_with_stats(&contents);
                 self.record_parse_skips(dataset_id.as_str(), None, &stats);
+                let events: Vec<graph_hunter_core::RawIngestEvent> = triples
+                    .into_iter()
+                    .map(graph_hunter_core::RawIngestEvent::from_parsed_triple)
+                    .collect();
                 let (ne, nr) = graph
-                    .insert_triples(triples, Some(dataset_id.as_str()))
+                    .insert_raw_events(events, Some(dataset_id.as_str()))
                     .map_err(|e| ApiError::Internal(e.to_string()))?;
                 (ne, nr, Some(stats))
             };
@@ -1213,13 +1221,26 @@ impl GraphHunterApi {
                                         t
                                     };
 
+                                    // Lift to RawIngestEvent at the writer boundary.
+                                    // This is an O(n) struct move (no allocations)
+                                    // that lets the writer skip Entity struct
+                                    // construction for entities already in the
+                                    // graph (interner-miss only). Native
+                                    // parser-side typed-fast-path + stats
+                                    // accumulation needs a parse_raw_with_stats
+                                    // trait method — queued.
+                                    let events: Vec<graph_hunter_core::RawIngestEvent> =
+                                        triples
+                                            .into_iter()
+                                            .map(graph_hunter_core::RawIngestEvent::from_parsed_triple)
+                                            .collect();
                                     let (ne, nr) = {
                                         let mut graph = bg_session
                                             .graph
                                             .write()
                                             .map_err(|e| format!("Lock poisoned: {}", e))?;
                                         graph
-                                            .insert_triples(triples, Some(&bg_dataset_id))
+                                            .insert_raw_events(events, Some(&bg_dataset_id))
                                             .map_err(|e| e.to_string())?
                                     };
                                     total_new_entities += ne;
@@ -1310,13 +1331,18 @@ impl GraphHunterApi {
                                             .get_or_insert_with(DriftSnapshot::default)
                                             .merge(&d);
                                     }
+                                    let events: Vec<graph_hunter_core::RawIngestEvent> =
+                                        triples
+                                            .into_iter()
+                                            .map(graph_hunter_core::RawIngestEvent::from_parsed_triple)
+                                            .collect();
                                     let (ne, nr) = {
                                         let mut graph = bg_session
                                             .graph
                                             .write()
                                             .map_err(|e| format!("Lock poisoned: {}", e))?;
                                         graph
-                                            .insert_triples(triples, Some(&bg_dataset_id))
+                                            .insert_raw_events(events, Some(&bg_dataset_id))
                                             .map_err(|e| e.to_string())?
                                     };
                                     total_new_entities += ne;
@@ -1354,13 +1380,18 @@ impl GraphHunterApi {
                             let (triples, stats) = parser.parse_with_stats(contents);
                             tracing::info!("INGEST: parsed {} triples", triples.len());
 
+                            let events: Vec<graph_hunter_core::RawIngestEvent> = triples
+                                .into_iter()
+                                .map(graph_hunter_core::RawIngestEvent::from_parsed_triple)
+                                .collect();
+
                             let mut graph = bg_session
                                 .graph
                                 .write()
                                 .map_err(|e| format!("Lock poisoned: {}", e))?;
 
                             let (ne, nr) = graph
-                                .insert_triples(triples, Some(&bg_dataset_id))
+                                .insert_raw_events(events, Some(&bg_dataset_id))
                                 .map_err(|e| e.to_string())?;
                             tracing::info!("INGEST: inserted ({}, {})", ne, nr);
                             Ok((ne, nr, stats.drift))
