@@ -218,6 +218,35 @@ fn bench_ingest(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    // Parse-only benchmark: measures simd-json + serde reflection
+    // throughput WITHOUT building Entity / Relation / HashMap
+    // intermediates. Anchors the upper bound — any production
+    // ingest path will be bounded above by this number, since
+    // the only thing it skips is the post-parse triple
+    // construction. Sequential to isolate parse cost from rayon
+    // worker scheduling effects.
+    let mut group = c.benchmark_group("ingest-sysmon-parse-only");
+    for n in &[1_000usize, 10_000, 50_000] {
+        let payload = synth_sysmon_ndjson(*n);
+        group.throughput(Throughput::Elements(*n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, _| {
+            b.iter(|| {
+                let mut scratch = Vec::<u8>::with_capacity(2048);
+                let mut count: usize = 0;
+                for line in black_box(&payload).lines() {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    if SysmonJsonParser::parse_only_sysmon(line, &mut scratch) {
+                        count += 1;
+                    }
+                }
+                black_box(count)
+            });
+        });
+    }
+    group.finish();
 }
 
 criterion_group!(benches, bench_ingest);

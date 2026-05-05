@@ -1006,6 +1006,26 @@ impl SysmonJsonParser {
     /// `scratch` is a caller-supplied Vec<u8> reused across every
     /// line a rayon worker handles — saves one heap allocation per
     /// line vs the prior `to_vec()` per line.
+    /// Parse-only fast path: deserializes the line into the typed
+    /// event struct and returns whether the parse succeeded.
+    /// Measures pure parse cost (simd-json + serde reflection)
+    /// without paying any `Entity` / `Relation` / `HashMap`
+    /// construction. Used by `bench_ingest_parse_only` to
+    /// distinguish parser cost from downstream-allocation cost.
+    ///
+    /// Production callers should NOT use this — it discards the
+    /// parsed event. It exists to anchor the upper bound on
+    /// throughput: any production ingest path that retains
+    /// triples will be bounded above by this number.
+    pub fn parse_only_sysmon(line: &str, scratch: &mut Vec<u8>) -> bool {
+        scratch.clear();
+        scratch.extend_from_slice(line.as_bytes());
+        match simd_json::serde::from_slice::<SysmonEventTyped<'_>>(scratch) {
+            Ok(ev) => ev.event_id.is_some(),
+            Err(_) => false,
+        }
+    }
+
     fn try_parse_typed_with_scratch(
         line: &str,
         scratch: &mut Vec<u8>,
