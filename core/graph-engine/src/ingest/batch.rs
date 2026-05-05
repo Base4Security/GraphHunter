@@ -5,7 +5,7 @@
 //! A `ParsedBatch` is the unit of work the graph writer consumes. It
 //! carries:
 //!
-//! - The parsed triples, ready for `insert_triples_chunk`.
+//! - The parsed events, ready for `insert_raw_events_chunk`.
 //! - The source identity and dataset tag so the writer can tag the
 //!   resulting `CompactRelation`s correctly without consulting external
 //!   state.
@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::parser::ParsedTriple;
+use crate::parser::RawIngestEvent;
 use graph_hunter_sources::Watermark;
 
 /// Priority of a parsed batch. Enrichment batches preempt normal
@@ -51,11 +51,11 @@ impl Default for Priority {
     }
 }
 
-/// A parsed batch of triples ready for the `GraphWriter` to insert.
+/// A parsed batch of events ready for the `GraphWriter` to insert.
 ///
-/// The batch owns its `triples` Vec. The writer drains the Vec via
-/// repeated calls to `GraphHunter::insert_triples_chunk`, releasing the
-/// write lock between chunks to let readers make progress.
+/// The batch owns its `events` Vec. The writer drains the Vec via
+/// repeated calls to `GraphHunter::insert_raw_events_chunk`, releasing
+/// the write lock between chunks to let readers make progress.
 ///
 /// `Serialize + Deserialize` derives support the overflow persistence
 /// code path in `crate::ingest::overflow` — when a writer is cancelled
@@ -69,20 +69,20 @@ pub struct ParsedBatch {
     /// the batch with its origin without a cross-lookup.
     pub source_id: String,
 
-    /// Dataset the triples should be attributed to when they land in
-    /// `GraphHunter`. Passed straight through to `insert_triples_chunk`.
+    /// Dataset the events should be attributed to when they land in
+    /// `GraphHunter`. Passed straight through to `insert_raw_events_chunk`.
     /// `None` means "untagged" (legacy ingestion behavior).
     pub dataset_id: Option<String>,
 
     /// Scheduling priority.
     pub priority: Priority,
 
-    /// The parsed triples. Drained in-place by the writer.
-    pub triples: Vec<ParsedTriple>,
+    /// The parsed events. Drained in-place by the writer.
+    pub events: Vec<RawIngestEvent>,
 
     /// Number of source rows that produced this batch. May be larger
-    /// than `triples.len()` because one row can yield zero or many
-    /// triples depending on the parser.
+    /// than `events.len()` because one row can yield zero or many
+    /// events depending on the parser.
     pub row_count: usize,
 
     /// Number of rows the parser rejected (malformed, schema drift,
@@ -111,13 +111,13 @@ impl ParsedBatch {
     /// Constructs a batch with default priority (`Normal`) and zero
     /// dropped-row count. Convenience for parser-task code paths that
     /// don't need to set everything.
-    pub fn new(source_id: impl Into<String>, triples: Vec<ParsedTriple>) -> Self {
-        let row_count = triples.len();
+    pub fn new(source_id: impl Into<String>, events: Vec<RawIngestEvent>) -> Self {
+        let row_count = events.len();
         Self {
             source_id: source_id.into(),
             dataset_id: None,
             priority: Priority::Normal,
-            triples,
+            events,
             row_count,
             dropped_rows: 0,
             watermark_after: None,
@@ -149,10 +149,10 @@ impl ParsedBatch {
         self
     }
 
-    /// Returns the number of triples still waiting to be inserted.
+    /// Returns the number of events still waiting to be inserted.
     /// Used by writer metrics.
-    pub fn triples_remaining(&self) -> usize {
-        self.triples.len()
+    pub fn events_remaining(&self) -> usize {
+        self.events.len()
     }
 }
 
@@ -182,6 +182,6 @@ mod tests {
         let (table, wm) = batch.watermark_after.as_ref().unwrap();
         assert_eq!(table, "SecurityEvent");
         assert_eq!(wm.as_str(), "2026-04-09T12:00:00Z");
-        assert_eq!(batch.triples_remaining(), 0);
+        assert_eq!(batch.events_remaining(), 0);
     }
 }

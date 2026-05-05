@@ -128,12 +128,12 @@ impl ParserTask {
             match result {
                 Ok(chunk) => {
                     if let Some(batch) = self.parse_chunk(chunk) {
-                        if !batch.triples.is_empty() {
+                        if !batch.events.is_empty() {
                             self.metrics.chunks_parsed.fetch_add(1, Ordering::Relaxed);
                         }
                         self.metrics
                             .triples_forwarded
-                            .fetch_add(batch.triples.len() as u64, Ordering::Relaxed);
+                            .fetch_add(batch.events.len() as u64, Ordering::Relaxed);
                         if parsed_tx.send(batch).await.is_err() {
                             // Writer dropped the receiver — no point
                             // continuing. Exit cleanly.
@@ -158,13 +158,20 @@ impl ParserTask {
     /// if the bytes are unparseable (non-UTF-8) or the encoding is
     /// unsupported (Parquet).
     fn parse_chunk(&self, chunk: RawChunk) -> Option<ParsedBatch> {
-        let triples = match chunk.encoding {
+        let events = match chunk.encoding {
             ChunkEncoding::Json | ChunkEncoding::Jsonl => {
                 let text = match std::str::from_utf8(chunk.rows.as_ref()) {
                     Ok(s) => s,
                     Err(_) => return None,
                 };
-                self.parser.parse(text)
+                // parse_raw is the raw-event production path. For
+                // parsers that override it (currently SysmonJsonParser
+                // covering all 16 typed Sysmon/WinSec/PowerShell
+                // EventIDs), this skips the Entity/Relation struct
+                // allocations the legacy parse() pays per triple. For
+                // parsers that haven't overridden, the default impl
+                // wraps parse() and lifts — same behavior as before.
+                self.parser.parse_raw(text)
             }
             ChunkEncoding::Parquet => {
                 // Not yet supported — future Data Lake v2 path.
@@ -172,23 +179,19 @@ impl ParserTask {
             }
         };
 
-        let row_count = triples.len();
+        let row_count = events.len();
         let mut batch = ParsedBatch {
             source_id: self.source_id.clone(),
             dataset_id: self.dataset_id.clone(),
             priority: self.priority,
-            triples,
+            events,
             row_count,
             dropped_rows: 0,
             watermark_after: chunk
                 .watermark_candidate
                 .map(|wm| (chunk.table.clone(), wm)),
         };
-        // Override row_count with the chunk-level row count if the
-        // parser dropped some: since we don't have pre-parse counts
-        // here, row_count stays equal to triples.len() for now. A
-        // future optimization can surface this via the LogParser trait.
-        batch.row_count = batch.triples.len();
+        batch.row_count = batch.events.len();
         Some(batch)
     }
 }
@@ -269,8 +272,8 @@ mod tests {
         let batch2 = parsed_rx.recv().await.unwrap();
         assert!(parsed_rx.recv().await.is_none());
 
-        assert_eq!(batch1.triples.len(), 3);
-        assert_eq!(batch2.triples.len(), 3);
+        assert_eq!(batch1.events.len(), 3);
+        assert_eq!(batch2.events.len(), 3);
         assert_eq!(batch1.source_id, "la:ws-1");
 
         assert_eq!(snapshot.chunks_received, 2);

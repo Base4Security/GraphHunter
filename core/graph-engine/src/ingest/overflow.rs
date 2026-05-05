@@ -264,27 +264,32 @@ impl OverflowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entity::Entity;
     use crate::ingest::batch::{ParsedBatch, Priority};
-    use crate::parser::ParsedTriple;
-    use crate::relation::Relation;
+    use crate::parser::RawIngestEvent;
     use crate::types::{EntityType, RelationType};
     use graph_hunter_sources::Watermark;
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
-    fn mk_triple(src: &str, dst: &str, ts: i64) -> ParsedTriple {
-        (
-            Entity::new(src, EntityType::User),
-            Relation::new(src, dst, RelationType::Auth, ts),
-            Entity::new(dst, EntityType::Process),
-        )
+    fn mk_event(src: &str, dst: &str, ts: i64) -> RawIngestEvent {
+        RawIngestEvent {
+            src_id: src.to_string(),
+            src_type: EntityType::User,
+            src_metadata: HashMap::new(),
+            dst_id: dst.to_string(),
+            dst_type: EntityType::Process,
+            dst_metadata: HashMap::new(),
+            rel_type: RelationType::Auth,
+            rel_metadata: HashMap::new(),
+            timestamp: ts,
+        }
     }
 
     fn mk_batch(source_id: &str, n: usize) -> ParsedBatch {
-        let triples: Vec<ParsedTriple> = (0..n)
-            .map(|i| mk_triple(&format!("u-{i}"), &format!("p-{i}"), 100 + i as i64))
+        let events: Vec<RawIngestEvent> = (0..n)
+            .map(|i| mk_event(&format!("u-{i}"), &format!("p-{i}"), 100 + i as i64))
             .collect();
-        ParsedBatch::new(source_id, triples)
+        ParsedBatch::new(source_id, events)
             .with_dataset_id("dataset-1")
             .with_priority(Priority::Normal)
     }
@@ -314,7 +319,7 @@ mod tests {
         assert_eq!(read_path, &path);
         assert_eq!(read_batch.source_id, "la:ws-1");
         assert_eq!(read_batch.dataset_id.as_deref(), Some("dataset-1"));
-        assert_eq!(read_batch.triples.len(), 3);
+        assert_eq!(read_batch.events.len(), 3);
         assert_eq!(read_batch.row_count, 3);
     }
 
@@ -420,7 +425,7 @@ mod tests {
         store.write_batch(&batch).unwrap();
         let pending = store.read_pending().unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].1.triples.len(), 0);
+        assert_eq!(pending[0].1.events.len(), 0);
     }
 
     #[test]
@@ -452,9 +457,9 @@ mod tests {
 
         let pending = store.read_pending().unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].1.triples.len(), 1000);
-        // Spot-check the first and last triple made it through.
-        assert_eq!(pending[0].1.triples[0].0.id, "u-0");
-        assert_eq!(pending[0].1.triples[999].0.id, "u-999");
+        assert_eq!(pending[0].1.events.len(), 1000);
+        // Spot-check the first and last event made it through.
+        assert_eq!(pending[0].1.events[0].src_id, "u-0");
+        assert_eq!(pending[0].1.events[999].src_id, "u-999");
     }
 }

@@ -42,6 +42,7 @@ use graph_hunter_core::{
     EntityType,
     LogParser,
     ParsedTriple,
+    RawIngestEvent,
     Relation,
     RelationType,
     // Ingest primitives
@@ -557,7 +558,7 @@ fn test_overflow(errors: &mut Vec<String>) -> OverflowReport {
     let first_source_id = first
         .map(|(_, b)| b.source_id.clone())
         .unwrap_or_default();
-    let first_triple_count = first.map(|(_, b)| b.triples.len()).unwrap_or(0);
+    let first_triple_count = first.map(|(_, b)| b.events.len()).unwrap_or(0);
 
     // Consume the first batch.
     let consume_ok = if let Some((path, _)) = pending.first() {
@@ -614,12 +615,19 @@ fn failed_overflow(err: Option<String>) -> OverflowReport {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn mk_smoke_triple(src_id: &str, dst_id: &str, ts: i64) -> ParsedTriple {
-    (
-        Entity::new(src_id, EntityType::User),
-        Relation::new(src_id, dst_id, RelationType::Auth, ts),
-        Entity::new(dst_id, EntityType::Process),
-    )
+fn mk_smoke_triple(src_id: &str, dst_id: &str, ts: i64) -> RawIngestEvent {
+    use std::collections::HashMap;
+    RawIngestEvent {
+        src_id: src_id.to_string(),
+        src_type: EntityType::User,
+        src_metadata: HashMap::new(),
+        dst_id: dst_id.to_string(),
+        dst_type: EntityType::Process,
+        dst_metadata: HashMap::new(),
+        rel_type: RelationType::Auth,
+        rel_metadata: HashMap::new(),
+        timestamp: ts,
+    }
 }
 
 /// A parser that emits a fixed number of deterministic triples per call.
@@ -629,6 +637,23 @@ struct SmokeParser {
 
 impl LogParser for SmokeParser {
     fn parse(&self, _data: &str) -> Vec<ParsedTriple> {
+        (0..self.triples_per_call)
+            .map(|i| {
+                (
+                    Entity::new(format!("smoke-u-{i}"), EntityType::User),
+                    Relation::new(
+                        format!("smoke-u-{i}"),
+                        format!("smoke-p-{i}"),
+                        RelationType::Auth,
+                        100 + i as i64,
+                    ),
+                    Entity::new(format!("smoke-p-{i}"), EntityType::Process),
+                )
+            })
+            .collect()
+    }
+
+    fn parse_raw(&self, _data: &str) -> Vec<RawIngestEvent> {
         (0..self.triples_per_call)
             .map(|i| mk_smoke_triple(&format!("smoke-u-{i}"), &format!("smoke-p-{i}"), 100 + i as i64))
             .collect()

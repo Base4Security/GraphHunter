@@ -2911,6 +2911,26 @@ impl GraphHunter {
         Ok(n)
     }
 
+    /// Per-chunk entry point for the raw-event ingest path. Mirrors
+    /// [`insert_triples_chunk`] but operates on
+    /// [`crate::parser::RawIngestEvent`]. Drains up to `chunk_size`
+    /// events from the front of `pending` and forwards them to
+    /// [`insert_raw_events`].
+    pub fn insert_raw_events_chunk(
+        &mut self,
+        pending: &mut Vec<crate::parser::RawIngestEvent>,
+        dataset_id: Option<&str>,
+        chunk_size: usize,
+    ) -> Result<usize, GraphError> {
+        if pending.is_empty() || chunk_size == 0 {
+            return Ok(0);
+        }
+        let n = pending.len().min(chunk_size);
+        let chunk: Vec<crate::parser::RawIngestEvent> = pending.drain(..n).collect();
+        self.insert_raw_events(chunk, dataset_id)?;
+        Ok(n)
+    }
+
     /// Inserts pre-parsed triples directly (streaming ingestion).
     pub fn insert_triples(
         &mut self,

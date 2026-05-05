@@ -150,7 +150,7 @@ impl<A: GraphAccess + 'static> GraphWriter<A> {
                 .fetch_add(1, Ordering::Relaxed);
         }
 
-        let mut pending = batch.triples;
+        let mut pending = batch.events;
         let dataset_id = batch.dataset_id.clone();
         let mut cancelled_mid_batch = false;
 
@@ -162,7 +162,7 @@ impl<A: GraphAccess + 'static> GraphWriter<A> {
 
             match self
                 .access
-                .insert_chunk(&mut pending, dataset_id.as_deref(), self.chunk_size)
+                .insert_raw_chunk(&mut pending, dataset_id.as_deref(), self.chunk_size)
                 .await
             {
                 Ok(n) => {
@@ -210,25 +210,30 @@ impl<A: GraphAccess + 'static> GraphWriter<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entity::Entity;
     use crate::graph::GraphHunter;
     use crate::ingest::batch::ParsedBatch;
     use crate::ingest::channels::parsed_channel;
     use crate::ingest::graph_access::InMemoryGraphAccess;
-    use crate::parser::ParsedTriple;
-    use crate::relation::Relation;
+    use crate::parser::RawIngestEvent;
     use crate::types::{EntityType, RelationType};
+    use std::collections::HashMap;
 
-    fn mk_triple(src_id: &str, dst_id: &str, ts: i64) -> ParsedTriple {
-        (
-            Entity::new(src_id, EntityType::User),
-            Relation::new(src_id, dst_id, RelationType::Auth, ts),
-            Entity::new(dst_id, EntityType::Process),
-        )
+    fn mk_triple(src_id: &str, dst_id: &str, ts: i64) -> RawIngestEvent {
+        RawIngestEvent {
+            src_id: src_id.to_string(),
+            src_type: EntityType::User,
+            src_metadata: HashMap::new(),
+            dst_id: dst_id.to_string(),
+            dst_type: EntityType::Process,
+            dst_metadata: HashMap::new(),
+            rel_type: RelationType::Auth,
+            rel_metadata: HashMap::new(),
+            timestamp: ts,
+        }
     }
 
-    fn mk_batch(source_id: &str, triples: Vec<ParsedTriple>) -> ParsedBatch {
-        ParsedBatch::new(source_id, triples)
+    fn mk_batch(source_id: &str, events: Vec<RawIngestEvent>) -> ParsedBatch {
+        ParsedBatch::new(source_id, events)
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -33,7 +33,7 @@ pub type ParsedTriple = (Entity, Relation, Entity);
 /// Existing callers of `parse(&str) -> Vec<ParsedTriple>` continue to
 /// work unchanged — `parse_raw` has a default implementation that
 /// goes through `parse` and converts.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RawIngestEvent {
     pub src_id: String,
     pub src_type: EntityType,

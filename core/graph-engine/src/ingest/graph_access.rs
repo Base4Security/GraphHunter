@@ -37,7 +37,7 @@
 use async_trait::async_trait;
 
 use crate::errors::GraphError;
-use crate::parser::ParsedTriple;
+use crate::parser::{ParsedTriple, RawIngestEvent};
 
 /// Default chunk size for `GraphWriter` — the number of triples
 /// processed per write-lock acquisition. Small enough that readers
@@ -84,6 +84,47 @@ pub trait GraphAccess: Send + Sync {
         dataset_id: Option<&str>,
         chunk_size: usize,
     ) -> Result<usize, GraphError>;
+
+    /// Raw-event variant of [`insert_chunk`]. Inserts up to
+    /// `chunk_size` events from the front of `pending` via
+    /// `GraphHunter::insert_raw_events_chunk`. The streaming pipeline
+    /// uses this path; see plan §perf RawIngestEvent.
+    ///
+    /// Default impl lifts each event through `ParsedTriple` and
+    /// delegates to `insert_chunk` so existing implementors keep
+    /// working; production implementors should override to call
+    /// `insert_raw_events_chunk` directly and capture the alloc
+    /// savings.
+    async fn insert_raw_chunk(
+        &self,
+        pending: &mut Vec<RawIngestEvent>,
+        dataset_id: Option<&str>,
+        chunk_size: usize,
+    ) -> Result<usize, GraphError> {
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let n = pending.len().min(chunk_size);
+        let chunk: Vec<RawIngestEvent> = pending.drain(..n).collect();
+        let mut triples: Vec<ParsedTriple> = chunk
+            .into_iter()
+            .map(|ev| {
+                use crate::entity::Entity;
+                use crate::relation::Relation;
+                let mut src = Entity::new(ev.src_id, ev.src_type);
+                src.metadata = ev.src_metadata;
+                let mut dst = Entity::new(ev.dst_id, ev.dst_type);
+                dst.metadata = ev.dst_metadata;
+                let mut rel =
+                    Relation::new(&src.id, &dst.id, ev.rel_type, ev.timestamp);
+                rel.metadata = ev.rel_metadata;
+                (src, rel, dst)
+            })
+            .collect();
+        // Delegate via the legacy chunk path. `chunk_size` here is
+        // the full `n`; the chunk vec is already sized.
+        self.insert_chunk(&mut triples, dataset_id, n).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +178,19 @@ impl GraphAccess for InMemoryGraphAccess {
         }
         let mut guard = self.graph.lock().await;
         guard.insert_triples_chunk(pending, dataset_id, chunk_size)
+    }
+
+    async fn insert_raw_chunk(
+        &self,
+        pending: &mut Vec<RawIngestEvent>,
+        dataset_id: Option<&str>,
+        chunk_size: usize,
+    ) -> Result<usize, GraphError> {
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let mut guard = self.graph.lock().await;
+        guard.insert_raw_events_chunk(pending, dataset_id, chunk_size)
     }
 }
 

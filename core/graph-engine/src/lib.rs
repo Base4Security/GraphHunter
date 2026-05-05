@@ -87,7 +87,7 @@ pub type InMemoryGraph = graph::GraphHunter;
 pub use hypothesis::{AggClause, AggColumn, Hypothesis, HypothesisStep, Predicate};
 pub use interner::{InternerMetrics, StrId, StringInterner, StringInternerBackend};
 pub use metadata_store::MetadataStore;
-pub use parser::{LogParser, ParseStats, ParsedTriple};
+pub use parser::{LogParser, ParseStats, ParsedTriple, RawIngestEvent};
 pub use preview::{preview_generic_from_keys, preview_sentinel, preview_sysmon};
 pub use relation::{CompactRelation, Relation};
 pub use sentinel::SentinelJsonParser;
