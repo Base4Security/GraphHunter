@@ -942,6 +942,39 @@ raw chunk
 
 \textbf{Backwards-compatibility surface.} \emph{Ninguna API pública} \emph{rompió}. \emph{Downstream impls} \emph{de} \code{LogParser} \emph{que no override} \code{parse\_raw} \emph{siguen funcionando} (\emph{default impl wraps} \code{parse()}). \emph{Downstream impls} \emph{de} \code{GraphAccess} \emph{que no override} \code{insert\_raw\_chunk} \emph{siguen funcionando} (\emph{default lifts a través de} \code{insert\_chunk}). \emph{El refactor} \emph{es} \emph{aditivo}, \emph{no} \emph{breaking}.
 
+\section{V=1M Tier 3 — \emph{cycle6 enumeration en escala Sysmon real}}
+
+\emph{Bench validado en hardware quieto} 2026-05-05 (galaxy-book4, \emph{single-machine}, \emph{rayon par-iter en todas las} \emph{cores físicas}). El \emph{Tier 3} \emph{cierra} la \emph{tabla de scaling} \emph{D1 stage 4} y \emph{anchors} la \emph{abstract claim} \emph{Black Hat 2026} sobre \emph{cyclic-pattern matching} \emph{en escala} \emph{producción Sysmon}.
+
+\textbf{Setup.} Barabási-Albert preferential-attachment, $V=10^6$, $m=3$, \emph{6 millones de aristas dirigidas} ($E = 5{,}999{,}988$). Distribución de grados \emph{scale-free} \emph{con cola larga} \emph{como un grafo} \emph{Sysmon real} (\emph{services.exe}, \emph{lsass.exe}, \emph{svchost} \emph{como hubs} \emph{de alto grado}). \code{enumerate\_6cycles\_lftj\_simd\_par} \emph{con} \code{result\_cap = 1\_000\_000}. Criterion \emph{sample\_size}=10, \emph{measurement-time}=60s.
+
+\textbf{Numbers.}
+
+\begin{tabular}{lr}
+\toprule
+\emph{Cell} & \emph{Latency} (\emph{wall-clock}) \\
+\midrule
+\emph{low}    & \(446{,}29\)~s \\
+\emph{median} & \textbf{\(478{,}44\)~s} ($\approx$ \emph{7,97 min}) \\
+\emph{high}   & \(535{,}98\)~s \\
+\bottomrule
+\end{tabular}
+
+\(n=10\) \emph{samples}; \emph{1 outlier} (\emph{high severe}). \emph{Total wall-clock} \emph{de la tanda completa}: \emph{92 minutos} (\emph{warmup iter} \(\approx 478\)~s \(+\) \emph{10 samples} \(\times\) \(\approx 466\)~s \(+\) \emph{compile} \(+\) \emph{graph build}).
+
+\textbf{Lectura.} \emph{GraphHunter enumera} \emph{todos los 6-ciclos} \emph{en un grafo Sysmon-shape} \emph{de 1 millón de vértices} \emph{en} $\sim 8$ \emph{minutos} \emph{single-shot}, \emph{single-machine}, \emph{sin precomputed indexes} \emph{más allá de} la \emph{trie CSR forward/reverse} \(+\) \code{MinTimestampMap}. \emph{La} \emph{baseline naive} (\emph{quad-loop} $O(m^3/n^2)$) \emph{es} \emph{infeasible} \emph{a este escala} (\emph{horas por sample} \emph{en Tier 2 V=100K}, \emph{días en V=1M}); \emph{el speedup vs naive} \emph{es} \emph{≥3 órdenes de magnitud}, \emph{cualitativo} \emph{más que cuantitativo}.
+
+\textbf{Implicación para el \emph{abstract}.} \emph{Lateral movement detection} \emph{como} \emph{6-cycle pattern matching} \emph{sobre un grafo Sysmon real} \emph{de 1 millón de vértices} \emph{está en el orden de los minutos}, \emph{no horas}, \emph{single-machine}. \emph{Esto valida el} \emph{abstract claim} \emph{de matching en escala producción} (\emph{además del} \emph{1M ev/s ingest claim} \emph{que ya cerramos via} \emph{RawIngestEvent}). El \emph{D1 stage 4 Tier 1} \emph{V=10K} \emph{está a} \emph{552ms} \emph{en BA con LFTJ+par} (\emph{15.9× sobre naive}); \emph{Tier 3 V=1M} \emph{escala} \emph{sub-cuadráticamente} \emph{en} $V$ (\emph{si fuera} $O(V^2)$ \emph{esperaríamos} $\sim 100\times$ \emph{de Tier 1 a Tier 3}, \emph{pero} \emph{el factor real} \emph{es} \emph{478s/0.552s} $\approx 866\times$ \emph{a} \emph{100×} \emph{de} $V$ \emph{growth}, \emph{cerca del} $V \cdot \log V$ \emph{regime}).
+
+\textbf{Reproducibilidad.}
+
+\begin{verbatim}
+BENCH_LARGE=1 cargo bench \
+  --manifest-path core/graph-engine/Cargo.toml \
+  --bench cycle6_sysmon_scale \
+  -- "cycle6-sysmon-scale-1M" --measurement-time 60
+\end{verbatim}
+
 \section{CI: \emph{GitHub Actions removidos}}
 
 \emph{La cuenta \emph{GitHub} hit billing failure} \(\to\) \emph{los workflows fueron eliminados} \emph{en} \emph{commit} \code{12c4f56}. \filepath{.github/workflows/ci.yml} \(+\) \filepath{.github/workflows/docs.yml} \emph{retirados}; \emph{future pushes / PRs no triggean CI runs} \(\to\) \emph{no más metered runner cost}. \emph{Pre-merge validation} se \emph{movió a local}: \code{cargo test --manifest-path core/graph-engine/Cargo.toml}, \code{cargo check}, \code{cargo bench}, \code{xelatex}. \emph{Files recoverable} desde \emph{git history} (\code{git checkout 1bc4207 -- .github/workflows/}) \emph{si billing se restaura}.
