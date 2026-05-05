@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use graph_hunter_dsl::types::{EntityType, RelationType};
+
 use crate::drift::DriftSnapshot;
 use crate::entity::Entity;
 use crate::relation::Relation;
@@ -9,6 +11,59 @@ use crate::relation::Relation;
 /// A triple produced by parsing a single log event:
 /// (source entity, relation, destination entity).
 pub type ParsedTriple = (Entity, Relation, Entity);
+
+/// Flat representation of a single (src, rel, dst) triple emitted by a
+/// parser, sized to skip the Entity/Relation struct overhead that the
+/// legacy `ParsedTriple` carries.
+///
+/// Why: per process_create the legacy path allocates ~5 structs (2-3
+/// `Entity`, 1-2 `Relation`) plus a deep `child.clone()` of the
+/// child-process Entity (HashMap deep-copy). At 700K ev/s that's
+/// 3–4M struct allocations and a HashMap clone/sec — visible budget
+/// in the 1.5× gap between the parse-only ceiling (~1.05M ev/s) and
+/// the full ingest path (~700K ev/s).
+///
+/// `RawIngestEvent` keeps the data flat: each event is one triple,
+/// metadata is held on whichever side it belongs to, and there is no
+/// nested `Entity`/`Relation` struct or wrapper allocation. Parsers
+/// that want the perf path emit `Vec<RawIngestEvent>` directly via
+/// [`LogParser::parse_raw`]; the consumer is
+/// `GraphHunter::insert_raw_events`.
+///
+/// Existing callers of `parse(&str) -> Vec<ParsedTriple>` continue to
+/// work unchanged — `parse_raw` has a default implementation that
+/// goes through `parse` and converts.
+#[derive(Clone, Debug)]
+pub struct RawIngestEvent {
+    pub src_id: String,
+    pub src_type: EntityType,
+    pub src_metadata: HashMap<String, String>,
+    pub dst_id: String,
+    pub dst_type: EntityType,
+    pub dst_metadata: HashMap<String, String>,
+    pub rel_type: RelationType,
+    pub rel_metadata: HashMap<String, String>,
+    pub timestamp: i64,
+}
+
+impl RawIngestEvent {
+    /// Lift a legacy `ParsedTriple` into the flat shape. Used by the
+    /// default `LogParser::parse_raw` implementation so parsers that
+    /// haven't been migrated still flow through the new ingest path.
+    pub fn from_parsed_triple((src, rel, dst): ParsedTriple) -> Self {
+        Self {
+            src_id: src.id,
+            src_type: src.entity_type,
+            src_metadata: src.metadata,
+            dst_id: dst.id,
+            dst_type: dst.entity_type,
+            dst_metadata: dst.metadata,
+            rel_type: rel.rel_type,
+            rel_metadata: rel.metadata,
+            timestamp: rel.timestamp,
+        }
+    }
+}
 
 /// Aggregate per-ingest parsing statistics. Populated by parsers that
 /// override [`LogParser::parse_with_stats`]. The default implementation
@@ -102,5 +157,16 @@ pub trait LogParser: Send + Sync {
     /// warning.
     fn parse_with_stats(&self, data: &str) -> (Vec<ParsedTriple>, ParseStats) {
         (self.parse(data), ParseStats::default())
+    }
+
+    /// Like [`parse`] but emits flat [`RawIngestEvent`]s, one per
+    /// triple. Default implementation delegates to `parse` and lifts
+    /// each tuple — parsers that want the allocation savings must
+    /// override.
+    fn parse_raw(&self, data: &str) -> Vec<RawIngestEvent> {
+        self.parse(data)
+            .into_iter()
+            .map(RawIngestEvent::from_parsed_triple)
+            .collect()
     }
 }

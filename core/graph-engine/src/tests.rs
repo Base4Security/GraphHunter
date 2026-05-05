@@ -955,6 +955,52 @@ fn sysmon_parse_event1_process_create() {
     assert_eq!(rel.timestamp, 1705329000);
 }
 
+#[test]
+fn sysmon_eid1_raw_path_parity_with_legacy() {
+    // Fixture: NDJSON with multiple EventID-1 lines that share entity
+    // ids — exercises the dst_metadata-skipped-on-second-emission
+    // optimization in `typed_process_create_raw` plus the writer's
+    // `insert_raw_events` path. Resulting graph (entity count, relation
+    // count, type tags, metadata) must match the legacy path exactly.
+    let ndjson = r#"{"EventID":1,"UtcTime":"2024-01-15 14:30:00.000","Image":"C:\\Windows\\cmd.exe","User":"alice","Computer":"H1","ProcessId":100,"ParentImage":"C:\\Windows\\explorer.exe","ParentProcessId":50}
+{"EventID":1,"UtcTime":"2024-01-15 14:30:01.000","Image":"C:\\Windows\\cmd.exe","User":"alice","Computer":"H1","ProcessId":101,"ParentImage":"C:\\Windows\\explorer.exe","ParentProcessId":50}
+{"EventID":1,"UtcTime":"2024-01-15 14:30:02.000","Image":"C:\\Windows\\powershell.exe","User":"bob","Computer":"H2","ProcessId":200,"ParentImage":"C:\\Windows\\cmd.exe","ParentProcessId":100}"#;
+
+    let parser = SysmonJsonParser;
+
+    let mut g_legacy = GraphHunter::new();
+    let triples = parser.parse(ndjson);
+    g_legacy.insert_triples(triples, None).unwrap();
+
+    let mut g_raw = GraphHunter::new();
+    let events = parser.parse_raw(ndjson);
+    g_raw.insert_raw_events(events, None).unwrap();
+
+    assert_eq!(
+        g_legacy.entities.len(),
+        g_raw.entities.len(),
+        "entity count diverged"
+    );
+    assert_eq!(
+        g_legacy.relation_count(),
+        g_raw.relation_count(),
+        "relation count diverged"
+    );
+    for (sid, legacy_ent) in g_legacy.entities.iter() {
+        let raw_ent = g_raw
+            .entities
+            .get(sid)
+            .expect("raw graph missing entity present in legacy");
+        assert_eq!(legacy_ent.id, raw_ent.id);
+        assert_eq!(legacy_ent.entity_type, raw_ent.entity_type);
+        assert_eq!(
+            legacy_ent.metadata, raw_ent.metadata,
+            "metadata diverged for {}",
+            legacy_ent.id
+        );
+    }
+}
+
 // ── Sysmon Event 3: Network Connection ──
 
 #[test]

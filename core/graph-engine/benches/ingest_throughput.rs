@@ -357,6 +357,61 @@ fn bench_ingest(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    // Raw-event vs legacy comparison on the all-EventID-1 fixture
+    // (process_create — the only EventID with a raw-path
+    // implementation today). Group covers parse-only and the full
+    // parse+insert end-to-end so the writer-side savings are visible.
+    {
+        let mut group = c.benchmark_group("ingest-eid1-raw-vs-legacy-parse");
+        for n in &[1_000usize, 10_000, 50_000] {
+            let payload = synth_sysmon_ndjson(*n);
+            group.throughput(Throughput::Elements(*n as u64));
+            group.bench_with_input(BenchmarkId::new("legacy", n), n, |b, _| {
+                b.iter(|| {
+                    let parser = SysmonJsonParser;
+                    let triples = parser.parse(black_box(&payload));
+                    black_box(triples)
+                });
+            });
+            group.bench_with_input(BenchmarkId::new("raw", n), n, |b, _| {
+                b.iter(|| {
+                    let parser = SysmonJsonParser;
+                    let events = parser.parse_raw(black_box(&payload));
+                    black_box(events)
+                });
+            });
+        }
+        group.finish();
+    }
+
+    {
+        use graph_hunter_core::GraphHunter;
+        let mut group = c.benchmark_group("ingest-eid1-raw-vs-legacy-end-to-end");
+        for n in &[1_000usize, 10_000, 50_000] {
+            let payload = synth_sysmon_ndjson(*n);
+            group.throughput(Throughput::Elements(*n as u64));
+            group.bench_with_input(BenchmarkId::new("legacy", n), n, |b, _| {
+                b.iter(|| {
+                    let parser = SysmonJsonParser;
+                    let triples = parser.parse(black_box(&payload));
+                    let mut g = GraphHunter::new();
+                    let _ = g.insert_triples(triples, None);
+                    black_box(g)
+                });
+            });
+            group.bench_with_input(BenchmarkId::new("raw", n), n, |b, _| {
+                b.iter(|| {
+                    let parser = SysmonJsonParser;
+                    let events = parser.parse_raw(black_box(&payload));
+                    let mut g = GraphHunter::new();
+                    let _ = g.insert_raw_events(events, None);
+                    black_box(g)
+                });
+            });
+        }
+        group.finish();
+    }
 }
 
 criterion_group!(benches, bench_ingest);

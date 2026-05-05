@@ -2978,6 +2978,93 @@ impl GraphHunter {
         Ok((new_entities, new_relations))
     }
 
+    /// Like [`insert_triples`] but consumes the flat
+    /// [`crate::parser::RawIngestEvent`] form, skipping the
+    /// `Entity`/`Relation` struct allocation that the legacy path
+    /// pays per-triple in the parser. The `Entity` is materialized
+    /// only when the source/dest is genuinely new in this graph;
+    /// otherwise we just merge metadata into the existing record.
+    pub fn insert_raw_events(
+        &mut self,
+        events: Vec<crate::parser::RawIngestEvent>,
+        dataset_id: Option<&str>,
+    ) -> Result<(usize, usize), GraphError> {
+        let merge_policy = MergePolicy::default();
+        let mut new_entities = 0usize;
+        let mut new_relations = 0usize;
+        let ds: Option<Arc<str>> = dataset_id.map(Arc::from);
+        let ds_tag = self.intern_dataset_tag(dataset_id);
+
+        for ev in events {
+            let crate::parser::RawIngestEvent {
+                src_id,
+                src_type,
+                src_metadata,
+                dst_id,
+                dst_type,
+                dst_metadata,
+                rel_type,
+                rel_metadata,
+                timestamp,
+            } = ev;
+
+            let src_sid = self.interner.intern(&src_id);
+            if let Some(existing) = self.entities.get_mut(&src_sid) {
+                Self::merge_metadata(&mut existing.metadata, &src_metadata, &merge_policy);
+            } else {
+                let mut entity = Entity::new(src_id.clone(), src_type.clone());
+                entity.metadata = src_metadata;
+                if let Some(ref id) = ds {
+                    entity.dataset_id = Some(Arc::clone(id));
+                }
+                self.set_entity_type_tag(src_sid, &src_type);
+                self.entities.insert(src_sid, entity);
+                self.type_index.entry(src_type).or_default().insert(src_sid);
+                self.reverse_adj.entry(src_sid).or_default();
+                new_entities += 1;
+            }
+
+            let dst_sid = self.interner.intern(&dst_id);
+            if let Some(existing) = self.entities.get_mut(&dst_sid) {
+                Self::merge_metadata(&mut existing.metadata, &dst_metadata, &merge_policy);
+            } else {
+                let mut entity = Entity::new(dst_id.clone(), dst_type.clone());
+                entity.metadata = dst_metadata;
+                if let Some(ref id) = ds {
+                    entity.dataset_id = Some(Arc::clone(id));
+                }
+                self.set_entity_type_tag(dst_sid, &dst_type);
+                self.entities.insert(dst_sid, entity);
+                self.type_index.entry(dst_type).or_default().insert(dst_sid);
+                self.reverse_adj.entry(dst_sid).or_default();
+                new_entities += 1;
+            }
+
+            if let Some(ref mut scorer) = self.anomaly_scorer {
+                scorer.observe_entity(&src_id, timestamp);
+                scorer.observe_entity(&dst_id, timestamp);
+                scorer.observe_edge(&src_id, &dst_id);
+            }
+
+            let meta_offset = self.meta_store.append(&rel_metadata);
+            let compact = CompactRelation {
+                source_sid: src_sid,
+                dest_sid: dst_sid,
+                rel_type_tag: rel_type.to_u8(),
+                timestamp,
+                metadata_offset: meta_offset,
+                dataset_tag: ds_tag,
+                ingested_at_delta: 0,
+            };
+
+            self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
+            self.push_to_streaming(&compact);
+            new_relations += 1;
+        }
+
+        Ok((new_entities, new_relations))
+    }
+
     /// Enables anomaly scoring with backfilling from existing data.
     pub fn enable_anomaly_scoring(&mut self, weights: ScoringWeights) {
         let mut scorer = AnomalyScorer::new(weights);

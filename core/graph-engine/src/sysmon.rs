@@ -1025,6 +1025,30 @@ impl SysmonJsonParser {
         }
     }
 
+    /// Mirrors `try_parse_typed_with_scratch` but emits
+    /// `RawIngestEvent`s for the EventIDs that have a raw-path
+    /// implementation. For unmigrated IDs returns `None` so the
+    /// caller can fall back to the legacy path + lift.
+    fn try_parse_typed_raw_with_scratch(
+        line: &str,
+        scratch: &mut Vec<u8>,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        scratch.clear();
+        scratch.extend_from_slice(line.as_bytes());
+        let event: SysmonEventTyped<'_> = simd_json::serde::from_slice(scratch).ok()?;
+        let event_id = event.event_id?;
+        let timestamp = event
+            .utc_time
+            .or(event.event_time)
+            .or(event.timestamp_at)
+            .and_then(Self::parse_timestamp)
+            .unwrap_or(0);
+        match event_id {
+            1 => Self::typed_process_create_raw(&event, timestamp),
+            _ => None,
+        }
+    }
+
     fn try_parse_typed_with_scratch(
         line: &str,
         scratch: &mut Vec<u8>,
@@ -1060,6 +1084,77 @@ impl SysmonJsonParser {
             4104 => Self::typed_powershell_script_block(&event, timestamp),
             _ => None,
         }
+    }
+
+    /// Raw-event variant of `typed_process_create`. Skips the
+    /// `Entity`/`Relation` struct + nested HashMap allocations the
+    /// legacy path pays per-event. Critically, when both the user
+    /// and parent triples are emitted, the child-process metadata
+    /// is populated only on the first event — the writer's
+    /// `merge_metadata` already deduplicates by entity id, so the
+    /// second event can carry an empty `dst_metadata` and skip the
+    /// HashMap deep-clone the legacy `child.clone()` performed.
+    #[inline]
+    fn typed_process_create_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+
+        let image = event.image?;
+        let mut events = Vec::with_capacity(2);
+
+        let mut child_metadata: HashMap<String, String> = HashMap::new();
+        if let Some(pid) = event.process_id {
+            child_metadata.insert("pid".into(), pid.to_string());
+        }
+        if let Some(cmd) = event.command_line {
+            child_metadata.insert("cmdline".into(), cmd.into());
+        }
+        if let Some(comp) = event.computer {
+            child_metadata.insert("computer".into(), comp.into());
+        }
+
+        let mut child_meta_consumed = false;
+        if let Some(user_name) = event.user {
+            let dst_meta = std::mem::take(&mut child_metadata);
+            child_meta_consumed = true;
+            events.push(RawIngestEvent {
+                src_id: user_name.into(),
+                src_type: EntityType::User,
+                src_metadata: HashMap::new(),
+                dst_id: image.into(),
+                dst_type: EntityType::Process,
+                dst_metadata: dst_meta,
+                rel_type: RelationType::Execute,
+                rel_metadata: HashMap::new(),
+                timestamp,
+            });
+        }
+        if let Some(parent_image) = event.parent_image {
+            let mut parent_meta: HashMap<String, String> = HashMap::new();
+            if let Some(ppid) = event.parent_process_id {
+                parent_meta.insert("pid".into(), ppid.to_string());
+            }
+            let dst_meta = if child_meta_consumed {
+                HashMap::new()
+            } else {
+                std::mem::take(&mut child_metadata)
+            };
+            events.push(RawIngestEvent {
+                src_id: parent_image.into(),
+                src_type: EntityType::Process,
+                src_metadata: parent_meta,
+                dst_id: image.into(),
+                dst_type: EntityType::Process,
+                dst_metadata: dst_meta,
+                rel_type: RelationType::Spawn,
+                rel_metadata: HashMap::new(),
+                timestamp,
+            });
+        }
+        Some(events)
     }
 
     #[inline]
@@ -1533,5 +1628,58 @@ impl LogParser for SysmonJsonParser {
     fn parse_with_stats(&self, data: &str) -> (Vec<ParsedTriple>, crate::parser::ParseStats) {
         let events = Self::collect_events(data);
         crate::generic::parse_events_with_stats(&events, |ev| Self::parse_event(ev))
+    }
+
+    /// Raw-event override: NDJSON-only fast path that emits
+    /// `RawIngestEvent`s for the migrated EventIDs (currently only
+    /// EventID 1). Lines that miss the raw path fall through to the
+    /// legacy `try_parse_typed_with_scratch` and are lifted into
+    /// `RawIngestEvent` via `from_parsed_triple`.
+    fn parse_raw(&self, data: &str) -> Vec<crate::parser::RawIngestEvent> {
+        use rayon::prelude::*;
+        let trimmed = data.trim();
+
+        // JSON-array path: rare for ingest; just delegate via the
+        // default lift-from-parse path.
+        if trimmed.starts_with('[') {
+            return self
+                .parse(data)
+                .into_iter()
+                .map(crate::parser::RawIngestEvent::from_parsed_triple)
+                .collect();
+        }
+
+        trimmed
+            .par_lines()
+            .filter(|l| !l.trim().is_empty())
+            .map_init(
+                || Vec::<u8>::with_capacity(2048),
+                |scratch, line| {
+                    if let Some(events) = Self::try_parse_typed_raw_with_scratch(line, scratch) {
+                        return events;
+                    }
+                    if let Some(triples) = Self::try_parse_typed_with_scratch(line, scratch) {
+                        return triples
+                            .into_iter()
+                            .map(crate::parser::RawIngestEvent::from_parsed_triple)
+                            .collect();
+                    }
+                    scratch.clear();
+                    scratch.extend_from_slice(line.as_bytes());
+                    let event = simd_json::serde::from_slice::<Value>(scratch)
+                        .ok()
+                        .or_else(|| serde_json::from_str(line).ok());
+                    event
+                        .map(|e| {
+                            Self::parse_event(&e)
+                                .into_iter()
+                                .map(crate::parser::RawIngestEvent::from_parsed_triple)
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                },
+            )
+            .flat_map_iter(|v: Vec<crate::parser::RawIngestEvent>| v.into_iter())
+            .collect()
     }
 }
