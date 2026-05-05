@@ -1,5 +1,4 @@
 use chrono::NaiveDateTime;
-use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
 
