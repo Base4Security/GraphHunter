@@ -91,6 +91,72 @@ struct SysmonEventTyped<'a> {
     // Event 15 — File Stream Hash (single Hash, not Hashes).
     #[serde(rename = "Hash", default, borrow)]
     hash_single: Option<&'a str>,
+    // Windows Security 4624 / 4625 — logon.
+    #[serde(rename = "TargetUserName", default, borrow)]
+    target_user_name: Option<&'a str>,
+    #[serde(rename = "TargetDomainName", default, borrow)]
+    target_domain_name: Option<&'a str>,
+    #[serde(rename = "LogonType", default)]
+    logon_type: Option<LogonTypeField<'a>>,
+    #[serde(rename = "IpAddress", default, borrow)]
+    ip_address: Option<&'a str>,
+    // Windows Security 4688 — security process create. Distinct from
+    // Sysmon's Image / User: Windows Security uses NewProcessName /
+    // SubjectUserName / SubjectDomainName / ParentProcessName.
+    #[serde(rename = "NewProcessName", default, borrow)]
+    new_process_name: Option<&'a str>,
+    #[serde(rename = "SubjectUserName", default, borrow)]
+    subject_user_name: Option<&'a str>,
+    #[serde(rename = "SubjectDomainName", default, borrow)]
+    subject_domain_name: Option<&'a str>,
+    #[serde(rename = "ParentProcessName", default, borrow)]
+    parent_process_name: Option<&'a str>,
+    // Windows Security 4689 / 4663.
+    #[serde(rename = "ProcessName", default, borrow)]
+    process_name: Option<&'a str>,
+    #[serde(rename = "ObjectName", default, borrow)]
+    object_name: Option<&'a str>,
+    #[serde(rename = "ObjectType", default, borrow)]
+    object_type: Option<&'a str>,
+    // Windows Security 5145 — network share.
+    #[serde(rename = "ShareName", default, borrow)]
+    share_name: Option<&'a str>,
+    #[serde(rename = "RelativeTargetName", default, borrow)]
+    relative_target_name: Option<&'a str>,
+    // Windows Security 5156 — WFP connection.
+    #[serde(rename = "Application", default, borrow)]
+    application: Option<&'a str>,
+    #[serde(rename = "DestAddress", default, borrow)]
+    dest_address: Option<&'a str>,
+    #[serde(rename = "DestPort", default, borrow)]
+    dest_port: Option<&'a str>,
+    #[serde(rename = "SourceAddress", default, borrow)]
+    source_address: Option<&'a str>,
+    // PowerShell 4104 — script block.
+    #[serde(rename = "ScriptBlockText", default, borrow)]
+    script_block_text: Option<&'a str>,
+    #[serde(rename = "ScriptBlockId", default, borrow)]
+    script_block_id: Option<&'a str>,
+}
+
+/// LogonType in Windows Security 4624/4625 can be either an integer
+/// (the canonical EVTX format, `2` = Interactive, `3` = Network, …)
+/// or a string (some Sentinel exports stringify it as `"3"`). Untagged
+/// serde enum lets simd-json accept either without a Value detour.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LogonTypeField<'a> {
+    Int(i64),
+    Str(&'a str),
+}
+
+impl LogonTypeField<'_> {
+    fn as_string(&self) -> String {
+        match self {
+            LogonTypeField::Int(n) => n.to_string(),
+            LogonTypeField::Str(s) => (*s).to_string(),
+        }
+    }
 }
 
 /// Parser for Sysmon, Windows Security, PowerShell, and Winlogbeat events exported as JSON.
@@ -964,6 +1030,15 @@ impl SysmonJsonParser {
             12 | 13 => Self::typed_registry_event(&event, timestamp),
             15 => Self::typed_file_stream_hash(&event, timestamp),
             23 => Self::typed_file_delete(&event, timestamp),
+            // Windows Security.
+            4624 | 4625 => Self::typed_security_logon(&event, event_id, timestamp),
+            4688 => Self::typed_security_process_create(&event, timestamp),
+            4689 => Self::typed_security_process_terminated(&event, timestamp),
+            4663 => Self::typed_security_object_access(&event, timestamp),
+            5145 => Self::typed_security_network_share(&event, timestamp),
+            5156 => Self::typed_security_wfp_connection(&event, timestamp),
+            // PowerShell.
+            4104 => Self::typed_powershell_script_block(&event, timestamp),
             _ => None,
         }
     }
@@ -1171,6 +1246,184 @@ impl SysmonJsonParser {
         }
         let rel = Relation::new(&process.id, &file.id, RelationType::Delete, timestamp);
         Some(vec![(process, rel, file)])
+    }
+
+    /// Helper: build `DOMAIN\user` from an optional domain + user.
+    /// Empty / `-` domain falls back to bare username (matches the
+    /// legacy `parse_security_*` semantics).
+    #[inline]
+    fn build_user_id(user: &str, domain: Option<&str>) -> String {
+        match domain {
+            Some(d) if !d.is_empty() && !d.eq_ignore_ascii_case("-") => {
+                format!("{}\\{}", d, user)
+            }
+            _ => user.to_string(),
+        }
+    }
+
+    #[inline]
+    fn typed_security_logon(
+        event: &SysmonEventTyped<'_>,
+        event_id: u64,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let user_name = event.target_user_name?;
+        let user_id = Self::build_user_id(user_name, event.target_domain_name);
+        let host_name = event
+            .computer
+            .or(event.hostname)
+            .unwrap_or("unknown-host");
+        let user = Entity::new(&user_id, EntityType::User);
+        let host = Entity::new(host_name, EntityType::Host);
+        let mut rel = Relation::new(&user.id, &host.id, RelationType::Auth, timestamp);
+        if let Some(lt) = &event.logon_type {
+            let s = lt.as_string();
+            if !s.is_empty() {
+                rel.metadata.insert("logon_type".into(), s);
+            }
+        }
+        if let Some(ip) = event.ip_address {
+            if ip != "-" {
+                rel.metadata.insert("ip_address".into(), ip.into());
+            }
+        }
+        if event_id == 4625 {
+            rel.metadata.insert("success".into(), "false".into());
+        }
+        Some(vec![(user, rel, host)])
+    }
+
+    #[inline]
+    fn typed_security_process_create(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let new_process = event.new_process_name?;
+        let mut triples = Vec::with_capacity(2);
+        let mut child = Entity::new(new_process, EntityType::Process);
+        if let Some(cmd) = event.command_line {
+            child.metadata.insert("cmdline".into(), cmd.into());
+        }
+        if let Some(comp) = event.computer.or(event.hostname) {
+            child.metadata.insert("computer".into(), comp.into());
+        }
+        if let Some(user_name) = event.subject_user_name {
+            let user_id = Self::build_user_id(user_name, event.subject_domain_name);
+            let user = Entity::new(&user_id, EntityType::User);
+            let rel = Relation::new(&user.id, &child.id, RelationType::Execute, timestamp);
+            triples.push((user, rel, child.clone()));
+        }
+        if let Some(parent_name) = event.parent_process_name {
+            let parent = Entity::new(parent_name, EntityType::Process);
+            let rel = Relation::new(&parent.id, &child.id, RelationType::Spawn, timestamp);
+            triples.push((parent, rel, child));
+        }
+        Some(triples)
+    }
+
+    #[inline]
+    fn typed_security_process_terminated(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let process_name = event.process_name?;
+        let host_name = event
+            .computer
+            .or(event.hostname)
+            .unwrap_or("unknown-host");
+        let process = Entity::new(process_name, EntityType::Process);
+        let host = Entity::new(host_name, EntityType::Host);
+        let rel = Relation::new(&process.id, &host.id, RelationType::Delete, timestamp);
+        Some(vec![(process, rel, host)])
+    }
+
+    #[inline]
+    fn typed_security_object_access(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let process_name = event.process_name?;
+        let object_name = event.object_name?;
+        let process = Entity::new(process_name, EntityType::Process);
+        let target = if event.object_type == Some("Key") {
+            Entity::new(object_name, EntityType::Registry)
+        } else {
+            Entity::new(object_name, EntityType::File)
+        };
+        let rel = Relation::new(&process.id, &target.id, RelationType::Read, timestamp);
+        Some(vec![(process, rel, target)])
+    }
+
+    #[inline]
+    fn typed_security_network_share(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let user_name = event.subject_user_name?;
+        let share_name = event.share_name.unwrap_or("");
+        let relative_target = event.relative_target_name.unwrap_or("");
+        let path = if !share_name.is_empty() && !relative_target.is_empty() {
+            format!("{}\\{}", share_name, relative_target)
+        } else if !share_name.is_empty() {
+            share_name.to_string()
+        } else {
+            return None;
+        };
+        let user_id = Self::build_user_id(user_name, event.subject_domain_name);
+        let user = Entity::new(&user_id, EntityType::User);
+        let mut file = Entity::new(&path, EntityType::File);
+        if let Some(ip) = event.ip_address {
+            file.metadata.insert("ip_address".into(), ip.into());
+        }
+        let rel = Relation::new(&user.id, &file.id, RelationType::Read, timestamp);
+        Some(vec![(user, rel, file)])
+    }
+
+    #[inline]
+    fn typed_security_wfp_connection(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let application = event.application?;
+        let dest_addr = event.dest_address?;
+        let process = Entity::new(application, EntityType::Process);
+        let mut ip = Entity::new(dest_addr, EntityType::IP);
+        if let Some(s) = event.dest_port {
+            ip.metadata.insert("dest_port".into(), s.into());
+        }
+        if let Some(s) = event.source_port {
+            ip.metadata.insert("source_port".into(), s.into());
+        }
+        if let Some(s) = event.protocol {
+            ip.metadata.insert("protocol".into(), s.into());
+        }
+        let mut rel = Relation::new(&process.id, &ip.id, RelationType::Connect, timestamp);
+        if let Some(s) = event.source_address {
+            rel.metadata.insert("source_address".into(), s.into());
+        }
+        Some(vec![(process, rel, ip)])
+    }
+
+    #[inline]
+    fn typed_powershell_script_block(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let host_name = event
+            .computer
+            .or(event.hostname)
+            .unwrap_or("unknown-host");
+        let host = Entity::new(host_name, EntityType::Host);
+        let mut process = Entity::new("powershell.exe", EntityType::Process);
+        if let Some(script_text) = event.script_block_text {
+            let preview: String = script_text.chars().take(200).collect();
+            process.metadata.insert("script_preview".into(), preview);
+        }
+        if let Some(sbid) = event.script_block_id {
+            process.metadata.insert("script_block_id".into(), sbid.into());
+        }
+        let rel = Relation::new(&host.id, &process.id, RelationType::Execute, timestamp);
+        Some(vec![(host, rel, process)])
     }
 
     /// Decodes the input into a `Vec<Value>` using the same JSON-array +
