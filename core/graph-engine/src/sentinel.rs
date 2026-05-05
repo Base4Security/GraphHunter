@@ -569,6 +569,432 @@ impl SentinelJsonParser {
 }
 
 impl SentinelJsonParser {
+    /// Raw-event dispatch — mirrors `parse_event` but emits
+    /// `RawIngestEvent` directly without going through the
+    /// `(Entity, Relation, Entity)` tuple.
+    fn parse_event_raw(event: &Value) -> Vec<crate::parser::RawIngestEvent> {
+        match Self::detect_table(event) {
+            SentinelTable::SecurityEvent => Self::parse_security_event_raw(event),
+            SentinelTable::SigninLogs => Self::parse_signin_logs_raw(event),
+            SentinelTable::DeviceProcessEvents => Self::parse_device_process_events_raw(event),
+            SentinelTable::DeviceNetworkEvents => Self::parse_device_network_events_raw(event),
+            SentinelTable::DeviceFileEvents => Self::parse_device_file_events_raw(event),
+            SentinelTable::CommonSecurityLog => Self::parse_common_security_log_raw(event),
+            SentinelTable::Unknown => Vec::new(),
+        }
+    }
+
+    fn parse_security_event_raw(event: &Value) -> Vec<crate::parser::RawIngestEvent> {
+        let event_id = match Self::extract_event_id(event) {
+            Some(id) => id,
+            None => return Vec::new(),
+        };
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
+        match event_id {
+            4624 | 4625 => Self::parse_security_event_auth_raw(event, timestamp, event_id),
+            4688 => Self::parse_security_event_process_raw(event, timestamp),
+            4663 => Self::parse_security_event_file_access_raw(event, timestamp),
+            _ => Vec::new(),
+        }
+    }
+
+    fn parse_security_event_auth_raw(
+        event: &Value,
+        timestamp: i64,
+        event_id: u64,
+    ) -> Vec<crate::parser::RawIngestEvent> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let account = Self::extract_str(event, "TargetUserName")
+            .or_else(|| Self::extract_str(event, "Account"));
+        let computer = Self::extract_str(event, "Computer");
+        let (account, computer) = match (account, computer) {
+            (Some(a), Some(c)) => (a, c),
+            _ => return Vec::new(),
+        };
+        let mut host_meta: HashMap<String, String> = HashMap::new();
+        if let Some(ip) = Self::extract_str(event, "IpAddress") {
+            host_meta.insert("source_ip".into(), ip.into());
+        }
+        let status = if event_id == 4624 { "Success" } else { "Failure" };
+        let mut rel_meta: HashMap<String, String> = HashMap::new();
+        rel_meta.insert("event_id".into(), event_id.to_string());
+        rel_meta.insert("status".into(), status.into());
+        if let Some(logon_type) = event.get("LogonType").and_then(|v| {
+            v.as_u64()
+                .map(|n| n.to_string())
+                .or_else(|| v.as_str().map(|s| s.to_string()))
+        }) {
+            rel_meta.insert("logon_type".into(), logon_type);
+        }
+        vec![RawIngestEvent {
+            src_id: account.into(),
+            src_type: EntityType::User,
+            src_metadata: HashMap::new(),
+            dst_id: computer.into(),
+            dst_type: EntityType::Host,
+            dst_metadata: host_meta,
+            rel_type: RelationType::Auth,
+            rel_metadata: rel_meta,
+            timestamp,
+        }]
+    }
+
+    fn parse_security_event_process_raw(
+        event: &Value,
+        timestamp: i64,
+    ) -> Vec<crate::parser::RawIngestEvent> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let process_name = match Self::extract_str(event, "NewProcessName")
+            .or_else(|| Self::extract_str(event, "Process"))
+        {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let mut child_meta: HashMap<String, String> = HashMap::new();
+        if let Some(pid) = event.get("NewProcessId").and_then(|v| {
+            v.as_u64()
+                .map(|n| n.to_string())
+                .or_else(|| v.as_str().map(|s| s.to_string()))
+        }) {
+            child_meta.insert("pid".into(), pid);
+        }
+        if let Some(cmdline) = Self::extract_str(event, "CommandLine") {
+            child_meta.insert("cmdline".into(), cmdline.into());
+        }
+        if let Some(computer) = Self::extract_str(event, "Computer") {
+            child_meta.insert("computer".into(), computer.into());
+        }
+
+        let mut events = Vec::with_capacity(2);
+        let mut child_meta_consumed = false;
+        if let Some(account) = Self::extract_str(event, "SubjectUserName")
+            .or_else(|| Self::extract_str(event, "Account"))
+        {
+            let dst_meta = std::mem::take(&mut child_meta);
+            child_meta_consumed = true;
+            events.push(RawIngestEvent {
+                src_id: account.into(),
+                src_type: EntityType::User,
+                src_metadata: HashMap::new(),
+                dst_id: process_name.into(),
+                dst_type: EntityType::Process,
+                dst_metadata: dst_meta,
+                rel_type: RelationType::Execute,
+                rel_metadata: HashMap::new(),
+                timestamp,
+            });
+        }
+        if let Some(parent_name) = Self::extract_str(event, "ParentProcessName") {
+            let dst_meta = if child_meta_consumed {
+                HashMap::new()
+            } else {
+                std::mem::take(&mut child_meta)
+            };
+            events.push(RawIngestEvent {
+                src_id: parent_name.into(),
+                src_type: EntityType::Process,
+                src_metadata: HashMap::new(),
+                dst_id: process_name.into(),
+                dst_type: EntityType::Process,
+                dst_metadata: dst_meta,
+                rel_type: RelationType::Execute,
+                rel_metadata: HashMap::new(),
+                timestamp,
+            });
+        }
+        events
+    }
+
+    fn parse_security_event_file_access_raw(
+        event: &Value,
+        timestamp: i64,
+    ) -> Vec<crate::parser::RawIngestEvent> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let process = match Self::extract_str(event, "ProcessName") {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let object = match Self::extract_str(event, "ObjectName") {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        vec![RawIngestEvent {
+            src_id: process.into(),
+            src_type: EntityType::Process,
+            src_metadata: HashMap::new(),
+            dst_id: object.into(),
+            dst_type: EntityType::File,
+            dst_metadata: HashMap::new(),
+            rel_type: RelationType::Read,
+            rel_metadata: HashMap::new(),
+            timestamp,
+        }]
+    }
+
+    fn parse_signin_logs_raw(event: &Value) -> Vec<crate::parser::RawIngestEvent> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
+        let user = match Self::extract_str(event, "UserPrincipalName")
+            .or_else(|| Self::extract_str(event, "UserDisplayName"))
+        {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let ip = match Self::extract_str(event, "IPAddress") {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let mut ip_meta: HashMap<String, String> = HashMap::new();
+        if let Some(app) = Self::extract_str(event, "AppDisplayName") {
+            ip_meta.insert("app".into(), app.into());
+        }
+        if let Some(loc) = Self::extract_str(event, "LocationDetails") {
+            ip_meta.insert("location".into(), loc.into());
+        }
+        if let Some(loc) = Self::extract_str(event, "Location") {
+            ip_meta.insert("location".into(), loc.into());
+        }
+        let mut rel_meta: HashMap<String, String> = HashMap::new();
+        if let Some(status) = event.get("ResultType").and_then(|v| {
+            v.as_u64()
+                .map(|n| n.to_string())
+                .or_else(|| v.as_str().map(|s| s.to_string()))
+        }) {
+            let status_str = if status == "0" { "Success" } else { "Failure" };
+            rel_meta.insert("status".into(), status_str.into());
+        }
+        if let Some(app) = Self::extract_str(event, "AppDisplayName") {
+            rel_meta.insert("app".into(), app.into());
+        }
+        vec![RawIngestEvent {
+            src_id: user.into(),
+            src_type: EntityType::User,
+            src_metadata: HashMap::new(),
+            dst_id: ip.into(),
+            dst_type: EntityType::IP,
+            dst_metadata: ip_meta,
+            rel_type: RelationType::Auth,
+            rel_metadata: rel_meta,
+            timestamp,
+        }]
+    }
+
+    fn parse_device_process_events_raw(event: &Value) -> Vec<crate::parser::RawIngestEvent> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
+        let file_name = match Self::extract_str(event, "FileName") {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let process_id = Self::extract_str(event, "FolderPath").unwrap_or(file_name);
+
+        let mut child_meta: HashMap<String, String> = HashMap::new();
+        if let Some(cmdline) = Self::extract_str(event, "ProcessCommandLine") {
+            child_meta.insert("cmdline".into(), cmdline.into());
+        }
+        if let Some(device) = Self::extract_str(event, "DeviceName") {
+            child_meta.insert("device".into(), device.into());
+        }
+        if let Some(sha256) = Self::extract_str(event, "SHA256") {
+            child_meta.insert("sha256".into(), sha256.into());
+        }
+
+        let mut events = Vec::with_capacity(2);
+        let mut child_meta_consumed = false;
+        if let Some(account) = Self::extract_str(event, "AccountName")
+            .or_else(|| Self::extract_str(event, "InitiatingProcessAccountName"))
+        {
+            let dst_meta = std::mem::take(&mut child_meta);
+            child_meta_consumed = true;
+            events.push(RawIngestEvent {
+                src_id: account.into(),
+                src_type: EntityType::User,
+                src_metadata: HashMap::new(),
+                dst_id: process_id.into(),
+                dst_type: EntityType::Process,
+                dst_metadata: dst_meta,
+                rel_type: RelationType::Execute,
+                rel_metadata: HashMap::new(),
+                timestamp,
+            });
+        }
+        if let Some(parent) = Self::extract_str(event, "InitiatingProcessFileName") {
+            let parent_path =
+                Self::extract_str(event, "InitiatingProcessFolderPath").unwrap_or(parent);
+            let dst_meta = if child_meta_consumed {
+                HashMap::new()
+            } else {
+                std::mem::take(&mut child_meta)
+            };
+            events.push(RawIngestEvent {
+                src_id: parent_path.into(),
+                src_type: EntityType::Process,
+                src_metadata: HashMap::new(),
+                dst_id: process_id.into(),
+                dst_type: EntityType::Process,
+                dst_metadata: dst_meta,
+                rel_type: RelationType::Execute,
+                rel_metadata: HashMap::new(),
+                timestamp,
+            });
+        }
+        events
+    }
+
+    fn parse_device_network_events_raw(event: &Value) -> Vec<crate::parser::RawIngestEvent> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
+        let device = match Self::extract_str(event, "DeviceName") {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let remote_ip = match Self::extract_str(event, "RemoteIP") {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let mut dest_meta: HashMap<String, String> = HashMap::new();
+        if let Some(port) = event.get("RemotePort").and_then(|v| {
+            v.as_u64()
+                .map(|n| n.to_string())
+                .or_else(|| v.as_str().map(|s| s.to_string()))
+        }) {
+            dest_meta.insert("remote_port".into(), port);
+        }
+        if let Some(url) = Self::extract_str(event, "RemoteUrl") {
+            dest_meta.insert("url".into(), url.into());
+        }
+        if let Some(proto) = Self::extract_str(event, "Protocol") {
+            dest_meta.insert("protocol".into(), proto.into());
+        }
+        let mut rel_meta: HashMap<String, String> = HashMap::new();
+        if let Some(action) = Self::extract_str(event, "ActionType") {
+            rel_meta.insert("action".into(), action.into());
+        }
+        if let Some(local_port) = event.get("LocalPort").and_then(|v| {
+            v.as_u64()
+                .map(|n| n.to_string())
+                .or_else(|| v.as_str().map(|s| s.to_string()))
+        }) {
+            rel_meta.insert("local_port".into(), local_port);
+        }
+        vec![RawIngestEvent {
+            src_id: device.into(),
+            src_type: EntityType::Host,
+            src_metadata: HashMap::new(),
+            dst_id: remote_ip.into(),
+            dst_type: EntityType::IP,
+            dst_metadata: dest_meta,
+            rel_type: RelationType::Connect,
+            rel_metadata: rel_meta,
+            timestamp,
+        }]
+    }
+
+    fn parse_device_file_events_raw(event: &Value) -> Vec<crate::parser::RawIngestEvent> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
+        let process = match Self::extract_str(event, "InitiatingProcessFileName") {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let file_name = match Self::extract_str(event, "FileName") {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let process_path =
+            Self::extract_str(event, "InitiatingProcessFolderPath").unwrap_or(process);
+        let file_path = Self::extract_str(event, "FolderPath").unwrap_or(file_name);
+        let mut file_meta: HashMap<String, String> = HashMap::new();
+        if let Some(sha256) = Self::extract_str(event, "SHA256") {
+            file_meta.insert("sha256".into(), sha256.into());
+        }
+        let rel_type = match Self::extract_str(event, "ActionType") {
+            Some(action) if action.contains("Read") => RelationType::Read,
+            _ => RelationType::Write,
+        };
+        vec![RawIngestEvent {
+            src_id: process_path.into(),
+            src_type: EntityType::Process,
+            src_metadata: HashMap::new(),
+            dst_id: file_path.into(),
+            dst_type: EntityType::File,
+            dst_metadata: file_meta,
+            rel_type,
+            rel_metadata: HashMap::new(),
+            timestamp,
+        }]
+    }
+
+    fn parse_common_security_log_raw(event: &Value) -> Vec<crate::parser::RawIngestEvent> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let timestamp = match Self::extract_timestamp(event) {
+            Some(ts) => ts,
+            None => return Vec::new(),
+        };
+        let src_ip = match Self::extract_str(event, "SourceIP") {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let dst_ip = match Self::extract_str(event, "DestinationIP") {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let mut dest_meta: HashMap<String, String> = HashMap::new();
+        if let Some(port) = event.get("DestinationPort").and_then(|v| {
+            v.as_u64()
+                .map(|n| n.to_string())
+                .or_else(|| v.as_str().map(|s| s.to_string()))
+        }) {
+            dest_meta.insert("dest_port".into(), port);
+        }
+        let mut rel_meta: HashMap<String, String> = HashMap::new();
+        if let Some(vendor) = Self::extract_str(event, "DeviceVendor") {
+            rel_meta.insert("vendor".into(), vendor.into());
+        }
+        if let Some(action) = Self::extract_str(event, "DeviceAction")
+            .or_else(|| Self::extract_str(event, "Activity"))
+        {
+            rel_meta.insert("action".into(), action.into());
+        }
+        if let Some(proto) = Self::extract_str(event, "Protocol") {
+            rel_meta.insert("protocol".into(), proto.into());
+        }
+        vec![RawIngestEvent {
+            src_id: src_ip.into(),
+            src_type: EntityType::IP,
+            src_metadata: HashMap::new(),
+            dst_id: dst_ip.into(),
+            dst_type: EntityType::IP,
+            dst_metadata: dest_meta,
+            rel_type: RelationType::Connect,
+            rel_metadata: rel_meta,
+            timestamp,
+        }]
+    }
+
     /// Decodes the input into a `Vec<Value>` using the same JSON-array +
     /// NDJSON fallback logic `parse` uses, so stats and triples see the
     /// exact same row stream.
@@ -642,6 +1068,41 @@ impl LogParser for SentinelJsonParser {
     fn parse_rows(&self, rows: &[Value]) -> Vec<ParsedTriple> {
         rows.par_iter()
             .flat_map(|event| Self::parse_event(event))
+            .collect()
+    }
+
+    /// Native raw-event override. Mirrors `parse()` but emits
+    /// `RawIngestEvent` directly via `parse_event_raw`, skipping the
+    /// `(Entity, Relation, Entity)` tuple allocation per triple.
+    /// Each handler that emits multiple triples sharing a dst entity
+    /// (security_event_process, device_process_events) applies the
+    /// dst-metadata-skip-on-second-emission optimization, removing
+    /// the legacy `child.clone()` HashMap deep-copy.
+    fn parse_raw(&self, data: &str) -> Vec<crate::parser::RawIngestEvent> {
+        use rayon::prelude::*;
+        let trimmed = data.trim();
+
+        if trimmed.starts_with('[') {
+            let mut buf = trimmed.as_bytes().to_vec();
+            if let Ok(events) = simd_json::serde::from_slice::<Vec<Value>>(&mut buf) {
+                return events
+                    .par_iter()
+                    .flat_map(|event| Self::parse_event_raw(event))
+                    .collect();
+            }
+        }
+
+        trimmed
+            .par_lines()
+            .filter(|l| !l.trim().is_empty())
+            .flat_map_iter(|line| {
+                let mut buf = line.as_bytes().to_vec();
+                let event = simd_json::serde::from_slice::<Value>(&mut buf).ok();
+                event
+                    .map(|e| Self::parse_event_raw(&e))
+                    .unwrap_or_default()
+                    .into_iter()
+            })
             .collect()
     }
 }

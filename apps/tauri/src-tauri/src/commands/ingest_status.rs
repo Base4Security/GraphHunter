@@ -41,12 +41,15 @@ pub struct IngestEngineStatus {
 #[tauri::command]
 pub fn cmd_get_ingest_engine_status() -> IngestEngineStatus {
     let raw_event_active = true;
-    // SysmonJsonParser overrides parse_raw natively for all 16 typed
-    // EventIDs (Sysmon 1, 3, 5, 7, 8, 11, 12/13, 15, 23 + WinSec
-    // 4624/4625, 4688, 4689, 4663, 5145, 5156 + PowerShell 4104).
-    // SentinelJsonParser, GenericParser, CsvParser flow through the
-    // default lift-from-parse impl today.
-    let parsers_with_native_raw = vec!["Sysmon".to_string()];
+    // SysmonJsonParser: 16 typed EventIDs (Sysmon 1, 3, 5, 7, 8, 11,
+    // 12/13, 15, 23 + WinSec 4624/4625, 4688, 4689, 4663, 5145, 5156
+    // + PowerShell 4104).
+    // SentinelJsonParser: 8 cloud Sentinel tables (SecurityEvent
+    // 4624/4625/4688/4663, SigninLogs, DeviceProcessEvents,
+    // DeviceNetworkEvents, DeviceFileEvents, CommonSecurityLog).
+    // GenericParser, CsvParser flow through the default lift-from-parse
+    // impl today.
+    let parsers_with_native_raw = vec!["Sysmon".to_string(), "Sentinel".to_string()];
     let vrl_compiler_active = true;
     let llm_compiler_available = std::env::var("GRAPHHUNTER_LOCAL_MODEL_PATH")
         .ok()

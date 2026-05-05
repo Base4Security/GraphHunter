@@ -2551,6 +2551,56 @@ fn search_temporal_pattern_still_works_with_indices() {
 // ── Phase 5: Sentinel Parser Tests ──
 // ══════════════════════════════════════════════════
 
+#[test]
+fn sentinel_raw_path_parity_with_legacy() {
+    // Cross-table NDJSON exercising every Sentinel raw-migrated
+    // handler: SecurityEvent (4624 + 4688 + 4663), SigninLogs,
+    // DeviceProcessEvents, DeviceNetworkEvents, DeviceFileEvents,
+    // CommonSecurityLog. Confirms native parse_raw produces an
+    // identical graph to the legacy parse + insert_triples path.
+    let ndjson = r#"{"Type":"SecurityEvent","TimeGenerated":"2024-01-15T14:30:00Z","EventID":4624,"Computer":"DC-01","TargetUserName":"admin","IpAddress":"10.0.0.5","LogonType":3}
+{"Type":"SecurityEvent","TimeGenerated":"2024-01-15T14:30:01Z","EventID":4688,"Computer":"DC-01","NewProcessName":"C:\\Windows\\cmd.exe","SubjectUserName":"alice","ParentProcessName":"C:\\Windows\\explorer.exe","CommandLine":"cmd /c whoami","NewProcessId":"1234"}
+{"Type":"SecurityEvent","TimeGenerated":"2024-01-15T14:30:02Z","EventID":4663,"ProcessName":"C:\\Windows\\notepad.exe","ObjectName":"C:\\Users\\u\\f.txt"}
+{"Type":"SigninLogs","TimeGenerated":"2024-01-15T14:30:03Z","UserPrincipalName":"alice@corp.com","IPAddress":"10.0.0.6","AppDisplayName":"Office365","ResultType":"0"}
+{"Type":"DeviceProcessEvents","TimeGenerated":"2024-01-15T14:30:04Z","DeviceName":"H1","FileName":"powershell.exe","FolderPath":"C:\\Windows\\powershell.exe","AccountName":"alice","InitiatingProcessFileName":"explorer.exe","InitiatingProcessFolderPath":"C:\\Windows\\explorer.exe","ProcessCommandLine":"powershell -nop","SHA256":"abc123"}
+{"Type":"DeviceNetworkEvents","TimeGenerated":"2024-01-15T14:30:05Z","DeviceName":"H1","RemoteIP":"10.0.0.7","RemotePort":"443","Protocol":"tcp","ActionType":"ConnectionSuccess","LocalPort":"49152"}
+{"Type":"DeviceFileEvents","TimeGenerated":"2024-01-15T14:30:06Z","InitiatingProcessFileName":"notepad.exe","InitiatingProcessFolderPath":"C:\\Windows\\notepad.exe","FileName":"f.txt","FolderPath":"C:\\Users\\u\\f.txt","ActionType":"FileCreated","SHA256":"def456"}
+{"Type":"CommonSecurityLog","TimeGenerated":"2024-01-15T14:30:07Z","SourceIP":"10.0.0.1","DestinationIP":"10.0.0.8","DestinationPort":"443","DeviceVendor":"PaloAlto","DeviceAction":"allow","Protocol":"tcp"}"#;
+
+    let parser = SentinelJsonParser;
+    let mut g_legacy = GraphHunter::new();
+    g_legacy.insert_triples(parser.parse(ndjson), None).unwrap();
+
+    let mut g_raw = GraphHunter::new();
+    g_raw
+        .insert_raw_events(parser.parse_raw(ndjson), None)
+        .unwrap();
+
+    assert_eq!(
+        g_legacy.entities.len(),
+        g_raw.entities.len(),
+        "entity count diverged"
+    );
+    assert_eq!(
+        g_legacy.relation_count(),
+        g_raw.relation_count(),
+        "relation count diverged"
+    );
+    for (sid, legacy_ent) in g_legacy.entities.iter() {
+        let raw_ent = g_raw
+            .entities
+            .get(sid)
+            .unwrap_or_else(|| panic!("raw graph missing entity: {}", legacy_ent.id));
+        assert_eq!(legacy_ent.id, raw_ent.id);
+        assert_eq!(legacy_ent.entity_type, raw_ent.entity_type);
+        assert_eq!(
+            legacy_ent.metadata, raw_ent.metadata,
+            "metadata diverged for {}",
+            legacy_ent.id
+        );
+    }
+}
+
 // ── Per-Table Tests ──
 
 #[test]
