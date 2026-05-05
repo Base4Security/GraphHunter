@@ -1001,6 +1001,58 @@ fn sysmon_eid1_raw_path_parity_with_legacy() {
     }
 }
 
+#[test]
+fn sysmon_long_tail_raw_path_parity_with_legacy() {
+    // Mixed-EID NDJSON exercising the 9 raw-migrated handlers
+    // (1, 3, 5, 7, 8, 11, 12, 15, 23) plus a 4624 (WinSec) and
+    // 4104 (PowerShell) that intentionally fall through to the
+    // legacy + lift path — confirms the fallback + raw path
+    // produce identical graphs.
+    let ndjson = r#"{"EventID":1,"UtcTime":"2024-01-15 14:30:00.000","Image":"C:\\Windows\\cmd.exe","User":"alice","Computer":"H1","ProcessId":100,"ParentImage":"C:\\Windows\\explorer.exe","ParentProcessId":50}
+{"EventID":3,"UtcTime":"2024-01-15 14:30:01.000","Computer":"H1","Image":"C:\\Windows\\svchost.exe","DestinationIp":"10.0.0.5","DestinationPort":"443","Protocol":"tcp"}
+{"EventID":5,"UtcTime":"2024-01-15 14:30:02.000","Image":"C:\\Windows\\cmd.exe","Computer":"H1","ProcessId":100}
+{"EventID":7,"UtcTime":"2024-01-15 14:30:03.000","Image":"C:\\Windows\\powershell.exe","ImageLoaded":"C:\\Windows\\System32\\lib1.dll","Signed":"true","Hashes":"SHA256=abc"}
+{"EventID":8,"UtcTime":"2024-01-15 14:30:04.000","SourceImage":"C:\\Windows\\svchost.exe","TargetImage":"C:\\Windows\\lsass.exe","StartAddress":"0x7FF","NewThreadId":"42"}
+{"EventID":11,"UtcTime":"2024-01-15 14:30:05.000","Image":"C:\\Windows\\notepad.exe","TargetFilename":"C:\\Users\\u\\f1.txt"}
+{"EventID":12,"UtcTime":"2024-01-15 14:30:06.000","Image":"C:\\Windows\\reg.exe","TargetObject":"HKLM\\Software\\App\\k1","EventType":"CreateKey"}
+{"EventID":15,"UtcTime":"2024-01-15 14:30:07.000","Image":"C:\\Windows\\notepad.exe","TargetFilename":"C:\\Users\\u\\s1.txt:ads","Hash":"SHA1=def"}
+{"EventID":23,"UtcTime":"2024-01-15 14:30:08.000","Image":"C:\\Windows\\cmd.exe","TargetFilename":"C:\\Users\\u\\d1.txt"}
+{"EventID":4624,"UtcTime":"2024-01-15 14:30:09.000","TargetUserName":"alice","TargetDomainName":"CORP","LogonType":3,"IpAddress":"10.0.0.1","Computer":"H1"}
+{"EventID":4104,"UtcTime":"2024-01-15 14:30:10.000","ScriptBlockText":"Get-Process","ScriptBlockId":"abc","Computer":"H1"}"#;
+
+    let parser = SysmonJsonParser;
+    let mut g_legacy = GraphHunter::new();
+    g_legacy.insert_triples(parser.parse(ndjson), None).unwrap();
+
+    let mut g_raw = GraphHunter::new();
+    g_raw
+        .insert_raw_events(parser.parse_raw(ndjson), None)
+        .unwrap();
+
+    assert_eq!(
+        g_legacy.entities.len(),
+        g_raw.entities.len(),
+        "entity count diverged"
+    );
+    assert_eq!(
+        g_legacy.relation_count(),
+        g_raw.relation_count(),
+        "relation count diverged"
+    );
+    for (sid, legacy_ent) in g_legacy.entities.iter() {
+        let raw_ent = g_raw.entities.get(sid).unwrap_or_else(|| {
+            panic!("raw graph missing entity present in legacy: {}", legacy_ent.id)
+        });
+        assert_eq!(legacy_ent.id, raw_ent.id);
+        assert_eq!(legacy_ent.entity_type, raw_ent.entity_type);
+        assert_eq!(
+            legacy_ent.metadata, raw_ent.metadata,
+            "metadata diverged for {}",
+            legacy_ent.id
+        );
+    }
+}
+
 // ── Sysmon Event 3: Network Connection ──
 
 #[test]

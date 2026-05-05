@@ -1045,6 +1045,14 @@ impl SysmonJsonParser {
             .unwrap_or(0);
         match event_id {
             1 => Self::typed_process_create_raw(&event, timestamp),
+            3 => Self::typed_network_connection_raw(&event, timestamp),
+            5 => Self::typed_process_terminated_raw(&event, timestamp),
+            7 => Self::typed_image_load_raw(&event, timestamp),
+            8 => Self::typed_create_remote_thread_raw(&event, timestamp),
+            11 => Self::typed_file_create_raw(&event, timestamp),
+            12 | 13 => Self::typed_registry_event_raw(&event, timestamp),
+            15 => Self::typed_file_stream_hash_raw(&event, timestamp),
+            23 => Self::typed_file_delete_raw(&event, timestamp),
             _ => None,
         }
     }
@@ -1189,6 +1197,276 @@ impl SysmonJsonParser {
             triples.push((parent, rel, child));
         }
         Some(triples)
+    }
+
+    /// Raw-event variants for the long-tail Sysmon EventIDs. Each
+    /// mirrors its `typed_*` legacy counterpart but emits
+    /// `RawIngestEvent`s without the Entity/Relation struct
+    /// allocations. Where a handler emits multiple triples sharing a
+    /// dst entity, the metadata is moved into the first event and
+    /// later emissions carry empty `dst_metadata` — the writer's
+    /// `merge_metadata` already dedupes by entity id.
+
+    #[inline]
+    fn typed_network_connection_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let dest_ip = event.destination_ip?;
+        let source_name = event
+            .computer
+            .or(event.hostname)
+            .or(event.source_hostname)
+            .unwrap_or("unknown-host");
+
+        let mut source_meta: HashMap<String, String> = HashMap::new();
+        if let Some(s) = event.source_ip {
+            source_meta.insert("source_ip".into(), s.into());
+        }
+        if let Some(s) = event.source_port {
+            source_meta.insert("source_port".into(), s.into());
+        }
+        let mut dest_meta: HashMap<String, String> = HashMap::new();
+        if let Some(s) = event.destination_port {
+            dest_meta.insert("dest_port".into(), s.into());
+        }
+        if let Some(s) = event.destination_hostname {
+            dest_meta.insert("hostname".into(), s.into());
+        }
+        if let Some(s) = event.protocol {
+            dest_meta.insert("protocol".into(), s.into());
+        }
+
+        let mut rel_meta: HashMap<String, String> = HashMap::new();
+        if let Some(image) = event.image {
+            rel_meta.insert("image".into(), image.into());
+        }
+
+        let mut events = Vec::with_capacity(2);
+        events.push(RawIngestEvent {
+            src_id: source_name.into(),
+            src_type: EntityType::Host,
+            src_metadata: source_meta,
+            dst_id: dest_ip.into(),
+            dst_type: EntityType::IP,
+            dst_metadata: std::mem::take(&mut dest_meta),
+            rel_type: RelationType::Connect,
+            rel_metadata: rel_meta,
+            timestamp,
+        });
+        if let Some(image) = event.image {
+            events.push(RawIngestEvent {
+                src_id: image.into(),
+                src_type: EntityType::Process,
+                src_metadata: HashMap::new(),
+                dst_id: dest_ip.into(),
+                dst_type: EntityType::IP,
+                dst_metadata: HashMap::new(),
+                rel_type: RelationType::Connect,
+                rel_metadata: HashMap::new(),
+                timestamp,
+            });
+        }
+        Some(events)
+    }
+
+    #[inline]
+    fn typed_image_load_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let image = event.image?;
+        let image_loaded = event.image_loaded?;
+        let mut file_meta: HashMap<String, String> = HashMap::new();
+        if let Some(s) = event.signed {
+            file_meta.insert("signed".into(), s.into());
+        }
+        if let Some(s) = event.signature_status {
+            file_meta.insert("signature_status".into(), s.into());
+        }
+        if let Some(s) = event.hashes {
+            file_meta.insert("hashes".into(), s.into());
+        }
+        Some(vec![RawIngestEvent {
+            src_id: image.into(),
+            src_type: EntityType::Process,
+            src_metadata: HashMap::new(),
+            dst_id: image_loaded.into(),
+            dst_type: EntityType::File,
+            dst_metadata: file_meta,
+            rel_type: RelationType::Read,
+            rel_metadata: HashMap::new(),
+            timestamp,
+        }])
+    }
+
+    #[inline]
+    fn typed_file_create_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let image = event.image?;
+        let target = event.target_filename?;
+        let mut file_meta: HashMap<String, String> = HashMap::new();
+        if let Some(s) = event.hashes {
+            file_meta.insert("hashes".into(), s.into());
+        }
+        Some(vec![RawIngestEvent {
+            src_id: image.into(),
+            src_type: EntityType::Process,
+            src_metadata: HashMap::new(),
+            dst_id: target.into(),
+            dst_type: EntityType::File,
+            dst_metadata: file_meta,
+            rel_type: RelationType::Write,
+            rel_metadata: HashMap::new(),
+            timestamp,
+        }])
+    }
+
+    #[inline]
+    fn typed_process_terminated_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let image = event.image?;
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
+        let mut process_meta: HashMap<String, String> = HashMap::new();
+        if let Some(pid) = event.process_id {
+            process_meta.insert("pid".into(), pid.to_string());
+        }
+        Some(vec![RawIngestEvent {
+            src_id: image.into(),
+            src_type: EntityType::Process,
+            src_metadata: process_meta,
+            dst_id: host_name.into(),
+            dst_type: EntityType::Host,
+            dst_metadata: HashMap::new(),
+            rel_type: RelationType::Delete,
+            rel_metadata: HashMap::new(),
+            timestamp,
+        }])
+    }
+
+    #[inline]
+    fn typed_create_remote_thread_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let source_image = event.source_image?;
+        let target_image = event.target_image?;
+        let mut rel_meta: HashMap<String, String> = HashMap::new();
+        if let Some(s) = event.start_address {
+            rel_meta.insert("start_address".into(), s.into());
+        }
+        if let Some(s) = event.new_thread_id {
+            rel_meta.insert("new_thread_id".into(), s.into());
+        }
+        if let Some(s) = event.start_module {
+            rel_meta.insert("start_module".into(), s.into());
+        }
+        Some(vec![RawIngestEvent {
+            src_id: source_image.into(),
+            src_type: EntityType::Process,
+            src_metadata: HashMap::new(),
+            dst_id: target_image.into(),
+            dst_type: EntityType::Process,
+            dst_metadata: HashMap::new(),
+            rel_type: RelationType::Execute,
+            rel_metadata: rel_meta,
+            timestamp,
+        }])
+    }
+
+    #[inline]
+    fn typed_registry_event_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let image = event.image?;
+        let target_object = event.target_object?;
+        let mut rel_meta: HashMap<String, String> = HashMap::new();
+        if let Some(s) = event.event_type_str {
+            rel_meta.insert("event_type".into(), s.into());
+        }
+        if let Some(s) = event.details {
+            rel_meta.insert("details".into(), s.into());
+        }
+        Some(vec![RawIngestEvent {
+            src_id: image.into(),
+            src_type: EntityType::Process,
+            src_metadata: HashMap::new(),
+            dst_id: target_object.into(),
+            dst_type: EntityType::Registry,
+            dst_metadata: HashMap::new(),
+            rel_type: RelationType::Modify,
+            rel_metadata: rel_meta,
+            timestamp,
+        }])
+    }
+
+    #[inline]
+    fn typed_file_stream_hash_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let image = event.image?;
+        let target = event.target_filename?;
+        let mut file_meta: HashMap<String, String> = HashMap::new();
+        if let Some(s) = event.hash_single {
+            file_meta.insert("hash".into(), s.into());
+        }
+        Some(vec![RawIngestEvent {
+            src_id: image.into(),
+            src_type: EntityType::Process,
+            src_metadata: HashMap::new(),
+            dst_id: target.into(),
+            dst_type: EntityType::File,
+            dst_metadata: file_meta,
+            rel_type: RelationType::Write,
+            rel_metadata: HashMap::new(),
+            timestamp,
+        }])
+    }
+
+    #[inline]
+    fn typed_file_delete_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let image = event.image?;
+        let target = event.target_filename?;
+        let mut file_meta: HashMap<String, String> = HashMap::new();
+        if let Some(s) = event.hashes {
+            file_meta.insert("hashes".into(), s.into());
+        }
+        Some(vec![RawIngestEvent {
+            src_id: image.into(),
+            src_type: EntityType::Process,
+            src_metadata: HashMap::new(),
+            dst_id: target.into(),
+            dst_type: EntityType::File,
+            dst_metadata: file_meta,
+            rel_type: RelationType::Delete,
+            rel_metadata: HashMap::new(),
+            timestamp,
+        }])
     }
 
     #[inline]
