@@ -20,6 +20,13 @@ use graph_hunter_core::{
     Entity, EntityType, GraphHunter, Hypothesis, HypothesisStep, Relation, RelationType,
 };
 
+/// Process-wide mutex serializing env-var mutations within this
+/// integration-test binary. The three tests below mutate
+/// `GRAPHHUNTER_K4_LFTJ` and `GRAPHHUNTER_LFTJ_PLANNER`; without
+/// this guard parallel runs would race. Mirrors the pattern in
+/// `core/graph-engine/src/planner.rs::tests::ENV_LOCK`.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn k4_graph() -> GraphHunter {
     let mut g = GraphHunter::new();
     for id in ["a", "b", "c", "d"] {
@@ -67,6 +74,7 @@ fn five_homogeneous_steps(name: &str) -> Hypothesis {
 
 #[test]
 fn structural_route_off_by_default_falls_back_to_dfs() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let g = k4_graph();
     let h = six_homogeneous_steps("plain six-step probe");
     unsafe {
@@ -88,6 +96,7 @@ fn structural_route_off_by_default_falls_back_to_dfs() {
 
 #[test]
 fn structural_route_dispatches_when_env_set() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let g = k4_graph();
     let h = six_homogeneous_steps("plain six-step probe (no marker)");
     unsafe {
@@ -110,6 +119,7 @@ fn structural_route_dispatches_when_env_set() {
 
 #[test]
 fn structural_route_does_not_misfire_on_five_step_chain() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let g = k4_graph();
     let h = five_homogeneous_steps("five-step probe");
     unsafe {

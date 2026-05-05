@@ -11,6 +11,15 @@ use graph_hunter_core::{
     Entity, EntityType, GraphHunter, Hypothesis, HypothesisStep, Relation, RelationType,
 };
 
+/// Process-wide mutex serializing env-var mutations within this
+/// integration-test binary. Without this, the three tests below
+/// race on `GRAPHHUNTER_K4_LFTJ` (one sets it, another removes it
+/// concurrently). The CI workflow used to band-aid this with
+/// `--test-threads=1` (retired in PR #14); explicit serialization
+/// is the proper fix. Mirrors the pattern used in
+/// `core/graph-engine/src/planner.rs::tests::ENV_LOCK`.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Build a tiny 4-clique on (a,b,c,d) with the six directed edges in
 /// strict chronological order so the temporal-clique enumerator emits
 /// exactly one tuple.
@@ -45,6 +54,7 @@ fn k4_hypothesis(name: &str) -> Hypothesis {
 
 #[test]
 fn k4_lftj_off_by_default() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let g = k4_graph();
     let h = k4_hypothesis("k4-clique");
     // Env var unset: must fall back to DFS-Match. The DFS-Match path
@@ -60,6 +70,7 @@ fn k4_lftj_off_by_default() {
 
 #[test]
 fn k4_lftj_dispatch_when_enabled_and_marked() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let g = k4_graph();
     let h = k4_hypothesis("APT lateral movement (k4-clique)");
     unsafe {
@@ -77,6 +88,7 @@ fn k4_lftj_dispatch_when_enabled_and_marked() {
 
 #[test]
 fn k4_lftj_skipped_without_marker() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let g = k4_graph();
     // Marker missing: even with the env var on, the dispatch must not
     // fire. We verify by checking that the result count matches the

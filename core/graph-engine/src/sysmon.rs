@@ -70,6 +70,27 @@ struct SysmonEventTyped<'a> {
     // Event 11 — file create.
     #[serde(rename = "TargetFilename", default, borrow)]
     target_filename: Option<&'a str>,
+    // Event 8 — CreateRemoteThread.
+    #[serde(rename = "SourceImage", default, borrow)]
+    source_image: Option<&'a str>,
+    #[serde(rename = "TargetImage", default, borrow)]
+    target_image: Option<&'a str>,
+    #[serde(rename = "StartAddress", default, borrow)]
+    start_address: Option<&'a str>,
+    #[serde(rename = "NewThreadId", default, borrow)]
+    new_thread_id: Option<&'a str>,
+    #[serde(rename = "StartModule", default, borrow)]
+    start_module: Option<&'a str>,
+    // Events 12 / 13 — Registry.
+    #[serde(rename = "TargetObject", default, borrow)]
+    target_object: Option<&'a str>,
+    #[serde(rename = "EventType", default, borrow)]
+    event_type_str: Option<&'a str>,
+    #[serde(rename = "Details", default, borrow)]
+    details: Option<&'a str>,
+    // Event 15 — File Stream Hash (single Hash, not Hashes).
+    #[serde(rename = "Hash", default, borrow)]
+    hash_single: Option<&'a str>,
 }
 
 /// Parser for Sysmon, Windows Security, PowerShell, and Winlogbeat events exported as JSON.
@@ -936,8 +957,13 @@ impl SysmonJsonParser {
         match event_id {
             1 => Self::typed_process_create(&event, timestamp),
             3 => Self::typed_network_connection(&event, timestamp),
+            5 => Self::typed_process_terminated(&event, timestamp),
             7 => Self::typed_image_load(&event, timestamp),
+            8 => Self::typed_create_remote_thread(&event, timestamp),
             11 => Self::typed_file_create(&event, timestamp),
+            12 | 13 => Self::typed_registry_event(&event, timestamp),
+            15 => Self::typed_file_stream_hash(&event, timestamp),
+            23 => Self::typed_file_delete(&event, timestamp),
             _ => None,
         }
     }
@@ -1052,6 +1078,98 @@ impl SysmonJsonParser {
             file.metadata.insert("hashes".into(), s.into());
         }
         let rel = Relation::new(&process.id, &file.id, RelationType::Write, timestamp);
+        Some(vec![(process, rel, file)])
+    }
+
+    #[inline]
+    fn typed_process_terminated(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let image = event.image?;
+        let host_name = event
+            .computer
+            .or(event.hostname)
+            .unwrap_or("unknown-host");
+        let mut process = Entity::new(image, EntityType::Process);
+        if let Some(pid) = event.process_id {
+            process.metadata.insert("pid".into(), pid.to_string());
+        }
+        let host = Entity::new(host_name, EntityType::Host);
+        let rel = Relation::new(&process.id, &host.id, RelationType::Delete, timestamp);
+        Some(vec![(process, rel, host)])
+    }
+
+    #[inline]
+    fn typed_create_remote_thread(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let source_image = event.source_image?;
+        let target_image = event.target_image?;
+        let source = Entity::new(source_image, EntityType::Process);
+        let target = Entity::new(target_image, EntityType::Process);
+        let mut rel = Relation::new(&source.id, &target.id, RelationType::Execute, timestamp);
+        if let Some(s) = event.start_address {
+            rel.metadata.insert("start_address".into(), s.into());
+        }
+        if let Some(s) = event.new_thread_id {
+            rel.metadata.insert("new_thread_id".into(), s.into());
+        }
+        if let Some(s) = event.start_module {
+            rel.metadata.insert("start_module".into(), s.into());
+        }
+        Some(vec![(source, rel, target)])
+    }
+
+    #[inline]
+    fn typed_registry_event(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let image = event.image?;
+        let target_object = event.target_object?;
+        let process = Entity::new(image, EntityType::Process);
+        let registry = Entity::new(target_object, EntityType::Registry);
+        let mut rel = Relation::new(&process.id, &registry.id, RelationType::Modify, timestamp);
+        if let Some(s) = event.event_type_str {
+            rel.metadata.insert("event_type".into(), s.into());
+        }
+        if let Some(s) = event.details {
+            rel.metadata.insert("details".into(), s.into());
+        }
+        Some(vec![(process, rel, registry)])
+    }
+
+    #[inline]
+    fn typed_file_stream_hash(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let image = event.image?;
+        let target = event.target_filename?;
+        let process = Entity::new(image, EntityType::Process);
+        let mut file = Entity::new(target, EntityType::File);
+        if let Some(s) = event.hash_single {
+            file.metadata.insert("hash".into(), s.into());
+        }
+        let rel = Relation::new(&process.id, &file.id, RelationType::Write, timestamp);
+        Some(vec![(process, rel, file)])
+    }
+
+    #[inline]
+    fn typed_file_delete(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<ParsedTriple>> {
+        let image = event.image?;
+        let target = event.target_filename?;
+        let process = Entity::new(image, EntityType::Process);
+        let mut file = Entity::new(target, EntityType::File);
+        if let Some(s) = event.hashes {
+            file.metadata.insert("hashes".into(), s.into());
+        }
+        let rel = Relation::new(&process.id, &file.id, RelationType::Delete, timestamp);
         Some(vec![(process, rel, file)])
     }
 
