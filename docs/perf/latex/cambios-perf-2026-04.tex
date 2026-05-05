@@ -910,6 +910,38 @@ Una \emph{single struct} por \emph{triple}, \emph{no nested} \emph{Entity/Relati
 
 \textbf{Production callers \emph{aún sin migrar}.} \filepath{core/graph-engine/src/ingest/parser\_task.rs} (\emph{streaming pipeline}), \filepath{core/graph-engine/src/ingest/enrichment.rs} (\emph{Sentinel enrichment loop}), \emph{etc.} \emph{siguen llamando} \code{parser.parse(text)} \(\to\) \code{insert\_triples\_chunk}. \emph{El refactor a} \code{parse\_raw} \(\to\) \code{insert\_raw\_events} \emph{es} \emph{multi-file} (\emph{ParsedBatch carrier type}, \emph{LogSourceAdapter trait surface}) \emph{y} \emph{queueado} \emph{para PR dedicado} \emph{post-merge}. La \emph{architectural question} \emph{está cerrada}: \emph{el path existe}, \emph{el bench prueba} \emph{el speedup}, \emph{las parity tests} \emph{prueban} \emph{equivalencia}; lo que queda es \emph{plumbing}.
 
+\section{\emph{Pipeline wiring} \emph{end-to-end} (PRs \#30 / \#31)}
+
+\emph{El plumbing} \emph{quedó} \emph{cerrado} \emph{en} \emph{dos PRs adicionales} \emph{post-arquitectura}. PR \#30 \emph{wires} la \emph{streaming pipeline}; PR \#31 \emph{wires} \emph{EnrichmentEngine}. \emph{Ambos production paths} \emph{ahora corren} \emph{end-to-end} \emph{sobre} la \emph{raw-event architecture}.
+
+\textbf{Streaming pipeline (PR \#30).} El \emph{flow} \emph{post-merge} es:
+
+\begin{verbatim}
+raw chunk
+  → parser_task: parser.parse_raw → Vec<RawIngestEvent>
+  → ParsedBatch.events
+  → writer: GraphAccess::insert_raw_chunk
+  → GraphHunter::insert_raw_events_chunk
+  → insert_raw_events
+  → CompactRelation + interner-deduplicated entity write
+\end{verbatim}
+
+\emph{Cambios principales:}
+
+\begin{itemize}
+  \item \filepath{core/graph-engine/src/ingest/batch.rs}: \code{ParsedBatch.triples} \emph{renombrado} \(\to\) \code{events}, \emph{tipo} \code{Vec<ParsedTriple>} \(\to\) \code{Vec<RawIngestEvent>}.
+  \item \filepath{core/graph-engine/src/ingest/parser\_task.rs}: \emph{llama} \code{parser.parse\_raw(text)} \emph{en lugar de} \code{parser.parse(text)}.
+  \item \filepath{core/graph-engine/src/ingest/writer.rs}: \emph{drena} \code{batch.events} \emph{via} \code{GraphAccess::insert\_raw\_chunk}.
+  \item \filepath{core/graph-engine/src/ingest/graph\_access.rs}: \emph{nuevo} \code{insert\_raw\_chunk} \emph{en el trait}; \emph{default impl} \emph{lifts} \emph{cada event a} \code{ParsedTriple} \emph{y delega al legacy} \code{insert\_chunk} (\emph{backwards compatibility}). \code{InMemoryGraphAccess} \emph{override} \emph{calls} \code{insert\_raw\_events\_chunk} \emph{directamente}.
+  \item \code{RawIngestEvent} \emph{ahora deriva} \code{Serialize}/\code{Deserialize} (\emph{required for} \emph{overflow persistence round-trip}).
+\end{itemize}
+
+\textbf{EnrichmentEngine (PR \#31).} \emph{Misma migración} \emph{aplicada al on-demand drill-down loop}: \filepath{core/graph-engine/src/ingest/enrichment.rs} \emph{ahora corre} \code{parser.parse\_raw(text)} \(\to\) \code{graph\_access.insert\_raw\_chunk(\&mut events, ...)}. \emph{22 unit tests} \emph{pasan unchanged} \emph{vía} el \emph{default} \code{parse\_raw} \emph{impl} \emph{que} \emph{lifts a través de} \code{parse()} \emph{en mock parsers}.
+
+\textbf{Estado final.} \emph{Los dos production paths} (\emph{streaming} \(+\) \emph{enrichment}) \emph{capturan} \emph{el} \emph{raw-path savings} \emph{end-to-end}. \code{SysmonJsonParser} \emph{tiene los 16 typed handlers} \emph{en} \code{*\_raw}; \emph{cada chunk de Sysmon/WinSec/PowerShell} \emph{que entra al pipeline} \emph{ahora corre} \emph{con} \emph{half the per-event allocations} \emph{vs el legacy path}. \code{SentinelJsonParser} \emph{y} \code{GenericParser} \emph{siguen} \emph{en} el \emph{lift-from-parse} \emph{default}; \emph{queueados} \emph{para overrides nativos} \emph{cuando profiling muestre} \emph{son hot}.
+
+\textbf{Backwards-compatibility surface.} \emph{Ninguna API pública} \emph{rompió}. \emph{Downstream impls} \emph{de} \code{LogParser} \emph{que no override} \code{parse\_raw} \emph{siguen funcionando} (\emph{default impl wraps} \code{parse()}). \emph{Downstream impls} \emph{de} \code{GraphAccess} \emph{que no override} \code{insert\_raw\_chunk} \emph{siguen funcionando} (\emph{default lifts a través de} \code{insert\_chunk}). \emph{El refactor} \emph{es} \emph{aditivo}, \emph{no} \emph{breaking}.
+
 \section{CI: \emph{GitHub Actions removidos}}
 
 \emph{La cuenta \emph{GitHub} hit billing failure} \(\to\) \emph{los workflows fueron eliminados} \emph{en} \emph{commit} \code{12c4f56}. \filepath{.github/workflows/ci.yml} \(+\) \filepath{.github/workflows/docs.yml} \emph{retirados}; \emph{future pushes / PRs no triggean CI runs} \(\to\) \emph{no más metered runner cost}. \emph{Pre-merge validation} se \emph{movió a local}: \code{cargo test --manifest-path core/graph-engine/Cargo.toml}, \code{cargo check}, \code{cargo bench}, \code{xelatex}. \emph{Files recoverable} desde \emph{git history} (\code{git checkout 1bc4207 -- .github/workflows/}) \emph{si billing se restaura}.
