@@ -246,6 +246,13 @@ impl GraphHunterApi {
         > = std::collections::HashMap::new();
         let mut bag_cache_hits: usize = 0;
         let mut bag_cache_misses: usize = 0;
+        // D3 stage 5 — strict subset of bag_cache_hits that came
+        // from the *persistent* (cross-batch) Session bag cache.
+        let mut yannakakis_persistent_bag_hits: usize = 0;
+        // D3 stage 5 (prefix companion) — strict subset of
+        // prefix_cache_hits that resumed from a snapshot stored in
+        // the *persistent* Session prefix cache.
+        let mut yannakakis_persistent_prefix_hits: usize = 0;
 
         // L2 stage 3a — full-hypothesis result cache. Key is the
         // serialized hypothesis + time window. When a batch runs
@@ -568,27 +575,75 @@ impl GraphHunterApi {
                         serde_json::to_string(step).unwrap_or_default()
                     })
                     .collect();
+                // D3 stage 5 — try the persistent session bag
+                // cache before the per-batch one. Session cache is
+                // keyed on (mutation_version, step+window
+                // fingerprint) and FIFO-bounded by total BagRow
+                // bytes (`MAX_BAG_BYTES`). Promotes the bag-cache
+                // win from "within-batch" to "across batches until
+                // graph mutates" — symmetric to D3 stage 4 for the
+                // LFTJ path.
+                let live_version = graph.mutation_version();
                 let bags: Vec<graph_hunter_core::yannakakis::Bag> = hypothesis
                     .steps
                     .iter()
                     .zip(step_fingerprints.iter())
                     .map(|(step, fp)| {
                         let key = format!("{fp}|{t_lo_window}|{t_hi_window}");
+                        // Within-batch bag_cache hit (also counted
+                        // by the persistent cache when the batch
+                        // saw the same key already).
                         if let Some(arc) = bag_cache.get(&key) {
                             bag_cache_hits += 1;
-                            (**arc).clone()
-                        } else {
-                            bag_cache_misses += 1;
-                            let bag = graph_hunter_core::yannakakis::materialize_bag(
-                                &graph,
-                                step,
-                                t_lo_window,
-                                t_hi_window,
-                            );
-                            let arc = std::sync::Arc::new(bag.clone());
-                            bag_cache.insert(key, arc);
-                            bag
+                            return (**arc).clone();
                         }
+                        // Persistent session cache lookup.
+                        let session_hit = session_for_bags
+                            .yannakakis_cache
+                            .read()
+                            .ok()
+                            .and_then(|cache| {
+                                cache.as_ref().and_then(|c| {
+                                    if c.version == live_version {
+                                        c.bags.get(&key).cloned()
+                                    } else {
+                                        None
+                                    }
+                                })
+                            });
+                        if let Some(arc) = session_hit {
+                            bag_cache_hits += 1;
+                            yannakakis_persistent_bag_hits += 1;
+                            // Mirror into per-batch cache for
+                            // subsequent same-batch dedup.
+                            bag_cache.insert(key, arc.clone());
+                            return (*arc).clone();
+                        }
+                        bag_cache_misses += 1;
+                        let bag = graph_hunter_core::yannakakis::materialize_bag(
+                            &graph,
+                            step,
+                            t_lo_window,
+                            t_hi_window,
+                        );
+                        let arc = std::sync::Arc::new(bag.clone());
+                        bag_cache.insert(key.clone(), arc.clone());
+                        // Insert into the persistent cache (resets
+                        // it if the graph mutated since last batch).
+                        if let Ok(mut slot) = session_for_bags.yannakakis_cache.write() {
+                            let cache = slot.get_or_insert_with(|| {
+                                crate::state::session::YannakakisSessionCache::new(
+                                    live_version,
+                                )
+                            });
+                            if cache.version != live_version {
+                                *cache = crate::state::session::YannakakisSessionCache::new(
+                                    live_version,
+                                );
+                            }
+                            cache.insert(key, arc);
+                        }
+                        bag
                     })
                     .collect();
 
@@ -607,7 +662,13 @@ impl GraphHunterApi {
                     graph_hunter_core::hypothesis::HypothesisShape::Chain
                 ) {
                     // Walk depths from the deepest possible prefix
-                    // down to 1; first hit wins.
+                    // down to 1; first hit wins. Within-batch
+                    // prefix_cache is checked first; on miss we
+                    // also consult the persistent session cache
+                    // (D3 stage 5 prefix companion to the bag
+                    // cache). Persistent hits hydrate the
+                    // per-batch cache so subsequent same-batch
+                    // hypotheses benefit too.
                     let max_depth = hypothesis.steps.len().saturating_sub(1);
                     for depth in (1..=max_depth).rev() {
                         let prefix_key = build_prefix_key(
@@ -619,6 +680,27 @@ impl GraphHunterApi {
                             resume_depth = depth;
                             resume_starting = snapshot.clone();
                             prefix_cache_hits += 1;
+                            break;
+                        }
+                        let session_hit = session_for_bags
+                            .yannakakis_cache
+                            .read()
+                            .ok()
+                            .and_then(|c| {
+                                c.as_ref().and_then(|y| {
+                                    if y.version == live_version {
+                                        y.prefixes.get(&prefix_key).cloned()
+                                    } else {
+                                        None
+                                    }
+                                })
+                            });
+                        if let Some(snapshot) = session_hit {
+                            resume_depth = depth;
+                            resume_starting = snapshot.clone();
+                            prefix_cache.insert(prefix_key, snapshot);
+                            prefix_cache_hits += 1;
+                            yannakakis_persistent_prefix_hits += 1;
                             break;
                         }
                     }
@@ -660,7 +742,23 @@ impl GraphHunterApi {
                             hypothesis.k_simplicity.max(1),
                         );
                         if snapshot.len() < PREFIX_CACHE_CAP {
-                            prefix_cache.insert(prefix_key, std::sync::Arc::new(snapshot));
+                            let arc = std::sync::Arc::new(snapshot);
+                            prefix_cache.insert(prefix_key.clone(), arc.clone());
+                            // Also write to the persistent session
+                            // cache (resets on graph version mismatch).
+                            if let Ok(mut slot) = session_for_bags.yannakakis_cache.write() {
+                                let cache = slot.get_or_insert_with(|| {
+                                    crate::state::session::YannakakisSessionCache::new(
+                                        live_version,
+                                    )
+                                });
+                                if cache.version != live_version {
+                                    *cache = crate::state::session::YannakakisSessionCache::new(
+                                        live_version,
+                                    );
+                                }
+                                cache.insert_prefix(prefix_key, arc);
+                            }
                         }
                     }
                     (paths, truncated)
@@ -744,6 +842,8 @@ impl GraphHunterApi {
             lftj_session_cache_reused,
             lftj_persistent_canonical_hits,
             lftj_persistent_trie_hits,
+            yannakakis_persistent_bag_hits,
+            yannakakis_persistent_prefix_hits,
         })
     }
 }
@@ -769,6 +869,19 @@ mod tests {
     use crate::state::Session;
     use graph_hunter_core::{GraphHunter, parse_dsl};
     use std::sync::Arc;
+
+    /// Process-wide mutex shared by every env-mutating hunt test in
+    /// this module. Cargo runs tests in parallel by default, so
+    /// `GRAPHHUNTER_YANNAKAKIS=1` set by one test would race with
+    /// `GRAPHHUNTER_TRIANGLE_LFTJ=1` set by another. Pattern mirrors
+    /// `core/graph-engine/src/planner.rs::tests::ENV_LOCK` (added in
+    /// PR #14). Each env-touching test acquires this guard for the
+    /// duration of its run.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn api() -> GraphHunterApi {
         let api = GraphHunterApi::new_noop();
@@ -902,6 +1015,7 @@ mod tests {
         // miss-only.
         // Note: env vars are process-wide; this test sets the flag
         // for its duration and restores afterwards.
+        let _env_guard = lock_env();
         let prior = std::env::var("GRAPHHUNTER_YANNAKAKIS").ok();
         // SAFETY: the harness runs tests with `--test-threads=1` for
         // env-var tests by convention, and we restore on drop.
@@ -959,11 +1073,109 @@ mod tests {
     }
 
     #[test]
+    fn run_hunt_batch_d3_stage5_yannakakis_persistent_prefix_cache() {
+        // D3 stage 5 prefix companion: the prefix snapshot cache
+        // also survives across batches via the Session cache.
+        // Two batches sharing a 2-step prefix: the second resumes
+        // from the cached snapshot rather than recomputing from
+        // bags. The bag cache also helps; we isolate the prefix
+        // hit explicitly.
+        let _env_guard = lock_env();
+        let prior = std::env::var("GRAPHHUNTER_YANNAKAKIS").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_YANNAKAKIS", "1") };
+        let api = api();
+        // First batch: 3-step chain populates depth-1 and depth-2
+        // prefix snapshots in both per-batch and persistent caches.
+        let _b1 = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![hypo(
+                    "User -[Auth]-> Host -[Connect]-> IP -[DNS]-> Domain",
+                )],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("first batch ok");
+        // Second batch: shares the first 2 steps with batch 1's
+        // hypothesis but diverges at step 3. Resume from the
+        // depth-2 prefix snapshot persisted in the session cache.
+        let b2 = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![hypo(
+                    "User -[Auth]-> Host -[Connect]-> IP -[Modify]-> File",
+                )],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("second batch ok");
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_YANNAKAKIS", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_YANNAKAKIS") },
+        }
+        assert!(
+            b2.yannakakis_persistent_prefix_hits >= 1,
+            "second batch should resume from a persisted prefix snapshot"
+        );
+        assert_eq!(b2.last_prefix_resume_depth, 2);
+    }
+
+    #[test]
+    fn run_hunt_batch_d3_stage5_yannakakis_persistent_bag_cache() {
+        // D3 stage 5: bag cache survives across batches via the
+        // Session-level YannakakisSessionCache, gated by
+        // mutation_version. Two consecutive batches with the same
+        // hypothesis: first batch materializes bags (zero
+        // persistent hits), second batch reads them from the
+        // session cache.
+        let _env_guard = lock_env();
+        let prior = std::env::var("GRAPHHUNTER_YANNAKAKIS").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_YANNAKAKIS", "1") };
+        let api = api();
+        let h = hypo("User -[Auth]-> Host -[Connect]-> IP");
+        let first = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h.clone()],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("first batch ok");
+        assert_eq!(
+            first.yannakakis_persistent_bag_hits, 0,
+            "first batch on a cold cache cannot have a persistent hit"
+        );
+        let second = api
+            .run_hunt_batch(RunHuntBatchRequest {
+                session: None,
+                hypotheses: vec![h],
+                time_window: None,
+                max_results: None,
+            })
+            .expect("second batch ok");
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_YANNAKAKIS", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_YANNAKAKIS") },
+        }
+        // Two-step hypothesis → two bag lookups in the second
+        // batch, both should hit the persistent cache.
+        assert_eq!(
+            second.yannakakis_persistent_bag_hits, 2,
+            "second batch on the same graph version must reuse both bags"
+        );
+        assert_eq!(
+            second.bag_cache_misses, 0,
+            "no bag materialization should fire on the warm second batch"
+        );
+    }
+
+    #[test]
     fn run_hunt_batch_d3_stage4_persistent_canonical_cache_across_batches() {
         // D3 stage 4: the canonical raw-result cache survives
         // across `run_hunt_batch` calls. First batch enumerates
         // and writes; second batch on the same Session + graph
         // version reads back without re-enumerating.
+        let _env_guard = lock_env();
         let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
         unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", "1") };
         let api = api();
@@ -1014,6 +1226,7 @@ mod tests {
         // hypotheses (Auth-triangle then Connect-triangle) both
         // build their own typed trie; a third batch firing the
         // Auth-triangle again hits the persistent typed-trie map.
+        let _env_guard = lock_env();
         let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
         unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", "1") };
         let api = api();
@@ -1075,6 +1288,7 @@ mod tests {
         // mutated. First batch builds (lftj_session_cache_reused
         // = false); second batch on the same Session reuses
         // (lftj_session_cache_reused = true).
+        let _env_guard = lock_env();
         let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
         unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", "1") };
         let api = api();
@@ -1124,6 +1338,7 @@ mod tests {
         // Mutating the graph (add_relation) bumps mutation_version
         // and the next batch must rebuild — session cache reused
         // = false.
+        let _env_guard = lock_env();
         let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
         unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", "1") };
         let api = api();
@@ -1185,6 +1400,7 @@ mod tests {
         // result_cache (stage 3a, keyed on hypothesis JSON) does
         // NOT hit. But the canonical cache (stage 2, keyed on
         // (plan, window)) DOES.
+        let _env_guard = lock_env();
         let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
         unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", "1") };
         let api = api();
@@ -1226,6 +1442,7 @@ mod tests {
         // share the canonical cache — different DispatchPlans.
         // This test verifies the cache key includes the plan, not
         // just the time_window.
+        let _env_guard = lock_env();
         let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
         let prior_k4 = std::env::var("GRAPHHUNTER_K4_LFTJ").ok();
         unsafe {
@@ -1269,6 +1486,7 @@ mod tests {
         // and both go through the trie path) share the forward
         // trie + ts_map. Triangle and K4 use the same forward
         // trie, so 1 build + 1 hit.
+        let _env_guard = lock_env();
         let prior_tri = std::env::var("GRAPHHUNTER_TRIANGLE_LFTJ").ok();
         let prior_k4 = std::env::var("GRAPHHUNTER_K4_LFTJ").ok();
         unsafe {
@@ -1331,6 +1549,7 @@ mod tests {
         // resume the second one's enumeration from depth 1
         // (after reusing the cached prefix snapshot from
         // hypothesis 1).
+        let _env_guard = lock_env();
         let prior = std::env::var("GRAPHHUNTER_YANNAKAKIS").ok();
         unsafe { std::env::set_var("GRAPHHUNTER_YANNAKAKIS", "1") };
         let api = api();

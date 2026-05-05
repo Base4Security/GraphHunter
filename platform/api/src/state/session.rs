@@ -119,6 +119,14 @@ pub struct Session {
     /// concept and shouldn't carry rayon-built indexes that only
     /// matter to batch lifetimes.
     pub lftj_cache: RwLock<Option<LftjSessionCache>>,
+    /// D3 stage 5 — Session-level Yannakakis bag cache. Mirror of
+    /// `lftj_cache` for the α-acyclic chain dispatch path. Persists
+    /// `Bag` materializations across `run_hunt_batch` calls keyed on
+    /// the graph's `mutation_version`. FIFO-bounded by total cached
+    /// `BagRow` bytes (`MAX_BAG_BYTES`) so a long-lived session
+    /// running many α-acyclic templates doesn't OOM — bags can be
+    /// large (one row per matching edge, 24 B per row).
+    pub yannakakis_cache: RwLock<Option<YannakakisSessionCache>>,
 }
 
 /// D3 stage 3+4 — Session-level LFTJ index cache. Built lazily on
@@ -186,6 +194,141 @@ pub type LftjCanonicalKey = (
     i64,
 );
 
+/// Maximum bytes of `BagRow` payload kept warm in the Yannakakis
+/// cache. ~256 MB cap — enough for ~10M cached BagRows (24 B each)
+/// across all live (step, window) signatures. A typical SOC
+/// template touches 1–5 distinct steps; at this cap we keep ~50
+/// templates worth of bags warm before FIFO eviction kicks in.
+pub const MAX_BAG_BYTES: usize = 256 * 1024 * 1024;
+
+/// Maximum bytes of prefix-snapshot payload kept warm. Prefix
+/// snapshots are smaller per-entry than bags (one entry per
+/// surviving partial chain at depth K) but the per-batch
+/// `PREFIX_CACHE_CAP` of 50K entries × ~40 B per entry × ~64
+/// distinct prefixes can still reach hundreds of MB. Cap at
+/// 128 MB — half the bag budget, since the Yannakakis chain
+/// enumerator pays bag cost first and prefix cost second.
+pub const MAX_PREFIX_BYTES: usize = 128 * 1024 * 1024;
+
+/// D3 stage 5 — Session-level Yannakakis cache. Persists `Bag`
+/// materializations and prefix snapshots across `run_hunt_batch`
+/// calls. Each cache FIFO-evicts on its own total byte budget
+/// (`MAX_BAG_BYTES`, `MAX_PREFIX_BYTES`); bag and prefix entries
+/// don't compete for the same budget because their access
+/// patterns differ (bag = wide reuse across templates that share
+/// a step; prefix = narrow reuse across templates that share an
+/// initial chain slice).
+pub struct YannakakisSessionCache {
+    pub version: u64,
+    pub bags: HashMap<String, Arc<graph_hunter_core::yannakakis::Bag>>,
+    pub bags_order: std::collections::VecDeque<String>,
+    pub bags_bytes: usize,
+    pub prefixes: HashMap<
+        String,
+        Arc<Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>>,
+    >,
+    pub prefixes_order: std::collections::VecDeque<String>,
+    pub prefixes_bytes: usize,
+}
+
+impl YannakakisSessionCache {
+    /// Fresh empty cache stamped with a graph version.
+    pub fn new(version: u64) -> Self {
+        Self {
+            version,
+            bags: HashMap::new(),
+            bags_order: std::collections::VecDeque::new(),
+            bags_bytes: 0,
+            prefixes: HashMap::new(),
+            prefixes_order: std::collections::VecDeque::new(),
+            prefixes_bytes: 0,
+        }
+    }
+
+    /// Approximate byte cost of a `Bag` (excludes the `Vec` header
+    /// + any spare capacity, since callers shouldn't reserve much).
+    fn bag_bytes(bag: &graph_hunter_core::yannakakis::Bag) -> usize {
+        bag.rows.len() * std::mem::size_of::<graph_hunter_core::yannakakis::BagRow>()
+    }
+
+    /// Approximate byte cost of a prefix snapshot. Each entry is a
+    /// `(Vec<StrId>, i64)` pair; the `Vec<StrId>` contents dominate
+    /// (one StrId = 4 bytes per visited vertex). Avg depth is
+    /// captured from the first entry — prefix snapshots at a fixed
+    /// depth all have equal-length inner vecs, so the first row is
+    /// representative.
+    fn prefix_bytes(
+        snapshot: &Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>,
+    ) -> usize {
+        let depth_bytes = snapshot
+            .first()
+            .map(|(v, _)| v.len() * std::mem::size_of::<graph_hunter_core::interner::StrId>())
+            .unwrap_or(0);
+        snapshot.len() * (depth_bytes + std::mem::size_of::<i64>())
+    }
+
+    /// Insert a bag, evicting oldest entries until the total byte
+    /// budget fits. Returns `true` when the entry was newly inserted;
+    /// `false` when the key already existed (the previous value is
+    /// overwritten with the new one but the FIFO position is
+    /// unchanged).
+    pub fn insert(
+        &mut self,
+        key: String,
+        bag: Arc<graph_hunter_core::yannakakis::Bag>,
+    ) -> bool {
+        let new_bytes = Self::bag_bytes(&bag);
+        let is_new = !self.bags.contains_key(&key);
+        if is_new {
+            // Evict from the front until we fit. Stop if we'd
+            // empty the cache and STILL not fit — in that case
+            // the bag itself exceeds the budget; insert it anyway
+            // (one big bag is better than no bags) but the next
+            // insert will evict it.
+            while self.bags_bytes + new_bytes > MAX_BAG_BYTES
+                && !self.bags_order.is_empty()
+            {
+                let evict_key = self.bags_order.pop_front().expect("non-empty");
+                if let Some(evicted) = self.bags.remove(&evict_key) {
+                    self.bags_bytes =
+                        self.bags_bytes.saturating_sub(Self::bag_bytes(&evicted));
+                }
+            }
+            self.bags_order.push_back(key.clone());
+            self.bags_bytes += new_bytes;
+        }
+        self.bags.insert(key, bag);
+        is_new
+    }
+
+    /// Insert a prefix snapshot with the same FIFO + byte-budget
+    /// semantics as `insert`. Returns `true` on a new key.
+    pub fn insert_prefix(
+        &mut self,
+        key: String,
+        snapshot: Arc<Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>>,
+    ) -> bool {
+        let new_bytes = Self::prefix_bytes(&snapshot);
+        let is_new = !self.prefixes.contains_key(&key);
+        if is_new {
+            while self.prefixes_bytes + new_bytes > MAX_PREFIX_BYTES
+                && !self.prefixes_order.is_empty()
+            {
+                let evict_key = self.prefixes_order.pop_front().expect("non-empty");
+                if let Some(evicted) = self.prefixes.remove(&evict_key) {
+                    self.prefixes_bytes = self
+                        .prefixes_bytes
+                        .saturating_sub(Self::prefix_bytes(&evicted));
+                }
+            }
+            self.prefixes_order.push_back(key.clone());
+            self.prefixes_bytes += new_bytes;
+        }
+        self.prefixes.insert(key, snapshot);
+        is_new
+    }
+}
+
 impl Session {
     pub fn new(
         id: impl Into<String>,
@@ -205,6 +348,7 @@ impl Session {
             ai_conversation: RwLock::new(AiConversation::new()),
             agentic_review: RwLock::new(MappingReviewQueue::new()),
             lftj_cache: RwLock::new(None),
+            yannakakis_cache: RwLock::new(None),
         }
     }
 }

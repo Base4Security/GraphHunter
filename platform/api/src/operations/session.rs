@@ -207,6 +207,7 @@ impl GraphHunterApi {
                     crate::state::agentic::MappingReviewQueue::new(),
                 ),
                 lftj_cache: std::sync::RwLock::new(None),
+                yannakakis_cache: std::sync::RwLock::new(None),
             });
             self.sessions().insert(session);
         }

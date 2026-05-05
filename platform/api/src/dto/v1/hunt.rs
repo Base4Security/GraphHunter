@@ -195,6 +195,23 @@ pub struct RunHuntBatchResponse {
     /// tries warm; this counts the matches.
     #[serde(default)]
     pub lftj_persistent_trie_hits: usize,
+    /// D3 stage 5: bag-cache hits served from the persistent
+    /// Session-level Yannakakis cache (`Session::yannakakis_cache`).
+    /// Strict subset of `bag_cache_hits` — that legacy counter
+    /// captures every bag reuse (within-batch + cross-batch); this
+    /// one isolates the cross-batch portion. The Session cache is
+    /// FIFO-bounded by total `BagRow` bytes; mutations to the graph
+    /// (`add_relation` etc.) bump `mutation_version` and invalidate
+    /// the whole cache atomically on the next batch.
+    #[serde(default)]
+    pub yannakakis_persistent_bag_hits: usize,
+    /// D3 stage 5 (prefix companion): prefix-snapshot resumes
+    /// served from the persistent Session-level cache. Strict
+    /// subset of `prefix_cache_hits`. Same `mutation_version`
+    /// invalidation as the bag cache; bounded separately by
+    /// `MAX_PREFIX_BYTES`.
+    #[serde(default)]
+    pub yannakakis_persistent_prefix_hits: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
