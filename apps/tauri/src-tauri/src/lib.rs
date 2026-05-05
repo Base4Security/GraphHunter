@@ -323,6 +323,8 @@ pub fn run() {
             commands::ticket_file::cmd_file_ticket,
             // Perf-flag introspection (M-track plug-and-play surface)
             commands::perf::cmd_get_perf_status,
+            // Ingest-engine introspection (RawIngestEvent + VRL/LLM compiler badge)
+            commands::ingest_status::cmd_get_ingest_engine_status,
             // Heavy-logs #4: soft-memory-ceiling telemetry
             commands::memory::cmd_get_memory_status,
             // Sentinel real-time connector commands

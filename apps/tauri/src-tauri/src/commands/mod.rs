@@ -14,5 +14,6 @@ pub mod sentinel_publish;
 pub mod sigma_save;
 pub mod ticket_file;
 pub mod azure_streaming_smoke;
+pub mod ingest_status;
 pub mod memory;
 pub mod perf;

@@ -143,6 +143,37 @@ function AppInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Ingest-engine status — populated once at mount from
+  // `cmd_get_ingest_engine_status`. Renders as a small toolbar badge
+  // next to the perf badge so the user perceives that the new
+  // RawIngestEvent + VRL/LLM compiler stack is on by default. Same
+  // null-on-missing pattern as `perfStatus` so older daemons just
+  // skip the badge.
+  const [ingestEngineStatus, setIngestEngineStatus] = useState<{
+    summary: string;
+    rawEventActive: boolean;
+    parsersWithNativeRaw: string[];
+    vrlCompilerActive: boolean;
+    llmCompilerAvailable: boolean;
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await invoke<typeof ingestEngineStatus>(
+          "cmd_get_ingest_engine_status"
+        );
+        if (!cancelled) setIngestEngineStatus(status);
+      } catch {
+        // Older daemon without the command — leave null.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Heavy-logs #4 — memory pressure pill. Polls cmd_get_memory_status
   // every 5 s; the badge shifts from green ("normal") to amber when
   // process RSS exceeds `warnAt` (default 75% of host RAM) and to red
@@ -806,6 +837,17 @@ function AppInner() {
               {perfStatus.lftjPlanner || perfStatus.k4Lftj || perfStatus.yannakakis
                 ? "Perf: M+L1"
                 : "Perf: Legacy"}
+            </span>
+          )}
+          {ingestEngineStatus && ingestEngineStatus.rawEventActive && (
+            <span
+              className="app-toolbar-ingest-badge"
+              data-active="true"
+              data-llm={ingestEngineStatus.llmCompilerAvailable ? "true" : "false"}
+              title={ingestEngineStatus.summary}
+              aria-label={ingestEngineStatus.summary}
+            >
+              {ingestEngineStatus.llmCompilerAvailable ? "Ingest: v2 + LLM" : "Ingest: v2"}
             </span>
           )}
           {memStatus && memStatus.hostTotalBytes > 0 && (

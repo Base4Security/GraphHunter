@@ -587,9 +587,10 @@ impl GraphHunterApi {
                 .write()
                 .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
             let parser = make_parser_for_format("sentinel").map_err(ApiError::InvalidInput)?;
-            let triples = parser.parse(&data);
+            // RawIngestEvent path — see evtx.rs for the rationale.
+            let events = parser.parse_raw(&data);
             let (e, r) = graph
-                .insert_triples(triples, Some(dataset_id.as_str()))
+                .insert_raw_events(events, Some(dataset_id.as_str()))
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             run_full_scoring(&mut graph);
             (e, r)

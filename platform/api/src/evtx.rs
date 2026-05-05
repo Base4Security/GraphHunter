@@ -95,10 +95,15 @@ pub fn evtx_ingest_streaming(
 
         if batch_lines.len() >= BATCH_SIZE {
             let batch_str = batch_lines.join("\n");
-            let triples = parser.parse(&batch_str);
+            // RawIngestEvent path — skips the per-event Entity/Relation
+            // struct allocations the legacy `parse() + insert_triples`
+            // pair pays. SysmonJsonParser overrides parse_raw natively
+            // for all 16 typed Sysmon/WinSec/PowerShell EventIDs;
+            // unmigrated parsers fall through to the default lift.
+            let events = parser.parse_raw(&batch_str);
             let (ne, nr) = match session.graph.write() {
                 Ok(mut graph) => graph
-                    .insert_triples(triples, Some(dataset_id))
+                    .insert_raw_events(events, Some(dataset_id))
                     .map_err(|e| e.to_string())?,
                 Err(_) => return Err("Graph lock poisoned".to_string()),
             };
@@ -121,10 +126,10 @@ pub fn evtx_ingest_streaming(
 
     if !batch_lines.is_empty() {
         let batch_str = batch_lines.join("\n");
-        let triples = parser.parse(&batch_str);
+        let events = parser.parse_raw(&batch_str);
         let (ne, nr) = match session.graph.write() {
             Ok(mut graph) => graph
-                .insert_triples(triples, Some(dataset_id))
+                .insert_raw_events(events, Some(dataset_id))
                 .map_err(|e| e.to_string())?,
             Err(_) => return Err("Graph lock poisoned".to_string()),
         };
