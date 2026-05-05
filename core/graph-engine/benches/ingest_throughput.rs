@@ -176,6 +176,102 @@ fn synth_sysmon_ndjson_long_tail(n_events: usize) -> String {
     out
 }
 
+/// Windows Security + PowerShell mixed fixture. Exercises the typed
+/// parsers shipped in PR #20 (4624/4625, 4688, 4689, 4663, 5145, 5156,
+/// 4104) which had no dedicated bench group until now. Bucket ratios
+/// approximate a busy member-server profile: heavy logon + process +
+/// firewall, light powershell + share access.
+fn synth_winsec_ndjson(n_events: usize) -> String {
+    let mut out = String::with_capacity(n_events * 260);
+    for i in 0..n_events {
+        let host = format!("host{}", i % 25);
+        let ts_sec = 1_700_000_000 + (i as i64);
+        let ts_str = format!("2023-11-14 22:13:{:02}.000", ts_sec % 60);
+        let bucket = i % 100;
+        if bucket < 25 {
+            // 4624 logon success
+            let lt = [2u8, 3, 4, 5, 7, 10][i % 6];
+            out.push_str(&format!(
+                "{{\"EventID\":4624,\"UtcTime\":\"{ts_str}\",\
+                  \"TargetUserName\":\"user{u}\",\"TargetDomainName\":\"CORP\",\
+                  \"LogonType\":{lt},\"IpAddress\":\"10.1.{a}.{b}\",\"Computer\":\"{host}\"}}\n",
+                u = i % 200,
+                a = (i / 254) % 256,
+                b = (i * 7) % 254 + 1,
+            ));
+        } else if bucket < 30 {
+            // 4625 logon failure (string LogonType variant)
+            out.push_str(&format!(
+                "{{\"EventID\":4625,\"UtcTime\":\"{ts_str}\",\
+                  \"TargetUserName\":\"user{u}\",\"TargetDomainName\":\"CORP\",\
+                  \"LogonType\":\"3\",\"IpAddress\":\"10.2.{a}.{b}\",\"Computer\":\"{host}\"}}\n",
+                u = i % 50,
+                a = (i / 254) % 256,
+                b = (i * 11) % 254 + 1,
+            ));
+        } else if bucket < 55 {
+            // 4688 security process create
+            out.push_str(&format!(
+                "{{\"EventID\":4688,\"UtcTime\":\"{ts_str}\",\
+                  \"NewProcessName\":\"C:\\\\Windows\\\\System32\\\\cmd.exe\",\
+                  \"SubjectUserName\":\"user{u}\",\"SubjectDomainName\":\"CORP\",\
+                  \"ParentProcessName\":\"C:\\\\Windows\\\\explorer.exe\",\
+                  \"CommandLine\":\"cmd.exe /c whoami\",\"Computer\":\"{host}\"}}\n",
+                u = i % 100,
+            ));
+        } else if bucket < 70 {
+            // 4689 security process terminated
+            out.push_str(&format!(
+                "{{\"EventID\":4689,\"UtcTime\":\"{ts_str}\",\
+                  \"ProcessName\":\"C:\\\\Windows\\\\System32\\\\cmd.exe\",\
+                  \"SubjectUserName\":\"user{u}\",\"SubjectDomainName\":\"CORP\",\
+                  \"Computer\":\"{host}\"}}\n",
+                u = i % 100,
+            ));
+        } else if bucket < 80 {
+            // 4663 object access
+            let obj_idx = i % 200;
+            out.push_str(&format!(
+                "{{\"EventID\":4663,\"UtcTime\":\"{ts_str}\",\
+                  \"ProcessName\":\"C:\\\\Windows\\\\System32\\\\notepad.exe\",\
+                  \"ObjectName\":\"C:\\\\Users\\\\u\\\\file{obj_idx}.txt\",\
+                  \"ObjectType\":\"File\",\"SubjectUserName\":\"user{u}\",\"Computer\":\"{host}\"}}\n",
+                u = i % 100,
+            ));
+        } else if bucket < 85 {
+            // 5145 network share
+            let rel = i % 50;
+            out.push_str(&format!(
+                "{{\"EventID\":5145,\"UtcTime\":\"{ts_str}\",\
+                  \"ShareName\":\"\\\\\\\\*\\\\IPC$\",\"RelativeTargetName\":\"share{rel}\",\
+                  \"SubjectUserName\":\"user{u}\",\"IpAddress\":\"10.3.{a}.{b}\",\"Computer\":\"{host}\"}}\n",
+                u = i % 50,
+                a = (i / 254) % 256,
+                b = (i * 13) % 254 + 1,
+            ));
+        } else if bucket < 95 {
+            // 5156 WFP connection
+            out.push_str(&format!(
+                "{{\"EventID\":5156,\"UtcTime\":\"{ts_str}\",\
+                  \"Application\":\"\\\\device\\\\harddiskvolume2\\\\windows\\\\system32\\\\svchost.exe\",\
+                  \"DestAddress\":\"10.4.{a}.{b}\",\"DestPort\":\"443\",\
+                  \"SourceAddress\":\"10.0.{a}.{c}\",\"Computer\":\"{host}\"}}\n",
+                a = (i / 254) % 256,
+                b = (i * 17) % 254 + 1,
+                c = (i * 19) % 254 + 1,
+            ));
+        } else {
+            // 4104 PowerShell script block
+            out.push_str(&format!(
+                "{{\"EventID\":4104,\"UtcTime\":\"{ts_str}\",\
+                  \"ScriptBlockText\":\"Get-Process | Where-Object {{$_.CPU -gt {i}}}\",\
+                  \"ScriptBlockId\":\"{i:032x}\",\"Computer\":\"{host}\"}}\n",
+            ));
+        }
+    }
+    out
+}
+
 fn bench_ingest(c: &mut Criterion) {
     let mut group = c.benchmark_group("ingest-sysmon-ndjson");
     for n in &[1_000usize, 10_000, 50_000] {
@@ -226,6 +322,20 @@ fn bench_ingest(c: &mut Criterion) {
     // the only thing it skips is the post-parse triple
     // construction. Sequential to isolate parse cost from rayon
     // worker scheduling effects.
+    let mut group = c.benchmark_group("ingest-winsec-ndjson");
+    for n in &[1_000usize, 10_000, 50_000] {
+        let payload = synth_winsec_ndjson(*n);
+        group.throughput(Throughput::Elements(*n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), n, |b, _| {
+            b.iter(|| {
+                let parser = SysmonJsonParser;
+                let triples = parser.parse(black_box(&payload));
+                black_box(triples)
+            });
+        });
+    }
+    group.finish();
+
     let mut group = c.benchmark_group("ingest-sysmon-parse-only");
     for n in &[1_000usize, 10_000, 50_000] {
         let payload = synth_sysmon_ndjson(*n);
