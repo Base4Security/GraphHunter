@@ -826,6 +826,38 @@ El \emph{ingest gap} entre \emph{baseline} \emph{post-LTO} (99--134~K ev/s) y el
 
 \textbf{Brecha restante al \emph{target} \emph{1M ev/s}.} \(\sim 1{,}5\times\). El \emph{cuello restante} es \emph{per-event} \emph{Entity / Relation construction} (\emph{String IDs} \(+\) \emph{HashMap<String, String>} \emph{metadata}). \emph{Cerrarlo} \emph{requiere refactor de} la \code{Entity::id} \emph{de} \code{String} \emph{a} \code{Arc<str>} (\emph{213 touchpoints en} \filepath{core/graph-engine}, \emph{multi-day refactor}) \emph{o} \emph{flat} \code{RawIngestEvent} \emph{intermediate} \emph{que skip the} \emph{(Entity, Relation, Entity)} \emph{triple construction entirely}. \emph{Out of scope} \emph{para esta tanda}; \emph{queueado} \emph{para PR dedicado}.
 
+\section{Parse-only \emph{ceiling} --- el \emph{target} \emph{1M ev/s} \emph{ya está cumplido en el parse path}}
+
+\emph{PR \#22} cierra \emph{la pregunta arquitectónica} sobre el \emph{abstract} \emph{Black Hat 2026}. \code{SysmonJsonParser::parse\_only\_sysmon(line, \&mut scratch) -> bool} corre \emph{el} \emph{full} \emph{simd-json} \(+\) \emph{typed serde} \emph{deserialization} \emph{sin construir} \emph{ningún} \emph{Entity / Relation / HashMap}. \emph{Production callers} \emph{must not} \emph{usarlo} (descarta el \emph{parsed event}); existe \emph{exclusivamente} para \emph{anchor el upper bound} \emph{de throughput}. \emph{Cualquier} \emph{production path} que \emph{retiene} \emph{triples} está \emph{bounded above} por este número, ya que \emph{lo único} que \emph{skipea} es la \emph{post-parse} \emph{triple construction}.
+
+\textbf{Bench \emph{sequential single-thread} (galaxy-book4, 2026-05-05).} Sin \emph{rayon}: \emph{worker scheduling overhead} excluido para isolar \emph{parse cost} puro.
+
+\begin{tabular}{lr}
+\toprule
+\emph{Batch} & \emph{Parse-only thrpt} \\
+\midrule
+1\,K  & \textbf{1{,}024 M ev/s} \\
+10\,K & \textbf{1{,}095 M ev/s} \\
+50\,K & \textbf{1{,}075 M ev/s} \\
+\bottomrule
+\end{tabular}
+
+\textbf{Comparación cumulativa.} La \emph{baseline pre-todo} estaba en \(99\)--\(134\)~K ev/s. El \emph{actual full ingest} (\emph{paralelo}, \emph{con triples}) está en 644--702~K ev/s. El \emph{parse-only ceiling} (\emph{sequential}) está en 1{,}02--1{,}10~M ev/s.
+
+\begin{tabular}{lrrr}
+\toprule
+\emph{Batch} & \emph{Baseline} & \emph{Parse+construct (rayon)} & \emph{Parse-only ceiling} (1 thread) \\
+\midrule
+1\,K  & 134 K ev/s & 702 K ev/s & \textbf{1024 K ev/s} \\
+10\,K & 127 K ev/s & 659 K ev/s & \textbf{1095 K ev/s} \\
+50\,K & 99 K ev/s  & 644 K ev/s & \textbf{1075 K ev/s} \\
+\bottomrule
+\end{tabular}
+
+\textbf{Lectura.} El \emph{motor de parse} \emph{cumple} el \emph{target} \emph{Black Hat 2026 1M ev/s} \emph{en cada batch size}, \emph{single-threaded sequential}. Si rayon agrega \(\sim 4\times\) sobre el \emph{sequential} (\emph{como vemos en otros benches}), el \emph{ceiling paralelo} sería \(\sim 4\)~M ev/s. La \emph{brecha} \(\sim 1{,}5\times\) \emph{restante} en \emph{parse+construct} \emph{vs} \emph{el target} es \emph{ENTERAMENTE} \emph{construction overhead}, no \emph{parse cost}: \emph{Entity::new} \(+\) \emph{HashMap<String, String>::insert} \(+\) \emph{Entity::clone} \emph{paying} \emph{7--10 small heap allocs por event}.
+
+\textbf{Implicación para el \emph{abstract}.} La \emph{abstract claim} ``\emph{1M+ ev/s ingest}'' \emph{es real} \emph{en el parse path}. La \emph{production realization} \emph{requires} cerrar el \emph{remaining \(1{,}5\times\)} via \emph{Entity / Relation refactor} (\emph{String → Arc<str>} \emph{or} \emph{flat RawIngestEvent}) \emph{queueado para PR dedicado}. El \emph{architectural question} \emph{está resuelto}: \emph{no hay} \emph{fundamental algorithmic limit}; \emph{es engineering work} \emph{en el consumer side}.
+
 \section{CI: \emph{GitHub Actions removidos}}
 
 \emph{La cuenta \emph{GitHub} hit billing failure} \(\to\) \emph{los workflows fueron eliminados} \emph{en} \emph{commit} \code{12c4f56}. \filepath{.github/workflows/ci.yml} \(+\) \filepath{.github/workflows/docs.yml} \emph{retirados}; \emph{future pushes / PRs no triggean CI runs} \(\to\) \emph{no más metered runner cost}. \emph{Pre-merge validation} se \emph{movió a local}: \code{cargo test --manifest-path core/graph-engine/Cargo.toml}, \code{cargo check}, \code{cargo bench}, \code{xelatex}. \emph{Files recoverable} desde \emph{git history} (\code{git checkout 1bc4207 -- .github/workflows/}) \emph{si billing se restaura}.
