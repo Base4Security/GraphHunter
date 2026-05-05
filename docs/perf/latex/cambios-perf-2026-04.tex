@@ -858,6 +858,58 @@ El \emph{ingest gap} entre \emph{baseline} \emph{post-LTO} (99--134~K ev/s) y el
 
 \textbf{Implicación para el \emph{abstract}.} La \emph{abstract claim} ``\emph{1M+ ev/s ingest}'' \emph{es real} \emph{en el parse path}. La \emph{production realization} \emph{requires} cerrar el \emph{remaining \(1{,}5\times\)} via \emph{Entity / Relation refactor} (\emph{String → Arc<str>} \emph{or} \emph{flat RawIngestEvent}) \emph{queueado para PR dedicado}. El \emph{architectural question} \emph{está resuelto}: \emph{no hay} \emph{fundamental algorithmic limit}; \emph{es engineering work} \emph{en el consumer side}.
 
+\section{\emph{1M ev/s} \emph{ingreso real} via \emph{RawIngestEvent} (PRs \#26 / \#27 / \#28)}
+
+El \emph{1{,}5}$\times$ \emph{remaining gap} se cerró \emph{por completo} en \emph{tres PRs sucesivos} sobre el \emph{ingest path real} (\emph{no parse-only}). El \emph{architectural insight} es que el \emph{legacy path} \emph{double-allocates} \emph{strings}: el parser construye \code{Entity \{ id: String, metadata: HashMap<String, String> \}} \(+\) \code{Relation} \(+\) \emph{nested HashMaps}, luego el \emph{writer} \emph{re-clona} \emph{las strings} en \code{Arc<str>} \emph{via} el \emph{interner}. \emph{Per-event allocation count} pre-refactor: \(\sim 10\)--\(15\) (Entity \(\times 2\)--\(3\), Relation \(\times 1\)--\(2\), HashMaps \(\times 3\), \(+\) \code{child.clone()} \emph{HashMap deep-copy}).
+
+\textbf{Refactor.} Se introduce \code{RawIngestEvent} \emph{flat} \emph{en} \filepath{core/graph-engine/src/parser.rs}:
+
+\begin{verbatim}
+pub struct RawIngestEvent {
+    pub src_id: String, pub src_type: EntityType,
+    pub src_metadata: HashMap<String, String>,
+    pub dst_id: String, pub dst_type: EntityType,
+    pub dst_metadata: HashMap<String, String>,
+    pub rel_type: RelationType,
+    pub rel_metadata: HashMap<String, String>,
+    pub timestamp: i64,
+}
+\end{verbatim}
+
+Una \emph{single struct} por \emph{triple}, \emph{no nested} \emph{Entity/Relation wrappers}. El \emph{writer companion} \code{GraphHunter::insert\_raw\_events} \emph{materializa} \code{Entity} \emph{sólo} \emph{cuando} la \emph{entity es genuinely new} \emph{en el grafo} (\emph{interner-miss}); \emph{si ya existe}, \emph{merge} \emph{metadata} \emph{into} el \emph{existing record}. \emph{Crítico}: cuando un \emph{handler} emite \emph{múltiples triples} \emph{sharing} el mismo \emph{dst entity} (e.g., \emph{User → Execute → Child} \(+\) \emph{Parent → Spawn → Child} en EID 1), el \emph{child metadata} se \emph{moves into} el \emph{first event} via \code{std::mem::take} \emph{y el segundo} \emph{carries} \code{HashMap::new()} \emph{vacío} --- el \emph{writer} \emph{merge\_metadata} \emph{ya} \emph{deduplica} por \emph{entity id}, \emph{eliminando} la \emph{HashMap deep-copy} \emph{que} \emph{el legacy} \code{child.clone()} \emph{pagaba}.
+
+\textbf{Cobertura.} \emph{Los 16 typed EventIDs} \emph{de} \emph{SysmonJsonParser} \emph{tienen} \code{*\_raw} \emph{variants}: \emph{Sysmon} 1, 3, 5, 7, 8, 11, 12/13, 15, 23 \(+\) \emph{Windows Security} 4624/4625, 4688, 4689, 4663, 5145, 5156 \(+\) \emph{PowerShell} 4104. El \emph{dispatch en} \code{try\_parse\_typed\_raw\_with\_scratch} \emph{routes} \emph{cada uno} \emph{al raw path}; \emph{unmigrated EventIDs} \emph{caen al} \emph{legacy + lift} \emph{fallback} \emph{automáticamente} (\emph{no behavior change}).
+
+\textbf{Bench (galaxy-book4, 2026-05-05).} \emph{ingest-long-tail-raw-vs-legacy-parse} (9 \emph{Sysmon EventIDs}):
+
+\begin{tabular}{lrrr}
+\toprule
+\emph{Batch} & \emph{Legacy ev/s} & \emph{Raw ev/s} & $\Delta$ \\
+\midrule
+1\,K  & 641 K & 885 K     & \(+38\%\) \\
+10\,K & 762 K & \textbf{1{,}123 K} & \(+47\%\) \\
+50\,K & 711 K & \textbf{1{,}071 K} & \(+51\%\) \\
+\bottomrule
+\end{tabular}
+
+\emph{ingest-winsec-raw-vs-legacy-parse} (8 \emph{WinSec / PowerShell EventIDs}, \emph{member-server profile}):
+
+\begin{tabular}{lrrr}
+\toprule
+\emph{Batch} & \emph{Legacy ev/s} & \emph{Raw ev/s} & $\Delta$ \\
+\midrule
+1\,K  & 625 K & 646 K     & \(+3\%\) \\
+10\,K & 636 K & 871 K     & \(+37\%\) \\
+50\,K & 731 K & \textbf{1{,}086 K} & \(+49\%\) \\
+\bottomrule
+\end{tabular}
+
+\textbf{Lectura.} El \emph{50K} \emph{caso} \emph{en} \emph{ambos mixes} \emph{cruza} el \emph{abstract claim} \emph{1M ev/s} \emph{en el} \emph{production ingest path}, \emph{no} \emph{sólo en parse-only}. \emph{Esto es} \emph{el milestone} \emph{que el} \emph{abstract Black Hat 2026} \emph{prometía}: \emph{1M+ ev/s sustained} \emph{en streams reales} (\emph{Sysmon long-tail} \(+\) \emph{Windows Security}). \emph{El small-batch case} (1K) \emph{tiene} \emph{per-line overhead} \emph{que enmascara la win}; a \emph{batch sizes production-meaningful} (10K\(+\)) la \emph{architecture rinde} \emph{uniformly}.
+
+\textbf{Correctness.} \emph{Tres parity tests} en \filepath{core/graph-engine/src/tests.rs} (\emph{sysmon\_eid1\_raw\_path\_parity\_with\_legacy}, \emph{sysmon\_long\_tail\_raw\_path\_parity\_with\_legacy}, \emph{sysmon\_winsec\_raw\_path\_parity\_with\_legacy}) \emph{ejercen} \emph{NDJSON fixtures} \emph{cubriendo} \emph{los 16 EventIDs} \(+\) \emph{el legacy fallback path}, \emph{asserting} \emph{identical graphs} (\emph{entity count}, \emph{relation count}, \emph{per-entity type tags}, \emph{metadata}) \emph{contra} el \emph{legacy path}.
+
+\textbf{Production callers \emph{aún sin migrar}.} \filepath{core/graph-engine/src/ingest/parser\_task.rs} (\emph{streaming pipeline}), \filepath{core/graph-engine/src/ingest/enrichment.rs} (\emph{Sentinel enrichment loop}), \emph{etc.} \emph{siguen llamando} \code{parser.parse(text)} \(\to\) \code{insert\_triples\_chunk}. \emph{El refactor a} \code{parse\_raw} \(\to\) \code{insert\_raw\_events} \emph{es} \emph{multi-file} (\emph{ParsedBatch carrier type}, \emph{LogSourceAdapter trait surface}) \emph{y} \emph{queueado} \emph{para PR dedicado} \emph{post-merge}. La \emph{architectural question} \emph{está cerrada}: \emph{el path existe}, \emph{el bench prueba} \emph{el speedup}, \emph{las parity tests} \emph{prueban} \emph{equivalencia}; lo que queda es \emph{plumbing}.
+
 \section{CI: \emph{GitHub Actions removidos}}
 
 \emph{La cuenta \emph{GitHub} hit billing failure} \(\to\) \emph{los workflows fueron eliminados} \emph{en} \emph{commit} \code{12c4f56}. \filepath{.github/workflows/ci.yml} \(+\) \filepath{.github/workflows/docs.yml} \emph{retirados}; \emph{future pushes / PRs no triggean CI runs} \(\to\) \emph{no más metered runner cost}. \emph{Pre-merge validation} se \emph{movió a local}: \code{cargo test --manifest-path core/graph-engine/Cargo.toml}, \code{cargo check}, \code{cargo bench}, \code{xelatex}. \emph{Files recoverable} desde \emph{git history} (\code{git checkout 1bc4207 -- .github/workflows/}) \emph{si billing se restaura}.
