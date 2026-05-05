@@ -365,18 +365,18 @@ impl EnrichmentEngine {
             };
 
             // Decode bytes into string and hand to the parser. The
-            // parser returns ParsedTriples, which may be fewer than
+            // parser returns RawIngestEvents, which may be fewer than
             // the row count — parser drops malformed rows silently
-            // per the `LogParser::parse` contract.
+            // per the `LogParser::parse_raw` contract.
             let text = match std::str::from_utf8(chunk.rows.as_ref()) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let mut triples = match chunk.encoding {
-                ChunkEncoding::Json | ChunkEncoding::Jsonl => self.parser.parse(text),
+            let mut events = match chunk.encoding {
+                ChunkEncoding::Json | ChunkEncoding::Jsonl => self.parser.parse_raw(text),
                 ChunkEncoding::Parquet => continue,
             };
-            let chunk_rows = triples.len();
+            let chunk_rows = events.len();
             rows_fetched += chunk_rows;
 
             // Enforce the row cap across the whole enrichment (not
@@ -384,26 +384,26 @@ impl EnrichmentEngine {
             // truncate and stop fetching.
             if rows_fetched > max_rows as usize {
                 let excess = rows_fetched - max_rows as usize;
-                if excess >= triples.len() {
+                if excess >= events.len() {
                     // Nothing from this chunk fits.
-                    triples.clear();
+                    events.clear();
                 } else {
-                    triples.truncate(triples.len() - excess);
+                    events.truncate(events.len() - excess);
                 }
                 truncated = true;
                 rows_fetched -= excess;
             }
 
-            // Write the triples into the graph via GraphAccess,
+            // Write the events into the graph via GraphAccess,
             // chunked so readers can make progress.
-            while !triples.is_empty() {
+            while !events.is_empty() {
                 if cancel.is_cancelled() {
                     error = Some("cancelled".to_string());
                     break;
                 }
                 match self
                     .graph_access
-                    .insert_chunk(&mut triples, Some(&dataset_id), self.chunk_size)
+                    .insert_raw_chunk(&mut events, Some(&dataset_id), self.chunk_size)
                     .await
                 {
                     Ok(n) => {
