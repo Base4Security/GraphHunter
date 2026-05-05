@@ -944,7 +944,7 @@ raw chunk
 
 \section{V=1M Tier 3 — \emph{cycle6 enumeration en escala Sysmon real}}
 
-\emph{Bench validado en hardware quieto} 2026-05-05 (galaxy-book4, \emph{single-machine}, \emph{rayon par-iter en todas las} \emph{cores físicas}). El \emph{Tier 3} \emph{cierra} la \emph{tabla de scaling} \emph{D1 stage 4} y \emph{anchors} la \emph{abstract claim} \emph{Black Hat 2026} sobre \emph{cyclic-pattern matching} \emph{en escala} \emph{producción Sysmon}.
+\emph{Bench validado en hardware quieto} 2026-05-05. \textbf{Host}: \emph{AMD Ryzen 5 PRO 5650U} (\emph{Zen 3 mobile}, 6 \emph{cores físicos} / 12 \emph{lógicos SMT2}, \emph{base 2,3 GHz} / \emph{boost 4,2 GHz}, \emph{TDP 15–25 W}, \emph{L3 16 MiB}, \emph{AVX2 sí}, \emph{AVX-512 no}). \emph{Single-machine}, \emph{rayon par-iter} \emph{sobre los 12 hilos lógicos}. El \emph{Tier 3} \emph{cierra} la \emph{tabla de scaling} \emph{D1 stage 4} y \emph{anchors} la \emph{abstract claim} \emph{Black Hat 2026} sobre \emph{cyclic-pattern matching} \emph{en escala} \emph{producción Sysmon}.
 
 \textbf{Setup.} Barabási-Albert preferential-attachment, $V=10^6$, $m=3$, \emph{6 millones de aristas dirigidas} ($E = 5{,}999{,}988$). Distribución de grados \emph{scale-free} \emph{con cola larga} \emph{como un grafo} \emph{Sysmon real} (\emph{services.exe}, \emph{lsass.exe}, \emph{svchost} \emph{como hubs} \emph{de alto grado}). \code{enumerate\_6cycles\_lftj\_simd\_par} \emph{con} \code{result\_cap = 1\_000\_000}. Criterion \emph{sample\_size}=10, \emph{measurement-time}=60s.
 
@@ -961,6 +961,10 @@ raw chunk
 \end{tabular}
 
 \(n=10\) \emph{samples}; \emph{1 outlier} (\emph{high severe}). \emph{Total wall-clock} \emph{de la tanda completa}: \emph{92 minutos} (\emph{warmup iter} \(\approx 478\)~s \(+\) \emph{10 samples} \(\times\) \(\approx 466\)~s \(+\) \emph{compile} \(+\) \emph{graph build}).
+
+\textbf{Diagnóstico del outlier high-severe.} El outlier \(+12\%\) (\(535{,}98\)~s \emph{vs median} \(478{,}44\)~s) \emph{es consistente con} \emph{thermal throttling} \emph{en el chassis mobile} \emph{de 15–25 W TDP} \emph{bajo} \emph{carga AVX2 sostenida} \emph{durante 8 minutos}. \emph{Zen 3 es uniforme} (\emph{no hay big.LITTLE / P+E cores}), \emph{así que} \emph{la varianza no es scheduling}; \emph{son ciclos de boost-then-base} \emph{durante} \emph{los \(\sim 78\) minutos} \emph{de measurement}. \emph{Un host server-grade} (\emph{Zen 4 EPYC} \emph{o} \emph{Sapphire Rapids Xeon}, \emph{TDP \(\geq 105\) W}, \emph{cooling activo}) \emph{daría} \emph{aproximadamente la mitad} \emph{del wall-clock} \emph{con varianza} \emph{\(<3\%\)}, \emph{estimación} \emph{\(\sim 4\)–\(5\) min/query}.
+
+\emph{Note}: \filepath{.cargo/config.toml} \emph{tiene una nota A1} \emph{que cita} \emph{Galaxy Book4} (\emph{Intel Core Ultra hybrid}) \emph{como justificación} \emph{para} \code{target-cpu=native} \emph{disabled}. \emph{Esa nota} \emph{no aplica} \emph{a este host} (\emph{Ryzen 5 PRO 5650U}, \emph{uniform Zen 3}, \emph{sin AVX-512}). \emph{Re-bisecting} \emph{el flag} \emph{en este host} \emph{podría} \emph{liberar} \emph{una mejora} \emph{adicional} (\emph{queueado como follow-up}).
 
 \textbf{Lectura.} \emph{GraphHunter enumera} \emph{todos los 6-ciclos} \emph{en un grafo Sysmon-shape} \emph{de 1 millón de vértices} \emph{en} $\sim 8$ \emph{minutos} \emph{single-shot}, \emph{single-machine}, \emph{sin precomputed indexes} \emph{más allá de} la \emph{trie CSR forward/reverse} \(+\) \code{MinTimestampMap}. \emph{La} \emph{baseline naive} (\emph{quad-loop} $O(m^3/n^2)$) \emph{es} \emph{infeasible} \emph{a este escala} (\emph{horas por sample} \emph{en Tier 2 V=100K}, \emph{días en V=1M}); \emph{el speedup vs naive} \emph{es} \emph{≥3 órdenes de magnitud}, \emph{cualitativo} \emph{más que cuantitativo}.
 
