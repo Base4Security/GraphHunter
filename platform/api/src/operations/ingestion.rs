@@ -375,21 +375,17 @@ impl GraphHunterApi {
                 .graph
                 .write()
                 .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
-            let (triples, stats, used_auto) = if let Some(cfg) = auto_config.clone() {
+            let (events, stats, used_auto) = if let Some(cfg) = auto_config.clone() {
                 let parser = ConfigurableParser::new(cfg);
-                let (t, s) = parser.parse_with_stats(&contents);
-                (t, s, true)
+                let (e, s) = parser.parse_raw_with_stats(&contents);
+                (e, s, true)
             } else {
                 let parser =
                     make_parser_for_format(&resolved_format).map_err(ApiError::InvalidInput)?;
-                let (t, s) = parser.parse_with_stats(&contents);
-                (t, s, false)
+                let (e, s) = parser.parse_raw_with_stats(&contents);
+                (e, s, false)
             };
             self.record_parse_skips(dataset_id.as_str(), None, &stats);
-            let events: Vec<graph_hunter_core::RawIngestEvent> = triples
-                .into_iter()
-                .map(graph_hunter_core::RawIngestEvent::from_parsed_triple)
-                .collect();
             let (ne, nr) = graph
                 .insert_raw_events(events, Some(dataset_id.as_str()))
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -691,12 +687,8 @@ impl GraphHunterApi {
                 (ne, nr, None)
             } else {
                 let parser = ConfigurableParser::new(req.config.clone());
-                let (triples, stats) = parser.parse_with_stats(&contents);
+                let (events, stats) = parser.parse_raw_with_stats(&contents);
                 self.record_parse_skips(dataset_id.as_str(), None, &stats);
-                let events: Vec<graph_hunter_core::RawIngestEvent> = triples
-                    .into_iter()
-                    .map(graph_hunter_core::RawIngestEvent::from_parsed_triple)
-                    .collect();
                 let (ne, nr) = graph
                     .insert_raw_events(events, Some(dataset_id.as_str()))
                     .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -1195,45 +1187,39 @@ impl GraphHunterApi {
                                             .collect()
                                     };
 
-                                    let triples: Vec<_> = if sub_chunks.len() > 1 {
-                                        use rayon::prelude::*;
-                                        let per_chunk: Vec<(Vec<_>, _)> = sub_chunks
-                                            .par_iter()
-                                            .map(|chunk| parser.parse_with_stats(chunk))
-                                            .collect();
-                                        let mut flattened: Vec<_> = Vec::new();
-                                        for (t, s) in per_chunk {
-                                            flattened.extend(t);
+                                    // parse_raw_with_stats: native typed-fast-path on
+                                    // SysmonJsonParser/SentinelJsonParser captures the
+                                    // parser-side allocation savings; other parsers fall
+                                    // through to the default lift-from-parse_with_stats.
+                                    // Stats fidelity trade-off documented on the trait
+                                    // method: drift / per_field_occurrence / skip_reasons
+                                    // are empty in the native typed paths.
+                                    let events: Vec<graph_hunter_core::RawIngestEvent> =
+                                        if sub_chunks.len() > 1 {
+                                            use rayon::prelude::*;
+                                            let per_chunk: Vec<(Vec<_>, _)> = sub_chunks
+                                                .par_iter()
+                                                .map(|chunk| parser.parse_raw_with_stats(chunk))
+                                                .collect();
+                                            let mut flattened: Vec<_> = Vec::new();
+                                            for (e, s) in per_chunk {
+                                                flattened.extend(e);
+                                                if let Some(d) = s.drift {
+                                                    drift_accum
+                                                        .get_or_insert_with(DriftSnapshot::default)
+                                                        .merge(&d);
+                                                }
+                                            }
+                                            flattened
+                                        } else {
+                                            let (e, s) = parser.parse_raw_with_stats(&parse_input);
                                             if let Some(d) = s.drift {
                                                 drift_accum
                                                     .get_or_insert_with(DriftSnapshot::default)
                                                     .merge(&d);
                                             }
-                                        }
-                                        flattened
-                                    } else {
-                                        let (t, s) = parser.parse_with_stats(&parse_input);
-                                        if let Some(d) = s.drift {
-                                            drift_accum
-                                                .get_or_insert_with(DriftSnapshot::default)
-                                                .merge(&d);
-                                        }
-                                        t
-                                    };
-
-                                    // Lift to RawIngestEvent at the writer boundary.
-                                    // This is an O(n) struct move (no allocations)
-                                    // that lets the writer skip Entity struct
-                                    // construction for entities already in the
-                                    // graph (interner-miss only). Native
-                                    // parser-side typed-fast-path + stats
-                                    // accumulation needs a parse_raw_with_stats
-                                    // trait method — queued.
-                                    let events: Vec<graph_hunter_core::RawIngestEvent> =
-                                        triples
-                                            .into_iter()
-                                            .map(graph_hunter_core::RawIngestEvent::from_parsed_triple)
-                                            .collect();
+                                            e
+                                        };
                                     let (ne, nr) = {
                                         let mut graph = bg_session
                                             .graph
@@ -1315,27 +1301,22 @@ impl GraphHunterApi {
                                 let batch_bytes = &raw[batch_start..];
                                 let batch_str = String::from_utf8_lossy(batch_bytes);
                                 if !batch_str.trim().is_empty() {
-                                    let (triples, final_stats) =
+                                    let (events, final_stats) =
                                         if let Some(ref hdr) = last_fields_header {
                                             if !batch_str.contains("#Fields:") {
                                                 let with_header = format!("{}\n{}", hdr, batch_str);
-                                                parser.parse_with_stats(&with_header)
+                                                parser.parse_raw_with_stats(&with_header)
                                             } else {
-                                                parser.parse_with_stats(&batch_str)
+                                                parser.parse_raw_with_stats(&batch_str)
                                             }
                                         } else {
-                                            parser.parse_with_stats(&batch_str)
+                                            parser.parse_raw_with_stats(&batch_str)
                                         };
                                     if let Some(d) = final_stats.drift {
                                         drift_accum
                                             .get_or_insert_with(DriftSnapshot::default)
                                             .merge(&d);
                                     }
-                                    let events: Vec<graph_hunter_core::RawIngestEvent> =
-                                        triples
-                                            .into_iter()
-                                            .map(graph_hunter_core::RawIngestEvent::from_parsed_triple)
-                                            .collect();
                                     let (ne, nr) = {
                                         let mut graph = bg_session
                                             .graph
@@ -1377,13 +1358,8 @@ impl GraphHunterApi {
                                 contents.len(),
                                 resolved
                             );
-                            let (triples, stats) = parser.parse_with_stats(contents);
-                            tracing::info!("INGEST: parsed {} triples", triples.len());
-
-                            let events: Vec<graph_hunter_core::RawIngestEvent> = triples
-                                .into_iter()
-                                .map(graph_hunter_core::RawIngestEvent::from_parsed_triple)
-                                .collect();
+                            let (events, stats) = parser.parse_raw_with_stats(contents);
+                            tracing::info!("INGEST: parsed {} events", events.len());
 
                             let mut graph = bg_session
                                 .graph

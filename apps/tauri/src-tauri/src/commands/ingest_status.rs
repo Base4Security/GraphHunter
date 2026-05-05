@@ -56,7 +56,11 @@ pub fn cmd_get_ingest_engine_status() -> IngestEngineStatus {
         .map(|p| !p.is_empty())
         .unwrap_or(false);
 
-    let mut active = vec!["RawIngestEvent path", "VRL compiler"];
+    let mut active = vec![
+        "RawIngestEvent path",
+        "parse_raw_with_stats (native typed-fast-path)",
+        "VRL compiler",
+    ];
     if llm_compiler_available {
         active.push("LLM compiler (model loaded on first use)");
     }

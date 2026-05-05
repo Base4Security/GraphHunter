@@ -169,4 +169,32 @@ pub trait LogParser: Send + Sync {
             .map(RawIngestEvent::from_parsed_triple)
             .collect()
     }
+
+    /// Raw-event variant of [`parse_with_stats`]. Default impl wraps
+    /// `parse_with_stats` and lifts each `ParsedTriple` to a
+    /// `RawIngestEvent` (an O(n) struct move with no allocations).
+    /// Parsers that want the parser-side allocation savings should
+    /// override this with a typed-fast-path implementation.
+    ///
+    /// **Stats fidelity tradeoff.** Native overrides typically use
+    /// the typed scratch fast-path (e.g. `SysmonEventTyped` for
+    /// SysmonJsonParser) which doesn't materialize a
+    /// `serde_json::Value` per event. Without a `Value`, the
+    /// `per_field_occurrence`, `skip_reasons`, and
+    /// `skipped_samples` fields can't be populated cheaply — those
+    /// inspections rely on `Value::as_object()` / cell-by-cell
+    /// scanning. Native overrides may leave those fields empty and
+    /// only populate `rows_seen`, `rows_with_triples`,
+    /// `rows_skipped`, and `drift`. The UI gracefully degrades:
+    /// empty maps render as "not reported", not "all zero".
+    /// Callers that need full per-field stats should call
+    /// `parse_with_stats` instead.
+    fn parse_raw_with_stats(&self, data: &str) -> (Vec<RawIngestEvent>, ParseStats) {
+        let (triples, stats) = self.parse_with_stats(data);
+        let events: Vec<RawIngestEvent> = triples
+            .into_iter()
+            .map(RawIngestEvent::from_parsed_triple)
+            .collect();
+        (events, stats)
+    }
 }

@@ -1105,4 +1105,55 @@ impl LogParser for SentinelJsonParser {
             })
             .collect()
     }
+
+    /// Native raw-event-with-stats override. Mirrors `parse_raw` but
+    /// also populates the minimal-stats subset:
+    /// `rows_seen`, `rows_with_triples`, `rows_skipped`. Per-field
+    /// occurrence + skip classification + drift are left empty since
+    /// they require a per-event `Value` walk that the raw path
+    /// avoids — see `LogParser::parse_raw_with_stats` docstring for
+    /// the trade-off.
+    fn parse_raw_with_stats(
+        &self,
+        data: &str,
+    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+        use rayon::prelude::*;
+        let trimmed = data.trim();
+
+        if trimmed.starts_with('[') {
+            let (triples, stats) = self.parse_with_stats(data);
+            let events: Vec<crate::parser::RawIngestEvent> = triples
+                .into_iter()
+                .map(crate::parser::RawIngestEvent::from_parsed_triple)
+                .collect();
+            return (events, stats);
+        }
+
+        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool)> = trimmed
+            .par_lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|line| {
+                let mut buf = line.as_bytes().to_vec();
+                let event = simd_json::serde::from_slice::<Value>(&mut buf).ok();
+                let events = event
+                    .map(|e| Self::parse_event_raw(&e))
+                    .unwrap_or_default();
+                let produced = !events.is_empty();
+                (events, produced)
+            })
+            .collect();
+
+        let mut stats = crate::parser::ParseStats::default();
+        stats.rows_seen = per_line.len();
+        let mut all_events: Vec<crate::parser::RawIngestEvent> = Vec::new();
+        for (events, produced) in per_line {
+            if produced {
+                stats.rows_with_triples += 1;
+            } else {
+                stats.rows_skipped += 1;
+            }
+            all_events.extend(events);
+        }
+        (all_events, stats)
+    }
 }

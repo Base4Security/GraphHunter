@@ -412,6 +412,33 @@ fn bench_ingest(c: &mut Criterion) {
     }
 
     {
+        // parse_raw_with_stats native typed-fast-path vs the
+        // parse_with_stats + lift legacy path. Confirms the trait
+        // method captures the parser-side wins on the
+        // line-streaming JSONL ingest path.
+        let mut group = c.benchmark_group("ingest-eid1-raw-with-stats-vs-legacy");
+        for n in &[1_000usize, 10_000, 50_000] {
+            let payload = synth_sysmon_ndjson(*n);
+            group.throughput(Throughput::Elements(*n as u64));
+            group.bench_with_input(BenchmarkId::new("legacy-with-stats", n), n, |b, _| {
+                b.iter(|| {
+                    let parser = SysmonJsonParser;
+                    let (triples, stats) = parser.parse_with_stats(black_box(&payload));
+                    black_box((triples, stats))
+                });
+            });
+            group.bench_with_input(BenchmarkId::new("raw-with-stats", n), n, |b, _| {
+                b.iter(|| {
+                    let parser = SysmonJsonParser;
+                    let (events, stats) = parser.parse_raw_with_stats(black_box(&payload));
+                    black_box((events, stats))
+                });
+            });
+        }
+        group.finish();
+    }
+
+    {
         // Long-tail raw-vs-legacy parse comparison. 9 EventIDs (1, 3,
         // 5, 7, 8, 11, 12, 15, 23) all migrated to *_raw — the
         // entire group should show consistent improvement.

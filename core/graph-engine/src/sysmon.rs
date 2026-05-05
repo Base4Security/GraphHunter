@@ -2218,4 +2218,88 @@ impl LogParser for SysmonJsonParser {
             .flat_map_iter(|v: Vec<crate::parser::RawIngestEvent>| v.into_iter())
             .collect()
     }
+
+    /// Native raw-event-with-stats override. Uses the typed scratch
+    /// fast-path (same as `parse_raw`) and accumulates only the
+    /// minimal stats subset that doesn't require materializing a
+    /// `serde_json::Value` per event:
+    /// `rows_seen`, `rows_with_triples`, `rows_skipped`. The
+    /// `per_field_occurrence`, `skip_reasons`, `skipped_samples`,
+    /// and `drift` fields are left empty/None — callers that need
+    /// those should call `parse_with_stats` instead.
+    ///
+    /// JSON-array inputs delegate to the legacy `parse_with_stats`
+    /// + lift path to keep full stat fidelity (those inputs are
+    /// rare for ingest and going through the stats path is fine).
+    fn parse_raw_with_stats(
+        &self,
+        data: &str,
+    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+        use rayon::prelude::*;
+        let trimmed = data.trim();
+
+        if trimmed.starts_with('[') {
+            let (triples, stats) = self.parse_with_stats(data);
+            let events: Vec<crate::parser::RawIngestEvent> = triples
+                .into_iter()
+                .map(crate::parser::RawIngestEvent::from_parsed_triple)
+                .collect();
+            return (events, stats);
+        }
+
+        // Per-line: (events, produced_at_least_one_triple). Reduce
+        // counts after the collect; events are flattened into the
+        // returned Vec.
+        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool)> = trimmed
+            .par_lines()
+            .filter(|l| !l.trim().is_empty())
+            .map_init(
+                || Vec::<u8>::with_capacity(2048),
+                |scratch, line| {
+                    if let Some(events) = Self::try_parse_typed_raw_with_scratch(line, scratch) {
+                        let produced = !events.is_empty();
+                        return (events, produced);
+                    }
+                    if let Some(triples) = Self::try_parse_typed_with_scratch(line, scratch) {
+                        let produced = !triples.is_empty();
+                        let events: Vec<_> = triples
+                            .into_iter()
+                            .map(crate::parser::RawIngestEvent::from_parsed_triple)
+                            .collect();
+                        return (events, produced);
+                    }
+                    scratch.clear();
+                    scratch.extend_from_slice(line.as_bytes());
+                    let parsed = simd_json::serde::from_slice::<Value>(scratch)
+                        .ok()
+                        .or_else(|| serde_json::from_str(line).ok());
+                    let events: Vec<crate::parser::RawIngestEvent> = parsed
+                        .map(|e| {
+                            Self::parse_event(&e)
+                                .into_iter()
+                                .map(crate::parser::RawIngestEvent::from_parsed_triple)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let produced = !events.is_empty();
+                    (events, produced)
+                },
+            )
+            .collect();
+
+        let mut stats = crate::parser::ParseStats::default();
+        stats.rows_seen = per_line.len();
+        let mut all_events: Vec<crate::parser::RawIngestEvent> = Vec::new();
+        for (events, produced) in per_line {
+            if produced {
+                stats.rows_with_triples += 1;
+            } else {
+                stats.rows_skipped += 1;
+            }
+            all_events.extend(events);
+        }
+        // per_field_occurrence, skip_reasons, skipped_samples, drift
+        // intentionally left empty — see trait docstring.
+        (all_events, stats)
+    }
 }
