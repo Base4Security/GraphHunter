@@ -755,7 +755,66 @@ Antes de este \emph{push}, los \emph{enumerators LFTJ} (triangle / K4 / K5 / C6)
   \item \code{lftj\_session\_cache\_reused: bool} --- \emph{warm session} indicator (D3 stage 3).
   \item \code{lftj\_persistent\_canonical\_hits} --- \emph{cross-batch} \emph{enumerate} reusos (D3 stage 4 \emph{strict subset of} \code{lftj\_canonical\_cache\_hits}).
   \item \code{lftj\_persistent\_trie\_hits} --- \emph{typed-trie map} \emph{hits} (D3 stage 4 \emph{strict subset of} \code{lftj\_trie\_cache\_hits}).
+  \item \code{yannakakis\_persistent\_bag\_hits} --- \emph{cross-batch} \emph{bag} reusos (D3 stage 5 \emph{strict subset of} \code{bag\_cache\_hits}).
+  \item \code{yannakakis\_persistent\_prefix\_hits} --- \emph{cross-batch} \emph{prefix snapshot} resumes (D3 stage 5 \emph{strict subset of} \code{prefix\_cache\_hits}).
 \end{itemize}
+
+\section{D3 stage 5 --- \emph{persistent} \emph{Yannakakis} \emph{caches}: la \emph{staircase} simétrica}
+
+\emph{Stage 4} cerró el \emph{LFTJ} \emph{path} (cíclicos) con \emph{typed-trie map} \(+\) \emph{persistent canonical cache} \emph{por} \code{Session}. \emph{Stage 5} hace \emph{lo mismo} \emph{para el otro brazo} del \emph{dispatcher}: el \emph{Yannakakis} \emph{α-acíclico} \emph{chain path}. Tanto las \emph{Bag} \emph{materializations} como los \emph{prefix snapshots} ahora \emph{sobreviven entre} \emph{batches} \emph{hasta que} \code{mutation\_version} \emph{se bumpa}.
+
+\textbf{\code{YannakakisSessionCache}}:
+
+\begin{itemize}
+  \item \code{bags: HashMap<step+window\_key, Arc<Bag>>} bounded por \code{MAX\_BAG\_BYTES = 256~MB} (FIFO eviction sobre \emph{total} \code{BagRow} \emph{bytes}, no \emph{entry count} --- los \emph{bags} varían \emph{orders of magnitude} en \emph{size} dependiendo de la \emph{step} \emph{selectivity}).
+  \item \code{prefixes: HashMap<prefix+window\_key, Arc<Vec<(Vec<StrId>, i64)>>>} bounded por \code{MAX\_PREFIX\_BYTES = 128~MB}. \emph{Independent budget} del \emph{bag cache} porque los \emph{access patterns} difieren --- \emph{bag = wide reuse across templates that share a step}; \emph{prefix = narrow reuse across templates that share an initial chain slice}.
+\end{itemize}
+
+\textbf{Producción \emph{story}.} Un \emph{operador} \emph{SOC} corriendo la \emph{misma batería ATT\&CK} cada 5--15 minutos contra un grafo \emph{slowly-mutating} ahora \emph{paga} \emph{bag materialization + prefix computation} \emph{una vez por ingest}, no \emph{una vez por batch}. \emph{Templates} que \emph{comparten initial chain slices} (e.g. múltiples \emph{templates} \texttt{User \(\to\) Host \(\to\) ...} divergiendo en step 3+) \emph{resumen enumeration} en la \emph{cached prefix depth} en \emph{cada batch}, no sólo en el \emph{primer batch} \emph{within-batch}.
+
+\textbf{Cierre simétrico.} D3 \emph{ahora ofrece} \emph{caching} \emph{end-to-end} \emph{both} dispatch paths:
+\begin{itemize}
+  \item \emph{LFTJ} (cyclic shapes K3/K4/K5/C6): typed-trie map (stage 4) + canonical raw-result cache (stage 4) + per-shape signature.
+  \item \emph{Yannakakis} (α-acyclic chains): bag cache (stage 5) + prefix snapshot cache (stage 5) + memory-bounded.
+\end{itemize}
+
+Ambos \emph{caches} \emph{invalidan atómicamente} cuando \code{GraphHunter::mutation\_version} \emph{cambia} (\emph{add\_entity}, \emph{add\_relation}, \emph{compact\_before}, \emph{remove\_entities\_and\_relations\_by\_dataset}). El \emph{whole-cache reset} es \emph{O(1)} (drop el \code{Option}); no hay \emph{partial invalidation logic} que sostener.
+
+\section{Type-aware LFTJ --- \emph{correctness fix} \emph{end-to-end}}
+
+\emph{Stage 4} introdujo el \emph{type-aware LFTJ trie filter} en el \emph{single-query API} (\code{search\_temporal\_pattern\_*\_lftj}): cuando la \emph{hypothesis} es \emph{homogeneous-shape} (todos los \emph{steps} comparten un concrete \code{(rel\_type, src\_type==dst\_type)}), el \emph{trie} se \emph{construye filtered} para incluir \emph{sólo edges} matching ese \emph{signature}. Antes, los \emph{enumerators LFTJ} eran \emph{type-blind} y \emph{retornaban matches} de \emph{cualquier rel\_type} aunque el \emph{operador} hubiera pedido \emph{Auth}.
+
+\emph{Stage 4 closing}: el \emph{batch path} (\code{run\_hunt\_batch}) ahora \emph{también} usa \code{graph.build\_lftj\_trie\_for(\&hypothesis)} \emph{consistente con} el \emph{single-query API}. \emph{Closes el gap} de \emph{type-blindness} que el \emph{type-aware fix} \emph{había dejado} en el \emph{batch routing}.
+
+\textbf{Test de regresión.} \code{type\_aware\_lftj\_k4\_filters\_by\_relation\_type}: graph con \emph{dos K4 disjuntos} en \emph{rel types distintos} (\emph{Auth} y \emph{Connect}); el \emph{type-aware} \emph{enumerate} emite \emph{sólo el matching K4}; el \emph{type-blind} (legacy) \emph{enumerate} emite \emph{los dos}, \emph{probando que el bug existía}.
+
+\section{Direct-typed simd-json --- ingest \emph{type-aware} sin \emph{Value HashMap}}
+
+El \emph{ingest gap} entre \emph{baseline} \emph{post-LTO} (99--134~K ev/s) y el \emph{target Black Hat} \emph{1M ev/s} se cerró en \emph{tres pasos}:
+
+\textbf{Paso 1 ---} \emph{rayon-parallelize} \(+\) \emph{fused pipeline} en \filepath{core/graph-engine/src/sysmon.rs}: el \emph{NDJSON parse} \emph{decode} \emph{paralelo} via \code{par\_lines()}, eliminado el \emph{intermediate} \code{Vec<Value>}. \emph{Lift}: \(\sim 2.5\times\) (134--99~K \(\to\) 287--328~K ev/s).
+
+\textbf{Paso 2 ---} \emph{direct-typed} \emph{simd-json} \emph{deserialization} para los \emph{highest-volume EventIDs} (1, 3, 7, 11): nuevo \code{SysmonEventTyped<'a>} \emph{borrowed-string} \emph{struct}, \emph{parsed directly} via \code{simd\_json::serde::from\_slice} \emph{sin pasar por} \code{Value} \emph{HashMap}. \code{try\_parse\_typed} \emph{dispatches} \emph{per-EventID} \emph{handlers}, \emph{fallback to legacy} \code{Value} \emph{path} \emph{para EventIDs} \emph{no-tipados}. \emph{Lift}: \(\sim 2\times\) sobre el \emph{paso 1} (\(\to\) 644--702~K ev/s en \emph{realistic Sysmon mixed fixture}).
+
+\textbf{Paso 3 ---} \emph{long-tail typed parsers} para \emph{EventIDs} 5, 8, 12/13, 15, 23. Después de este paso el \emph{typed path} cubre \emph{\(\sim\) all common Sysmon emissions}; \emph{sólo} \emph{PowerShell 4104} y \emph{Windows Security 46xx/51xx} \emph{aún dispatch via} \code{Value}, pero su \emph{volume} en un \emph{típical EDR stream} es \emph{bajo}.
+
+\textbf{Cumulative numbers (galaxy-book4, 2026-05-04, mixed fixture):}
+
+\begin{tabular}{lrr}
+\toprule
+\emph{Batch} & \emph{Original} (pre-todo) & \emph{Final} (post-paso 3) \\
+\midrule
+1\,K  & 134 K ev/s & \textbf{702 K ev/s} (\(5{,}2\times\)) \\
+10\,K & 127 K ev/s & \textbf{659 K ev/s} (\(5{,}2\times\)) \\
+50\,K & 99 K ev/s  & \textbf{644 K ev/s} (\(6{,}5\times\)) \\
+\bottomrule
+\end{tabular}
+
+\textbf{Brecha restante al \emph{target} \emph{1M ev/s}.} \(\sim 1{,}5\times\). El \emph{cuello} \emph{ya no es} \emph{simd-json} ni \emph{Value HashMap}; el \emph{cuello restante} es \emph{per-event allocation cost} (\emph{Entity} \(+\) \emph{Relation} construction con \emph{String IDs} y \emph{HashMap<String, String>} \emph{metadata}). \emph{Cerrarlo} \emph{requiere} (a) \emph{interner-aware parser API} o (b) \emph{flat} \code{RawIngestEvent} \emph{intermediate} que \emph{skip} la \emph{(Entity, Relation, Entity)} \emph{triple construction entirely}. \emph{Out of scope} \emph{para este push}; \emph{ambos paths} son \emph{1+ day refactors}.
+
+\section{Tech debt: \emph{env-mutex refactor} \emph{retires} \code{--test-threads=1}}
+
+Varios \emph{planner / dispatch tests} \emph{en} \filepath{core/graph-engine/src/planner.rs} y los \emph{integration tests} en \filepath{tests/k4\_lftj\_dispatch.rs} y \filepath{tests/m1\_planner\_dispatch.rs} \emph{mutaban} \emph{process-wide} \emph{env vars} (\code{GRAPHHUNTER\_LFTJ\_PLANNER}, \code{\_C6\_LFTJ}, \emph{etc.}) \emph{sin serialización}. \emph{CI} \emph{mascaraba} esto con \code{--test-threads=1} en el \emph{Core} \emph{job}. El \emph{refactor} introduce un \code{ENV\_LOCK: Mutex<()>} \emph{estático} \emph{compartido} por \emph{cada test} \emph{env-mutating} dentro de \emph{cada binary} (los \emph{integration tests} son \emph{separate binaries}; \emph{cada uno} tiene su \emph{propio} \code{ENV\_LOCK}). \emph{Drops} el \code{--test-threads=1} \emph{en} \filepath{.github/workflows/ci.yml}; \emph{674/674} \emph{lib tests} \(+\) \emph{ambos} \emph{integration tests} \emph{pasan} \emph{paralelos} \emph{post-refactor}.
 
 \chapter{D1 --- cruce AGM en patrones cíclicos: K4}
 
