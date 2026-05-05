@@ -1053,6 +1053,52 @@ fn sysmon_long_tail_raw_path_parity_with_legacy() {
     }
 }
 
+#[test]
+fn sysmon_winsec_raw_path_parity_with_legacy() {
+    // All 8 WinSec + PowerShell EventIDs migrated to raw. Verify
+    // identical graphs vs legacy on a one-line-per-ID NDJSON fixture.
+    let ndjson = r#"{"EventID":4624,"UtcTime":"2024-01-15 14:30:00.000","TargetUserName":"alice","TargetDomainName":"CORP","LogonType":3,"IpAddress":"10.0.0.1","Computer":"H1"}
+{"EventID":4625,"UtcTime":"2024-01-15 14:30:01.000","TargetUserName":"bob","TargetDomainName":"CORP","LogonType":"3","IpAddress":"10.0.0.2","Computer":"H1"}
+{"EventID":4688,"UtcTime":"2024-01-15 14:30:02.000","NewProcessName":"C:\\Windows\\cmd.exe","SubjectUserName":"alice","SubjectDomainName":"CORP","ParentProcessName":"C:\\Windows\\explorer.exe","CommandLine":"cmd /c whoami","Computer":"H1"}
+{"EventID":4689,"UtcTime":"2024-01-15 14:30:03.000","ProcessName":"C:\\Windows\\cmd.exe","SubjectUserName":"alice","SubjectDomainName":"CORP","Computer":"H1"}
+{"EventID":4663,"UtcTime":"2024-01-15 14:30:04.000","ProcessName":"C:\\Windows\\notepad.exe","ObjectName":"C:\\Users\\u\\f1.txt","ObjectType":"File","SubjectUserName":"alice","Computer":"H1"}
+{"EventID":5145,"UtcTime":"2024-01-15 14:30:05.000","ShareName":"\\\\*\\IPC$","RelativeTargetName":"share1","SubjectUserName":"alice","IpAddress":"10.0.0.3","Computer":"H1"}
+{"EventID":5156,"UtcTime":"2024-01-15 14:30:06.000","Application":"\\device\\harddisk\\svchost.exe","DestAddress":"10.0.0.4","DestPort":"443","SourceAddress":"10.0.0.1","Computer":"H1"}
+{"EventID":4104,"UtcTime":"2024-01-15 14:30:07.000","ScriptBlockText":"Get-Process","ScriptBlockId":"abc","Computer":"H1"}"#;
+
+    let parser = SysmonJsonParser;
+    let mut g_legacy = GraphHunter::new();
+    g_legacy.insert_triples(parser.parse(ndjson), None).unwrap();
+
+    let mut g_raw = GraphHunter::new();
+    g_raw
+        .insert_raw_events(parser.parse_raw(ndjson), None)
+        .unwrap();
+
+    assert_eq!(
+        g_legacy.entities.len(),
+        g_raw.entities.len(),
+        "entity count diverged"
+    );
+    assert_eq!(
+        g_legacy.relation_count(),
+        g_raw.relation_count(),
+        "relation count diverged"
+    );
+    for (sid, legacy_ent) in g_legacy.entities.iter() {
+        let raw_ent = g_raw.entities.get(sid).unwrap_or_else(|| {
+            panic!("raw graph missing entity present in legacy: {}", legacy_ent.id)
+        });
+        assert_eq!(legacy_ent.id, raw_ent.id);
+        assert_eq!(legacy_ent.entity_type, raw_ent.entity_type);
+        assert_eq!(
+            legacy_ent.metadata, raw_ent.metadata,
+            "metadata diverged for {}",
+            legacy_ent.id
+        );
+    }
+}
+
 // ── Sysmon Event 3: Network Connection ──
 
 #[test]

@@ -386,6 +386,32 @@ fn bench_ingest(c: &mut Criterion) {
     }
 
     {
+        // WinSec + PowerShell raw-vs-legacy parse comparison. All
+        // 8 IDs (4624, 4625, 4688, 4689, 4663, 5145, 5156, 4104) on
+        // the raw path. Mirror of the ingest-winsec-ndjson group.
+        let mut group = c.benchmark_group("ingest-winsec-raw-vs-legacy-parse");
+        for n in &[1_000usize, 10_000, 50_000] {
+            let payload = synth_winsec_ndjson(*n);
+            group.throughput(Throughput::Elements(*n as u64));
+            group.bench_with_input(BenchmarkId::new("legacy", n), n, |b, _| {
+                b.iter(|| {
+                    let parser = SysmonJsonParser;
+                    let triples = parser.parse(black_box(&payload));
+                    black_box(triples)
+                });
+            });
+            group.bench_with_input(BenchmarkId::new("raw", n), n, |b, _| {
+                b.iter(|| {
+                    let parser = SysmonJsonParser;
+                    let events = parser.parse_raw(black_box(&payload));
+                    black_box(events)
+                });
+            });
+        }
+        group.finish();
+    }
+
+    {
         // Long-tail raw-vs-legacy parse comparison. 9 EventIDs (1, 3,
         // 5, 7, 8, 11, 12, 15, 23) all migrated to *_raw — the
         // entire group should show consistent improvement.

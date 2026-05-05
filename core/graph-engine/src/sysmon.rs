@@ -1053,6 +1053,13 @@ impl SysmonJsonParser {
             12 | 13 => Self::typed_registry_event_raw(&event, timestamp),
             15 => Self::typed_file_stream_hash_raw(&event, timestamp),
             23 => Self::typed_file_delete_raw(&event, timestamp),
+            4624 | 4625 => Self::typed_security_logon_raw(&event, event_id, timestamp),
+            4688 => Self::typed_security_process_create_raw(&event, timestamp),
+            4689 => Self::typed_security_process_terminated_raw(&event, timestamp),
+            4663 => Self::typed_security_object_access_raw(&event, timestamp),
+            5145 => Self::typed_security_network_share_raw(&event, timestamp),
+            5156 => Self::typed_security_wfp_connection_raw(&event, timestamp),
+            4104 => Self::typed_powershell_script_block_raw(&event, timestamp),
             _ => None,
         }
     }
@@ -1651,6 +1658,257 @@ impl SysmonJsonParser {
             }
             _ => user.to_string(),
         }
+    }
+
+    /// Raw-event variants for Windows Security + PowerShell EventIDs.
+    /// Same shape as the Sysmon long-tail raw migrations: skip
+    /// `Entity`/`Relation` struct allocs, build metadata HashMaps
+    /// only on the side that actually owns metadata, and apply the
+    /// dst-metadata-skip-on-second-emission trick when a handler
+    /// emits multiple triples that share a dst (4688 child process).
+
+    #[inline]
+    fn typed_security_logon_raw(
+        event: &SysmonEventTyped<'_>,
+        event_id: u64,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let user_name = event.target_user_name?;
+        let user_id = Self::build_user_id(user_name, event.target_domain_name);
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
+        let mut rel_meta: HashMap<String, String> = HashMap::new();
+        if let Some(lt) = &event.logon_type {
+            let s = lt.as_string();
+            if !s.is_empty() {
+                rel_meta.insert("logon_type".into(), s);
+            }
+        }
+        if let Some(ip) = event.ip_address {
+            if ip != "-" {
+                rel_meta.insert("ip_address".into(), ip.into());
+            }
+        }
+        if event_id == 4625 {
+            rel_meta.insert("success".into(), "false".into());
+        }
+        Some(vec![RawIngestEvent {
+            src_id: user_id,
+            src_type: EntityType::User,
+            src_metadata: HashMap::new(),
+            dst_id: host_name.into(),
+            dst_type: EntityType::Host,
+            dst_metadata: HashMap::new(),
+            rel_type: RelationType::Auth,
+            rel_metadata: rel_meta,
+            timestamp,
+        }])
+    }
+
+    #[inline]
+    fn typed_security_process_create_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let new_process = event.new_process_name?;
+
+        let mut child_metadata: HashMap<String, String> = HashMap::new();
+        if let Some(cmd) = event.command_line {
+            child_metadata.insert("cmdline".into(), cmd.into());
+        }
+        if let Some(comp) = event.computer.or(event.hostname) {
+            child_metadata.insert("computer".into(), comp.into());
+        }
+
+        let mut events = Vec::with_capacity(2);
+        let mut child_meta_consumed = false;
+        if let Some(user_name) = event.subject_user_name {
+            let user_id = Self::build_user_id(user_name, event.subject_domain_name);
+            let dst_meta = std::mem::take(&mut child_metadata);
+            child_meta_consumed = true;
+            events.push(RawIngestEvent {
+                src_id: user_id,
+                src_type: EntityType::User,
+                src_metadata: HashMap::new(),
+                dst_id: new_process.into(),
+                dst_type: EntityType::Process,
+                dst_metadata: dst_meta,
+                rel_type: RelationType::Execute,
+                rel_metadata: HashMap::new(),
+                timestamp,
+            });
+        }
+        if let Some(parent_name) = event.parent_process_name {
+            let dst_meta = if child_meta_consumed {
+                HashMap::new()
+            } else {
+                std::mem::take(&mut child_metadata)
+            };
+            events.push(RawIngestEvent {
+                src_id: parent_name.into(),
+                src_type: EntityType::Process,
+                src_metadata: HashMap::new(),
+                dst_id: new_process.into(),
+                dst_type: EntityType::Process,
+                dst_metadata: dst_meta,
+                rel_type: RelationType::Spawn,
+                rel_metadata: HashMap::new(),
+                timestamp,
+            });
+        }
+        Some(events)
+    }
+
+    #[inline]
+    fn typed_security_process_terminated_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let process_name = event.process_name?;
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
+        Some(vec![RawIngestEvent {
+            src_id: process_name.into(),
+            src_type: EntityType::Process,
+            src_metadata: HashMap::new(),
+            dst_id: host_name.into(),
+            dst_type: EntityType::Host,
+            dst_metadata: HashMap::new(),
+            rel_type: RelationType::Delete,
+            rel_metadata: HashMap::new(),
+            timestamp,
+        }])
+    }
+
+    #[inline]
+    fn typed_security_object_access_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let process_name = event.process_name?;
+        let object_name = event.object_name?;
+        let target_type = if event.object_type == Some("Key") {
+            EntityType::Registry
+        } else {
+            EntityType::File
+        };
+        Some(vec![RawIngestEvent {
+            src_id: process_name.into(),
+            src_type: EntityType::Process,
+            src_metadata: HashMap::new(),
+            dst_id: object_name.into(),
+            dst_type: target_type,
+            dst_metadata: HashMap::new(),
+            rel_type: RelationType::Read,
+            rel_metadata: HashMap::new(),
+            timestamp,
+        }])
+    }
+
+    #[inline]
+    fn typed_security_network_share_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let user_name = event.subject_user_name?;
+        let share_name = event.share_name.unwrap_or("");
+        let relative_target = event.relative_target_name.unwrap_or("");
+        let path = if !share_name.is_empty() && !relative_target.is_empty() {
+            format!("{}\\{}", share_name, relative_target)
+        } else if !share_name.is_empty() {
+            share_name.to_string()
+        } else {
+            return None;
+        };
+        let user_id = Self::build_user_id(user_name, event.subject_domain_name);
+        let mut file_meta: HashMap<String, String> = HashMap::new();
+        if let Some(ip) = event.ip_address {
+            file_meta.insert("ip_address".into(), ip.into());
+        }
+        Some(vec![RawIngestEvent {
+            src_id: user_id,
+            src_type: EntityType::User,
+            src_metadata: HashMap::new(),
+            dst_id: path,
+            dst_type: EntityType::File,
+            dst_metadata: file_meta,
+            rel_type: RelationType::Read,
+            rel_metadata: HashMap::new(),
+            timestamp,
+        }])
+    }
+
+    #[inline]
+    fn typed_security_wfp_connection_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let application = event.application?;
+        let dest_addr = event.dest_address?;
+        let mut ip_meta: HashMap<String, String> = HashMap::new();
+        if let Some(s) = event.dest_port {
+            ip_meta.insert("dest_port".into(), s.into());
+        }
+        if let Some(s) = event.source_port {
+            ip_meta.insert("source_port".into(), s.into());
+        }
+        if let Some(s) = event.protocol {
+            ip_meta.insert("protocol".into(), s.into());
+        }
+        let mut rel_meta: HashMap<String, String> = HashMap::new();
+        if let Some(s) = event.source_address {
+            rel_meta.insert("source_address".into(), s.into());
+        }
+        Some(vec![RawIngestEvent {
+            src_id: application.into(),
+            src_type: EntityType::Process,
+            src_metadata: HashMap::new(),
+            dst_id: dest_addr.into(),
+            dst_type: EntityType::IP,
+            dst_metadata: ip_meta,
+            rel_type: RelationType::Connect,
+            rel_metadata: rel_meta,
+            timestamp,
+        }])
+    }
+
+    #[inline]
+    fn typed_powershell_script_block_raw(
+        event: &SysmonEventTyped<'_>,
+        timestamp: i64,
+    ) -> Option<Vec<crate::parser::RawIngestEvent>> {
+        use crate::parser::RawIngestEvent;
+        use std::collections::HashMap;
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
+        let mut process_meta: HashMap<String, String> = HashMap::new();
+        if let Some(script_text) = event.script_block_text {
+            let preview: String = script_text.chars().take(200).collect();
+            process_meta.insert("script_preview".into(), preview);
+        }
+        if let Some(sbid) = event.script_block_id {
+            process_meta.insert("script_block_id".into(), sbid.into());
+        }
+        Some(vec![RawIngestEvent {
+            src_id: host_name.into(),
+            src_type: EntityType::Host,
+            src_metadata: HashMap::new(),
+            dst_id: "powershell.exe".into(),
+            dst_type: EntityType::Process,
+            dst_metadata: process_meta,
+            rel_type: RelationType::Execute,
+            rel_metadata: HashMap::new(),
+            timestamp,
+        }])
     }
 
     #[inline]
