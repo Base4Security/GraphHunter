@@ -71,76 +71,80 @@ test(
     const schema = await fetchSchema();
     const paths = new Set(schema.endpoints.map((e) => e.path));
 
-    // Keeping this list explicit (rather than deriving from the
-    // registry) catches "tool migrated but endpoint not registered in
-    // platform/api" — the exact drift we want to break the build on.
-    // Grouped by domain; mirrors the registry order.
+    // v2 catalog (orthogonal namespaces). Keeping this list explicit
+    // (rather than deriving from the registry) catches "tool migrated
+    // but endpoint not registered in platform/api" — the exact drift
+    // we want to break the build on. Grouped by new namespace.
     const requiredPaths = [
-      // navigation
+      // session
       "/health",
-      "/entity_types",
       "/v1/schema",
+      // graph.*
+      "/graph_summary",
+      "/entity_types",
+      "/entity_type_counts",
+      "/relation_schema",
+      "/subnet_analysis",
+      "/temporal_heatmap",
+      "/datasets",
+      "/path_nodes",
+      // node.*
+      "/node_details",
+      "/explain_score",
       "/search",
       "/expand",
-      "/node_details",
-      "/subgraph",
-      "/events_for_node",
-      "/relation_schema",
-      "/events_paginated",
       "/expand_grouped",
-      // hunting
+      "/events_for_node",
+      "/events_paginated",
+      "/subgraph",
+      "/export_subgraph",
+      // hunt.*
+      "/parse_dsl",
       "/run_hunt",
       "/hunt_results",
-      "/parse_dsl",
       "/diff_hunts",
-      "/export_hunt_results",
-      "/save_hypothesis_as_sigma",
-      // scoring
-      "/enable_anomaly_scoring",
-      "/compute_scores",
-      "/explain_score",
-      // graph-views
-      "/graph_summary",
-      "/entity_type_counts",
-      "/temporal_heatmap",
-      "/subnet_analysis",
-      // catalogs
+      // /enable_anomaly_scoring is no longer hit by any MCP tool —
+      // the v2 follow-up wired per-call `scoring` into RunHuntRequest
+      // / RunHuntBody so hunt.run(scoring=anomaly|gnn) finalizes the
+      // scorer server-side without a pre-call enable hop. The legacy
+      // endpoint still exists on the API for direct callers.
+      // catalog.get
       "/catalog",
       "/catalog/status",
       "/catalog/diagnostics",
-      "/datasets",
-      // notes
-      "/notes",
-      "/notes/list",
-      "/path_nodes",
+      // tags / notes / scores / review
       "/tag",
       "/untag",
       "/tags",
-      // export
-      "/export_subgraph",
-      "/export_ocsf",
-      "/export_iocs",
-      // data-quality
-      "/check_invariants",
-      "/schema_drift_detect",
-      "/mapping_regression_test",
-      "/invariant_check_hypothetical",
-      "/list_dead_letters",
-      "/reingest_dead_letter",
-      "/purge_dead_letters",
-      // agentic
-      "/ingest_negotiate",
-      "/canonical_map",
-      "/parser_generate",
-      "/agentic_review_list",
+      "/notes",
+      "/notes/list",
+      "/compute_scores",
       "/agentic_review_approve",
       "/agentic_review_reject",
-      "/publish_mapping",
+      "/agentic_review_list",
+      // ingest.*
+      "/ingest_negotiate",
+      "/parser_generate",
+      "/canonical_map",
+      "/mapping_regression_test",
+      "/check_invariants",
+      "/invariant_check_hypothetical",
+      "/schema_drift_detect",
+      "/list_dead_letters",
+      "/purge_dead_letters",
+      "/reingest_dead_letter",
       "/fetch_shared_mappings",
-      // integrations
+      "/publish_mapping",
+      // enrich
       "/enrich_ip",
-      "/file_ticket",
+      // export
+      "/export_hunt_results",
+      "/export_iocs",
+      "/export_ocsf",
+      "/save_hypothesis_as_sigma",
+      // publish
       "/publish_iocs_to_sentinel",
+      "/file_ticket",
     ];
 
     for (const path of requiredPaths) {

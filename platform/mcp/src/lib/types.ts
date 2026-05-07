@@ -11,17 +11,27 @@ import type { ZodSchema } from "zod";
 
 export type ToolStability = "stable" | "experimental" | "deprecated";
 
+/**
+ * v2 catalog (orthogonal namespaces). Each tool's `name` is also
+ * dot-prefixed with the same value (e.g. `tags` lives under category
+ * "tags", `node.expand` under "node"). The MCP SDK accepts dotted
+ * tool names; this enum is the bookkeeping fence so a stray tool
+ * doesn't end up with the wrong family in `tools/list`.
+ */
 export type ToolCategory =
-  | "navigation"
-  | "hunting"
-  | "scoring"
-  | "graph-views"
-  | "catalogs"
+  | "session"
+  | "graph"
+  | "node"
+  | "hunt"
+  | "catalog"
+  | "tags"
   | "notes"
+  | "scores"
+  | "review"
+  | "ingest"
+  | "enrich"
   | "export"
-  | "data-quality"
-  | "agentic"
-  | "integrations";
+  | "publish";
 
 export interface DeprecationNotice {
   readonly since: string;

@@ -194,15 +194,64 @@ const MAX_RESPONSE_CHARS = 100_000;
 /** Max items in any array before we truncate and summarize. */
 const MAX_ARRAY_ITEMS = 100;
 
-/** Max length for individual metadata string values. */
-const MAX_METADATA_VALUE_LEN = 200;
+/**
+ * Max length for individual metadata string values. Bumped from 200 →
+ * 50_000 on 2026-05-07 — the original 200-char cap was a relic of the
+ * old metadata-bag protection (raw event JSON dumps that could be
+ * hundreds of KB). With `MAX_RESPONSE_CHARS` capping the whole payload
+ * at 100 KB and `MAX_ARRAY_ITEMS` capping arrays at 100, the per-string
+ * cap was redundant *and* mauling load-bearing fields (analyst notes,
+ * narrative paragraphs, sigma yaml, vrl source). 50_000 means a single
+ * truly runaway value still gets cut, but reasonable analyst content
+ * always round-trips. Set `GRAPHHUNTER_MCP_NO_TRUNCATE=1` to disable
+ * per-key truncation entirely (only `MAX_RESPONSE_CHARS` then applies).
+ */
+const MAX_METADATA_VALUE_LEN = 50_000;
+const PER_KEY_TRUNCATION_DISABLED =
+  process.env.GRAPHHUNTER_MCP_NO_TRUNCATE === "1" ||
+  process.env.GRAPHHUNTER_MCP_NO_TRUNCATE === "true";
+
+/**
+ * Keys whose string values are passed through verbatim regardless of
+ * length. They carry analyst-meaningful payload (LLM narratives,
+ * generated rule YAML, user-authored notes, compiled VRL, KQL audit
+ * echoes, ingestion rationale, raw command lines that constitute
+ * hunt signal). Mirrors `platform/mcp/src/lib/content.ts`.
+ */
+const LONG_TEXT_KEYS = new Set([
+  "narrative",
+  "yaml",
+  "content",
+  "vrl_source",
+  "rationale",
+  "kql",
+  "kql_executed",
+  "dsl",
+  "hypothesis_dsl",
+  "formatted",
+  "description",
+  "summary",
+  "explanation",
+  "message",
+  "reason",
+  "skipped_reason",
+  "raw_sample",
+  "candidate_vrl",
+  "hypothetical_vrl",
+  "command_line",
+  "process_command_line",
+  "cmdline",
+  "ProcessCommandLine",
+]);
 
 /** Truncate a metadata value, preserving start + end for readability. */
-function truncateValue(v: unknown): unknown {
+function truncateValue(v: unknown, key?: string): unknown {
   if (typeof v === "string" && v.length > MAX_METADATA_VALUE_LEN) {
+    if (key && LONG_TEXT_KEYS.has(key)) return v;
+    if (PER_KEY_TRUNCATION_DISABLED) return v;
     return v.slice(0, MAX_METADATA_VALUE_LEN - 20) + " ... " + v.slice(-15);
   }
-  if (Array.isArray(v)) return v.slice(0, 20).map(truncateValue);
+  if (Array.isArray(v)) return v.slice(0, 20).map((item) => truncateValue(item, key));
   if (v && typeof v === "object") return sanitizeObject(v as Record<string, unknown>);
   return v;
 }
@@ -214,7 +263,7 @@ function sanitizeObject(obj: Record<string, unknown>): Record<string, unknown> {
     if (val && typeof val === "object" && !Array.isArray(val)) {
       result[key] = sanitizeObject(val as Record<string, unknown>);
     } else {
-      result[key] = truncateValue(val);
+      result[key] = truncateValue(val, key);
     }
   }
   return result;
@@ -254,7 +303,7 @@ function sanitizeApiResponse(data: unknown): unknown {
     } else if (val && typeof val === "object" && !Array.isArray(val)) {
       result[key] = sanitizeObject(val as Record<string, unknown>);
     } else {
-      result[key] = truncateValue(val);
+      result[key] = truncateValue(val, key);
     }
   }
   return result;

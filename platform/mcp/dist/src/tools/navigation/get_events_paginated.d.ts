@@ -1,7 +1,0 @@
-export declare const getEventsPaginated: import("../../lib/types.js").Tool<{
-    node_id: string;
-    page?: number | undefined;
-    page_size?: number | undefined;
-    sort_by?: "timestamp" | "rel_type" | "source" | "target" | undefined;
-}, unknown>;
-//# sourceMappingURL=get_events_paginated.d.ts.map

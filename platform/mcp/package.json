@@ -1,7 +1,7 @@
 {
   "name": "@graphhunter/mcp",
-  "version": "1.0.0",
-  "description": "MCP server exposing GraphHunter tools — modular successor to graph-hunter-mcp, per ADR-004",
+  "version": "2.0.0",
+  "description": "MCP server exposing GraphHunter tools — v2 orthogonal catalog (37 tools, namespaced). Hard-cut from v1; old flat names removed.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

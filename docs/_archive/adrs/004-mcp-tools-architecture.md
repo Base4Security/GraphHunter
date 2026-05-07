@@ -184,3 +184,52 @@ for (const ext of extensions) {
 - PAIN_POINTS §1 (monolitos)
 - TARGET_ARCHITECTURE §8 (MCP como plataforma)
 - Decisión explícita del usuario sobre clientes pidiendo features.
+
+---
+
+## v2 — Catálogo ortogonal (2026-05-06)
+
+**Estado**: shippeado. `package.json` → `"version": "2.0.0"` (semver major).
+
+### Por qué
+
+El catálogo v1 estaba en 55 tools de nombres planos (`tag_entity`, `expand_node_grouped`, `agentic_review_approve`, …). Tres problemas:
+
+1. **Discoverability**: la lista que ve el LLM es lineal y opaca; tools casi-idénticas (`expand_node` vs `expand_node_grouped`, los tres `agentic_review_*`, los tres `*_dead_letters`) compiten por slot mental.
+2. **Latch oculto**: `enable_anomaly_scoring()` flipeaba un bit del servidor; el output de `run_hunt` posterior dependía de si se llamó o no, así que un transcript MCP no era replayable. **Resuelto en el follow-up backend (2026-05-06)**: `RunHuntRequest` ahora lleva `scoring: Option<HuntScoring>` (Structural/Anomaly/Gnn), `RunHuntBody` lo plumbea desde HTTP, y `run_hunt` decide la variante de DFS por call: Structural fuerza el plain DFS incluso con un scorer ya finalizado en sesión, Anomaly/Gnn auto-finalizan el scorer antes del search. La latch física sigue existiendo en `Graph::anomaly_scorer` (no la borramos para no romper v1 callers que la setean explícito), pero ya no es load-bearing para hunt.run. Cubierto por `run_hunt_per_call_scoring_overrides_session_state` en `operations/hunt.rs`.
+3. **`export` disperso**: 6 tools (`export_hunt_results`, `export_iocs`, `export_ocsf`, `save_hypothesis_as_sigma`, `publish_iocs_to_sentinel`, `file_ticket`) con 6 contratos parecidos pero no idénticos.
+
+### Qué cambió
+
+**Hard cut a un catálogo namespaced de 36 tools** (35% reducción). Cada tool sigue siendo un `defineTool()` con `Tool<I, O>` tipado — sólo cambia el nombre y, donde aplica, un discriminador `op`/`mode`/`include`/`kind` que reemplaza varias tools v1 con una sola. La SDK MCP acepta nombres con `.` sin cambios al server adapter.
+
+| Familia v2 | Tools | Reemplazo |
+|---|---|---|
+| `session.*` | 1 | check_connection |
+| `graph.*` | 7 | get_graph_summary, get_entity_types, get_entity_type_counts (merge), get_relation_schema, get_subnet_analysis, get_temporal_heatmap, list_datasets, get_path_nodes |
+| `node.*` | 6 | get_node_details, explain_score (separado per ADR judgment), search_entities, expand_node + expand_node_grouped (merge), get_events_for_node + get_events_paginated (merge), get_subgraph + export_subgraph (merge) |
+| `hunt.*` | 4 | parse_dsl, run_hunt (con `scoring=structural\|anomaly\|gnn` — kill latch), get_hunt_results, diff_hunts |
+| `catalog.get` | 1 | get_catalog + _diagnostics + _with_status (merge con `include`) |
+| `tags`, `notes`, `review` | 3 | merges con discriminador `op` |
+| `scores.recompute` | 1 | compute_scores |
+| `ingest.*` | 10 | toda agentic/ + data-quality/ (incluye `dead_letters` con `op=list\|purge\|retry`; mantiene `invariants_live` + `invariants_hypothetical` separados por inputs disjuntos) |
+| `enrich` | 1 | enrich_ip generalizado (target_type=ip\|domain\|hash\|url) |
+| `export` | 1 | export_hunt_results + export_iocs + export_ocsf + save_hypothesis_as_sigma (file/inline) |
+| `publish` | 1 | publish_iocs_to_sentinel + file_ticket (sistemas externos, gates dry_run/confirm) |
+
+### Decisiones de juicio (no obvias)
+
+1. **`node.score_explanation` separado** de `node.get`. La explicación tiene narrativa larga; merger contamina el contrato JSON.
+2. **`ingest.invariants_live` separado** de `ingest.invariants_hypothetical`. Inputs disjuntos (live no toma `vrl`/`sample_size`; hypothetical los exige). Schema unificado sería sucio.
+3. **`export` separado** de `publish`. Una matriz `kind × format × target` única tendría celdas inválidas (`kind=ocsf` + `target=sentinel` no existe). Dos verbos limpios > un mega-tool.
+
+### Hard cut
+
+No alias layer. Los nombres v1 fueron borrados en el mismo PR. Clientes externos pinean `mcp@1.x` mientras migran. Razón: el repo tiene `DeprecationNotice` en el shape pero no había forwarding implementado, y mantener 55+36 tools en `tools/list` durante el soak periodo polluye el contexto del LLM.
+
+### Verificación
+
+- `npm run build` clean (TS strict).
+- `node -e "import('./dist/src/registry.js').then(m => console.log(m.registry.length))"` → `36`.
+- Cada `tool.name` matches `^[a-z]+(\.[a-z_]+)?$`.
+- `tests/contract/schema.test.ts` updated — el endpoint list arranca con la nueva agrupación; `/enable_anomaly_scoring` removido (ningún tool lo llama).
