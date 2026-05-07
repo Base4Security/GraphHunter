@@ -134,3 +134,58 @@ pub struct IngestError {
     pub dataset_id: String,
     pub error: String,
 }
+
+/// Fire-and-forget telemetry emitted on every LLM-as-compiler
+/// dispatcher decision so the analyst always sees which path was
+/// taken. Without it, a silent fall-back to heuristic that produces
+/// zero triples is indistinguishable from a parser bug. The
+/// frontend renders this as a status-log entry; the analyst only
+/// needs to act on it when the outcome is `llm_proposal` (which also
+/// gets a separate `IngestLlmProposal` with the full diff).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IngestLlmDiagnostic {
+    pub job_id: String,
+    pub dataset_id: String,
+    /// One of `heuristic_ok`, `llm_proposal`, `llm_unavailable`.
+    /// Stable strings so the frontend can switch on them.
+    pub outcome: String,
+    /// Human-readable explanation of why the dispatcher chose this
+    /// path. Includes mapping counts for `heuristic_ok`, the failure
+    /// mode for `llm_unavailable`, and a brief teaser for
+    /// `llm_proposal` (the full diff travels in the separate
+    /// `IngestLlmProposal` event).
+    pub reason: String,
+    /// Backend identifier (e.g. `candle-phi3-q4` or `mock`). `None`
+    /// when the dispatcher short-circuited on `HeuristicOk` and never
+    /// asked the backend for its id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_id: Option<String>,
+}
+
+/// Emitted by the LLM-as-compiler dispatcher (Phase C) when the
+/// heuristic config was weak (zero Node mappings) and the LLM
+/// produced a refined alternative. Streaming was halted before any
+/// triples landed; the frontend confirm banner renders the diff and
+/// re-triggers ingest with the analyst's chosen `FieldConfig` via
+/// `cmd_load_data_streaming` (passing `config = chosen`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IngestLlmProposal {
+    pub job_id: String,
+    pub dataset_id: String,
+    /// Original file path, so the frontend can re-trigger ingest with
+    /// the chosen config. Tauri commands pass it back unchanged.
+    pub source_path: String,
+    /// Format the dispatcher resolved for the source.
+    pub format: String,
+    /// Heuristic-produced FieldConfig (zero-Node, low confidence).
+    /// Serialized as `serde_json::Value` so the frontend can render
+    /// it as-is without extra type duplication.
+    pub heuristic: serde_json::Value,
+    /// LLM-refined FieldConfig with one or more Node mappings.
+    pub refined: serde_json::Value,
+    /// Field-by-field diff between heuristic and refined. Shape:
+    /// `{added: [...], removed: [...], changed: [...], unchanged_count: u}`.
+    pub diff: serde_json::Value,
+    pub confidence: f32,
+    pub backend_id: String,
+}

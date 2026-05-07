@@ -125,11 +125,20 @@ pub fn auto_field_config_for(format_name: &str, contents: &str) -> Option<FieldC
                     Some(et.to_string())
                 }
             });
+            // 2026-05-06 (#11 fix): the previous fallback was
+            // `fi.raw_name.clone()`, which silently promoted any
+            // unrecognized field to a Node typed by its own field
+            // name. That wrongly turned numeric/categorical metadata
+            // (`bytes`, `action`, `count`, `priority`) into entities
+            // of types like `bytes` or `action`. When neither the
+            // value-regex heuristic nor a canonical mapping has an
+            // opinion, default to Metadata so the analyst can opt in
+            // explicitly instead of opt out after seeing junk nodes.
             let suggested = match (fi.suggested_entity_type.clone(), canonical_default) {
                 (Some(t), _) => t,
                 (None, _) if is_timestamp => "Skip".to_string(),
                 (None, Some(canonical)) => canonical,
-                (None, None) => fi.raw_name.clone(),
+                (None, None) => "Skip".to_string(),
             };
             let (role, entity_type) = if suggested == "Skip" {
                 (FieldRole::Metadata, None)
@@ -998,6 +1007,14 @@ impl GraphHunterApi {
                 // customization panel uses, so one-shot ingest doesn't silently
                 // fall back to plain GenericParser for formats that benefit
                 // from field-based entity-type suggestions.
+                //
+                // The LLM-as-compiler dispatcher used to fire here when
+                // `GRAPHHUNTER_LLM_INGEST=1`, but Phi-3 inference on a CPU
+                // dev profile took 9 minutes per call — unusable as a hot-
+                // path silent step. Phase G demoted the dispatcher to an
+                // explicit "Probar mapeo IA" button on `DatasetCard`, which
+                // calls `cmd_request_llm_proposal` after a 0-triple ingest.
+                // The hot path stays heuristic-only and instant.
                 let auto_config = if bg_config.is_none() {
                     auto_field_config_for(&resolved, &peek_buf)
                 } else {

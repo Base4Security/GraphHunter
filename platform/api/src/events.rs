@@ -51,6 +51,21 @@ pub mod events {
     pub const INGEST_PROGRESS: &str = "ingest-progress";
     pub const INGEST_COMPLETE: &str = "ingest-complete";
     pub const INGEST_ERROR: &str = "ingest-error";
+    /// Emitted by the LLM-as-compiler dispatcher when the heuristic
+    /// produced a low-confidence config and the LLM offers a refined
+    /// alternative. Streaming halts before any triples are inserted;
+    /// the frontend renders a confirm banner with the diff and
+    /// re-triggers ingest with the analyst's chosen config.
+    pub const INGEST_LLM_PROPOSAL: &str = "ingest-llm-proposal";
+    /// Emitted on every dispatcher decision (heuristic confident, LLM
+    /// proposal, LLM unavailable). The frontend renders a status-log
+    /// line so the analyst always sees which path the dispatcher took
+    /// — without this, a silent fall-back to heuristic that produces
+    /// zero triples looks identical to a parser bug. Distinct from
+    /// `ingest-llm-proposal` because the proposal carries the diff
+    /// payload + halts streaming, while the diagnostic is fire-and-
+    /// forget telemetry.
+    pub const INGEST_LLM_DIAGNOSTIC: &str = "ingest-llm-diagnostic";
     pub const SENTINEL_DATA: &str = "sentinel-data";
     pub const SENTINEL_STATUS: &str = "sentinel-status";
     pub const MCP_VIEW_UPDATE: &str = "mcp-view-update";

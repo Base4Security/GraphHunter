@@ -88,6 +88,8 @@ fn ndjson_export_covers_every_shipping_class_and_validates_against_schema() {
             session: None,
             dataset_id: None,
             format: "ndjson".into(),
+            page_size: None,
+            offset: None,
         })
         .expect("export_ocsf");
 
@@ -148,6 +150,8 @@ fn json_array_format_returns_a_valid_array() {
             session: None,
             dataset_id: None,
             format: "json".into(),
+            page_size: None,
+            offset: None,
         })
         .expect("export_ocsf json");
     let v: Value = serde_json::from_str(&out).expect("json array parses");
@@ -229,6 +233,8 @@ fn dataset_with_field_config_stamps_real_vrl_hash() {
             session: None,
             dataset_id: Some(dataset_id.clone()),
             format: "ndjson".into(),
+            page_size: None,
+            offset: None,
         })
         .expect("export_ocsf");
 
@@ -260,6 +266,8 @@ fn unsupported_format_is_rejected() {
             session: None,
             dataset_id: None,
             format: "xml".into(),
+            page_size: None,
+            offset: None,
         })
         .expect_err("xml must be rejected");
     let msg = err.to_string();

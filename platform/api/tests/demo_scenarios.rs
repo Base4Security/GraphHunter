@@ -58,6 +58,7 @@ fn run_hunt_paths(api: &GraphHunterApi, dsl: &str) -> Vec<Vec<std::sync::Arc<str
             hypothesis: parsed.hypothesis,
             time_window: None,
             max_results: Some(1_000),
+            scoring: None,
         })
         .expect("run_hunt");
     // `run_hunt` inlines paths when path_count ≤ 100; for these demo

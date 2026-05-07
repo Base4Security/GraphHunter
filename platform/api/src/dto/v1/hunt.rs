@@ -10,6 +10,29 @@ use crate::state::SessionHandle;
 use graph_hunter_core::{DedupMode, HuntDiagnostic, Hypothesis, ScoredPath};
 use serde::{Deserialize, Serialize};
 
+/// Per-call scoring mode (v2 follow-up — replaces the
+/// `enable_anomaly_scoring` latch).
+///
+/// - `Structural`: ignore any session-installed anomaly scorer for
+///   this call and run the plain DFS. Replay-stable: a transcript
+///   that calls `run_hunt(scoring=Structural)` produces structural
+///   scores regardless of whether prior calls enabled the scorer.
+/// - `Anomaly`: ensure the per-session anomaly scorer is enabled and
+///   finalized BEFORE running, then use the score-guided smart DFS.
+///   Idempotent — repeat calls don't re-finalize.
+/// - `Gnn`: same as `Anomaly` from the search-path perspective; the
+///   GNN-threat dimension surfaces in the breakdown only when
+///   `compute_gnn_scores` has previously run. Kept distinct so the
+///   transcript declares intent (and a future weight-set per mode
+///   could differentiate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HuntScoring {
+    Structural,
+    Anomaly,
+    Gnn,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunHuntRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -24,6 +47,12 @@ pub struct RunHuntRequest {
     /// Cap on paths materialized before truncation. Default 10 000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_results: Option<usize>,
+    /// Per-call scoring override. When `None` (legacy), the call uses
+    /// whatever scoring state the session currently has (sticky if a
+    /// prior `enable_anomaly_scoring` ran). When `Some`, the value
+    /// drives this call deterministically — see [`HuntScoring`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoring: Option<HuntScoring>,
 }
 
 /// Response shape matching the existing Tauri `HuntResults` for

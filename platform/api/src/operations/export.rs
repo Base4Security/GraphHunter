@@ -185,6 +185,18 @@ impl GraphHunterApi {
         }
 
         let dataset_filter = req.dataset_id.clone();
+        // 2026-05-06: bound the response size. The JS string limit
+        // (~536 MB) was the actual ceiling for an MCP caller, and
+        // a real Sentinel session of 1M+ events blew through it.
+        // Default cap of 10k keeps the rendered string < 50 MB
+        // safely; analysts who need more page through with `offset`.
+        const DEFAULT_PAGE_SIZE: usize = 10_000;
+        const MAX_PAGE_SIZE: usize = 200_000;
+        let page_size = req
+            .page_size
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .min(MAX_PAGE_SIZE);
+        let offset = req.offset.unwrap_or(0);
 
         // Build a per-dataset mapping_hash table from FieldConfig before
         // touching the graph. Datasets without a FieldConfig stay on the
@@ -211,8 +223,34 @@ impl GraphHunterApi {
             let entity_by_id: HashMap<String, &graph_hunter_core::entity::Entity> =
                 entities.iter().map(|e| (e.id.clone(), e)).collect();
 
-            let mut events: Vec<serde_json::Value> = Vec::new();
+            // First pass: count the total match set so the meta
+            // envelope is honest about `has_more`. Skipping the
+            // dataset filter twice would double-iterate; we live
+            // with one extra pass here because it's a vector of
+            // refs and the inner work (provenance + serialize) only
+            // runs on the page slice below.
+            let mut total: usize = 0;
             for relation in &relations {
+                if let Some(ds) = &dataset_filter {
+                    match relation.dataset_id.as_deref() {
+                        Some(rds) if rds == ds => {}
+                        _ => continue,
+                    }
+                }
+                if entity_by_id.contains_key(&relation.source_id)
+                    && entity_by_id.contains_key(&relation.dest_id)
+                {
+                    total += 1;
+                }
+            }
+
+            let mut events: Vec<serde_json::Value> = Vec::new();
+            let mut produced: usize = 0;
+            let mut skipped: usize = 0;
+            for relation in &relations {
+                if events.len() >= page_size {
+                    break;
+                }
                 if let Some(ds) = &dataset_filter {
                     match relation.dataset_id.as_deref() {
                         Some(rds) if rds == ds => {}
@@ -225,16 +263,40 @@ impl GraphHunterApi {
                 ) else {
                     continue;
                 };
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
                 let prov = provenance_for_relation(relation, &dataset_filter, &vrl_by_dataset);
                 let event = triple_to_ocsf(source, relation, dest, &prov);
                 let value = serde_json::to_value(&event)
                     .map_err(|e| ApiError::Internal(format!("ocsf serialize: {e}")))?;
                 events.push(value);
+                produced += 1;
             }
+            let has_more = offset + produced < total;
 
             let rendered = match req.format.as_str() {
                 "ndjson" => {
+                    // Lead with a `_meta` JSON line so a streaming
+                    // consumer (jq, splunk forwarder, etc.) can
+                    // skip-comment it cheaply but still know to
+                    // page when `has_more = true`.
+                    let meta = serde_json::json!({
+                        "_meta": {
+                            "offset": offset,
+                            "page_size": page_size,
+                            "returned": produced,
+                            "total_in_session": total,
+                            "has_more": has_more,
+                        }
+                    });
                     let mut out = String::new();
+                    out.push_str(
+                        &serde_json::to_string(&meta)
+                            .map_err(|e| ApiError::Internal(format!("ndjson meta: {e}")))?,
+                    );
+                    out.push('\n');
                     for v in &events {
                         out.push_str(
                             &serde_json::to_string(v)
@@ -244,8 +306,20 @@ impl GraphHunterApi {
                     }
                     out
                 }
-                _ => serde_json::to_string(&events)
-                    .map_err(|e| ApiError::Internal(format!("json array: {e}")))?,
+                _ => {
+                    let envelope = serde_json::json!({
+                        "events": events,
+                        "_meta": {
+                            "offset": offset,
+                            "page_size": page_size,
+                            "returned": produced,
+                            "total_in_session": total,
+                            "has_more": has_more,
+                        }
+                    });
+                    serde_json::to_string(&envelope)
+                        .map_err(|e| ApiError::Internal(format!("json array: {e}")))?
+                }
             };
             Ok(rendered)
         })
@@ -339,15 +413,64 @@ fn provenance_for_relation(
 type IocItem = (String, String, String, Option<String>);
 
 /// Public dispatcher used by the HTTP layer's bulk-export helpers.
+///
+/// 2026-05-06: dedupe `items` by `(node_id, entity_type)` before
+/// dispatching. Previously a node carrying multiple tags produced one
+/// `IocItem` per tag — every format then emitted duplicate
+/// indicators (the same IP appearing twice in `kql_ioc_set`, the
+/// same STIX `indicator--…` UUID-collision pair, etc.). Merge the
+/// tags into a comma-separated label and concatenate the non-empty
+/// reasons so no signal is lost.
 pub fn format_ioc_feed(format: &str, items: &[IocItem]) -> String {
+    let deduped = dedupe_items(items);
     match format {
-        "stix21" => build_stix21(items),
-        "misp_csv" => build_misp_csv(items),
-        "kql_ioc_set" => build_kql_ioc_set(items),
-        "sigma_stub" => build_sigma_stub(items),
-        "sentinel_watchlist" => build_sentinel_watchlist_csv(items),
+        "stix21" => build_stix21(&deduped),
+        "misp_csv" => build_misp_csv(&deduped),
+        "kql_ioc_set" => build_kql_ioc_set(&deduped),
+        "sigma_stub" => build_sigma_stub(&deduped),
+        "sentinel_watchlist" => build_sentinel_watchlist_csv(&deduped),
         _ => String::new(),
     }
+}
+
+/// Collapse multiple tags on the same `(node_id, entity_type)` into a
+/// single `IocItem`. Tags joined with `,` (Sigma + STIX-friendly),
+/// reasons concatenated with ` | ` so analyst notes from each tag are
+/// preserved. Order is stable: first-seen wins, subsequent occurrences
+/// merge in arrival order.
+fn dedupe_items(items: &[IocItem]) -> Vec<IocItem> {
+    use std::collections::HashMap;
+    let mut order: Vec<(String, String)> = Vec::with_capacity(items.len());
+    let mut acc: HashMap<(String, String), (Vec<String>, Vec<String>)> = HashMap::new();
+    for (node_id, etype, tag, reason) in items {
+        let key = (node_id.clone(), etype.clone());
+        let entry = acc.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            (Vec::new(), Vec::new())
+        });
+        if !entry.0.iter().any(|t| t == tag) {
+            entry.0.push(tag.clone());
+        }
+        if let Some(r) = reason.as_ref().filter(|s| !s.trim().is_empty()) {
+            if !entry.1.iter().any(|x| x == r) {
+                entry.1.push(r.clone());
+            }
+        }
+    }
+    order
+        .into_iter()
+        .map(|key| {
+            let (node_id, etype) = key.clone();
+            let (tags, reasons) = acc.remove(&key).unwrap_or_default();
+            let merged_tag = tags.join(",");
+            let merged_reason = if reasons.is_empty() {
+                None
+            } else {
+                Some(reasons.join(" | "))
+            };
+            (node_id, etype, merged_tag, merged_reason)
+        })
+        .collect()
 }
 
 /// CSV body ready for the Azure Sentinel Watchlist REST API. First
@@ -386,6 +509,16 @@ fn build_stix21(items: &[IocItem]) -> String {
     let mut objects: Vec<serde_json::Value> = Vec::with_capacity(items.len());
     for (node_id, entity_type, tag, reason) in items {
         let pattern = stix_pattern_for(entity_type, node_id);
+        // 2026-05-06 (N2 fix): `tag` is a comma-joined string after
+        // `dedupe_items` collapses multiple tags on the same node.
+        // STIX 2.1 § 4.1 defines `labels` as `list of string`, so a
+        // single CSV entry like `["ioc:suspicious,ioc:malicious"]`
+        // breaks schema validators. Split back into separate labels.
+        let labels: Vec<&str> = tag
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
         let indicator = serde_json::json!({
             "type": "indicator",
             "spec_version": "2.1",
@@ -394,7 +527,7 @@ fn build_stix21(items: &[IocItem]) -> String {
             "modified": created,
             "name": format!("{entity_type}: {node_id}"),
             "description": reason.clone().unwrap_or_default(),
-            "labels": [tag],
+            "labels": labels,
             "pattern": pattern,
             "pattern_type": "stix",
             "valid_from": created,
@@ -471,51 +604,48 @@ fn build_kql_ioc_set(items: &[IocItem]) -> String {
     let mut ips = Vec::new();
     let mut domains = Vec::new();
     let mut files = Vec::new();
+    let mut processes = Vec::new();
+    let mut hashes = Vec::new();
     for (node_id, entity_type, _, _) in items {
         let escaped = node_id.replace('"', "\\\"");
         match entity_type.as_str() {
             "IP" => ips.push(escaped),
             "Domain" => domains.push(escaped),
             "File" => files.push(escaped),
+            // Process IoCs (e.g. cnd.exe) used to drop on the floor
+            // here — Sentinel `DeviceProcessEvents.FileName` is the
+            // standard match field, so emit them under a dedicated
+            // `IoC_Processes` datatable for paste-into-hunt.
+            "Process" => processes.push(escaped),
+            "Hash" => hashes.push(escaped),
             _ => {}
         }
     }
     let mut out = String::new();
     out.push_str("// Generated by Graph Hunter — paste into an Azure Sentinel hunting query.\n");
-    if !ips.is_empty() {
-        out.push_str("let IoC_IPs = datatable(ip:string)[\n");
+    let push_table = |out: &mut String, name: &str, col: &str, vals: &[String]| {
+        if vals.is_empty() {
+            return;
+        }
+        out.push_str(&format!("let {name} = datatable({col}:string)[\n"));
         out.push_str(
-            &ips.iter()
-                .map(|ip| format!("  \"{ip}\""))
-                .collect::<Vec<_>>()
-                .join(",\n"),
-        );
-        out.push_str("\n];\n");
-    }
-    if !domains.is_empty() {
-        out.push_str("let IoC_Domains = datatable(domain:string)[\n");
-        out.push_str(
-            &domains
+            &vals
                 .iter()
-                .map(|d| format!("  \"{d}\""))
+                .map(|v| format!("  \"{v}\""))
                 .collect::<Vec<_>>()
                 .join(",\n"),
         );
         out.push_str("\n];\n");
-    }
-    if !files.is_empty() {
-        out.push_str("let IoC_Files = datatable(filename:string)[\n");
-        out.push_str(
-            &files
-                .iter()
-                .map(|f| format!("  \"{f}\""))
-                .collect::<Vec<_>>()
-                .join(",\n"),
-        );
-        out.push_str("\n];\n");
-    }
+    };
+    push_table(&mut out, "IoC_IPs", "ip", &ips);
+    push_table(&mut out, "IoC_Domains", "domain", &domains);
+    push_table(&mut out, "IoC_Files", "filename", &files);
+    push_table(&mut out, "IoC_Processes", "process_name", &processes);
+    push_table(&mut out, "IoC_Hashes", "hash", &hashes);
     if out.lines().count() <= 1 {
-        out.push_str("// (no IoCs of IP/Domain/File type in the current tag set)\n");
+        out.push_str(
+            "// (no IoCs of IP/Domain/File/Process/Hash type in the current tag set)\n",
+        );
     }
     out
 }
@@ -532,9 +662,16 @@ fn build_sigma_stub(items: &[IocItem]) -> String {
         .map(|(id, _, _, _)| id.as_str())
         .collect();
 
+    // Deterministic UUID derived from the IoC set — replaces the
+    // 2026-04 hardcoded 00000000-… literal that caused collisions
+    // when multiple Sigma stubs were imported into the same SIEM.
+    // Stable across re-exports of the same IoCs (good for diffing
+    // rule versions) but distinct between disjoint sets.
+    let rule_id = sigma_rule_uuid(&ips, &domains);
+
     let mut out = String::new();
     out.push_str("title: Graph Hunter IoC stub\n");
-    out.push_str("id: 00000000-0000-0000-0000-000000000000\n");
+    out.push_str(&format!("id: {rule_id}\n"));
     out.push_str("status: experimental\n");
     out.push_str(
         "description: Auto-generated from Graph Hunter IoC tag set. Replace logsource + attach timeframe before production use.\n",
@@ -572,6 +709,72 @@ fn build_sigma_stub(items: &[IocItem]) -> String {
     ));
     out.push_str("level: medium\n");
     out
+}
+
+/// Deterministic UUIDv5-style identifier derived from the sorted IP +
+/// domain set. Gives the same rule_id for repeated exports of an
+/// equivalent IoC set, but a different one when the set changes.
+/// Hash function reuses the FNV-1a 64-bit recipe from
+/// `uuid_from_node` — not a real RFC-4122 UUID but a 36-char id that
+/// looks right in a Sigma `id:` field and is stable per-set.
+fn sigma_rule_uuid(ips: &[&str], domains: &[&str]) -> String {
+    let mut sorted_ips: Vec<&str> = ips.to_vec();
+    sorted_ips.sort_unstable();
+    let mut sorted_domains: Vec<&str> = domains.to_vec();
+    sorted_domains.sort_unstable();
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for ip in &sorted_ips {
+        for b in ip.bytes() {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        hash ^= b'\n' as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash ^= b'|' as u64;
+    hash = hash.wrapping_mul(0x100_0000_01b3);
+    for d in &sorted_domains {
+        for b in d.bytes() {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        hash ^= b'\n' as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    // Fan out to a second 64-bit half so we have 128 bits of state to
+    // populate the UUID layout — without dragging a real hash crate
+    // in.
+    let mut second: u64 = 0x84222325cbf29ce4;
+    for ip in &sorted_ips {
+        for b in ip.bytes() {
+            second = second.rotate_left(5) ^ (b as u64);
+        }
+    }
+    for d in &sorted_domains {
+        for b in d.bytes() {
+            second = second.rotate_left(5) ^ (b as u64);
+        }
+    }
+    if sorted_ips.is_empty() && sorted_domains.is_empty() {
+        // Fallback: empty IoC set still gets a recognizable, distinct
+        // id so two empty stubs imported simultaneously don't collide.
+        // 2026-05-06: empty IoC set used to emit a string that
+        // looked like a UUID but contained letters in hex slots
+        // (`empty…`), which broke `sigmac` and any consumer
+        // validating the field as a real UUID. Use the canonical nil
+        // UUID instead — sigmac accepts it, and downstream tooling
+        // can treat it as "no IoCs supplied".
+        return "00000000-0000-0000-0000-000000000000".to_string();
+    }
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        (hash >> 32) as u32,
+        (hash >> 16) as u16 & 0xffff,
+        (hash as u16) & 0xffff,
+        (second >> 48) as u16 & 0xffff,
+        second & 0xffff_ffff_ffff,
+    )
 }
 
 /// Best-effort ISO-8601 timestamp without pulling `chrono` in. Moved
@@ -657,6 +860,25 @@ mod tests {
         assert!(out.contains("\"type\": \"bundle\""));
         assert!(out.contains("\"type\": \"indicator\""));
         assert!(out.contains("ipv4-addr:value"));
+    }
+
+    #[test]
+    fn stix21_splits_csv_labels() {
+        // 2026-05-06 (N2 fix): when dedupe collapses two tags into a
+        // single comma-joined `IocItem.tag`, the STIX exporter must
+        // emit them as separate strings, not as one CSV element.
+        let items = vec![(
+            "1.2.3.4".to_string(),
+            "IP".to_string(),
+            "ioc:suspicious,ioc:malicious".to_string(),
+            None,
+        )];
+        let out = build_stix21(&items);
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let labels = parsed["objects"][0]["labels"].as_array().unwrap();
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0], "ioc:suspicious");
+        assert_eq!(labels[1], "ioc:malicious");
     }
 
     #[test]

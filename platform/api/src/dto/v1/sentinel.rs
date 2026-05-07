@@ -6,6 +6,73 @@ use crate::sentinel_connector::ConnectorStatus;
 use crate::state::SessionHandle;
 use serde::{Deserialize, Serialize};
 
+// ── Time window (Phase L) ─────────────────────────────────────────────
+//
+// Both `SentinelConnectRequest` and `RunKqlRequest` accept a
+// `time_window: Option<TimeWindow>` so the analyst can override the
+// default `ago(24h)` lookback. Hunting templates (Phase M) reuse the
+// same shape via `kql_filter()` so a single picker drives every query.
+
+/// Lookback presets that map to KQL `ago(...)` durations. Serialized
+/// as the literal duration string (`"1h"`, `"24h"`, `"7d"`) so the
+/// frontend's TimeWindow type can stay symmetrical with KQL syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LookbackPreset {
+    #[serde(rename = "1h")]
+    H1,
+    #[serde(rename = "6h")]
+    H6,
+    #[serde(rename = "24h")]
+    H24,
+    #[serde(rename = "7d")]
+    D7,
+    #[serde(rename = "30d")]
+    D30,
+}
+
+impl LookbackPreset {
+    /// KQL duration literal for `ago(...)`. Symmetric with the serde
+    /// rename so a round-trip serialize/deserialize is the identity.
+    pub fn as_kql(self) -> &'static str {
+        match self {
+            Self::H1 => "1h",
+            Self::H6 => "6h",
+            Self::H24 => "24h",
+            Self::D7 => "7d",
+            Self::D30 => "30d",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TimeWindow {
+    /// `where TimeGenerated > ago(<preset>)`.
+    Preset { lookback: LookbackPreset },
+    /// `where TimeGenerated between (datetime(<from>) .. datetime(<to>))`.
+    /// Both fields are ISO-8601 timestamps. UTC assumed when offset is
+    /// missing; KQL accepts naked ISO-8601 inside `datetime(...)`.
+    Absolute { from_iso: String, to_iso: String },
+}
+
+impl TimeWindow {
+    /// Render the window as a KQL filter clause. The leading `where`
+    /// is included so the caller can splice it into a query without
+    /// position-dependent string surgery.
+    pub fn kql_filter(&self) -> String {
+        match self {
+            Self::Preset { lookback } => {
+                format!("where TimeGenerated > ago({})", lookback.as_kql())
+            }
+            Self::Absolute { from_iso, to_iso } => {
+                format!(
+                    "where TimeGenerated between (datetime({from_iso}) .. datetime({to_iso}))"
+                )
+            }
+        }
+    }
+}
+
 // ── Real-time connector lifecycle ──────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -30,6 +97,12 @@ pub struct SentinelConnectRequest {
     /// `SENTINEL_BATCH_SIZE` or 10000.
     #[serde(default)]
     pub batch_size: u32,
+    /// Initial-poll time window override. `None` keeps the legacy
+    /// `ago(24h)` default. Once the watermark store has a checkpoint
+    /// for the connector, the watermark wins (preserves incremental
+    /// polling semantics).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<TimeWindow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +135,39 @@ pub struct RunKqlRequest {
     pub azure_client_id: String,
     #[serde(default)]
     pub azure_client_secret: String,
+    /// Soft-sugar time window (Phase L). When the analyst's `kql`
+    /// already contains a `TimeGenerated` filter, this is ignored —
+    /// the user's filter wins. Otherwise the dispatcher prepends a
+    /// `where TimeGenerated ...` clause derived from this window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<TimeWindow>,
+}
+
+/// One-click hunting template (Phase M). The body is a KQL string
+/// templated with a `{TIME}` placeholder that the API substitutes
+/// with `time_window.kql_filter()` before dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HuntingTemplateId {
+    FailedLogonBurst,
+    LateralMovement,
+    EncodedPowerShell,
+    SuspiciousDns,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct RunHuntingTemplateRequest {
+    pub template: Option<HuntingTemplateId>,
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub azure_tenant_id: String,
+    #[serde(default)]
+    pub azure_client_id: String,
+    #[serde(default)]
+    pub azure_client_secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<TimeWindow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +178,18 @@ pub struct KqlResult {
     pub total_relations: usize,
     pub kql_executed: String,
     pub row_count: usize,
+    /// Wall time of the KQL roundtrip (Phase N). `0` when the
+    /// transport doesn't measure (legacy callers).
+    #[serde(default)]
+    pub took_ms: u64,
+    /// `take N` clause that was applied to the query, when
+    /// detectable. `None` when the query has no take limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_limit: Option<u32>,
+    /// True when `row_count >= take_limit` — UI surfaces a "narrow
+    /// your window" warning instead of a clean success log entry.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 // ── Env probe ──────────────────────────────────────────────────────────

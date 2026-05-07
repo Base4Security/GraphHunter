@@ -48,6 +48,15 @@ impl GraphHunterApi {
     /// Errors with [`ApiError::InvalidInput`] for private / non-
     /// routable IPs. Async because the HTTP fallback awaits reqwest.
     pub async fn enrich_ip(&self, req: EnrichIpRequest) -> ApiResult<EnrichIpResponse> {
+        // 2026-05-06: distinguish "not an IP" from "not routable" so a
+        // typo on the input doesn't read as "private IP". Parse first,
+        // classify second.
+        if req.ip.trim().parse::<std::net::IpAddr>().is_err() {
+            return Err(ApiError::InvalidInput(format!(
+                "`{}` is not a valid IPv4/IPv6 address. enrich expects something like `8.8.8.8` or `2001:db8::1`.",
+                req.ip
+            )));
+        }
         if !ip_utils::is_public(&req.ip) {
             return Err(ApiError::InvalidInput(format!(
                 "IP {} is not a public/routable address. GeoIP enrichment is only available for external IPs.",

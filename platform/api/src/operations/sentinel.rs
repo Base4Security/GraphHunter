@@ -12,8 +12,8 @@ use graph_hunter_siem::{
 use uuid::Uuid;
 
 use crate::dto::sentinel::{
-    ConnectorStatusResponse, KqlResult, RunKqlRequest, SentinelConnectRequest,
-    SentinelConnectedEvent, SentinelEnvStatus,
+    ConnectorStatusResponse, HuntingTemplateId, KqlResult, RunHuntingTemplateRequest,
+    RunKqlRequest, SentinelConnectRequest, SentinelConnectedEvent, SentinelEnvStatus, TimeWindow,
 };
 use crate::events::events as event_names;
 use crate::format_registry::make_parser_for_format;
@@ -140,6 +140,7 @@ impl GraphHunterApi {
             poll_interval_secs: poll_interval,
             tables,
             batch_size,
+            initial_time_window_filter: req.time_window.as_ref().map(TimeWindow::kql_filter),
         };
 
         let transport = Arc::new(HttpSentinelTransport::new());
@@ -269,10 +270,16 @@ impl GraphHunterApi {
     /// the executed KQL so the analyst can replicate it in the Azure
     /// portal.
     pub async fn run_kql(&self, req: RunKqlRequest) -> ApiResult<KqlResult> {
-        let kql = req.kql.trim().to_string();
-        if kql.is_empty() {
+        let raw_kql = req.kql.trim().to_string();
+        if raw_kql.is_empty() {
             return Err(ApiError::InvalidInput("KQL query cannot be empty".into()));
         }
+        // Phase L soft sugar: if the analyst's query lacks a
+        // `TimeGenerated` filter and the form supplied a window, splice
+        // one in between the table reference and the rest of the query.
+        // If the user wrote their own filter we leave it untouched —
+        // explicit always wins over inferred.
+        let kql = apply_time_window_sugar(&raw_kql, req.time_window.as_ref());
 
         let workspace_id = env_or(&req.workspace_id, "AZURE_WORKSPACE_ID")?;
         let tenant_id = env_or(&req.azure_tenant_id, "AZURE_TENANT_ID")?;
@@ -286,6 +293,7 @@ impl GraphHunterApi {
         };
         let kql_clone = kql.clone();
         let ws_clone = workspace_id.clone();
+        let started = std::time::Instant::now();
         let res = tokio::task::spawn_blocking(move || {
             run_sentinel_query(&ws_clone, &kql_clone, Some(auth))
         })
@@ -295,8 +303,11 @@ impl GraphHunterApi {
             service: "sentinel-kql".into(),
             message: e,
         })?;
+        let took_ms = started.elapsed().as_millis() as u64;
 
         let row_count = res.data.matches('{').count();
+        let take_limit = extract_take_limit(&kql);
+        let truncated = take_limit.is_some_and(|cap| row_count >= cap as usize);
 
         let session = self.sessions().current_session().ok_or_else(|| {
             ApiError::InvalidState("No current session. Create or load a session first.".into())
@@ -376,6 +387,216 @@ impl GraphHunterApi {
             total_relations,
             kql_executed: kql,
             row_count,
+            took_ms,
+            take_limit,
+            truncated,
         })
+    }
+
+    /// Phase M: run a pre-built hunting KQL template against Sentinel.
+    /// The KQL is rendered from `template` + the analyst's chosen
+    /// `time_window`, then dispatched through the same `run_kql` path
+    /// so result handling (ingest + scoring + dataset row + emit)
+    /// stays in one place.
+    pub async fn run_hunting_template(
+        &self,
+        req: RunHuntingTemplateRequest,
+    ) -> ApiResult<KqlResult> {
+        let template = req
+            .template
+            .ok_or_else(|| ApiError::InvalidInput("template is required".into()))?;
+        let window = req
+            .time_window
+            .clone()
+            .unwrap_or(TimeWindow::Preset {
+                lookback: crate::dto::sentinel::LookbackPreset::H24,
+            });
+        let kql = render_hunting_template(template, &window);
+        // Setting `time_window: None` here so `run_kql`'s soft-sugar
+        // step doesn't double-prepend a filter onto the rendered
+        // template (which already contains the analyst's window).
+        self.run_kql(RunKqlRequest {
+            kql,
+            workspace_id: req.workspace_id,
+            azure_tenant_id: req.azure_tenant_id,
+            azure_client_id: req.azure_client_id,
+            azure_client_secret: req.azure_client_secret,
+            time_window: None,
+        })
+        .await
+    }
+}
+
+/// Phase L: prepend `where TimeGenerated > ...` to the analyst's
+/// KQL when (a) the form supplied a time window AND (b) the query
+/// doesn't already have a `TimeGenerated` filter. Idempotent — calling
+/// it twice with the same window leaves the second call's output
+/// unchanged.
+fn apply_time_window_sugar(kql: &str, window: Option<&TimeWindow>) -> String {
+    let Some(window) = window else {
+        return kql.to_string();
+    };
+    if kql.contains("TimeGenerated") {
+        return kql.to_string();
+    }
+    // Splice the filter as a fresh stage right after the table
+    // reference. KQL pipelines are `Table | step | step | ...`, so
+    // inserting `| where TimeGenerated ...` after the first segment
+    // keeps the rest of the user's pipeline intact.
+    let trimmed = kql.trim();
+    if let Some((head, tail)) = trimmed.split_once('|') {
+        format!("{} | {} | {}", head.trim_end(), window.kql_filter(), tail.trim_start())
+    } else {
+        format!("{} | {}", trimmed, window.kql_filter())
+    }
+}
+
+/// Phase N: pull the `take N` clause out of the rendered KQL so the
+/// frontend can warn when row count saturates the cap. Conservative
+/// regex — matches `take 1234` (case-sensitive, KQL convention) and
+/// returns the largest such value, since some templates have multiple
+/// `take` stages and the last one is the actual ceiling.
+fn extract_take_limit(kql: &str) -> Option<u32> {
+    let mut last: Option<u32> = None;
+    let mut iter = kql.char_indices().peekable();
+    while let Some((i, _)) = iter.next() {
+        let rest = &kql[i..];
+        let stripped = rest.trim_start();
+        if let Some(after_take) = stripped.strip_prefix("take ") {
+            let n: String = after_take
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(n) = n.parse::<u32>() {
+                last = Some(n);
+            }
+        }
+    }
+    last
+}
+
+/// Phase M (revised): ingest-scope templates — pull RAW events in a
+/// thematic category so the analyst can hunt over them inside
+/// GraphHunter (DSL, temporal heatmap, graph traversal, scoring).
+///
+/// Critical design decision: these queries deliberately do NOT
+/// aggregate. The original drafts used `summarize` — that pre-hunts
+/// in KQL and returns rows that have already lost the per-event
+/// detail GraphHunter's graph engine needs. The user's mental model
+/// is "bring logs to GH, hunt in GH (not in Azure)", so each template
+/// scopes the table + filters by event type and projects the columns
+/// the SentinelJsonParser uses to build entities/relations, then
+/// `take`s a bounded number of raw rows.
+fn render_hunting_template(template: HuntingTemplateId, window: &TimeWindow) -> String {
+    let time_filter = window.kql_filter();
+    match template {
+        // Authentication failures: raw 4625 events. Each row becomes
+        // an Account → IP / Account → Computer relation in GH; the
+        // analyst then hunts brute-force / credential-stuffing
+        // structurally with the DSL.
+        HuntingTemplateId::FailedLogonBurst => format!(
+            "SecurityEvent\n\
+             | {time_filter}\n\
+             | where EventID == 4625\n\
+             | project TimeGenerated, Computer, Account, TargetUserName,\n\
+                       IpAddress, LogonType, FailureReason, WorkstationName\n\
+             | order by TimeGenerated desc\n\
+             | take 1000"
+        ),
+        // Successful interactive / remote logons: raw 4624 events
+        // (LogonType 2 = interactive, 3 = network, 7 = unlock,
+        // 10 = RemoteInteractive). Lateral-movement hunts in GH look
+        // for one Account touching ≥N Computers via the resulting
+        // edges.
+        HuntingTemplateId::LateralMovement => format!(
+            "SecurityEvent\n\
+             | {time_filter}\n\
+             | where EventID == 4624 and LogonType in (2, 3, 7, 10)\n\
+             | project TimeGenerated, Computer, Account, TargetUserName,\n\
+                       IpAddress, LogonType, AuthenticationPackageName, WorkstationName\n\
+             | order by TimeGenerated desc\n\
+             | take 1000"
+        ),
+        // PowerShell process executions, scoped to suspicious-CLI
+        // patterns. The `where` keeps the volume manageable while
+        // staying raw (no aggregation): every row is one process
+        // launch, GH builds (User, Computer, ParentProcess, Process)
+        // edges per row.
+        HuntingTemplateId::EncodedPowerShell => format!(
+            "DeviceProcessEvents\n\
+             | {time_filter}\n\
+             | where FileName endswith \"powershell.exe\" or FileName endswith \"pwsh.exe\"\n\
+             | where ProcessCommandLine has_any (\"-EncodedCommand\", \"-enc \", \"FromBase64String\", \"-nop\", \"-w hidden\")\n\
+             | project TimeGenerated, DeviceName, AccountName, AccountDomain,\n\
+                       ProcessCommandLine, InitiatingProcessFileName,\n\
+                       InitiatingProcessAccountName, FileName\n\
+             | order by TimeGenerated desc\n\
+             | take 1000"
+        ),
+        // DNS queries scoped to risk-list TLDs. Raw rows so GH builds
+        // (ClientIP, Domain) edges per query — the analyst then hunts
+        // for fan-out patterns or co-occurrence with other categories.
+        HuntingTemplateId::SuspiciousDns => format!(
+            "DnsEvents\n\
+             | {time_filter}\n\
+             | where QueryType in (\"A\", \"AAAA\")\n\
+             | extend Tld = tolower(extract(@\"\\.([a-z]+)$\", 1, Name))\n\
+             | where Tld in~ (\"ru\", \"cn\", \"tk\", \"top\", \"xyz\", \"icu\", \"click\", \"info\")\n\
+             | project TimeGenerated, ClientIP, Computer, Name, QueryType, Tld\n\
+             | order by TimeGenerated desc\n\
+             | take 1000"
+        ),
+    }
+}
+
+/// Render a hunting template's KQL without dispatching it. Lets the
+/// frontend "ver KQL" toggle show the analyst exactly what's about to
+/// run.
+pub fn preview_hunting_template(template: HuntingTemplateId, window: &TimeWindow) -> String {
+    render_hunting_template(template, window)
+}
+
+#[cfg(test)]
+mod sugar_tests {
+    use super::*;
+    use crate::dto::sentinel::LookbackPreset;
+
+    #[test]
+    fn time_window_sugar_prepends_when_no_filter() {
+        let out = apply_time_window_sugar(
+            "SecurityEvent | take 50",
+            Some(&TimeWindow::Preset { lookback: LookbackPreset::H1 }),
+        );
+        assert_eq!(out, "SecurityEvent | where TimeGenerated > ago(1h) | take 50");
+    }
+
+    #[test]
+    fn time_window_sugar_leaves_user_filter_alone() {
+        let original = "SecurityEvent | where TimeGenerated > ago(7d) | take 50";
+        let out = apply_time_window_sugar(
+            original,
+            Some(&TimeWindow::Preset { lookback: LookbackPreset::H1 }),
+        );
+        assert_eq!(out, original);
+    }
+
+    #[test]
+    fn time_window_sugar_noops_when_no_window() {
+        let original = "SecurityEvent | take 50";
+        let out = apply_time_window_sugar(original, None);
+        assert_eq!(out, original);
+    }
+
+    #[test]
+    fn take_limit_picks_last_take() {
+        // Multiple `take` stages — last wins, like KQL semantics.
+        let kql = "SigninLogs | take 1000 | summarize by Account | take 200";
+        assert_eq!(extract_take_limit(kql), Some(200));
+    }
+
+    #[test]
+    fn take_limit_none_when_no_take() {
+        let kql = "SigninLogs | summarize by Account";
+        assert_eq!(extract_take_limit(kql), None);
     }
 }

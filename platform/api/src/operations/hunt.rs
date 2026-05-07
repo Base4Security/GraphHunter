@@ -7,7 +7,7 @@
 use graph_hunter_core::HuntDiff;
 
 use crate::dto::hunt::{
-    DiffHuntsRequest, GetHuntPageRequest, GetHuntPageResponse, RunHuntBatchEntry,
+    DiffHuntsRequest, GetHuntPageRequest, GetHuntPageResponse, HuntScoring, RunHuntBatchEntry,
     RunHuntBatchRequest, RunHuntBatchResponse, RunHuntRequest, RunHuntResponse,
 };
 use crate::{ApiError, ApiResult, GraphHunterApi};
@@ -28,6 +28,32 @@ impl GraphHunterApi {
         let max_results = req.max_results.unwrap_or(10_000);
         let session = self.resolve_session(req.session.as_ref())?;
 
+        // Per-call scoring override (v2 follow-up). When the caller
+        // asks for `Anomaly` or `Gnn`, ensure the per-session scorer
+        // is enabled + finalized BEFORE we acquire the read lock for
+        // the search. Idempotent: re-installing the scorer is cheap
+        // when it's already there with the same weights.
+        if matches!(
+            req.scoring,
+            Some(HuntScoring::Anomaly) | Some(HuntScoring::Gnn)
+        ) {
+            let mut graph = session
+                .graph
+                .write()
+                .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+            let needs_finalize = graph
+                .anomaly_scorer
+                .as_ref()
+                .map(|s| !s.is_finalized())
+                .unwrap_or(true);
+            if needs_finalize {
+                if graph.anomaly_scorer.is_none() {
+                    graph.enable_anomaly_scoring(Default::default());
+                }
+                graph.finalize_anomaly_scorer();
+            }
+        }
+
         // Read lock: both DFS paths are non-mutating, so concurrent hunts
         // on the same session can run in parallel.
         let (paths, truncated) = {
@@ -35,12 +61,27 @@ impl GraphHunterApi {
                 .graph
                 .read()
                 .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
-            let scorer_ready = graph
-                .anomaly_scorer
-                .as_ref()
-                .map(|s| s.is_finalized())
-                .unwrap_or(false);
-            if scorer_ready {
+            // Per-call scoring decides which DFS variant runs.
+            // - Some(Structural): explicitly bypass the smart DFS
+            //   even if the session has a finalized scorer. This
+            //   is what makes a transcript replay-stable: a
+            //   Structural call always uses the plain DFS,
+            //   independent of prior session state.
+            // - Some(Anomaly | Gnn): smart DFS (we just ensured
+            //   the scorer is finalized above).
+            // - None (legacy): fall back to the old "use scorer
+            //   if finalized" behavior — preserves v1 semantics
+            //   for callers that haven't migrated.
+            let use_smart = match req.scoring {
+                Some(HuntScoring::Structural) => false,
+                Some(HuntScoring::Anomaly) | Some(HuntScoring::Gnn) => true,
+                None => graph
+                    .anomaly_scorer
+                    .as_ref()
+                    .map(|s| s.is_finalized())
+                    .unwrap_or(false),
+            };
+            if use_smart {
                 graph
                     .search_temporal_pattern_smart(
                         &req.hypothesis,
@@ -775,6 +816,9 @@ impl GraphHunterApi {
                     hypothesis,
                     time_window,
                     max_results,
+                    // batch hunts inherit v1 behavior — whatever
+                    // session-level scoring is active.
+                    scoring: None,
                 };
                 let entry = match self.run_hunt(item_req) {
                     Ok(resp) => RunHuntBatchEntry {
@@ -875,6 +919,47 @@ mod tests {
         parse_dsl(dsl, Some("test")).unwrap().hypothesis
     }
 
+    /// Per-call `scoring=Anomaly` finalizes the per-session anomaly
+    /// scorer before the search even when no prior `enable_*` call
+    /// touched it. Subsequent `scoring=Structural` runs still use the
+    /// plain DFS — the override drives the search-path choice
+    /// regardless of session state. Pins the v2-follow-up behavior.
+    #[test]
+    fn run_hunt_per_call_scoring_overrides_session_state() {
+        let api = api();
+        // No prior enable_anomaly_scoring; Anomaly should
+        // self-bootstrap the scorer.
+        let _ = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: Some(HuntScoring::Anomaly),
+            })
+            .expect("Anomaly run on empty graph should not error");
+        // After the Anomaly run the session has a finalized scorer.
+        if let Some(s) = api
+            .sessions()
+            .current_session()
+            .and_then(|sess| sess.graph.read().ok().map(|g| g.anomaly_scorer.is_some()))
+        {
+            assert!(s, "Anomaly run must finalize the per-session scorer");
+        }
+        // Structural override now uses the plain DFS even though the
+        // scorer is sticky on the session — the override is what
+        // gives the v2 transcript its replay-stable property.
+        let _ = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: Some(HuntScoring::Structural),
+            })
+            .expect("Structural override after Anomaly must not error");
+    }
+
     #[test]
     fn run_hunt_empty_graph_returns_zero_with_diagnostic() {
         let api = api();
@@ -884,6 +969,7 @@ mod tests {
                 hypothesis: hypo("User -[Auth]-> Host"),
                 time_window: None,
                 max_results: None,
+                scoring: None,
             })
             .expect("should not error on empty graph");
         assert_eq!(resp.path_count, 0);
@@ -917,6 +1003,7 @@ mod tests {
                 hypothesis: hypo("User -[Auth]-> Host"),
                 time_window: None,
                 max_results: None,
+                scoring: None,
             })
             .unwrap();
         // Cache is empty for an empty graph, but the path must succeed.

@@ -198,7 +198,12 @@ pub async fn polling_loop<T: SentinelTransport>(
                 let store = watermarks.read().await;
                 store.get(table).cloned()
             };
-            let kql = KqlQueryBuilder::build(table, watermark.as_deref(), config.batch_size);
+            let kql = KqlQueryBuilder::build(
+                table,
+                watermark.as_deref(),
+                config.batch_size,
+                config.initial_time_window_filter.as_deref(),
+            );
 
             tracing::info!("SENTINEL: querying table {}", table);
             match transport
@@ -308,6 +313,19 @@ pub async fn polling_loop<T: SentinelTransport>(
         if total_new_entities > 0 || total_new_relations > 0 {
             if let Ok(mut graph) = session.graph.write() {
                 run_scoring_incremental(&mut graph);
+            }
+            // Bump the live dataset's counters so the UI's
+            // `DatasetCard` reflects what's actually been ingested
+            // — without this it sat at "0 entities, 0 relations"
+            // even while the graph kept growing under the hood.
+            // Bookkeeping is per-dataset_id, NOT total graph counts:
+            // a session may have other datasets we mustn't double-
+            // count.
+            if let Ok(mut datasets) = session.datasets.write() {
+                if let Some(ds) = datasets.iter_mut().find(|d| d.id == dataset_id) {
+                    ds.entity_count = ds.entity_count.saturating_add(total_new_entities);
+                    ds.relation_count = ds.relation_count.saturating_add(total_new_relations);
+                }
             }
             emitter.emit(
                 event_names::SENTINEL_DATA,

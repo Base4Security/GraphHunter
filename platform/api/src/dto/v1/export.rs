@@ -28,6 +28,13 @@ pub struct ExportHuntResultsRequest {
 /// Export every triple in the session (or a single dataset) as OCSF v1.4
 /// events with Graph Hunter's provenance extension. `format` is `"json"`
 /// (single JSON array) or `"ndjson"` (one event per line).
+///
+/// 2026-05-06: `page_size` + `offset` added after a QA pass found
+/// the unbounded path OOM'd the JS string limit on real sessions.
+/// `page_size = None` now defaults to a 10 000-event cap; the
+/// response includes a leading `_meta` line (NDJSON) or `_meta`
+/// envelope (JSON) telling the caller how many events were returned
+/// out of the full match set so they know whether to page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportOcsfRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -38,6 +45,14 @@ pub struct ExportOcsfRequest {
     pub dataset_id: Option<String>,
     /// `"json"` → one JSON array; `"ndjson"` → newline-delimited events.
     pub format: String,
+    /// Cap on returned events. `None` defaults to 10 000.  Hard
+    /// ceiling 200 000 to keep memory bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<usize>,
+    /// Number of events to skip before starting the page. Used with
+    /// `page_size` to walk a large session in chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

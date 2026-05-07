@@ -182,6 +182,7 @@ fn run_hunt_populates_cache_and_pages_back() {
             hypothesis,
             time_window: None,
             max_results: Some(1_000),
+            scoring: None,
         })
         .unwrap();
     // The seed has 2 Auth edges (alice→web-01, bob→web-01), each a
@@ -216,6 +217,7 @@ fn run_hunt_zero_paths_populates_diagnostic() {
             hypothesis,
             time_window: None,
             max_results: None,
+            scoring: None,
         })
         .unwrap();
     assert_eq!(resp.path_count, 0);

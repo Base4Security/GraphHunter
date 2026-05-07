@@ -90,6 +90,7 @@ fn run_hunt_request_shape() {
         hypothesis: h,
         time_window: Some((0, 100)),
         max_results: Some(500),
+        scoring: None,
     };
     assert_keys(&req, &["hypothesis", "time_window", "max_results"]);
 }

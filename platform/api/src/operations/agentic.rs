@@ -71,12 +71,18 @@ impl GraphHunterApi {
                     .iter()
                     .filter(|m| matches!(m.role, FieldRole::Node))
                     .count();
+                let total_count = cfg.mappings.len();
                 (
                     cfg,
                     format!(
+                        // 2026-05-06: previously both blanks used
+                        // `cfg_len_helper(&Some(node_count))` which
+                        // resolved to the same value, so a 6-mapping
+                        // result with 5 Nodes printed "5 mappings (5
+                        // Node)". Total now reads from
+                        // `cfg.mappings.len()` as intended.
                         "auto_field_config_for({format}) produced {} mappings ({} Node).",
-                        cfg_len_helper(&Some(node_count)),
-                        node_count,
+                        total_count, node_count,
                     ),
                     // Heuristic confidence is high when at least one
                     // Node mapping landed; calibration is M6 work.
@@ -343,9 +349,10 @@ fn maybe_warm_start(
     (proposed, warm, bumped, true)
 }
 
-fn cfg_len_helper(n: &Option<usize>) -> usize {
-    n.unwrap_or(0)
-}
+// `cfg_len_helper` removed 2026-05-06 — its only caller was the
+// rationale-formatting site above, which now reads `total_count` /
+// `node_count` directly. Helper was a thin Option<usize> unwrap
+// that obscured the real off-by-one bug it was masking.
 
 fn push_draft(session: &Arc<crate::state::Session>, draft: MappingDraft) -> ApiResult<()> {
     let mut q = session

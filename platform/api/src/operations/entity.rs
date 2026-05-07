@@ -258,6 +258,23 @@ impl GraphHunterApi {
             return Err(ApiError::InvalidInput("tag cannot be empty".into()));
         }
         let session = self.resolve_session(req.session.as_ref())?;
+        // 2026-05-06: validate the node exists before tagging. Used
+        // to silently accept any string — that meant a misspelled
+        // node_id contaminated the IoC export with a phantom entry.
+        // For a tool whose output is published to Sentinel/Jira, the
+        // wrong default is "trust the caller". Now we 400.
+        {
+            let graph = session
+                .graph
+                .read()
+                .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+            if graph.get_entity(&req.node_id).is_none() {
+                return Err(ApiError::InvalidInput(format!(
+                    "tag_entity: node_id `{}` does not exist in the current graph",
+                    req.node_id
+                )));
+            }
+        }
         let mut tags = session
             .tags
             .write()
@@ -280,14 +297,20 @@ impl GraphHunterApi {
         Ok(entry)
     }
 
-    pub fn untag_entity(&self, req: UntagEntityRequest) -> ApiResult<()> {
+    /// Remove every entry matching `(node_id, tag)`. Returns the
+    /// number of removed rows so callers can distinguish "tag was
+    /// there and is now gone" from "no-op, never tagged".
+    /// 2026-05-06: previously returned `()` and the MCP wrapper
+    /// always reported `{ok: true}`, hiding misspelled IDs / tags.
+    pub fn untag_entity(&self, req: UntagEntityRequest) -> ApiResult<usize> {
         let session = self.resolve_session(req.session.as_ref())?;
         let mut tags = session
             .tags
             .write()
             .map_err(|e| ApiError::Internal(format!("tags lock poisoned: {e}")))?;
+        let before = tags.len();
         tags.retain(|t| !(t.node_id == req.node_id && t.tag == req.tag));
-        Ok(())
+        Ok(before - tags.len())
     }
 
     pub fn list_tagged(&self, req: ListTaggedRequest) -> ApiResult<TagsResponse> {
@@ -318,6 +341,26 @@ mod tests {
         api.sessions().insert(session);
         api.sessions().set_current(Some(id.clone()));
         (api, id)
+    }
+
+    /// Seed `node_ids` as User entities in the current session's
+    /// graph. Used by tag-related tests after the 2026-05-06
+    /// existence check on `tag_entity` started rejecting tags
+    /// against unseen nodes (which used to silently contaminate
+    /// the IoC export).
+    fn seed_users(api: &GraphHunterApi, node_ids: &[&str]) {
+        if let Some(session) = api.sessions().current_session() {
+            if let Ok(mut graph) = session.graph.write() {
+                for id in node_ids {
+                    use graph_hunter_core::EntityType;
+                    let entity = graph_hunter_core::entity::Entity::new(
+                        id.to_string(),
+                        EntityType::User,
+                    );
+                    let _ = graph.add_entity(entity);
+                }
+            }
+        }
     }
 
     #[test]
@@ -400,6 +443,7 @@ mod tests {
     #[test]
     fn tag_entity_idempotent_updates_reason_in_place() {
         let (api, _id) = api_with_empty_session();
+        seed_users(&api, &["alice"]);
         let first = api
             .tag_entity(TagEntityRequest {
                 session: None,
@@ -429,6 +473,7 @@ mod tests {
     #[test]
     fn list_tagged_filters_by_prefix() {
         let (api, _id) = api_with_empty_session();
+        seed_users(&api, &["alice", "bob"]);
         api.tag_entity(TagEntityRequest {
             session: None,
             node_id: "alice".to_string(),
@@ -456,14 +501,72 @@ mod tests {
     #[test]
     fn untag_missing_pair_is_noop() {
         let (api, _id) = api_with_empty_session();
-        // Does not error on an unknown (node, tag) pair — matches legacy
-        // behavior in cmd_untag_entity.
-        api.untag_entity(UntagEntityRequest {
+        // Does not error on an unknown (node, tag) pair, but reports
+        // 0 removed so callers can distinguish no-op from success.
+        let removed = api
+            .untag_entity(UntagEntityRequest {
+                session: None,
+                node_id: "nobody".to_string(),
+                tag: "x".to_string(),
+            })
+            .unwrap();
+        assert_eq!(removed, 0, "untag for nonexistent pair must report 0 removed");
+    }
+
+    /// 2026-05-06: tag_entity must reject node_ids absent from the
+    /// graph. Pre-fix, the call silently accepted any string, which
+    /// then leaked phantom IoCs into export_iocs / publish.
+    #[test]
+    fn tag_entity_rejects_unknown_node_id() {
+        let (api, _id) = api_with_empty_session();
+        let err = api
+            .tag_entity(TagEntityRequest {
+                session: None,
+                node_id: "ghost-node-not-in-graph".to_string(),
+                tag: "ioc:test".to_string(),
+                reason: None,
+            })
+            .unwrap_err();
+        match err {
+            ApiError::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("does not exist"),
+                    "expected 'does not exist' message, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+    }
+
+    /// untag_entity returns the number of (node_id, tag) rows
+    /// actually removed — was `()` in v1, hiding misspelled IDs.
+    #[test]
+    fn untag_entity_returns_removed_count() {
+        let (api, _id) = api_with_empty_session();
+        seed_users(&api, &["alice"]);
+        api.tag_entity(TagEntityRequest {
             session: None,
-            node_id: "nobody".to_string(),
-            tag: "x".to_string(),
+            node_id: "alice".to_string(),
+            tag: "ioc:test".to_string(),
+            reason: None,
         })
         .unwrap();
+        let removed = api
+            .untag_entity(UntagEntityRequest {
+                session: None,
+                node_id: "alice".to_string(),
+                tag: "ioc:test".to_string(),
+            })
+            .unwrap();
+        assert_eq!(removed, 1, "tag was present, should have removed 1 row");
+        let removed_again = api
+            .untag_entity(UntagEntityRequest {
+                session: None,
+                node_id: "alice".to_string(),
+                tag: "ioc:test".to_string(),
+            })
+            .unwrap();
+        assert_eq!(removed_again, 0, "second untag is a no-op");
     }
 
     #[test]

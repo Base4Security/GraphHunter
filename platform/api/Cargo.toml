@@ -98,7 +98,16 @@ ml-scoring = ["graph_hunter_gnn/ml-scoring"]
 # Off by default — do NOT enable in production builds. Transitively
 # activates `ml-scoring` so the ONNX backend is compiled.
 gnn-v2-experimental = ["graph_hunter_gnn/gnn-v2-experimental"]
-# Enables the candle-backed Phi-3 LocalLlm. Off by default — the mock
-# backend covers tests / CI; enabling this requires
-# GRAPHHUNTER_LOCAL_MODEL_PATH to point at a `.gguf` checkpoint.
+# Enables the candle-backed Phi-3 LocalLlm. Off by default at the
+# crate level — the mock backend covers tests / CI. Enabled by the
+# desktop / CLI binaries via their own feature lists so users get a
+# real backend without setting env vars; the resolver in
+# `graph_hunter_local_llm::resolve_model_path` finds the bundled
+# `.gguf` next to the executable. `GRAPHHUNTER_LOCAL_MODEL_PATH`
+# remains the manual override.
 local-llm-candle = ["graph_hunter_local_llm/candle"]
+# Enables the xgrammar-backed prefix-constrained sampler. Off at the
+# crate level so library tests stay light; the apps flip it on so
+# the LLM-as-compiler path emits VRL that parses by construction
+# rather than relying on post-hoc validation.
+xgrammar = ["graph_hunter_constrained_decode/xgrammar"]

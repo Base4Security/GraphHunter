@@ -202,8 +202,25 @@ impl GraphHunterApi {
     }
 
     /// Build the complete subgraph (nodes + edges) induced by the given
-    /// set of node IDs. Caps at 5 000 edges to keep responses bounded.
+    /// set of node IDs.
+    ///
+    /// 2026-05-06 (#13 fix): edges are now paginated. `page_size`
+    /// defaults to 5 000 (the legacy implicit cap) and `offset` to 0.
+    /// The response carries `total_edges`/`has_more` so callers know
+    /// whether to keep walking. Hard ceiling of 50 000 per page to
+    /// keep memory bounded — large investigations should chunk
+    /// instead of spiking the cap.
     pub fn get_subgraph(&self, req: SubgraphRequest) -> ApiResult<Subgraph> {
+        const DEFAULT_PAGE_SIZE: usize = 5_000;
+        const MAX_PAGE_SIZE: usize = 50_000;
+
+        let page_size = req
+            .page_size
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .min(MAX_PAGE_SIZE)
+            .max(1);
+        let offset = req.offset.unwrap_or(0);
+
         self.with_graph_read(req.session.as_ref(), |graph| {
             let id_set: HashSet<&str> = req.node_ids.iter().map(|s| s.as_str()).collect();
 
@@ -221,20 +238,36 @@ impl GraphHunterApi {
                 })
                 .collect();
 
-            const MAX_SUBGRAPH_EDGES: usize = 5000;
+            // Walk every induced edge once to count the total, but
+            // only materialize `SubgraphEdge` for the requested page.
+            // This gives the caller honest paging metadata without
+            // forcing a second pass.
+            let mut total_edges: usize = 0;
             let mut edges: Vec<SubgraphEdge> = Vec::new();
-            'outer: for source_id in &req.node_ids {
+            for source_id in &req.node_ids {
                 for compact in graph.get_compact_relations(source_id) {
-                    if edges.len() >= MAX_SUBGRAPH_EDGES {
-                        break 'outer;
-                    }
                     let dest_str = graph.interner.resolve(compact.dest_sid);
-                    if id_set.contains(dest_str) {
+                    if !id_set.contains(dest_str) {
+                        continue;
+                    }
+                    let idx = total_edges;
+                    total_edges += 1;
+                    if idx >= offset && edges.len() < page_size {
                         edges.push(subgraph_edge_from_compact(graph, &compact));
                     }
                 }
             }
-            Ok(Subgraph { nodes, edges })
+            let returned_edges = edges.len();
+            let has_more = offset + returned_edges < total_edges;
+            Ok(Subgraph {
+                nodes,
+                edges,
+                total_edges,
+                returned_edges,
+                offset,
+                page_size,
+                has_more,
+            })
         })
     }
 

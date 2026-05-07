@@ -56,6 +56,22 @@ pub struct SubgraphEdge {
 pub struct Subgraph {
     pub nodes: Vec<SubgraphNode>,
     pub edges: Vec<SubgraphEdge>,
+    /// 2026-05-06: pagination envelope. `total_edges` is the full
+    /// count induced by `node_ids` before the page cap; `has_more`
+    /// tells the caller whether `offset + page_size` is enough to
+    /// see the rest. Older clients that ignore these fields keep
+    /// working — the semantics of the legacy default cap (5 000) is
+    /// preserved when `page_size` is omitted.
+    #[serde(default)]
+    pub total_edges: usize,
+    #[serde(default)]
+    pub returned_edges: usize,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub page_size: usize,
+    #[serde(default)]
+    pub has_more: bool,
 }
 
 /// Paginated events response for the Event View panel.
@@ -109,6 +125,13 @@ pub struct SubgraphRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionHandle>,
     pub node_ids: Vec<String>,
+    /// Cap on returned edges. `None` keeps the legacy 5 000 default;
+    /// hard ceiling of 50 000 to keep responses bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<usize>,
+    /// Number of edges to skip before starting the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

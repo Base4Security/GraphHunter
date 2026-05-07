@@ -37,6 +37,24 @@ impl GraphHunterApi {
         let session = self.resolve_session(req.session.as_ref())?;
         let window_secs = req.window_secs.unwrap_or(3_600).max(60);
 
+        // 2026-05-06: validate dataset_id exists. Previously a typo'd
+        // id silently returned drift_score: 0 / "no drift" — same
+        // shape as a healthy dataset. Now 400 with the known set.
+        {
+            let datasets = session
+                .datasets
+                .read()
+                .map_err(|e| ApiError::Internal(format!("datasets lock poisoned: {e}")))?;
+            if !datasets.iter().any(|d| d.id == req.dataset_id) {
+                let known: Vec<String> = datasets.iter().map(|d| d.id.clone()).collect();
+                return Err(ApiError::InvalidInput(format!(
+                    "schema_drift_detect: dataset `{}` not in current session (known: [{}])",
+                    req.dataset_id,
+                    known.join(", ")
+                )));
+            }
+        }
+
         let snapshot = {
             let guard = self
                 .inner
