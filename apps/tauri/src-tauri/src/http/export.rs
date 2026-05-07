@@ -187,6 +187,10 @@ pub(super) struct ExportOcsfBody {
     dataset_id: Option<String>,
     #[serde(default)]
     format: Option<String>,
+    #[serde(default)]
+    page_size: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
 }
 
 pub(super) async fn handler_export_ocsf(
@@ -199,6 +203,8 @@ pub(super) async fn handler_export_ocsf(
         session: None,
         dataset_id: body.dataset_id,
         format: fmt,
+        page_size: body.page_size,
+        offset: body.offset,
     }) {
         Ok(text) => ok_json(serde_json::json!({ "data": text, "format": fmt_for_resp })),
         Err(e) => {

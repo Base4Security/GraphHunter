@@ -41,6 +41,10 @@ pub(super) async fn handler_run_kql(
             azure_tenant_id: body.azure_tenant_id.unwrap_or_default(),
             azure_client_id: body.azure_client_id.unwrap_or_default(),
             azure_client_secret: body.azure_client_secret.unwrap_or_default(),
+            // HTTP transport doesn't currently expose a time window
+            // picker — the analyst supplies the `where TimeGenerated`
+            // filter in their KQL when they hit this route directly.
+            time_window: None,
         }),
     )
     .await;

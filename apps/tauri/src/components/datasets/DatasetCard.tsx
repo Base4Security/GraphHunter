@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronRight, Download, Edit3, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, Download, Edit3, Sparkles, Trash2 } from "lucide-react";
 import { invoke, errorMessage } from "../../lib/tauri";
 import type { DatasetInfo, GraphStats, LogEntry } from "../../types";
 import { now } from "../../lib/time";
@@ -45,6 +45,11 @@ export default function DatasetCard({
   const [health, setHealth] = useState<InvariantReport | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [healthOpen, setHealthOpen] = useState(false);
+  // True while `cmd_request_llm_proposal` is awaiting Phi-3. Disables
+  // the button + swaps the label so the user knows it's working — the
+  // banner state itself lives in the parent (DatasetsLeftPanel) where
+  // the permanent `ingest-llm-proposal` listener catches the event.
+  const [aiProposalRunning, setAiProposalRunning] = useState(false);
 
   useEffect(() => {
     if (d.relation_count === 0) return;
@@ -306,9 +311,9 @@ export default function DatasetCard({
         <div
           style={{
             display: "flex",
-            alignItems: "center",
-            gap: 4,
-            padding: "4px 6px",
+            flexDirection: "column",
+            gap: 6,
+            padding: "6px 8px",
             marginBottom: 6,
             background: "rgba(220, 38, 38, 0.12)",
             border: "1px solid rgba(220, 38, 38, 0.35)",
@@ -317,11 +322,68 @@ export default function DatasetCard({
             fontSize: 10,
           }}
         >
-          <AlertTriangle size={12} />
-          <span>
-            Parser saw {stats!.rows_seen} rows but produced 0 triples.
-            Re-ingest with an adjusted mapping.
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <AlertTriangle size={12} />
+            <span>
+              Parser saw {stats!.rows_seen} rows but produced 0 triples.
+              Re-ingest with an adjusted mapping.
+            </span>
+          </div>
+          <button
+            type="button"
+            disabled={aiProposalRunning}
+            onClick={async () => {
+              if (aiProposalRunning) return;
+              setAiProposalRunning(true);
+              onLog({
+                time: now(),
+                message: `${d.name}: pidiendo mapeo al compilador IA (Phi-3, puede tardar 15-60s)…`,
+                level: "info",
+              });
+              try {
+                await invoke("cmd_request_llm_proposal", { datasetId: d.id });
+                // Success message is fire-and-forget — the actual outcome
+                // lands as either an `ingest-llm-proposal` event (banner
+                // appears in DatasetsLeftPanel) or `ingest-llm-diagnostic`
+                // (status-log entry from the parent listener). We don't
+                // duplicate the log here.
+              } catch (e) {
+                onLog({
+                  time: now(),
+                  message: `${d.name}: solicitud al compilador IA falló — ${errorMessage(e)}`,
+                  level: "error",
+                });
+              } finally {
+                setAiProposalRunning(false);
+              }
+            }}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              padding: "4px 8px",
+              background: aiProposalRunning
+                ? "rgba(251, 191, 36, 0.25)"
+                : "rgba(99, 102, 241, 0.25)",
+              border: aiProposalRunning
+                ? "1px solid #fbbf24"
+                : "1px solid rgba(99, 102, 241, 0.55)",
+              borderRadius: 3,
+              color: aiProposalRunning ? "#fde68a" : "#c7d2fe",
+              fontSize: 10,
+              fontWeight: 600,
+              cursor: aiProposalRunning ? "wait" : "pointer",
+            }}
+            title={
+              aiProposalRunning
+                ? "Phi-3 corriendo en background, esperá el banner"
+                : "Pedir al compilador IA un mapeo alternativo basado en una muestra del archivo"
+            }
+          >
+            <Sparkles size={11} />
+            {aiProposalRunning ? "⏳ Compilador IA pensando…" : "Probar mapeo IA"}
+          </button>
         </div>
       )}
       {d.field_config && d.field_config.mappings.length > 0 && (

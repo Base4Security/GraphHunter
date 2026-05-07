@@ -12,6 +12,12 @@ path = "src/lib.rs"
 [dependencies]
 graph_hunter_vrl = { path = "../vrl" }
 graph_hunter_core = { path = "../../core/graph-engine" }
+# Trait surface for the logits-masker bridge. local-llm has zero
+# heavy deps without its `candle` feature so this is cheap; the
+# bridge impl in `xgrammar_backend` adapts `ConstrainedSampler` to
+# `LogitsMasker` so `CandleBackend::infer_constrained` can drive
+# constrained decoding without local-llm pulling in tokenizers 0.21.
+graph_hunter_local_llm = { path = "../local-llm" }
 
 [dependencies.llguidance]
 version = "1.7"
@@ -33,6 +39,13 @@ features = ["onig"]
 version = "1"
 optional = true
 
+# Used by `from_json_schema` to accept `serde_json::Value` literals
+# from callers (the dispatcher builds the schema with `json!`). Gated
+# behind `xgrammar` so the post-hoc-validator-only build stays light.
+[dependencies.serde_json]
+version = "1"
+optional = true
+
 [features]
 default = []
 # xgrammar-backed prefix-constrained sampler. Off by default; the
@@ -41,7 +54,7 @@ default = []
 # the VRL subset CFG so the LLM emits VRL that parses by construction.
 # Pulls in llguidance (Microsoft) which natively reads the Lark grammar
 # at `grammars/vrl_subset.lark`, plus the toktrie HF-tokenizer adapter.
-xgrammar = ["dep:llguidance", "dep:toktrie_hf_tokenizers", "dep:tokenizers", "dep:thiserror"]
+xgrammar = ["dep:llguidance", "dep:toktrie_hf_tokenizers", "dep:tokenizers", "dep:thiserror", "dep:serde_json"]
 
 [dev-dependencies]
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }

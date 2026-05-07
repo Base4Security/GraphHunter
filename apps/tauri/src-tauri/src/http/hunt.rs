@@ -72,6 +72,13 @@ pub(super) async fn handler_hunt_results(
 #[derive(Debug, Deserialize)]
 pub(super) struct RunHuntBody {
     hypothesis_dsl: String,
+    /// v2 follow-up: per-call scoring override. Snake-case strings
+    /// (`structural` | `anomaly` | `gnn`); maps to
+    /// [`graph_hunter_api::dto::hunt::HuntScoring`]. Omit (or pass
+    /// `null`) to keep v1 behavior — whatever scorer the session has
+    /// decides which DFS runs.
+    #[serde(default)]
+    scoring: Option<graph_hunter_api::dto::hunt::HuntScoring>,
 }
 
 #[derive(serde::Serialize)]
@@ -97,6 +104,7 @@ pub(super) async fn handler_run_hunt(
     };
     let api_clone = api.clone();
     let hypothesis_for_search = hypothesis.clone();
+    let scoring = body.scoring;
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::task::spawn_blocking(move || {
@@ -105,6 +113,7 @@ pub(super) async fn handler_run_hunt(
                 hypothesis: hypothesis_for_search,
                 time_window: None,
                 max_results: Some(10_000),
+                scoring,
             })
         }),
     )
@@ -143,6 +152,11 @@ pub(super) async fn handler_run_hunt(
                     Subgraph {
                         nodes: vec![],
                         edges: vec![],
+                        total_edges: 0,
+                        returned_edges: 0,
+                        offset: 0,
+                        page_size: 0,
+                        has_more: false,
                     },
                 );
             }

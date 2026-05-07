@@ -52,6 +52,10 @@ pub fn cmd_run_hunt(
             hypothesis,
             time_window,
             max_results: Some(10_000),
+            // Tauri command keeps v1 semantics — sticky session scorer
+            // decides. The MCP `hunt.run` is the path that exposes the
+            // per-call override.
+            scoring: None,
         })
         .map_err(CommandError::from)?;
     Ok(HuntResults {
@@ -174,10 +178,14 @@ pub fn cmd_get_events_paginated(
 pub fn cmd_get_subgraph(
     api: State<Arc<GraphHunterApi>>,
     node_ids: Vec<String>,
+    page_size: Option<usize>,
+    offset: Option<usize>,
 ) -> Result<Subgraph, CommandError> {
     api.get_subgraph(SubgraphRequest {
         session: None,
         node_ids,
+        page_size,
+        offset,
     })
     .map_err(CommandError::from)
 }

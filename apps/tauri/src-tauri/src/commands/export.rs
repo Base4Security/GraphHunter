@@ -60,11 +60,15 @@ pub fn cmd_export_ocsf(
     api: State<Arc<GraphHunterApi>>,
     format: String,
     dataset_id: Option<String>,
+    page_size: Option<usize>,
+    offset: Option<usize>,
 ) -> Result<String, CommandError> {
     api.export_ocsf(ExportOcsfRequest {
         session: None,
         dataset_id,
         format,
+        page_size,
+        offset,
     })
     .map_err(CommandError::from)
 }

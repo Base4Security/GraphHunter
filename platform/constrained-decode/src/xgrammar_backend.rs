@@ -76,6 +76,41 @@ impl ConstrainedSampler {
     /// tokenizer must be the *same* one the model was trained with —
     /// every token-id in the mask is interpreted in that vocabulary.
     pub fn from_lark(grammar_lark: &str, tokenizer: Tokenizer) -> SamplerResult<Self> {
+        Self::build(TopLevelGrammar::from_lark(grammar_lark.to_string()), tokenizer)
+    }
+
+    /// Build a sampler that constrains output to a JSON Schema.
+    ///
+    /// Used by the agentic ingest dispatcher to guarantee that Phi-3
+    /// emits a parseable `FieldConfig` JSON object — the validator
+    /// otherwise rejected ~all adversarial outputs and the dispatcher
+    /// fell back to a heuristic that produced 0 triples.
+    /// `schema_json` is the schema document itself; it's a
+    /// `serde_json::Value` so callers can build it from a `json!`
+    /// macro literal without going through string-encoding hops.
+    pub fn from_json_schema(
+        schema_json: serde_json::Value,
+        tokenizer: Tokenizer,
+    ) -> SamplerResult<Self> {
+        Self::build(TopLevelGrammar::from_json_schema(schema_json), tokenizer)
+    }
+
+    /// Convenience: load `tokenizer.json` from disk and build a
+    /// JSON-schema sampler in one step. Saves the API crate from
+    /// having to depend on `tokenizers` 0.21 directly (it's already a
+    /// dep of this crate via `toktrie_hf_tokenizers`, but exposing it
+    /// at the api boundary would create a transitive version skew with
+    /// candle-transformers' `tokenizers` 0.23).
+    pub fn from_json_schema_path(
+        schema_json: serde_json::Value,
+        tokenizer_path: &std::path::Path,
+    ) -> SamplerResult<Self> {
+        let tokenizer = Tokenizer::from_file(tokenizer_path)
+            .map_err(|e| SamplerError::Tokenizer(format!("load {}: {e}", tokenizer_path.display())))?;
+        Self::from_json_schema(schema_json, tokenizer)
+    }
+
+    fn build(grammar: TopLevelGrammar, tokenizer: Tokenizer) -> SamplerResult<Self> {
         let bt = ByteTokenizer::from_tokenizer(tokenizer)
             .map_err(|e| SamplerError::Tokenizer(e.to_string()))?;
         let env =
@@ -84,7 +119,6 @@ impl ConstrainedSampler {
 
         let factory = ParserFactory::new_simple(&tok_env)
             .map_err(|e| SamplerError::Grammar(e.to_string()))?;
-        let grammar = TopLevelGrammar::from_lark(grammar_lark.to_string());
         // Matcher::new takes a Result<TokenParser> — it surfaces parser
         // errors lazily on first compute_mask. We pass the raw Result
         // through and let downstream calls report the cause.
@@ -134,6 +168,24 @@ impl ConstrainedSampler {
     /// progress.
     pub fn is_accepting(&mut self) -> bool {
         self.matcher.is_accepting().unwrap_or(false)
+    }
+}
+
+/// Bridge to `graph_hunter_local_llm::LogitsMasker` so
+/// `CandleBackend::infer_constrained` can drive a `ConstrainedSampler`
+/// without `local-llm` having to depend on the toktrie / llguidance
+/// stack (which lives on `tokenizers` 0.21 while local-llm is on
+/// 0.23). Errors are flattened to `String` to match the trait's
+/// dependency-free shape.
+impl graph_hunter_local_llm::LogitsMasker for ConstrainedSampler {
+    fn mask_logits(&mut self, logits: &mut [f32]) -> Result<(), String> {
+        ConstrainedSampler::mask_logits(self, logits).map_err(|e| e.to_string())
+    }
+    fn consume(&mut self, token_id: u32) -> Result<(), String> {
+        ConstrainedSampler::consume(self, token_id).map_err(|e| e.to_string())
+    }
+    fn is_stopped(&self) -> bool {
+        ConstrainedSampler::is_stopped(self)
     }
 }
 

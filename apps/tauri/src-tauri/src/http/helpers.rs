@@ -41,7 +41,7 @@ pub(super) fn neighborhood_to_subgraph(hood: &Neighborhood) -> Subgraph {
             n.metadata.clone(),
         ))
         .collect();
-    let edges = hood
+    let edges: Vec<SubgraphEdge> = hood
         .edges
         .iter()
         .map(|e| SubgraphEdge {
@@ -53,7 +53,16 @@ pub(super) fn neighborhood_to_subgraph(hood: &Neighborhood) -> Subgraph {
             dataset_id: None,
         })
         .collect();
-    Subgraph { nodes, edges }
+    let total = edges.len();
+    Subgraph {
+        nodes,
+        returned_edges: total,
+        edges,
+        total_edges: total,
+        offset: 0,
+        page_size: total,
+        has_more: false,
+    }
 }
 
 /// Build subgraph for the given node IDs and emit to frontend map
@@ -67,6 +76,8 @@ pub(super) fn build_subgraph_for_ids(
     api.get_subgraph(graph_hunter_api::dto::graph_ops::SubgraphRequest {
         session: None,
         node_ids: node_ids.to_vec(),
+        page_size: None,
+        offset: None,
     })
     .map_err(crate::error::CommandError::from)
 }

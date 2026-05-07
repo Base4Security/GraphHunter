@@ -48,7 +48,7 @@ pub(super) async fn handler_untag_entity(
         node_id: body.node_id,
         tag: body.tag,
     }) {
-        Ok(()) => ok_json(serde_json::json!({"ok": true})),
+        Ok(removed) => ok_json(serde_json::json!({"removed": removed})),
         Err(e) => {
             let code = StatusCode::from_u16(e.status_code())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);

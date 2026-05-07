@@ -493,6 +493,7 @@ dependencies = [
  "memmap2",
  "mimalloc",
  "ordered-float",
+ "parking_lot",
  "quick-xml",
  "rayon",
  "rusqlite",

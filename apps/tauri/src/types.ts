@@ -484,6 +484,63 @@ export interface IngestErrorEvent {
   error: string;
 }
 
+// ── LLM-as-compiler dispatcher (Phase C/D) ──
+
+export interface FieldMappingSummary {
+  raw_name: string;
+  role: FieldRole;
+  entity_type?: string | null;
+}
+
+export interface MappingChange {
+  raw_name: string;
+  heuristic?: FieldMappingSummary | null;
+  refined?: FieldMappingSummary | null;
+}
+
+export interface MappingDiff {
+  added: FieldMappingSummary[];
+  removed: FieldMappingSummary[];
+  changed: MappingChange[];
+  unchanged_count: number;
+}
+
+/**
+ * Emitted on `ingest-llm-diagnostic` for every dispatcher decision —
+ * heuristic confident, LLM proposal pending, or LLM unavailable. The
+ * panel renders this as a status-log entry so the analyst always sees
+ * which path was taken; without it, a silent fallback to the heuristic
+ * that produces zero triples is indistinguishable from a parser bug.
+ */
+export interface IngestLlmDiagnosticEvent {
+  job_id: string;
+  dataset_id: string;
+  /** `heuristic_ok` | `llm_proposal` | `llm_unavailable` */
+  outcome: "heuristic_ok" | "llm_proposal" | "llm_unavailable" | string;
+  reason: string;
+  backend_id?: string | null;
+}
+
+/**
+ * Emitted on the `ingest-llm-proposal` Tauri event when the heuristic
+ * config produced zero recognized Node mappings and the local LLM
+ * offered a refined alternative. The streaming pipeline aborts before
+ * any triples land — the analyst chooses one of the two configs in the
+ * confirm banner and the frontend re-triggers `cmd_load_data_streaming`
+ * with the chosen one.
+ */
+export interface IngestLlmProposalEvent {
+  job_id: string;
+  dataset_id: string;
+  source_path: string;
+  format: string;
+  heuristic: FieldConfig;
+  refined: FieldConfig;
+  diff: MappingDiff;
+  confidence: number;
+  backend_id: string;
+}
+
 // ── Merge policy ──
 
 export type MergePolicy = "FirstWriteWins" | "LastWriteWins" | "Append";
@@ -498,6 +555,28 @@ export interface CompactionStats {
 }
 
 // ── Sentinel Real-Time Connector ──
+
+/**
+ * Time window for Sentinel queries (Phase L). Either a preset
+ * lookback string (matches KQL `ago()` durations) or an absolute
+ * datetime range. Backend serializes via `#[serde(tag = "kind")]` so
+ * the wire shape is `{ kind: "preset", lookback: "1h" }` or
+ * `{ kind: "absolute", from_iso: "...", to_iso: "..." }`.
+ */
+export type LookbackPreset = "1h" | "6h" | "24h" | "7d" | "30d";
+export type TimeWindow =
+  | { kind: "preset"; lookback: LookbackPreset }
+  | { kind: "absolute"; from_iso: string; to_iso: string };
+
+/**
+ * Hunting template identifier (Phase M). The backend renders the
+ * matching KQL body with the analyst's chosen `TimeWindow`.
+ */
+export type HuntingTemplateId =
+  | "failed_logon_burst"
+  | "lateral_movement"
+  | "encoded_power_shell"
+  | "suspicious_dns";
 
 export interface SentinelConnectedEvent {
   connector_id: string;
@@ -559,6 +638,12 @@ export interface KqlResult {
   total_relations: number;
   kql_executed: string;
   row_count: number;
+  /** Phase N: wall-time of the KQL roundtrip, ms. */
+  took_ms?: number;
+  /** Phase N: `take N` clause applied (when detectable). */
+  take_limit?: number | null;
+  /** Phase N: true when row_count saturates take_limit. */
+  truncated?: boolean;
 }
 
 // ── Temporal heatmap ──

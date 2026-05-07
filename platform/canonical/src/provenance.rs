@@ -34,8 +34,12 @@ pub struct ProvenanceCtx {
     /// 1.0; heuristic auto-config sets a fractional value; agentic drafts
     /// set the LLM-reported confidence.
     pub confidence: f32,
-    /// sha256 of the raw event bytes. Empty when the raw bytes are not
-    /// retained (e.g. streamed sources with no replay buffer).
+    /// sha256 of the raw event bytes. Omitted from the wire entirely
+    /// when the raw bytes are not retained (e.g. streamed sources
+    /// with no replay buffer). Consumers that validate `64-hex` no
+    /// longer have to whitelist `""` — a missing key is the
+    /// canonical "not stamped" signal.
+    #[serde(skip_serializing_if = "String::is_empty", default)]
     pub raw_event_sha256: String,
     /// Ids of upstream events that contributed to this one. Empty for
     /// one-to-one mappings; populated for derived edges (e.g. a transitive
@@ -67,7 +71,7 @@ impl ProvenanceCtx {
             mapping_hash,
             parser_name,
             confidence: 1.0,
-            raw_event_sha256: sha256_hex(raw_event),
+            raw_event_sha256: hash_or_empty(raw_event),
             upstream_ids: Vec::new(),
         }
     }
@@ -90,9 +94,24 @@ impl ProvenanceCtx {
             mapping_hash: sha256_hex(vrl_source),
             parser_name: "vrl".to_string(),
             confidence,
-            raw_event_sha256: sha256_hex(raw_event),
+            raw_event_sha256: hash_or_empty(raw_event),
             upstream_ids: Vec::new(),
         }
+    }
+}
+
+/// Hash the raw event bytes, but return `""` when the caller passed an
+/// empty slice — that's the contract for "raw bytes not retained" and
+/// it must be visually distinct from an actual zero-byte payload. The
+/// previous behaviour (`sha256_hex(&[])`) emitted the famous
+/// `e3b0c442…` constant for every export-time relation that lost its
+/// raw bytes, fooling consumers into believing a real digest was
+/// stamped.
+fn hash_or_empty(raw_event: &[u8]) -> String {
+    if raw_event.is_empty() {
+        String::new()
+    } else {
+        sha256_hex(raw_event)
     }
 }
 
@@ -119,6 +138,18 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(a.mapping_hash, "builtin:sysmon");
         assert_eq!(a.raw_event_sha256.len(), 64);
+    }
+
+    #[test]
+    fn empty_raw_event_yields_empty_hash() {
+        // 2026-05-06 (N1 fix): exports that don't retain raw bytes
+        // pass &[] and must not get the SHA-256 of the empty string
+        // (e3b0c442…), which would mislead consumers into thinking a
+        // real digest was computed.
+        let ctx = ProvenanceCtx::for_builtin_parser("sysmon", "ds1", &[]);
+        assert!(ctx.raw_event_sha256.is_empty());
+        let vrl_ctx = ProvenanceCtx::for_vrl("map-1", 1, b"src", "ds1", &[], 1.0);
+        assert!(vrl_ctx.raw_event_sha256.is_empty());
     }
 
     #[test]

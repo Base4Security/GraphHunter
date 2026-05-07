@@ -64,6 +64,13 @@ pub fn run() {
         ("GRAPHHUNTER_LFTJ_PLANNER", "1"),
         ("GRAPHHUNTER_K4_LFTJ", "1"),
         ("GRAPHHUNTER_YANNAKAKIS", "1"),
+        // GRAPHHUNTER_LLM_INGEST was the silent-dispatcher kill-switch
+        // when Phase C ran the LLM on every ambiguous ingest. Phase G
+        // demoted that path to a manual "Probar mapeo IA" button on
+        // `DatasetCard`, so there's no env-var to default-on anymore —
+        // the AI runs only when the analyst clicks. The env var is
+        // still honored if set (for future re-enablement of the
+        // silent path), just not flipped at startup.
     ] {
         if std::env::var(key).is_err() {
             // SAFETY: set_var is unsafe in 2024 edition because env
@@ -325,6 +332,8 @@ pub fn run() {
             commands::perf::cmd_get_perf_status,
             // Ingest-engine introspection (RawIngestEvent + VRL/LLM compiler badge)
             commands::ingest_status::cmd_get_ingest_engine_status,
+            commands::ingest_status::cmd_debug_emit_synthetic_llm_proposal,
+            commands::ingest_status::cmd_request_llm_proposal,
             // Heavy-logs #4: soft-memory-ceiling telemetry
             commands::memory::cmd_get_memory_status,
             // Sentinel real-time connector commands
@@ -333,6 +342,8 @@ pub fn run() {
             commands::sentinel::cmd_sentinel_status,
             commands::sentinel::cmd_sentinel_check_env,
             commands::sentinel::cmd_run_kql,
+            commands::sentinel::cmd_run_hunting_template,
+            commands::sentinel::cmd_preview_hunting_template,
             // Azure streaming plan smoke test (Phase 5-9 core validation)
             #[allow(deprecated)]
             commands::azure_streaming_smoke::cmd_azure_streaming_smoke_test,

@@ -155,6 +155,8 @@ function AppInner() {
     parsersWithNativeRaw: string[];
     vrlCompilerActive: boolean;
     llmCompilerAvailable: boolean;
+    llmCompilerModelPath: string | null;
+    llmCompilerDispatcherEnabled: boolean;
   } | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -843,11 +845,23 @@ function AppInner() {
             <span
               className="app-toolbar-ingest-badge"
               data-active="true"
-              data-llm={ingestEngineStatus.llmCompilerAvailable ? "true" : "false"}
+              data-llm={
+                ingestEngineStatus.llmCompilerAvailable &&
+                ingestEngineStatus.llmCompilerDispatcherEnabled
+                  ? "true"
+                  : ingestEngineStatus.llmCompilerAvailable
+                    ? "loaded"
+                    : "false"
+              }
               title={ingestEngineStatus.summary}
               aria-label={ingestEngineStatus.summary}
             >
-              {ingestEngineStatus.llmCompilerAvailable ? "Ingest: v2 + LLM" : "Ingest: v2"}
+              {ingestEngineStatus.llmCompilerAvailable &&
+              ingestEngineStatus.llmCompilerDispatcherEnabled
+                ? "Ingest: v2 + IA Compiler"
+                : ingestEngineStatus.llmCompilerAvailable
+                  ? "Ingest: v2 + LLM (idle)"
+                  : "Ingest: v2"}
             </span>
           )}
           {memStatus && memStatus.hostTotalBytes > 0 && (

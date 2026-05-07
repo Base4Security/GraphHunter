@@ -38,12 +38,15 @@ import type {
   IngestJobStarted,
   IngestCompleteEvent,
   IngestErrorEvent,
+  IngestLlmProposalEvent,
+  IngestLlmDiagnosticEvent,
 } from "../types";
 import { ENTITY_COLORS } from "../types";
 import FieldSelector from "./FieldSelector";
 import { FileUploadSection } from "./ingest";
 import { SentinelConnectForm } from "./ingest";
 import { ElasticConnectForm } from "./ingest";
+import { LlmIngestConfirmBanner } from "./ingest/LlmIngestConfirmBanner";
 import { DatasetList } from "./datasets";
 
 interface EntityTypeCount {
@@ -114,6 +117,14 @@ export default function IngestPanel({
   const [zeroTripleWarning, setZeroTripleWarning] = useState<string | null>(
     null
   );
+  // Set when the LLM-as-compiler dispatcher (Phase C) halts an ingest
+  // because the heuristic produced zero recognized Node mappings and the
+  // local LLM offered a refined alternative. The banner renders the diff
+  // and lets the analyst pick which config to re-ingest with.
+  const [llmProposal, setLlmProposal] = useState<IngestLlmProposalEvent | null>(
+    null
+  );
+  const [llmProposalLoading, setLlmProposalLoading] = useState(false);
   // Entity types for preview dropdown: standard + custom from graph + any in current mapping
   const [graphEntityTypes, setGraphEntityTypes] = useState<string[]>([]);
 
@@ -193,6 +204,36 @@ export default function IngestPanel({
       cancelled = true;
     };
   }, [currentSessionId, previewResult]);
+
+  // Permanent mount-time listener for `ingest-llm-proposal`. Without
+  // this, the per-file listeners inside loadData() are the only thing
+  // attached — meaning the synthetic debug emit (and any out-of-band
+  // proposal from a future async path) lands in the void if there's
+  // no active ingest. With this hook the banner state always updates
+  // when an event lands, regardless of ingest lifecycle.
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      const u = await listen<IngestLlmProposalEvent>(
+        "ingest-llm-proposal",
+        (event) => {
+          if (!cancelled) setLlmProposal(event.payload);
+        },
+      );
+      if (cancelled) {
+        u();
+      } else {
+        unlisten = u;
+      }
+    })().catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   // Fetch datasets when session or stats change
   useEffect(() => {
@@ -284,6 +325,111 @@ export default function IngestPanel({
     }
   }
 
+  /**
+   * Re-trigger `cmd_load_data_streaming` with the analyst's chosen
+   * config (refined-by-LLM or heuristic) after the dispatcher halted
+   * an ambiguous ingest. Backend dispatcher sees `bg_config.is_some()`
+   * on the second call and skips its own negotiation, so this can't
+   * recurse into another proposal banner.
+   */
+  async function reingestWithProposalChoice(choice: "refined" | "heuristic") {
+    if (!llmProposal) return;
+    const proposal = llmProposal;
+    const sourcePath = proposal.source_path;
+    const fileName = sourcePath.split(/[/\\]/).pop() || sourcePath;
+    const chosenConfig =
+      choice === "refined" ? proposal.refined : proposal.heuristic;
+    setLlmProposalLoading(true);
+    try {
+      onLog({
+        time: now(),
+        message: `Re-ingesting ${fileName} with ${
+          choice === "refined" ? "AI compiler" : "heuristic"
+        } mapping…`,
+        level: "info",
+      });
+
+      const { invoke } = await import("@tauri-apps/api/core");
+      const { listen } = await import("@tauri-apps/api/event");
+
+      await new Promise<void>((resolve) => {
+        let unlistenComplete: (() => void) | null = null;
+        let unlistenError: (() => void) | null = null;
+        const cleanup = () => {
+          unlistenComplete?.();
+          unlistenError?.();
+        };
+        (async () => {
+          unlistenComplete = await listen<IngestCompleteEvent>(
+            "ingest-complete",
+            (event) => {
+              const { result } = event.payload;
+              onStatsUpdate({
+                entity_count: result.total_entities,
+                relation_count: result.total_relations,
+              });
+              if (result.zero_triples) {
+                setZeroTripleWarning(fileName);
+                onLog({
+                  time: now(),
+                  message: `${fileName}: re-ingest produced 0 triples — mapping rejected by parser.`,
+                  level: "error",
+                });
+              } else {
+                onLog({
+                  time: now(),
+                  message: `${fileName}: +${result.new_entities} entities, +${result.new_relations} relations (via ${
+                    choice === "refined" ? "AI" : "heuristic"
+                  } mapping).`,
+                  level: "success",
+                });
+              }
+              cleanup();
+              resolve();
+            },
+          );
+          unlistenError = await listen<IngestErrorEvent>(
+            "ingest-error",
+            (event) => {
+              onLog({
+                time: now(),
+                message: `${fileName}: ${event.payload.error}`,
+                level: "error",
+              });
+              cleanup();
+              resolve();
+            },
+          );
+          await invoke<IngestJobStarted>("cmd_load_data_streaming", {
+            path: sourcePath,
+            format: proposal.format,
+            config: chosenConfig,
+            dateFrom: null,
+            dateTo: null,
+          });
+        })().catch((err) => {
+          onLog({
+            time: now(),
+            message: `Re-ingest call failed: ${errorMessage(err)}`,
+            level: "error",
+          });
+          cleanup();
+          resolve();
+        });
+      });
+
+      setLlmProposal(null);
+    } catch (e) {
+      onLog({
+        time: now(),
+        message: `Re-ingest error: ${errorMessage(e)}`,
+        level: "error",
+      });
+    } finally {
+      setLlmProposalLoading(false);
+    }
+  }
+
   async function loadData() {
     if (filePaths.length === 0) return;
     setLoading(true);
@@ -348,11 +494,15 @@ export default function IngestPanel({
             let unlistenProgress: (() => void) | null = null;
             let unlistenComplete: (() => void) | null = null;
             let unlistenError: (() => void) | null = null;
+            let unlistenProposal: (() => void) | null = null;
+            let unlistenDiagnostic: (() => void) | null = null;
 
             const fileCleanup = () => {
               unlistenProgress?.();
               unlistenComplete?.();
               unlistenError?.();
+              unlistenProposal?.();
+              unlistenDiagnostic?.();
             };
 
             (async () => {
@@ -400,6 +550,55 @@ export default function IngestPanel({
                 fileCleanup();
                 resolve(); // continue with next file
               });
+
+              // Fire-and-forget dispatcher diagnostic. Logged for
+              // every decision (heuristic confident / LLM proposal
+              // pending / LLM unavailable) so the analyst always
+              // sees which path the dispatcher took. Without it a
+              // silent fall-back that produces zero triples looks
+              // identical to a parser bug.
+              unlistenDiagnostic = await listen<IngestLlmDiagnosticEvent>(
+                "ingest-llm-diagnostic",
+                (event) => {
+                  const p = event.payload;
+                  const level: LogEntry["level"] =
+                    p.outcome === "llm_proposal" ? "warning" : "info";
+                  const tag =
+                    p.outcome === "heuristic_ok"
+                      ? "Compilador IA (heurística)"
+                      : p.outcome === "llm_proposal"
+                        ? "Compilador IA (propuesta)"
+                        : "Compilador IA (fallback)";
+                  onLog({
+                    time: now(),
+                    message: `${fileName}: ${tag} — ${p.reason}`,
+                    level,
+                  });
+                },
+              );
+
+              // LLM-as-compiler dispatcher: heuristic produced zero
+              // recognized Node mappings, local LLM offered a refined
+              // alternative. Streaming was halted backend-side before
+              // any triples landed; the analyst now picks one of the
+              // two configs in the confirm banner. We unblock this
+              // file's Promise — the banner buttons re-trigger
+              // `cmd_load_data_streaming` with the chosen config.
+              unlistenProposal = await listen<IngestLlmProposalEvent>(
+                "ingest-llm-proposal",
+                (event) => {
+                  setLlmProposal(event.payload);
+                  onLog({
+                    time: now(),
+                    message: `${fileName}: compilador IA propone otro mapeo (confianza ${Math.round(
+                      Math.max(0, Math.min(1, event.payload.confidence)) * 100,
+                    )}%) — revisar el banner antes de continuar.`,
+                    level: "warning",
+                  });
+                  fileCleanup();
+                  resolve();
+                },
+              );
 
               // Store cleanup for external abort (e.g. unmount)
               unlistenRef.current = () => {
@@ -754,6 +953,15 @@ export default function IngestPanel({
           </div>
           {ingestSource === "file" && (
           <>
+            {llmProposal && (
+              <LlmIngestConfirmBanner
+                proposal={llmProposal}
+                loading={llmProposalLoading}
+                onApplyRefined={() => reingestWithProposalChoice("refined")}
+                onApplyHeuristic={() => reingestWithProposalChoice("heuristic")}
+                onDismiss={() => setLlmProposal(null)}
+              />
+            )}
             {zeroTripleWarning && (
               <div
                 role="alert"

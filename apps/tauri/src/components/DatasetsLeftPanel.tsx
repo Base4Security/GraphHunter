@@ -30,12 +30,17 @@ import type {
   IngestJobStarted,
   IngestCompleteEvent,
   IngestErrorEvent,
+  IngestLlmProposalEvent,
   SentinelConnectedEvent,
   SentinelEnvStatus,
   KqlResult,
+  HuntingTemplateId,
+  LookbackPreset,
 } from "../types";
 import FieldSelector from "./FieldSelector";
 import { FileUploadSection, SentinelConnectForm, ElasticConnectForm } from "./ingest";
+import { buildTimeWindow } from "./ingest/SentinelConnectForm";
+import { LlmIngestConfirmBanner } from "./ingest/LlmIngestConfirmBanner";
 import { DatasetList } from "./datasets";
 
 interface SentinelProps {
@@ -99,6 +104,18 @@ export default function DatasetsLeftPanel({
   const [sentinelPollInterval, setSentinelPollInterval] = useState(30);
   const [adhocKql, setAdhocKql] = useState("");
   const [adhocLoading, setAdhocLoading] = useState(false);
+  // Phase L: Sentinel time-window picker. Single source of truth for
+  // every Sentinel-bound query (connect, streaming, ad-hoc KQL,
+  // hunting templates).
+  const [lookbackPreset, setLookbackPreset] = useState<LookbackPreset | "custom">("24h");
+  const [customFromIso, setCustomFromIso] = useState("");
+  const [customToIso, setCustomToIso] = useState("");
+  // Phase N: at-a-glance summary of the latest Sentinel KQL run.
+  const [lastKqlSummary, setLastKqlSummary] = useState<{
+    rows: number;
+    tookMs: number;
+    truncated: boolean;
+  } | null>(null);
 
   const [ingestProgress, setIngestProgress] = useState<{
     processed: number;
@@ -114,6 +131,71 @@ export default function DatasetsLeftPanel({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [mappingRows, setMappingRows] = useState<DetectedField[]>([]);
   const [graphEntityTypes, setGraphEntityTypes] = useState<string[]>([]);
+
+  // LLM-as-compiler dispatcher (Phase D): banner state + permanent
+  // listener so synthetic / dispatcher-emitted proposals always land,
+  // not just during an active ingest.
+  const [llmProposal, setLlmProposal] = useState<IngestLlmProposalEvent | null>(null);
+  const [llmProposalLoading, setLlmProposalLoading] = useState(false);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      const u = await listen<IngestLlmProposalEvent>(
+        "ingest-llm-proposal",
+        (event) => {
+          if (!cancelled) setLlmProposal(event.payload);
+        },
+      );
+      if (cancelled) {
+        u();
+      } else {
+        unlisten = u;
+      }
+    })().catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  async function reingestWithProposalChoice(choice: "refined" | "heuristic") {
+    if (!llmProposal) return;
+    const proposal = llmProposal;
+    const sourcePath = proposal.source_path;
+    const fileName = sourcePath.split(/[/\\]/).pop() || sourcePath;
+    const chosenConfig =
+      choice === "refined" ? proposal.refined : proposal.heuristic;
+    setLlmProposalLoading(true);
+    try {
+      onLog({
+        time: now(),
+        message: `Re-ingesting ${fileName} with ${
+          choice === "refined" ? "AI compiler" : "heuristic"
+        } mapping…`,
+        level: "info",
+      });
+      const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
+      await tauriInvoke<IngestJobStarted>("cmd_load_data_streaming", {
+        path: sourcePath,
+        format: proposal.format,
+        config: chosenConfig,
+        dateFrom: null,
+        dateTo: null,
+      });
+      setLlmProposal(null);
+    } catch (e) {
+      onLog({
+        time: now(),
+        message: `Re-ingest call failed: ${errorMessage(e)}`,
+        level: "error",
+      });
+    } finally {
+      setLlmProposalLoading(false);
+    }
+  }
 
   const [showDataIngestion, setShowDataIngestion] = useState(false);
   const [showDatasets, setShowDatasets] = useState(true);
@@ -266,6 +348,7 @@ export default function DatasetsLeftPanel({
   async function startSentinelStream() {
     try {
       setLoading(true);
+      const timeWindow = buildTimeWindow(lookbackPreset, customFromIso, customToIso);
       const result = await invoke<SentinelConnectedEvent>("cmd_sentinel_connect", {
         params: {
           workspace_id: siemWorkspaceId.trim(),
@@ -275,6 +358,7 @@ export default function DatasetsLeftPanel({
           poll_interval_secs: sentinelPollInterval,
           tables: [],
           batch_size: 0,
+          time_window: timeWindow ?? null,
         },
       });
       setStreaming(true);
@@ -310,6 +394,7 @@ export default function DatasetsLeftPanel({
     setAdhocLoading(true);
     onLog({ time: now(), message: "Running ad-hoc KQL query...", level: "info" });
     try {
+      const timeWindow = buildTimeWindow(lookbackPreset, customFromIso, customToIso);
       const result = await invoke<KqlResult>("cmd_run_kql", {
         params: {
           kql: adhocKql.trim(),
@@ -317,15 +402,25 @@ export default function DatasetsLeftPanel({
           azure_tenant_id: azureTenantId.trim(),
           azure_client_id: azureClientId.trim(),
           azure_client_secret: azureClientSecret.trim(),
+          time_window: timeWindow ?? null,
         },
+      });
+      setLastKqlSummary({
+        rows: result.row_count,
+        tookMs: result.took_ms ?? 0,
+        truncated: !!result.truncated,
       });
       onStatsUpdate({
         entity_count: result.total_entities,
         relation_count: result.total_relations,
       });
+      const tookSecs = ((result.took_ms ?? 0) / 1000).toFixed(1);
+      const truncatedSuffix = result.truncated
+        ? " — truncated, narrow your window or raise take"
+        : "";
       onLog({
         time: now(),
-        message: `Ad-hoc KQL: ${result.row_count} rows → +${result.new_entities}E +${result.new_relations}R`,
+        message: `Ad-hoc KQL: ${result.row_count} rows in ${tookSecs}s → +${result.new_entities}E +${result.new_relations}R${truncatedSuffix}`,
         level: "success",
         kql: result.kql_executed,
         kqlSource: "adhoc",
@@ -334,6 +429,60 @@ export default function DatasetsLeftPanel({
       });
     } catch (e) {
       onLog({ time: now(), message: `Ad-hoc KQL failed: ${errorMessage(e)}`, level: "error" });
+    } finally {
+      setAdhocLoading(false);
+    }
+  }
+
+  /** Phase M: dispatch a pre-built hunting template against
+   * Sentinel using the analyst's current time window + creds. */
+  async function runHuntingTemplate(template: HuntingTemplateId) {
+    setAdhocLoading(true);
+    onLog({
+      time: now(),
+      message: `Hunting template "${template}" running…`,
+      level: "info",
+    });
+    try {
+      const timeWindow = buildTimeWindow(lookbackPreset, customFromIso, customToIso);
+      const result = await invoke<KqlResult>("cmd_run_hunting_template", {
+        params: {
+          template,
+          workspace_id: siemWorkspaceId.trim(),
+          azure_tenant_id: azureTenantId.trim(),
+          azure_client_id: azureClientId.trim(),
+          azure_client_secret: azureClientSecret.trim(),
+          time_window: timeWindow ?? null,
+        },
+      });
+      setLastKqlSummary({
+        rows: result.row_count,
+        tookMs: result.took_ms ?? 0,
+        truncated: !!result.truncated,
+      });
+      onStatsUpdate({
+        entity_count: result.total_entities,
+        relation_count: result.total_relations,
+      });
+      const tookSecs = ((result.took_ms ?? 0) / 1000).toFixed(1);
+      const truncatedSuffix = result.truncated
+        ? " — truncated, narrow your window or raise take"
+        : "";
+      onLog({
+        time: now(),
+        message: `Hunting "${template}": ${result.row_count} rows in ${tookSecs}s → +${result.new_entities}E +${result.new_relations}R${truncatedSuffix}`,
+        level: result.truncated ? "warning" : "success",
+        kql: result.kql_executed,
+        kqlSource: "adhoc",
+        kqlTarget: template,
+        kqlRowCount: result.row_count,
+      });
+    } catch (e) {
+      onLog({
+        time: now(),
+        message: `Hunting template failed: ${errorMessage(e)}`,
+        level: "error",
+      });
     } finally {
       setAdhocLoading(false);
     }
@@ -815,6 +964,15 @@ export default function DatasetsLeftPanel({
             </div>
             {ingestSource === "file" && (
             <>
+              {llmProposal && (
+                <LlmIngestConfirmBanner
+                  proposal={llmProposal}
+                  loading={llmProposalLoading}
+                  onApplyRefined={() => reingestWithProposalChoice("refined")}
+                  onApplyHeuristic={() => reingestWithProposalChoice("heuristic")}
+                  onDismiss={() => setLlmProposal(null)}
+                />
+              )}
               <FileUploadSection
                 filePaths={filePaths}
                 setFilePaths={setFilePaths}
@@ -869,6 +1027,14 @@ export default function DatasetsLeftPanel({
                   setAdhocKql,
                   adhocLoading,
                   onRunKql: runAdhocKql,
+                  lookbackPreset,
+                  setLookbackPreset,
+                  customFromIso,
+                  setCustomFromIso,
+                  customToIso,
+                  setCustomToIso,
+                  onRunHuntingTemplate: runHuntingTemplate,
+                  lastKqlSummary,
                 }}
               />
             )}

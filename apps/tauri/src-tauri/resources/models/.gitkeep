@@ -1,0 +1,2 @@
+# Placeholder so the Tauri bundle.resources glob has a valid parent directory.
+# Run scripts/download-model.sh --stage-bundle to populate this dir with the GGUF + tokenizer for release builds.

@@ -8,12 +8,21 @@
 //! [`MockBackend`] returns deterministic canned responses keyed by
 //! [`PromptSpec::template`] and keeps CI green without a model on disk.
 //! The real Candle backend (Phi-3-mini-Q4 GGUF, CPU-only) lives in the
-//! `candle` module; [`default_backend`] picks it when
-//! `GRAPHHUNTER_LOCAL_MODEL_PATH` is set and falls back to the mock
-//! otherwise.
+//! `candle` module; [`default_backend`] picks it via
+//! [`resolve_model_path`], which checks the `GRAPHHUNTER_LOCAL_MODEL_PATH`
+//! override first, then well-known bundled locations next to the
+//! executable, then a `target/models` dev-tree fallback. Only when
+//! none of those resolve does it fall back to the mock.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Filename of the GGUF checkpoint shipped with the desktop and CLI
+/// binaries. Mirrored by `scripts/download-model.sh` (which writes
+/// the same name into `target/models/` and the Tauri resources dir
+/// during build).
+pub const MODEL_FILENAME: &str = "Phi-3-mini-4k-instruct-q4.gguf";
 
 /// Identifies the call-site that produced a prompt. The mock backend
 /// uses this as a lookup key for canned responses; the candle backend
@@ -91,6 +100,28 @@ pub enum LocalLlmError {
 
 pub type LocalLlmResult<T> = Result<T, LocalLlmError>;
 
+/// Driver for prefix-constrained decoding. Defined here in `local-llm`
+/// rather than in `constrained-decode` so [`LocalLlm::infer_constrained`]
+/// can take it as a trait object without `local-llm` depending on
+/// `constrained-decode`'s heavy llguidance / toktrie deps (or its
+/// `tokenizers` 0.21 vs candle-transformers' 0.23 version skew).
+///
+/// The bridge impl lives in `graph_hunter_constrained_decode` under
+/// its `xgrammar` feature, where `ConstrainedSampler` is adapted to
+/// this shape. Errors are reported as `String` to keep the API free of
+/// constrained-decode's `SamplerError` type.
+pub trait LogitsMasker: Send {
+    /// Set `logits[i] = -inf` for every token id that the grammar
+    /// disallows at the current prefix. After this call returns,
+    /// sampling from `logits` is constrained-by-construction.
+    fn mask_logits(&mut self, logits: &mut [f32]) -> Result<(), String>;
+    /// Advance the parser state by the just-sampled token.
+    fn consume(&mut self, token_id: u32) -> Result<(), String>;
+    /// True once the matcher has reached an accepting state and no
+    /// further tokens are required (end-of-grammar).
+    fn is_stopped(&self) -> bool;
+}
+
 /// Local-only LLM backend.
 ///
 /// Implementations must be `Send + Sync`: the agentic operations are
@@ -102,6 +133,22 @@ pub trait LocalLlm: Send + Sync {
     /// into the agentic draft so reviewers see which backend produced
     /// it.
     fn backend_id(&self) -> &'static str;
+
+    /// Constrained-decode variant: at every token, the `masker` is
+    /// consulted to mask out grammar-illegal token ids before sampling
+    /// and is advanced after. Default impl returns `BackendUnavailable`
+    /// so the mock backend (and any future non-candle backend) compiles
+    /// without implementing the constrained path.
+    fn infer_constrained(
+        &self,
+        _spec: &PromptSpec,
+        _masker: &mut dyn LogitsMasker,
+    ) -> LocalLlmResult<String> {
+        Err(LocalLlmError::BackendUnavailable(format!(
+            "{} does not support constrained decode",
+            self.backend_id()
+        )))
+    }
 }
 
 /// Convenience type-alias: most call-sites take an
@@ -117,17 +164,124 @@ mod candle;
 #[cfg(feature = "candle")]
 pub use candle::CandleBackend;
 
+/// Resolve where `tokenizer.json` lives next to a given GGUF model
+/// path. Mirrors the logic that `CandleBackend::lazy` uses internally,
+/// exposed at the crate root so the agentic dispatcher can hand the
+/// path to a constrained-decode sampler without needing the candle
+/// feature compiled in.
+///
+/// `GRAPHHUNTER_LOCAL_TOKENIZER_PATH` overrides — same env var the
+/// candle backend already reads, so power users only set it once.
+pub fn resolve_tokenizer_path(model_path: &std::path::Path) -> PathBuf {
+    if let Ok(explicit) = std::env::var("GRAPHHUNTER_LOCAL_TOKENIZER_PATH") {
+        return PathBuf::from(explicit);
+    }
+    let dir = model_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    dir.join("tokenizer.json")
+}
+
+/// Resolve the location of the Phi-3 GGUF checkpoint, walking through
+/// (1) the manual `GRAPHHUNTER_LOCAL_MODEL_PATH` override, (2)
+/// well-known paths next to the running executable (matching how the
+/// Tauri bundle and the CLI installer place the model), and (3) a
+/// dev-tree `target/models/` walk for `npm run tauri dev`.
+///
+/// Returns `None` when no bundled model is present — callers should
+/// degrade to [`MockBackend`] in that case rather than panic. The
+/// override path is returned even if the file is missing so
+/// `CandleBackend::lazy` surfaces a precise error to the user.
+pub fn resolve_model_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("GRAPHHUNTER_LOCAL_MODEL_PATH") {
+        #[cfg(feature = "candle")]
+        tracing::debug!(
+            target: "graph_hunter_local_llm::resolver",
+            "resolve_model_path: env override = {}",
+            p
+        );
+        return Some(PathBuf::from(p));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for candidate in [
+                dir.join("resources").join("models").join(MODEL_FILENAME),
+                dir.join("models").join(MODEL_FILENAME),
+            ] {
+                #[cfg(feature = "candle")]
+                tracing::debug!(
+                    target: "graph_hunter_local_llm::resolver",
+                    "resolve_model_path: try exe-relative {} -> {}",
+                    candidate.display(),
+                    if candidate.is_file() { "HIT" } else { "miss" }
+                );
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        #[cfg(feature = "candle")]
+        tracing::debug!(
+            target: "graph_hunter_local_llm::resolver",
+            "resolve_model_path: cwd-walk start at {}",
+            cwd.display()
+        );
+        let mut dir = Some(cwd);
+        while let Some(d) = dir {
+            let cand = d.join("target").join("models").join(MODEL_FILENAME);
+            #[cfg(feature = "candle")]
+            tracing::debug!(
+                target: "graph_hunter_local_llm::resolver",
+                "resolve_model_path: try cwd-walk {} -> {}",
+                cand.display(),
+                if cand.is_file() { "HIT" } else { "miss" }
+            );
+            if cand.is_file() {
+                return Some(cand);
+            }
+            dir = d.parent().map(|p| p.to_path_buf());
+        }
+    }
+    #[cfg(feature = "candle")]
+    tracing::warn!(
+        target: "graph_hunter_local_llm::resolver",
+        "resolve_model_path: no checkpoint found in any well-known location"
+    );
+    None
+}
+
 /// Default backend factory. Picks the candle-backed Phi-3 path when
-/// the `candle` feature is on AND `GRAPHHUNTER_LOCAL_MODEL_PATH`
-/// points at a `.gguf` file; falls back to [`MockBackend`] otherwise
-/// so unit tests, CI, and headless dev always get a working agentic
-/// loop.
+/// the `candle` feature is on AND [`resolve_model_path`] returns a
+/// path; falls back to [`MockBackend`] otherwise so unit tests, CI,
+/// and headless dev always get a working agentic loop.
+///
+/// **Process-singleton (Phase H)**: the resolved handle is cached in a
+/// `OnceLock` so repeated AI requests reuse the same `CandleBackend`
+/// instance — and therefore the same warm `LoadedModel` mutex. Before
+/// this cache, every dispatcher invocation rebuilt a fresh backend and
+/// reloaded the 2.2 GB GGUF on first inference, multiplying RAM by
+/// the call count and adding ~5s per call on a Ryzen 5 PRO 5650U.
+/// `LocalLlmHandle` is `Arc<dyn LocalLlm>`, cheap to clone.
 pub fn default_backend() -> LocalLlmHandle {
+    static BACKEND: std::sync::OnceLock<LocalLlmHandle> = std::sync::OnceLock::new();
+    BACKEND.get_or_init(build_default_backend).clone()
+}
+
+fn build_default_backend() -> LocalLlmHandle {
     #[cfg(feature = "candle")]
     {
-        if let Ok(path) = std::env::var("GRAPHHUNTER_LOCAL_MODEL_PATH") {
-            match CandleBackend::lazy(path.into()) {
-                Ok(b) => return Arc::new(b),
+        if let Some(path) = resolve_model_path() {
+            match CandleBackend::lazy(path.clone()) {
+                Ok(b) => {
+                    tracing::info!(
+                        target: "graph_hunter_local_llm",
+                        "candle backend ready: {}",
+                        path.display()
+                    );
+                    return Arc::new(b);
+                }
                 Err(e) => {
                     tracing::warn!(
                         target: "graph_hunter_local_llm",

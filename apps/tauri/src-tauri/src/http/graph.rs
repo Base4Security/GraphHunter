@@ -174,6 +174,10 @@ pub(super) async fn handler_node_details(
 #[derive(Debug, Deserialize)]
 pub(super) struct SubgraphBody {
     node_ids: Vec<String>,
+    #[serde(default)]
+    page_size: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
 }
 
 pub(super) async fn handler_subgraph(
@@ -188,6 +192,8 @@ pub(super) async fn handler_subgraph(
             api_clone.get_subgraph(graph_hunter_api::dto::graph_ops::SubgraphRequest {
                 session: None,
                 node_ids: body.node_ids,
+                page_size: body.page_size,
+                offset: body.offset,
             })
         }),
     )

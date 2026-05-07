@@ -8,9 +8,10 @@ use std::sync::Arc;
 use tauri::State;
 
 use graph_hunter_api::dto::sentinel::{
-    ConnectorStatusResponse, KqlResult, RunKqlRequest, SentinelConnectRequest,
-    SentinelConnectedEvent, SentinelEnvStatus,
+    ConnectorStatusResponse, HuntingTemplateId, KqlResult, RunHuntingTemplateRequest,
+    RunKqlRequest, SentinelConnectRequest, SentinelConnectedEvent, SentinelEnvStatus, TimeWindow,
 };
+use graph_hunter_api::operations::sentinel::preview_hunting_template;
 use graph_hunter_api::GraphHunterApi;
 
 use crate::error::CommandError;
@@ -65,4 +66,31 @@ pub async fn cmd_run_kql(
 #[tauri::command]
 pub fn cmd_sentinel_check_env(api: State<Arc<GraphHunterApi>>) -> SentinelEnvStatus {
     api.sentinel_check_env()
+}
+
+/// Phase M: run one of the pre-built hunting templates against
+/// Sentinel. The KQL is rendered server-side from `template` +
+/// `time_window` and dispatched through the same `run_kql` path.
+#[tauri::command]
+pub async fn cmd_run_hunting_template(
+    api: State<'_, Arc<GraphHunterApi>>,
+    params: RunHuntingTemplateRequest,
+) -> Result<KqlResult, CommandError> {
+    api.run_hunting_template(params)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// Stateless: render a hunting template's KQL without dispatching.
+/// Powers the "ver KQL" toggle in the templates UI so the analyst
+/// inspects the query before clicking Run.
+#[tauri::command]
+pub fn cmd_preview_hunting_template(
+    template: HuntingTemplateId,
+    time_window: Option<TimeWindow>,
+) -> String {
+    let window = time_window.unwrap_or(TimeWindow::Preset {
+        lookback: graph_hunter_api::dto::sentinel::LookbackPreset::H24,
+    });
+    preview_hunting_template(template, &window)
 }

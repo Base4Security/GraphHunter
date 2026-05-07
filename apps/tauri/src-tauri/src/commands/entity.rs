@@ -225,12 +225,15 @@ pub fn cmd_tag_entity(
     .map_err(CommandError::from)
 }
 
+/// Returns the number of (node_id, tag) rows that were actually
+/// removed — `0` means the pair was never tagged. Replaces the v1
+/// `()` return that hid misspelled IDs.
 #[tauri::command]
 pub fn cmd_untag_entity(
     api: State<Arc<GraphHunterApi>>,
     node_id: String,
     tag: String,
-) -> Result<(), CommandError> {
+) -> Result<usize, CommandError> {
     api.untag_entity(UntagEntityRequest {
         session: None,
         node_id,
