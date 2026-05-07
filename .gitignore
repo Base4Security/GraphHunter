@@ -44,6 +44,16 @@ CSIRT-Report-*.md
 docs/_archive/incidents/*.md
 !docs/_archive/incidents/.gitkeep
 
+# Personal LaTeX/PDF documentation trees — kept locally, not in repo (2026-05-07).
+# These are academic / personal drafts (paper, architecture, algorithms, design,
+# specification, manual). docs/_archive/ remains tracked as historical reference.
+docs/algoritmos/
+docs/arquitectura/
+docs/diseno/
+docs/especificacion/
+docs/manual/
+docs/paper/
+
 # LaTeX build artifacts (keep .tex, ignore compile output)
 docs/**/*.aux
 docs/**/*.log
