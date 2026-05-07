@@ -220,12 +220,31 @@ impl SentinelTokenCache {
 pub struct KqlQueryBuilder;
 
 impl KqlQueryBuilder {
-    /// Builds a KQL query for a Sentinel table with watermark-based pagination.
-    /// If no watermark, defaults to last 24h.
-    pub fn build(table: &str, watermark: Option<&str>, batch_size: u32) -> String {
-        let time_filter = match watermark {
-            Some(w) => format!("where TimeGenerated > datetime({})", w),
-            None => "where TimeGenerated > ago(24h)".to_string(),
+    /// Builds a KQL query for a Sentinel table.
+    ///
+    /// Resolution order for the `where TimeGenerated ...` clause:
+    ///   1. `watermark` set → `> datetime({watermark})` (incremental
+    ///      polling — wins over any caller-supplied window).
+    ///   2. `time_window_filter` set → use the caller's pre-rendered
+    ///      filter verbatim. Phase L: the api crate renders this from
+    ///      its `TimeWindow` DTO via `kql_filter()`; siem stays
+    ///      DTO-free so the dep direction (api → siem, not the
+    ///      reverse) is preserved.
+    ///   3. Neither set → legacy `ago(24h)` fallback for callers that
+    ///      haven't migrated.
+    ///
+    /// Back-compat: callers that don't pass a time window get the same
+    /// behavior they had before this change.
+    pub fn build(
+        table: &str,
+        watermark: Option<&str>,
+        batch_size: u32,
+        time_window_filter: Option<&str>,
+    ) -> String {
+        let time_filter = match (watermark, time_window_filter) {
+            (Some(w), _) => format!("where TimeGenerated > datetime({})", w),
+            (None, Some(tw)) => tw.to_string(),
+            (None, None) => "where TimeGenerated > ago(24h)".to_string(),
         };
         format!(
             "{} | {} | order by TimeGenerated asc | take {}",
@@ -325,6 +344,11 @@ pub struct SentinelPollingConfig {
     pub poll_interval_secs: u64,
     pub tables: Vec<String>,
     pub batch_size: u32,
+    /// Pre-rendered KQL `where TimeGenerated ...` clause to apply on
+    /// the first poll (before a watermark exists). Phase L: the api
+    /// crate renders this from its `TimeWindow` DTO so the connector
+    /// stays DTO-free. `None` keeps the legacy `ago(24h)` default.
+    pub initial_time_window_filter: Option<String>,
 }
 
 #[cfg(test)]
@@ -333,7 +357,7 @@ mod tests {
 
     #[test]
     fn kql_with_watermark() {
-        let q = KqlQueryBuilder::build("SecurityEvent", Some("2024-01-15T14:30:00Z"), 10000);
+        let q = KqlQueryBuilder::build("SecurityEvent", Some("2024-01-15T14:30:00Z"), 10000, None);
         assert_eq!(
             q,
             "SecurityEvent | where TimeGenerated > datetime(2024-01-15T14:30:00Z) | order by TimeGenerated asc | take 10000"
@@ -342,10 +366,46 @@ mod tests {
 
     #[test]
     fn kql_without_watermark() {
-        let q = KqlQueryBuilder::build("SigninLogs", None, 5000);
+        let q = KqlQueryBuilder::build("SigninLogs", None, 5000, None);
         assert_eq!(
             q,
             "SigninLogs | where TimeGenerated > ago(24h) | order by TimeGenerated asc | take 5000"
+        );
+    }
+
+    /// Phase L: caller supplies a pre-rendered time-window filter and
+    /// the builder uses it verbatim instead of the legacy 24h default.
+    #[test]
+    fn kql_with_time_window_filter_overrides_default() {
+        let q = KqlQueryBuilder::build(
+            "SigninLogs",
+            None,
+            5000,
+            Some("where TimeGenerated > ago(7d)"),
+        );
+        assert_eq!(
+            q,
+            "SigninLogs | where TimeGenerated > ago(7d) | order by TimeGenerated asc | take 5000"
+        );
+    }
+
+    /// Phase L: watermark always wins — the per-table incremental
+    /// pointer is more authoritative than a UI lookback selection.
+    #[test]
+    fn kql_watermark_wins_over_time_window() {
+        let q = KqlQueryBuilder::build(
+            "SigninLogs",
+            Some("2024-01-15T14:30:00Z"),
+            5000,
+            Some("where TimeGenerated > ago(7d)"),
+        );
+        assert!(
+            q.contains("datetime(2024-01-15T14:30:00Z)"),
+            "watermark must win over time_window: {q}"
+        );
+        assert!(
+            !q.contains("ago(7d)"),
+            "time_window leaked through despite watermark: {q}"
         );
     }
 

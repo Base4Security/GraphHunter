@@ -21,6 +21,9 @@ fn main() {
         ("GRAPHHUNTER_LFTJ_PLANNER", "1"),
         ("GRAPHHUNTER_K4_LFTJ", "1"),
         ("GRAPHHUNTER_YANNAKAKIS", "1"),
+        // GRAPHHUNTER_LLM_INGEST is no longer default-on — Phase G
+        // demoted the silent dispatcher to an explicit click on the
+        // desktop UI. CLI ingest stays heuristic-only.
     ] {
         if std::env::var(key).is_err() {
             // SAFETY: still single-threaded at startup; the matcher

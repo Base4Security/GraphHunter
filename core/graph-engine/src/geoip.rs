@@ -300,6 +300,16 @@ pub fn geoip_from_metadata(
     // it into country_name (common Sentinel shape: "US - California - ...").
     let country_name = country_name.or_else(|| location.clone());
 
+    // 2026-05-06: Azure SigninLogs puts ISO-3166 alpha-2 codes (e.g.
+    // "JP", "US") under a `country` *name*-shaped field. Detect and
+    // swap so the response shape matches user expectation
+    // (`country_code` carries the code, `country_name` the full name).
+    // Heuristic: 2 ASCII uppercase letters AND no preexisting code.
+    let (country_code, country_name) = match (country_code, country_name) {
+        (None, Some(maybe_code)) if is_iso_alpha2(&maybe_code) => (Some(maybe_code), None),
+        pair => pair,
+    };
+
     if country_code.is_none()
         && country_name.is_none()
         && city.is_none()
@@ -328,6 +338,16 @@ pub fn geoip_from_metadata(
         is_anonymous_proxy: None,
         source: Some(GeoIpSource::DatasetMetadata),
     })
+}
+
+/// Heuristic: is `s` a 2-character ASCII uppercase token (the
+/// ISO-3166 alpha-2 country code shape)?  Used by
+/// `geoip_from_metadata` to detect dataset feeds that stuff the
+/// 2-letter code into a name-shaped field (Azure SigninLogs being
+/// the canonical offender).
+fn is_iso_alpha2(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() == 2 && bytes.iter().all(|b| b.is_ascii_uppercase())
 }
 
 pub fn write_geoip_to_metadata(

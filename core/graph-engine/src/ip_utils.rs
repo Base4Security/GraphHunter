@@ -140,6 +140,19 @@ pub fn is_public(s: &str) -> bool {
     classify_ip(s) == Some(IpClass::Public)
 }
 
+/// Returns `true` for any address that should be considered "internal"
+/// for analyst-facing rollups: private (RFC 1918 + CGNAT), loopback,
+/// or link-local. The narrower `is_private` is RFC-1918-only and was
+/// not the right signal for `subnet_analysis.is_internal` because a
+/// /64 containing `::1` is plainly internal but classified as Loopback,
+/// not Private.
+pub fn is_internal(s: &str) -> bool {
+    matches!(
+        classify_ip(s),
+        Some(IpClass::Private) | Some(IpClass::Loopback) | Some(IpClass::LinkLocal)
+    )
+}
+
 /// Extracts the /24 subnet for IPv4 (e.g. `"10.3.10.0/24"`) or the /64
 /// subnet for IPv6. Returns `None` for non-IP input.
 pub fn subnet_24(s: &str) -> Option<String> {
