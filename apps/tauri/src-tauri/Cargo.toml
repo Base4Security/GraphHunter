@@ -68,12 +68,5 @@ tempfile = "3"
 subtle = "2"
 
 [features]
-# Opt-in: enable with --features simd. Runtime falls back to pure-Rust DFS when AVX2 is unavailable.
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
-# Propagates to BOTH graph_hunter_core (the matcher) AND graph_hunter_api.
-# Without the api-crate propagation, the `#[cfg(feature = "simd")]` switch
-# in `GraphHunterApi::run_hunt` (which routes to `search_temporal_pattern_simd`)
-# stays OFF even when Tauri is built with `--features simd`, silently
-# dropping back to the scalar matcher.
-simd = ["graph_hunter_api/simd"]

@@ -78,7 +78,7 @@ impl GraphHunterApi {
     /// `cmd_get_simd_isa` with a generalized payload.
     pub fn runtime_info(&self) -> RuntimeInfo {
         RuntimeInfo {
-            simd_isa: graph_hunter_matcher_ffi::ffi::simd_isa_name().to_string(),
+            simd_isa: graph_hunter_core::simd_rust::isa_label().to_string(),
         }
     }
 

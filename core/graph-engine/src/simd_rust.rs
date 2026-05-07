@@ -1,26 +1,16 @@
-//! Pure-Rust SIMD primitives (P2-D foundation).
+//! Pure-Rust SIMD primitives.
 //!
-//! This module is the first installment of the plan to replace the
-//! C++ `libgraphmatch` SIMD layer with pure-Rust `std::arch`
-//! intrinsics. It ships a single primitive end-to-end —
-//! [`intersect_sorted_u32_count`] — with runtime AVX2 dispatch and a
-//! scalar fallback. Follow-up sessions add the other primitives the
-//! DFS matcher uses and wire the module into
-//! `search_temporal_pattern_simd`.
-//!
-//! # Why this shape
-//!
-//! The hottest primitive in `libgraphmatch` is sorted-set
-//! intersection over `u32` node ids (neighbor matching during DFS
-//! pattern search). Reproducing it here proves the `std::arch`
-//! approach is viable before we take a dependency on more primitives.
+//! Sorted-set intersection over `u32` node ids — the hot primitive
+//! used by LFTJ triangle/clique enumeration. Runtime-dispatches an
+//! AVX2 implementation on x86_64 and falls through to a scalar merge
+//! everywhere else.
 //!
 //! # Runtime dispatch
 //!
 //! We use `is_x86_feature_detected!("avx2")` on x86_64 and gate the
 //! AVX2 implementation with `#[target_feature(enable = "avx2")]`. On
 //! non-x86_64 hosts (`aarch64`, wasm, etc.) the dispatcher falls
-//! through to the scalar path — a subsequent PR can add NEON.
+//! through to the scalar path.
 //!
 //! # Safety
 //!
@@ -29,12 +19,8 @@
 //! it checks the feature at runtime before calling the AVX2 body.
 
 /// Count elements common to two *sorted, ascending, deduplicated*
-/// slices of `u32`.
-///
-/// Matches the semantics of `gm::simd::intersect_count` in
-/// `libgraphmatch/src/simd_intersect.cpp`. Runtime-dispatches AVX2
-/// on x86_64 hosts that report the feature; otherwise runs the
-/// scalar merge.
+/// slices of `u32`. Runtime-dispatches AVX2 on x86_64 hosts that
+/// report the feature; otherwise runs the scalar merge.
 ///
 /// # Non-assumptions
 ///
@@ -83,6 +69,19 @@ pub(crate) fn scalar_intersect_count(a: &[u32], b: &[u32]) -> usize {
         }
     }
     count
+}
+
+/// Runtime label for the active SIMD ISA. Returns `"avx2"` on x86_64
+/// hosts that report AVX2 at startup, `"scalar"` otherwise. Used by
+/// the runtime info / status-badge surface in the API.
+pub fn isa_label() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return "avx2";
+        }
+    }
+    "scalar"
 }
 
 // ─── AVX2 implementation (x86_64) ───────────────────────────────────

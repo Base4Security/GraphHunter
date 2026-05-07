@@ -155,9 +155,8 @@ impl RelationType {
 }
 
 impl EntityType {
-    /// Numeric tag matching libgraphmatch's GM_ENTITY_* constants.
-    /// `Other(_)` returns 255 as a sentinel — the SIMD bridge resolves it
-    /// dynamically via `OtherTypeMap`.
+    /// Numeric tag used by the engine's bitmaps (NLF, k-hop reachability,
+    /// type-tag SoA in graph.rs). `Other(_)` returns 255 as a sentinel.
     pub fn to_u8(&self) -> u8 {
         match self {
             EntityType::IP => 0,

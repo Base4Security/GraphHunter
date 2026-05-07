@@ -22,60 +22,40 @@ impl GraphHunterApi {
     /// returns either the paths inline (when ≤ 100) or just the count
     /// with the cache populated for pagination.
     ///
-    /// Uses the SIMD-accelerated search when the `simd` feature is
-    /// compiled in, falls back to the smart DFS when the anomaly scorer
-    /// has been finalized, else the plain DFS.
+    /// Uses the smart DFS when the anomaly scorer has been finalized,
+    /// else the plain DFS.
     pub fn run_hunt(&self, req: RunHuntRequest) -> ApiResult<RunHuntResponse> {
         let max_results = req.max_results.unwrap_or(10_000);
         let session = self.resolve_session(req.session.as_ref())?;
 
-        // Run the search with a read lock — both the SIMD path
-        // (`search_temporal_pattern_simd` takes `&self`) and the scalar
-        // paths are non-mutating, so multiple concurrent hunts on the
-        // same session can run in parallel.
+        // Read lock: both DFS paths are non-mutating, so concurrent hunts
+        // on the same session can run in parallel.
         let (paths, truncated) = {
-            #[cfg(feature = "simd")]
-            {
-                let graph = session
-                    .graph
-                    .read()
-                    .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
-                graph_hunter_matcher_ffi::search_temporal_pattern_simd(
-                    &graph,
-                    &req.hypothesis,
-                    req.time_window,
-                    Some(max_results),
-                )
-                .map_err(|e| ApiError::Internal(format!("search failed: {e}")))?
-            }
-            #[cfg(not(feature = "simd"))]
-            {
-                let graph = session
-                    .graph
-                    .read()
-                    .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
-                let scorer_ready = graph
-                    .anomaly_scorer
-                    .as_ref()
-                    .map(|s| s.is_finalized())
-                    .unwrap_or(false);
-                if scorer_ready {
-                    graph
-                        .search_temporal_pattern_smart(
-                            &req.hypothesis,
-                            req.time_window,
-                            max_results,
-                        )
-                        .map_err(|e| ApiError::Internal(format!("search failed: {e}")))?
-                } else {
-                    graph
-                        .search_temporal_pattern(
-                            &req.hypothesis,
-                            req.time_window,
-                            Some(max_results),
-                        )
-                        .map_err(|e| ApiError::Internal(format!("search failed: {e}")))?
-                }
+            let graph = session
+                .graph
+                .read()
+                .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+            let scorer_ready = graph
+                .anomaly_scorer
+                .as_ref()
+                .map(|s| s.is_finalized())
+                .unwrap_or(false);
+            if scorer_ready {
+                graph
+                    .search_temporal_pattern_smart(
+                        &req.hypothesis,
+                        req.time_window,
+                        max_results,
+                    )
+                    .map_err(|e| ApiError::Internal(format!("search failed: {e}")))?
+            } else {
+                graph
+                    .search_temporal_pattern(
+                        &req.hypothesis,
+                        req.time_window,
+                        Some(max_results),
+                    )
+                    .map_err(|e| ApiError::Internal(format!("search failed: {e}")))?
             }
         };
 

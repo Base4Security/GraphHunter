@@ -11,10 +11,9 @@ path = "src/lib.rs"
 
 [dependencies]
 graph_hunter_core = { path = "../../core/graph-engine", features = ["geoip"] }
-# SIMD matcher extracted from core per F2.13 (ADR-002). `run_hunt`
-# dispatches to `graph_hunter_matcher_ffi::search_temporal_pattern_simd`
-# when the `simd` feature is enabled; the dep is unconditional because
-# the function is callable (scalar-fallback) when the feature is off.
+# Thin Rust forwarder for `search_temporal_pattern_simd`. Kept as a
+# separate crate for API stability after the C++ libgraphmatch tree
+# was removed (2026-05-07).
 graph_hunter_matcher_ffi = { path = "../../core/matcher-ffi" }
 # GNN inference + training-corpus export (ex graph_hunter_core::gnn_bridge /
 # npu_scorer / aad_training_export), extracted per F2.14. `run_hunt`'s
@@ -99,7 +98,6 @@ ml-scoring = ["graph_hunter_gnn/ml-scoring"]
 # Off by default — do NOT enable in production builds. Transitively
 # activates `ml-scoring` so the ONNX backend is compiled.
 gnn-v2-experimental = ["graph_hunter_gnn/gnn-v2-experimental"]
-simd = ["graph_hunter_matcher_ffi/simd"]
 # Enables the candle-backed Phi-3 LocalLlm. Off by default — the mock
 # backend covers tests / CI; enabling this requires
 # GRAPHHUNTER_LOCAL_MODEL_PATH to point at a `.gguf` checkpoint.

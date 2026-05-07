@@ -1417,7 +1417,6 @@ dependencies = [
 name = "graph_hunter_matcher_ffi"
 version = "0.1.0"
 dependencies = [
- "cc",
  "graph_hunter_core",
  "mimalloc",
 ]

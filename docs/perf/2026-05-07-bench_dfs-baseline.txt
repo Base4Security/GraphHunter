@@ -1,0 +1,156 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling find-msvc-tools v0.1.9
+   Compiling serde_core v1.0.228
+   Compiling shlex v1.3.0
+   Compiling autocfg v1.5.0
+   Compiling getrandom v0.3.4
+   Compiling serde v1.0.228
+   Compiling version_check v0.9.5
+   Compiling zerocopy v0.8.48
+   Compiling allocator-api2 v0.2.21
+   Compiling once_cell v1.21.4
+   Compiling memchr v2.8.0
+   Compiling ahash v0.8.12
+   Compiling cc v1.2.60
+   Compiling num-traits v0.2.19
+   Compiling futures-core v0.3.32
+   Compiling futures-sink v0.3.32
+   Compiling crossbeam-utils v0.8.21
+   Compiling windows-link v0.2.1
+   Compiling pin-project-lite v0.2.17
+   Compiling zmij v1.0.21
+   Compiling windows_x86_64_msvc v0.52.6
+   Compiling itoa v1.0.18
+   Compiling futures-channel v0.3.32
+   Compiling futures-io v0.3.32
+   Compiling slab v0.4.12
+   Compiling pkg-config v0.3.33
+   Compiling serde_json v1.0.149
+   Compiling vcpkg v0.2.15
+   Compiling equivalent v1.0.2
+   Compiling futures-task v0.3.32
+   Compiling crossbeam-epoch v0.9.18
+   Compiling syn v2.0.117
+   Compiling smallvec v1.15.1
+   Compiling ref-cast v1.0.25
+   Compiling rayon-core v1.13.0
+   Compiling libmimalloc-sys v0.1.47
+   Compiling parking_lot_core v0.9.12
+   Compiling getrandom v0.4.2
+   Compiling libsqlite3-sys v0.28.0
+   Compiling ryu v1.0.23
+   Compiling float-cmp v0.10.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling windows-targets v0.52.6
+   Compiling bytes v1.11.1
+   Compiling hashbrown v0.17.0
+   Compiling foldhash v0.1.5
+   Compiling scopeguard v1.2.0
+   Compiling windows-sys v0.52.0
+   Compiling lock_api v0.4.14
+   Compiling hashbrown v0.15.5
+   Compiling windows-sys v0.61.2
+   Compiling indexmap v2.14.0
+   Compiling simdutf8 v0.1.5
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fastrand v2.4.1
+   Compiling fallible-iterator v0.3.0
+   Compiling either v1.15.0
+   Compiling bitflags v2.11.1
+   Compiling unsafe-libyaml v0.2.11
+   Compiling rayon v1.12.0
+   Compiling mimalloc v0.1.50
+   Compiling tempfile v3.27.0
+   Compiling lru v0.12.5
+   Compiling fs4 v0.8.4
+   Compiling parking_lot v0.12.5
+   Compiling ordered-float v4.6.0
+   Compiling graph_hunter_matcher_ffi v0.1.0 (C:\Users\lsotomayor\GraphHunter\core\matcher-ffi)
+   Compiling quick-xml v0.38.4
+   Compiling memmap2 v0.9.10
+   Compiling hashbrown v0.14.5
+   Compiling serde_derive v1.0.228
+   Compiling futures-macro v0.3.32
+   Compiling tokio-macros v2.7.0
+   Compiling ref-cast-impl v1.0.25
+   Compiling async-trait v0.1.89
+   Compiling hashlink v0.9.1
+   Compiling tokio v1.52.1
+   Compiling futures-util v0.3.32
+   Compiling halfbrown v0.2.5
+   Compiling chrono v0.4.44
+   Compiling graph_hunter_dsl v0.1.0 (C:\Users\lsotomayor\GraphHunter\platform\dsl)
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling tokio-util v0.7.18
+   Compiling value-trait v0.10.1
+   Compiling futures-executor v0.3.32
+   Compiling simd-json v0.14.3
+   Compiling futures v0.3.32
+   Compiling graph_hunter_sources v0.1.0 (C:\Users\lsotomayor\GraphHunter\platform\sources)
+   Compiling rusqlite v0.31.0
+   Compiling graph_hunter_core v1.0.0 (C:\Users\lsotomayor\GraphHunter\core\graph-engine)
+warning: unused import: `std::path::Path`
+  --> C:\Users\lsotomayor\GraphHunter\core\graph-engine\src\geoip.rs:12:5
+   |
+12 | use std::path::Path;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `graph_hunter_core` (lib) generated 1 warning (run `cargo fix --lib -p graph_hunter_core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+     Running `target\release\bench_dfs.exe`
+=== DFS pattern-match micro-benchmark ===
+(verifying StrId-based DFS refactor; paths must still materialize to valid entity ids)
+
+Graph(small): 5000 entities, 39980 relations
+small / spawn_chain L=2                  iters=20  results=4       avg=0.052 ms
+small / spawn_chain L=3                  iters=20  results=0       avg=0.064 ms
+small / lateral L=3                      iters=20  results=0       avg=0.031 ms
+small / lateral L=4                      iters=20  results=0       avg=0.031 ms
+
+Graph(big): 20000 entities, 159980 relations
+big   / spawn_chain L=2                  iters=10  results=38      avg=0.174 ms
+big   / spawn_chain L=3                  iters=10  results=0       avg=0.132 ms
+big   / lateral L=3                      iters=10  results=0       avg=0.137 ms
+big   / lateral L=4                      iters=10  results=0       avg=0.109 ms
+
+--- Saturation workloads (Any/Any chains, cap=10K) ---
+small / any_chain L=2                    iters=10  results=10000   avg=0.702 ms
+small / any_chain L=3                    iters=10  results=10000   avg=0.808 ms
+small / any_chain L=4                    iters=10  results=10000   avg=0.885 ms
+big   / any_chain L=2                    iters=10  results=10000   avg=0.955 ms
+big   / any_chain L=3                    iters=10  results=10000   avg=1.089 ms
+big   / any_chain L=4                    iters=10  results=10000   avg=1.151 ms
+
+--- Smart top-K search (anomaly-pruned, top_k=1000) ---
+small / smart any_chain L=3              iters=10  results=1000    avg=81.793 ms
+small / smart any_chain L=4              iters=10  results=1000    avg=403.783 ms
+big   / smart any_chain L=3              iters=10  results=1000    avg=535.465 ms
+big   / smart any_chain L=4              iters=10  results=1000    avg=2850.003 ms
+big   / smart spawn_chain L=2            iters=10  results=38      avg=0.271 ms
+big   / smart lateral L=3                iters=10  results=0       avg=0.260 ms
+
+=== SIMD vs pure-Rust comparison ===
+[bench_dfs] SIMD ISA = avx2
+[simd_matcher] Built C++ graph: 5000 nodes, 39980 edges, ISA=avx2
+[simd_matcher] Built C++ graph: 20000 nodes, 159980 edges, ISA=avx2
+small / spawn_chain L=2                  rust=     0.070 ms  simd=     0.307 ms  x0.23  (rust=4 simd=4)
+small / spawn_chain L=3                  rust=     0.106 ms  simd=     0.305 ms  x0.35  (rust=0 simd=0)
+small / lateral L=3                      rust=     0.072 ms  simd=     0.304 ms  x0.24  (rust=0 simd=0)
+small / lateral L=4                      rust=     0.072 ms  simd=     0.323 ms  x0.22  (rust=0 simd=0)
+small / any_chain L=2                    rust=     0.839 ms  simd=     3.354 ms  x0.25  (rust=10000 simd=10000)
+small / any_chain L=3                    rust=     0.878 ms  simd=     3.343 ms  x0.26  (rust=10000 simd=10000)
+small / any_chain L=4                    rust=     1.038 ms  simd=     4.302 ms  x0.24  (rust=10000 simd=10000)
+big   / spawn_chain L=2                  rust=     0.187 ms  simd=     3.637 ms  x0.05  (rust=38 simd=38)
+big   / spawn_chain L=3                  rust=     0.181 ms  simd=     3.459 ms  x0.05  (rust=0 simd=0)
+big   / lateral L=3                      rust=     0.141 ms  simd=     3.412 ms  x0.04  (rust=0 simd=0)
+big   / lateral L=4                      rust=     0.160 ms  simd=     3.217 ms  x0.05  (rust=0 simd=0)
+big   / any_chain L=2                    rust=     1.265 ms  simd=     4.356 ms  x0.29  (rust=10000 simd=10000)
+big   / any_chain L=3                    rust=     1.256 ms  simd=     4.071 ms  x0.31  (rust=10000 simd=10000)
+big   / any_chain L=4                    rust=     1.562 ms  simd=     4.626 ms  x0.34  (rust=10000 simd=10000)
+
+OK: all paths produced valid, resolvable entity ids.
