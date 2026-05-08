@@ -145,12 +145,18 @@ export default function HuntResultsTable({
 
   const [exportOpen, setExportOpen] = useState(false);
   const exportRef = useRef<HTMLDivElement>(null);
+  const [iocOpen, setIocOpen] = useState(false);
+  const iocRef = useRef<HTMLDivElement>(null);
 
-  // Close export dropdown on outside click
+  // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (exportRef.current && !exportRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (exportRef.current && !exportRef.current.contains(target)) {
         setExportOpen(false);
+      }
+      if (iocRef.current && !iocRef.current.contains(target)) {
+        setIocOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
@@ -187,6 +193,54 @@ export default function HuntResultsTable({
     [onLog]
   );
 
+  // IOC export — surfaces `cmd_export_iocs` for the six formats backed
+  // by the API (`json`, `csv`, `stix21`, `misp_csv`, `kql_ioc_set`,
+  // `sigma_stub`). Each format has its own MIME + extension so the
+  // downloaded file opens in the right tool by default.
+  const IOC_FORMATS = useMemo(
+    () =>
+      [
+        { id: "json", label: "JSON", mime: "application/json", ext: "json" },
+        { id: "csv", label: "CSV", mime: "text/csv", ext: "csv" },
+        { id: "stix21", label: "STIX 2.1", mime: "application/json", ext: "stix.json" },
+        { id: "misp_csv", label: "MISP CSV", mime: "text/csv", ext: "misp.csv" },
+        { id: "kql_ioc_set", label: "KQL IOC set", mime: "text/plain", ext: "kql" },
+        { id: "sigma_stub", label: "Sigma stub", mime: "application/x-yaml", ext: "yml" },
+      ] as const,
+    [],
+  );
+
+  const handleExportIocs = useCallback(
+    async (fmt: (typeof IOC_FORMATS)[number]) => {
+      setIocOpen(false);
+      try {
+        const data = await invoke<string>("cmd_export_iocs", {
+          format: fmt.id,
+          tagPrefix: null,
+        });
+        const blob = new Blob([data], { type: fmt.mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `iocs.${fmt.ext}`;
+        a.click();
+        URL.revokeObjectURL(url);
+        onLog({
+          time: new Date().toLocaleTimeString("en-US", { hour12: false }),
+          message: `Exported IOCs as ${fmt.label}`,
+          level: "success",
+        });
+      } catch (e) {
+        onLog({
+          time: new Date().toLocaleTimeString("en-US", { hour12: false }),
+          message: `IOC export failed: ${errorMessage(e)}`,
+          level: "error",
+        });
+      }
+    },
+    [onLog, IOC_FORMATS],
+  );
+
   const totalPages = results
     ? Math.max(1, Math.ceil(results.filtered_paths / PAGE_SIZE))
     : 1;
@@ -219,12 +273,15 @@ export default function HuntResultsTable({
               className="btn btn-sm"
               onClick={() => setExportOpen((v) => !v)}
               title="Export hunt results"
+              aria-haspopup="menu"
+              aria-expanded={exportOpen}
             >
               <Download size={14} style={{ marginRight: 4, verticalAlign: "middle" }} />
               Export
             </button>
             {exportOpen && (
               <div
+                role="menu"
                 style={{
                   position: "absolute",
                   top: "100%",
@@ -238,6 +295,7 @@ export default function HuntResultsTable({
                 }}
               >
                 <button
+                  role="menuitem"
                   className="btn btn-sm"
                   style={{ display: "block", width: "100%", textAlign: "left" }}
                   onClick={() => handleExport("csv")}
@@ -245,12 +303,53 @@ export default function HuntResultsTable({
                   CSV
                 </button>
                 <button
+                  role="menuitem"
                   className="btn btn-sm"
                   style={{ display: "block", width: "100%", textAlign: "left" }}
                   onClick={() => handleExport("json")}
                 >
                   JSON
                 </button>
+              </div>
+            )}
+          </div>
+          <div ref={iocRef} style={{ position: "relative", display: "inline-block" }}>
+            <button
+              className="btn btn-sm"
+              onClick={() => setIocOpen((v) => !v)}
+              title="Export tagged entities as IOC feeds (STIX, Sigma, KQL, MISP, JSON, CSV)"
+              aria-haspopup="menu"
+              aria-expanded={iocOpen}
+            >
+              <Download size={14} style={{ marginRight: 4, verticalAlign: "middle" }} />
+              Export IOCs
+            </button>
+            {iocOpen && (
+              <div
+                role="menu"
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  right: 0,
+                  background: "var(--bg-secondary)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 4,
+                  zIndex: 100,
+                  minWidth: 140,
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+                }}
+              >
+                {IOC_FORMATS.map((fmt) => (
+                  <button
+                    key={fmt.id}
+                    role="menuitem"
+                    className="btn btn-sm"
+                    style={{ display: "block", width: "100%", textAlign: "left" }}
+                    onClick={() => handleExportIocs(fmt)}
+                  >
+                    {fmt.label}
+                  </button>
+                ))}
               </div>
             )}
           </div>
