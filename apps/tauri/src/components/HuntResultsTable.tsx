@@ -66,6 +66,9 @@ export default function HuntResultsTable({
   );
 
   // Load datasets once so badge labels can show friendly names instead of UUIDs.
+  // Non-fatal on failure — badges fall back to a truncated UUID — but the
+  // failure is logged so the analyst notices when names go missing instead
+  // of silently seeing UUID stubs.
   useEffect(() => {
     (async () => {
       try {
@@ -73,11 +76,15 @@ export default function HuntResultsTable({
         const map = new Map<string, string>();
         for (const d of list) map.set(d.id, d.name);
         setDatasetNameById(map);
-      } catch {
-        // Non-fatal: badges just fall back to the raw dataset_id.
+      } catch (e) {
+        onLog({
+          time: new Date().toLocaleTimeString("en-US", { hour12: false }),
+          message: `Dataset list unavailable — badges will show truncated IDs (${errorMessage(e)})`,
+          level: "warning",
+        });
       }
     })();
-  }, []);
+  }, [onLog]);
 
   const resolveDatasetLabel = useMemo(
     () => (id: string) => {
