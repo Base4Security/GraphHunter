@@ -417,6 +417,8 @@ export default function HypothesisBuilder({
               onChange={(e) => { setAiSituation(e.target.value); setAiError(null); }}
               placeholder="e.g. Lateral movement after credential theft, or process injection from a signed binary"
               rows={3}
+              disabled={aiLoading}
+              aria-busy={aiLoading}
               style={{
                 width: "100%",
                 resize: "vertical",
@@ -429,6 +431,7 @@ export default function HypothesisBuilder({
                 color: "var(--text-primary)",
                 marginBottom: 8,
                 boxSizing: "border-box",
+                opacity: aiLoading ? 0.6 : 1,
               }}
             />
             <LoadingButton
@@ -440,6 +443,34 @@ export default function HypothesisBuilder({
             >
               Propose hypothesis
             </LoadingButton>
+            {aiLoading && (
+              <div
+                role="status"
+                aria-live="polite"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 11,
+                  color: "var(--text-secondary)",
+                  marginBottom: 8,
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    display: "inline-block",
+                    width: 12,
+                    height: 12,
+                    border: "2px solid var(--text-secondary)",
+                    borderTopColor: "transparent",
+                    borderRadius: "50%",
+                    animation: "spin 0.8s linear infinite",
+                  }}
+                />
+                <span>Local LLM thinking — first call can take 10–30 seconds.</span>
+              </div>
+            )}
             {aiError && (
               <div style={{ color: "var(--danger)", fontSize: 11, marginBottom: 8 }}>{aiError}</div>
             )}
