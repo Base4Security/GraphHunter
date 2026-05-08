@@ -970,40 +970,51 @@ function AppInner() {
         aria-label="Resize bottom panel"
       />
 
-      {/* Bottom panel with mode tabs */}
+      {/* Bottom panel with mode tabs (WAI-ARIA tablist pattern). */}
       <ErrorBoundary section="Bottom Panel">
       <div className="panel panel-bottom-container">
-        <div className="mode-tabs">
-          <button
-            className={`mode-tab ${bottomTab === "hunt" ? "active" : ""}`}
-            onClick={() => handleBottomTabChange("hunt")}
-          >
-            Hunt Mode
-          </button>
-          <button
-            className={`mode-tab ${bottomTab === "explore" ? "active" : ""}`}
-            onClick={() => handleBottomTabChange("explore")}
-          >
-            Explorer Mode
-          </button>
-          <button
-            className={`mode-tab ${bottomTab === "events" ? "active" : ""}`}
-            onClick={() => handleBottomTabChange("events")}
-          >
-            Events view
-          </button>
-          <button
-            className={`mode-tab ${bottomTab === "heatmap" ? "active" : ""}`}
-            onClick={() => handleBottomTabChange("heatmap")}
-          >
-            Heatmap
-          </button>
-          <button
-            className={`mode-tab ${bottomTab === "timeline" ? "active" : ""}`}
-            onClick={() => handleBottomTabChange("timeline")}
-          >
-            Timeline
-          </button>
+        <div
+          className="mode-tabs"
+          role="tablist"
+          aria-label="Bottom panel mode"
+          onKeyDown={(e) => {
+            // Roving-tabindex arrow-key nav. Home/End jump to ends.
+            const order: BottomTab[] = ["hunt", "explore", "events", "heatmap", "timeline"];
+            const idx = order.indexOf(bottomTab);
+            if (idx < 0) return;
+            let next = idx;
+            if (e.key === "ArrowRight") next = (idx + 1) % order.length;
+            else if (e.key === "ArrowLeft") next = (idx - 1 + order.length) % order.length;
+            else if (e.key === "Home") next = 0;
+            else if (e.key === "End") next = order.length - 1;
+            else return;
+            e.preventDefault();
+            handleBottomTabChange(order[next]);
+            // Move focus to the new tab so screen readers announce it.
+            (document.getElementById(`mode-tab-${order[next]}`) as HTMLElement | null)?.focus();
+          }}
+        >
+          {([
+            { id: "hunt", label: "Hunt Mode" },
+            { id: "explore", label: "Explorer Mode" },
+            { id: "events", label: "Events view" },
+            { id: "heatmap", label: "Heatmap" },
+            { id: "timeline", label: "Timeline" },
+          ] as const).map(({ id, label }) => (
+            <button
+              key={id}
+              id={`mode-tab-${id}`}
+              role="tab"
+              type="button"
+              aria-selected={bottomTab === id}
+              aria-controls={`mode-panel-${id}`}
+              tabIndex={bottomTab === id ? 0 : -1}
+              className={`mode-tab ${bottomTab === id ? "active" : ""}`}
+              onClick={() => handleBottomTabChange(id)}
+            >
+              {label}
+            </button>
+          ))}
         </div>
 
         {/* `ExplorerPanel` is the default tab and stays eager so the
@@ -1011,35 +1022,45 @@ function AppInner() {
             lazy chunks and share a single Suspense boundary — only one
             can be mounted at a time, so a shared boundary is sufficient. */}
         {bottomTab === "explore" && (
-          <ExplorerPanel
-            onExploreNode={handleExploreNode}
-            neighborhood={explorerNeighborhood}
-            onLog={addLog}
-          />
+          <div role="tabpanel" id="mode-panel-explore" aria-labelledby="mode-tab-explore">
+            <ExplorerPanel
+              onExploreNode={handleExploreNode}
+              neighborhood={explorerNeighborhood}
+              onLog={addLog}
+            />
+          </div>
         )}
         {bottomTab !== "explore" && (
           <LazyBoundary>
             {bottomTab === "hunt" && (
-              <HypothesisBuilder
-                onHuntResults={handleHuntResults}
-                onLog={addLog}
-              />
+              <div role="tabpanel" id="mode-panel-hunt" aria-labelledby="mode-tab-hunt">
+                <HypothesisBuilder
+                  onHuntResults={handleHuntResults}
+                  onLog={addLog}
+                />
+              </div>
             )}
             {bottomTab === "events" && (
-              <EventsViewPanel selectedNodeId={selectedNodeId} />
+              <div role="tabpanel" id="mode-panel-events" aria-labelledby="mode-tab-events">
+                <EventsViewPanel selectedNodeId={selectedNodeId} />
+              </div>
             )}
             {bottomTab === "heatmap" && (
-              <HeatmapView
-                statsKey={stats.entity_count + stats.relation_count}
-                onShowRelationOnMap={handleShowTypeOnMap}
-                onLog={addLog}
-              />
+              <div role="tabpanel" id="mode-panel-heatmap" aria-labelledby="mode-tab-heatmap">
+                <HeatmapView
+                  statsKey={stats.entity_count + stats.relation_count}
+                  onShowRelationOnMap={handleShowTypeOnMap}
+                  onLog={addLog}
+                />
+              </div>
             )}
             {bottomTab === "timeline" && (
-              <TimelineView
-                statsKey={stats.entity_count + stats.relation_count}
-                onShowTypeOnMap={handleShowTypeOnMap}
-              />
+              <div role="tabpanel" id="mode-panel-timeline" aria-labelledby="mode-tab-timeline">
+                <TimelineView
+                  statsKey={stats.entity_count + stats.relation_count}
+                  onShowTypeOnMap={handleShowTypeOnMap}
+                />
+              </div>
             )}
           </LazyBoundary>
         )}
