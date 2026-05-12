@@ -15,7 +15,7 @@ use graph_hunter_core::FieldConfig;
 use tauri::State;
 
 use crate::error::CommandError;
-use crate::types::{IngestJobStarted, LoadResult, PreviewIngestResult};
+use crate::types::{IngestJobStarted, LoadResult, PcapPreviewResult, PreviewIngestResult};
 
 /// Preview ingestion: detect format and proposed field → entity type mapping.
 #[tauri::command]
@@ -25,6 +25,21 @@ pub fn cmd_preview_ingest(
     format: String,
 ) -> Result<PreviewIngestResult, CommandError> {
     api.preview_ingest(graph_hunter_api::dto::ingestion::PreviewIngestRequest { path, format })
+        .map_err(CommandError::from)
+}
+
+/// PCAP / PCAPNG offline preview. Separate from `cmd_preview_ingest`
+/// because the binary content can't survive a UTF-8 `read_to_string`
+/// pass and the response shape is richer (top-N IPs / ports / proto
+/// mix) than the tabular `detected_fields` model. Frontend dispatches
+/// by extension: `.pcap` / `.pcapng` / `.cap` → here; everything else
+/// → `cmd_preview_ingest`.
+#[tauri::command]
+pub fn cmd_pcap_preview(
+    api: State<Arc<graph_hunter_api::GraphHunterApi>>,
+    path: String,
+) -> Result<PcapPreviewResult, CommandError> {
+    api.pcap_preview(graph_hunter_api::dto::ingestion::PcapPreviewRequest { path })
         .map_err(CommandError::from)
 }
 

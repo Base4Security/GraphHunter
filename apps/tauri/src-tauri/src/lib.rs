@@ -263,6 +263,7 @@ pub fn run() {
             commands::entity::cmd_list_tagged,
             // Ingestion commands
             commands::ingestion::cmd_preview_ingest,
+            commands::ingestion::cmd_pcap_preview,
             commands::ingestion::cmd_load_data,
             commands::ingestion::cmd_load_data_streaming,
             commands::ingestion::cmd_ingest_siem,

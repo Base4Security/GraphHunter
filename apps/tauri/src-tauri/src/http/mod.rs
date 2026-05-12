@@ -145,6 +145,7 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
         .route("/export_ocsf", post(export::handler_export_ocsf))
         .route("/check_invariants", post(invariants::handler_check_invariants))
         .route("/ingest_negotiate", post(ingest::handler_ingest_negotiate))
+        .route("/pcap_preview", post(ingest::handler_pcap_preview))
         .route("/canonical_map", post(ingest::handler_canonical_map))
         .route("/parser_generate", post(ingest::handler_parser_generate))
         .route("/schema_drift_detect", post(ingest::handler_schema_drift_detect))

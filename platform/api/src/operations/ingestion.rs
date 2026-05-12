@@ -22,12 +22,11 @@ use uuid::Uuid;
 use crate::dto::ingestion::{
     DetectedField, IngestComplete, IngestError, IngestJobStarted, IngestSiemRequest,
     LoadDataRequest, LoadDataStreamingRequest, LoadDataWithConfigRequest, LoadResult,
-    PreviewIngestRequest, PreviewIngestResult,
+    PcapPreviewRequest, PcapPreviewResult, PreviewIngestRequest, PreviewIngestResult,
 };
 use crate::events::events::{INGEST_COMPLETE, INGEST_ERROR, INGEST_PROGRESS};
 use crate::evtx::{
-    evtx_ingest_streaming, evtx_preview_sample, evtx_to_sysmon_ndjson, file_looks_like_evtx,
-    path_is_evtx,
+    evtx_preview_sample, evtx_to_sysmon_ndjson, file_looks_like_evtx, path_is_evtx,
 };
 use crate::format_registry::{make_parser_for_format, resolve_format, rich_preview_for_format};
 use crate::scoring::{run_full_scoring, run_scoring_adaptive};
@@ -324,6 +323,15 @@ impl GraphHunterApi {
             format: resolved,
             detected_fields,
         })
+    }
+
+    /// PCAP / PCAPNG preview. Reads up to 10K packets and returns a
+    /// non-tabular summary (top src/dst IPs, top dst ports, protocol
+    /// mix, time span). Stateless — touches no session. Frontend
+    /// dispatches by extension; the regular [`Self::preview_ingest`]
+    /// path would corrupt the binary file via `read_to_string`.
+    pub fn pcap_preview(&self, req: PcapPreviewRequest) -> ApiResult<PcapPreviewResult> {
+        crate::pcap_preview::pcap_preview_sample(&req.path).map_err(ApiError::Io)
     }
 
     /// Read a file from disk, parse it, insert triples into the
@@ -768,10 +776,13 @@ impl GraphHunterApi {
         req: LoadDataStreamingRequest,
     ) -> ApiResult<IngestJobStarted> {
         // Validate format before any work so callers fail fast.
+        // Tabular formats stay hardcoded (they flow through
+        // `format_registry`); stateful ingestors (EVTX, PCAP, …) come
+        // from the `ingestors` module registry so adding one there
+        // automatically accepts its name + aliases here.
         let pre_check = req.format.to_lowercase();
-        if ![
+        const TABULAR_FORMATS: &[&str] = &[
             "auto",
-            "evtx",
             "sysmon",
             "sentinel",
             "cognito",
@@ -784,11 +795,12 @@ impl GraphHunterApi {
             "faz",
             "forti",
             "xml",
-        ]
-        .contains(&pre_check.as_str())
+        ];
+        if !TABULAR_FORMATS.contains(&pre_check.as_str())
+            && !crate::ingestors::is_known_streaming_format(&pre_check)
         {
             return Err(ApiError::InvalidInput(format!(
-                "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', or 'fortianalyzer'.",
+                "Unsupported format: '{}'. Use 'auto', 'evtx', 'pcap', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', or 'fortianalyzer'.",
                 req.format
             )));
         }
@@ -870,26 +882,26 @@ impl GraphHunterApi {
                     bg_date_to
                 );
 
-                // 1. Open file and check for EVTX (binary) before any UTF-8 read
-                let use_evtx = path_is_evtx(&bg_path)
-                    || bg_format.to_lowercase() == "evtx"
-                    || (bg_format.to_lowercase() == "auto" && file_looks_like_evtx(&bg_path));
-
-                if use_evtx {
-                    let parser: Box<dyn LogParser + Send> = if let Some(cfg) = &bg_config {
-                        Box::new(ConfigurableParser::new(cfg.clone()))
-                    } else {
-                        Box::new(GenericParser)
-                    };
-
-                    let result = evtx_ingest_streaming(
-                        &bg_path,
-                        parser.as_ref(),
-                        &bg_session,
-                        &bg_dataset_id,
-                        &bg_emitter,
-                        &bg_job_id,
-                    );
+                // 1. Stateful binary / state-carrying-text formats go
+                //    through the `ingestors` registry. EVTX and PCAP
+                //    used to be two hard-coded `if`-branches here;
+                //    they're now `StreamingIngestor` impls in
+                //    `crate::ingestors`. Future PRs add Zeek,
+                //    Suricata, NetFlow, live capture by registering
+                //    new ingestors — no edit to this dispatch.
+                if let Some(ingestor) =
+                    crate::ingestors::resolve_ingestor(&bg_path, &bg_format)
+                {
+                    let result = ingestor.ingest(crate::ingestors::IngestContext {
+                        path: &bg_path,
+                        session: &bg_session,
+                        dataset_id: &bg_dataset_id,
+                        emitter: &bg_emitter,
+                        job_id: &bg_job_id,
+                        date_from: bg_date_from.as_deref(),
+                        date_to: bg_date_to.as_deref(),
+                        config: bg_config.as_ref(),
+                    });
 
                     match result {
                         Ok((total_new_entities, total_new_relations)) => {

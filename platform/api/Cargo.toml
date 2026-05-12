@@ -47,6 +47,24 @@ rand = "0.8"
 # Windows Event Log binary parser. Tauri already pulls evtx 0.11 with
 # default features disabled; mirror those settings so the link unifies.
 evtx = { version = "0.11", default-features = false }
+# PCAP / PCAPNG framing — pure-Rust, sans-io. We deliberately avoid
+# `pcap` / `pnet`, which would force a libpcap (or Npcap on Windows)
+# native link. PR1 only uses this for sampling preview metadata
+# (first ~10K packets); PR2 will reuse it for the full streaming
+# flow ingest path.
+pcap-parser = "0.16"
+# L2-L4 decode (Ethernet, 802.1Q VLAN, IPv4/IPv6, TCP/UDP/ICMP).
+# Pure-Rust, no external link. >= 0.15 has the VLAN handling we
+# need for the modern Wireshark sample captures.
+etherparse = "0.15"
+# MD5 for JA3 client fingerprint hashing. Tiny, single-purpose
+# crate; JA3 spec mandates MD5 specifically (not a security hash —
+# a stable fingerprint format the SOC tooling already understands).
+md5 = "0.7"
+# ISO 8601 timestamp parsing for Suricata `eve.json` (`timestamp`
+# field) and decimal-seconds parsing for Zeek log files. Same major
+# version as core / parsers, so we share the lockfile pin.
+chrono = "0.4"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -56,7 +74,7 @@ serde_json = "1"
 # 1.x because it's the well-trodden stable API; 2.x has a different
 # encode!()/decode!() shape and we don't need its perks here.
 bincode = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 thiserror = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 tokio-util = "0.7"

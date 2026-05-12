@@ -5,10 +5,12 @@ import { LoadingButton } from "../ui";
 import type {
   LogEntry,
   PreviewIngestResult,
+  PcapPreviewResult,
   DetectedField,
 } from "../../types";
 import { ENTITY_TYPES } from "../../types";
 import IngestProgressBar from "./IngestProgress";
+import PcapPreviewSummary from "./PcapPreviewSummary";
 import { now } from "../../lib/time";
 
 interface FileUploadSectionProps {
@@ -22,6 +24,14 @@ interface FileUploadSectionProps {
   previewLoading: boolean;
   previewResult: PreviewIngestResult | null;
   setPreviewResult: (r: PreviewIngestResult | null) => void;
+  /**
+   * PCAP / PCAPNG preview, populated by the parent when the selected
+   * file's extension is `.pcap` / `.pcapng` / `.cap`. Mutually
+   * exclusive with `previewResult` (the tabular path); when set, the
+   * field-mapping table is replaced by `PcapPreviewSummary`.
+   */
+  pcapPreviewResult?: PcapPreviewResult | null;
+  setPcapPreviewResult?: (r: PcapPreviewResult | null) => void;
   mappingRows: DetectedField[];
   setMappingRows: React.Dispatch<React.SetStateAction<DetectedField[]>>;
   graphEntityTypes: string[];
@@ -52,6 +62,8 @@ export default function FileUploadSection({
   previewLoading,
   previewResult,
   setPreviewResult: _setPreviewResult,
+  pcapPreviewResult = null,
+  setPcapPreviewResult,
   mappingRows,
   setMappingRows,
   graphEntityTypes,
@@ -77,6 +89,7 @@ export default function FileUploadSection({
       setWebFiles(fileArray);
       setFilePaths(fileArray.map((f) => f.name));
       _setPreviewResult(null);
+      setPcapPreviewResult?.(null);
       setMappingRows([]);
       onLog({ time: now(), message: `Selected ${fileArray.length} file(s)`, level: "info" });
     }
@@ -90,6 +103,7 @@ export default function FileUploadSection({
     }
     if (newPaths.length === 0) {
       _setPreviewResult(null);
+      setPcapPreviewResult?.(null);
       setMappingRows([]);
     }
   }
@@ -281,7 +295,8 @@ export default function FileUploadSection({
         >
           {previewLoading ? "Previewing\u2026" : "Preview"}
         </button>
-        {previewResult && (
+        {pcapPreviewResult && <PcapPreviewSummary result={pcapPreviewResult} />}
+        {previewResult && !pcapPreviewResult && (
           <div className="panel-left-section" style={{ marginTop: 8 }}>
             <div
               style={{

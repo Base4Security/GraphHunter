@@ -9,6 +9,7 @@ import { ingestSchemaDrift } from "./schema_drift.js";
 import { ingestDeadLetters } from "./dead_letters.js";
 import { ingestFetchSharedMappings } from "./fetch_shared_mappings.js";
 import { ingestPublishMapping } from "./publish_mapping.js";
+import { ingestPcapPreview } from "./pcap_preview.js";
 
 export const ingestTools: Tool[] = [
   ingestNegotiate,
@@ -21,4 +22,5 @@ export const ingestTools: Tool[] = [
   ingestDeadLetters,
   ingestFetchSharedMappings,
   ingestPublishMapping,
+  ingestPcapPreview,
 ];

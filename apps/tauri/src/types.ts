@@ -93,6 +93,58 @@ export interface PreviewIngestResult {
   detected_fields: DetectedField[];
 }
 
+// ── PCAP / PCAPNG preview ──
+//
+// Mirrors `graph_hunter_api::pcap_preview::PcapPreviewResult`. PCAP is
+// binary and doesn't fit the tabular `PreviewIngestResult` model, so
+// it gets its own preview shape and command (`cmd_pcap_preview`). The
+// frontend dispatches by extension: `.pcap` / `.pcapng` / `.cap` → here.
+
+export interface PcapPreviewResult {
+  /** "pcap" | "pcapng" | "unknown" — matches the magic-byte family. */
+  format: string;
+  file_size: number;
+  /** Packets actually decoded (≤ 10_000). */
+  packets_sampled: number;
+  /** Linear extrapolation from sampled bytes — rough order-of-magnitude. */
+  packet_count_estimate: number;
+  time_span: PcapTimeSpan | null;
+  protocol_mix: PcapProtocolCount[];
+  top_src_ips: PcapIpCount[];
+  top_dst_ips: PcapIpCount[];
+  top_dst_ports: PcapPortCount[];
+  /** Soft warnings (truncated file, undecodable packets, …). May be omitted. */
+  warnings?: string[];
+}
+
+export interface PcapTimeSpan {
+  first_unix_secs: number;
+  last_unix_secs: number;
+  duration_secs: number;
+}
+
+export interface PcapProtocolCount {
+  /** "TCP" | "UDP" | "ICMP" | "ICMPv6" | "Other". */
+  protocol: string;
+  packets: number;
+  bytes: number;
+}
+
+export interface PcapIpCount {
+  ip: string;
+  packets: number;
+  bytes: number;
+}
+
+export interface PcapPortCount {
+  port: number;
+  /** "TCP" | "UDP". */
+  protocol: string;
+  /** Well-known service name (e.g. "HTTPS", "DNS"), or omitted. */
+  service?: string;
+  packets: number;
+}
+
 export interface ParseStats {
   rows_seen: number;
   rows_with_triples: number;

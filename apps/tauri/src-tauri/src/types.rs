@@ -9,7 +9,10 @@ use serde::Serialize;
 pub use graph_hunter_api::dto::graph_ops::GraphStats;
 
 // Moved to `graph_hunter_api::dto::ingestion` in P1 Fase 2.
-pub use graph_hunter_api::dto::ingestion::{DetectedField, LoadResult, PreviewIngestResult};
+pub use graph_hunter_api::dto::ingestion::{
+    DetectedField, LoadResult, PcapIpCount, PcapPortCount, PcapPreviewResult, PcapProtocolCount,
+    PcapTimeSpan, PreviewIngestResult,
+};
 
 #[derive(Serialize)]
 pub struct HuntResults {

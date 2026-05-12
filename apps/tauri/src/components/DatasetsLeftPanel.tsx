@@ -22,6 +22,7 @@ import type {
   LogEntry,
   SessionInfo,
   PreviewIngestResult,
+  PcapPreviewResult,
   DetectedField,
   DatasetInfo,
   FieldInfo,
@@ -128,6 +129,7 @@ export default function DatasetsLeftPanel({
   const [webFiles, setWebFiles] = useState<File[]>([]);
 
   const [previewResult, setPreviewResult] = useState<PreviewIngestResult | null>(null);
+  const [pcapPreviewResult, setPcapPreviewResult] = useState<PcapPreviewResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [mappingRows, setMappingRows] = useState<DetectedField[]>([]);
   const [graphEntityTypes, setGraphEntityTypes] = useState<string[]>([]);
@@ -523,24 +525,50 @@ export default function DatasetsLeftPanel({
     if (filePaths.length === 0) return;
     setPreviewLoading(true);
     setPreviewResult(null);
+    setPcapPreviewResult(null);
     setMappingRows([]);
     try {
-      const result = await invoke<PreviewIngestResult>("cmd_preview_ingest", {
-        path: filePaths[0],
-        format,
-      });
-      setPreviewResult(result);
-      setMappingRows(result.detected_fields.map((f) => ({ ...f })));
-      onLog({
-        time: now(),
-        message: `Preview: ${result.format}, ${result.detected_fields.length} fields`,
-        level: "info",
-      });
+      // Dispatch by extension: PCAP files are binary and need a
+      // separate preview path (`cmd_pcap_preview`). Everything else
+      // goes through the tabular `cmd_preview_ingest`.
+      const path = filePaths[0];
+      if (isPcapPath(path)) {
+        const pcap = await invoke<PcapPreviewResult>("cmd_pcap_preview", {
+          path,
+        });
+        setPcapPreviewResult(pcap);
+        onLog({
+          time: now(),
+          message: `Preview: ${pcap.format}, ${pcap.packets_sampled.toLocaleString()} packets sampled`,
+          level: "info",
+        });
+      } else {
+        const result = await invoke<PreviewIngestResult>("cmd_preview_ingest", {
+          path,
+          format,
+        });
+        setPreviewResult(result);
+        setMappingRows(result.detected_fields.map((f) => ({ ...f })));
+        onLog({
+          time: now(),
+          message: `Preview: ${result.format}, ${result.detected_fields.length} fields`,
+          level: "info",
+        });
+      }
     } catch (e) {
       onLog({ time: now(), message: `Preview failed: ${errorMessage(e)}`, level: "error" });
     } finally {
       setPreviewLoading(false);
     }
+  }
+
+  function isPcapPath(p: string): boolean {
+    const lower = p.toLowerCase();
+    return (
+      lower.endsWith(".pcap") ||
+      lower.endsWith(".pcapng") ||
+      lower.endsWith(".cap")
+    );
   }
 
   async function loadData() {
@@ -633,9 +661,14 @@ export default function DatasetsLeftPanel({
                 resolve();
               };
 
+              // PCAP files need format="pcap" so the backend short-
+              // circuits to the binary-safe flow ingest path before
+              // any UTF-8 read. The dropdown only carries text-format
+              // options, so we override here based on extension.
+              const effectiveFormat = isPcapPath(currentPath) ? "pcap" : format;
               await invoke<IngestJobStarted>("cmd_load_data_streaming", {
                 path: currentPath,
-                format,
+                format: effectiveFormat,
                 config,
                 dateFrom: null,
                 dateTo: null,
@@ -984,6 +1017,8 @@ export default function DatasetsLeftPanel({
                 previewLoading={previewLoading}
                 previewResult={previewResult}
                 setPreviewResult={setPreviewResult}
+                pcapPreviewResult={pcapPreviewResult}
+                setPcapPreviewResult={setPcapPreviewResult}
                 mappingRows={mappingRows}
                 setMappingRows={setMappingRows}
                 graphEntityTypes={graphEntityTypes}

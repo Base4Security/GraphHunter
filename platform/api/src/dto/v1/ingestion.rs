@@ -9,6 +9,24 @@ pub struct PreviewIngestRequest {
     pub format: String,
 }
 
+/// PCAP / PCAPNG offline preview request. PCAP files are binary and
+/// don't fit the row/header model that backs [`PreviewIngestResult`],
+/// so they get their own command surface. Frontend dispatches by
+/// extension: `.pcap` / `.pcapng` / `.cap` → `cmd_pcap_preview`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PcapPreviewRequest {
+    pub path: String,
+}
+
+/// Re-exported from [`crate::pcap_preview`] so transports see one
+/// canonical name for the response shape. The struct itself lives
+/// next to the parser so its `serde` derives travel with the
+/// implementation.
+pub use crate::pcap_preview::{
+    IpCount as PcapIpCount, PcapPreviewResult, PortCount as PcapPortCount,
+    ProtocolCount as PcapProtocolCount, TimeSpan as PcapTimeSpan,
+};
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DetectedField {
     pub field_name: String,

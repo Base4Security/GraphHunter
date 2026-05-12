@@ -17,6 +17,12 @@ pub mod error;
 pub mod events;
 pub mod evtx;
 pub mod format_registry;
+pub mod ingestors;
+pub mod netflow;
+pub mod pcap;
+pub mod pcap_l7;
+pub mod pcap_l7_auth;
+pub mod pcap_preview;
 // `local_llm` was lifted into its own crate at platform/local-llm.
 // Re-exported here so call-sites that imported `api::local_llm::X`
 // keep resolving during the migration.
