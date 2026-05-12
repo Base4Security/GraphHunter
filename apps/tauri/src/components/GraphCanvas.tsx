@@ -271,6 +271,57 @@ function applyGraphDiff(
   return nextMap;
 }
 
+// ── Layout selection ───────────────────────────────────────────────────────
+//
+// Three tiers, chosen by rendered node count:
+//   ≤ 1000   → dagre LR with animated entry. Pretty, deterministic
+//              left-to-right flow that reads well for hunt paths.
+//   1001–1500 → cose (force-directed) with 200 iterations + no
+//              animation. Still produces useful topology; dagre's
+//              cost goes superlinear past ~1000 dense nodes.
+//   > 1500   → cose with 50 iterations + no animation. PR-C tier-3.
+//              At this scale the analyst is panning to find clusters
+//              rather than reading topology, so we trade visual
+//              quality for first-paint responsiveness. The
+//              `Re-layout` button in the canvas toolbar still runs
+//              a full layout when the user asks for it.
+function pickLayoutOptions(renderedNodeCount: number): cytoscape.LayoutOptions {
+  if (renderedNodeCount > 1500) {
+    return {
+      name: "cose",
+      animate: false,
+      fit: true,
+      padding: 50,
+      nodeRepulsion: () => 8000,
+      idealEdgeLength: () => 80,
+      numIter: 50,
+    } as cytoscape.LayoutOptions;
+  }
+  if (renderedNodeCount > 1000) {
+    return {
+      name: "cose",
+      animate: false,
+      fit: true,
+      padding: 50,
+      nodeRepulsion: () => 8000,
+      idealEdgeLength: () => 80,
+      numIter: 200,
+    } as cytoscape.LayoutOptions;
+  }
+  return {
+    name: "dagre",
+    rankDir: "LR",
+    nodeSep: 60,
+    rankSep: 100,
+    animate: true,
+    animationDuration: 600,
+    animationEasing:
+      "ease-out-cubic" as unknown as cytoscape.Css.TransitionTimingFunction,
+    fit: true,
+    padding: 50,
+  } as cytoscape.LayoutOptions;
+}
+
 export default function GraphCanvas({
   subgraph,
   highlightPaths,
@@ -381,6 +432,24 @@ export default function GraphCanvas({
   useEffect(() => {
     if (!containerRef.current) return;
 
+    // PR-C: zoom-aware label opacity. Below 0.4× zoom labels are
+    // invisible; between 0.4× and 0.7× they fade in linearly; above
+    // 0.7× they're fully opaque. Eliminates the per-frame text-
+    // shaping cost when the analyst zooms out to inspect topology
+    // on graphs that approach the 2K-node / 5K-edge caps.
+    //
+    // Cytoscape's function-form style values aren't re-evaluated on
+    // raw `zoom` events; they fire on data changes + `cy.style()
+    // .update()`. The viewport handler below calls `update()` when
+    // the zoom crosses a band boundary so we don't waste cycles on
+    // every pan tick.
+    const labelOpacityForZoom = (ele: cytoscape.SingularElementArgument) => {
+      const z = ele.cy().zoom();
+      if (z < 0.4) return 0;
+      if (z < 0.7) return (z - 0.4) / 0.3;
+      return 1;
+    };
+
     const cy = cytoscape({
       container: containerRef.current,
       style: [
@@ -394,6 +463,7 @@ export default function GraphCanvas({
             "font-family": "JetBrains Mono, Fira Code, monospace",
             color: "#94a3b8",
             "text-margin-y": 6,
+            "text-opacity": labelOpacityForZoom as unknown as number,
             "background-color": "data(color)",
             "border-width": 2,
             "border-color": "data(color)",
@@ -479,6 +549,7 @@ export default function GraphCanvas({
             color: "#64748b",
             "text-rotation": "autorotate",
             "text-margin-y": -8,
+            "text-opacity": labelOpacityForZoom as unknown as number,
           },
         },
         {
@@ -505,11 +576,41 @@ export default function GraphCanvas({
 
     cyRef.current = cy;
 
+    // PR-C: track the current zoom *band* so we can ask cytoscape to
+    // re-evaluate the function-form `text-opacity` styles only when
+    // zoom crosses a threshold. Without this, the function-form
+    // styles are only re-run on data changes — the label-cull
+    // optimisation would never engage just from a wheel-zoom.
+    //   0 → invisible    (z < 0.4)
+    //   1 → fading       (0.4 ≤ z < 0.7)
+    //   2 → fully opaque (z ≥ 0.7)
+    let zoomBand = -1;
+    const updateZoomBand = () => {
+      const z = cy.zoom();
+      const band = z < 0.4 ? 0 : z < 0.7 ? 1 : 2;
+      if (band !== zoomBand) {
+        zoomBand = band;
+        // Recompute function-form styles. One pass; cytoscape
+        // internally re-renders only the affected attributes.
+        cy.style().update();
+      }
+    };
+    // Seed the band so the first style().update() during a pan
+    // doesn't fire spuriously.
+    updateZoomBand();
+
     // Persist viewport (zoom + pan) to global state, debounced. Skipped while
     // a programmatic restore is in flight (isRestoringRef) to avoid an echo
     // loop where the restore itself fires a viewport event.
+    //
+    // PR-C: bumped from 200 ms → 250 ms so continuous-pan / continuous-zoom
+    // gestures coalesce into one dispatch per ~quarter-second; saves a
+    // Redux round-trip per intermediate viewport tick.
     const handleViewport = () => {
       if (isRestoringRef.current) return;
+      // Cheap synchronous check — only triggers a style update when
+      // the band actually changed, so this is free during normal pans.
+      updateZoomBand();
       if (viewportDebounceRef.current !== null) {
         window.clearTimeout(viewportDebounceRef.current);
       }
@@ -519,7 +620,7 @@ export default function GraphCanvas({
           type: "SET_VIEW_STATE",
           payload: { zoom: cy.zoom(), pan: cy.pan() },
         });
-      }, 200);
+      }, 250);
     };
     cy.on("viewport", handleViewport);
 
@@ -770,31 +871,11 @@ export default function GraphCanvas({
 
     const elements = buildElements(subgraph);
 
-    // Use faster layout for large graphs (>1000 nodes rendered). Only matters
-    // on the full-rebuild path; incremental diffs reuse existing positions.
+    // PR-C: layout selection lives in `pickLayoutOptions` so the
+    // hunt and explorer paths stay in sync. Three tiers now —
+    // dagre / cose-200 / cose-50.
     const renderedNodeCount = elements.filter((el) => el.group === "nodes").length;
-    const layoutOptions: cytoscape.LayoutOptions =
-      renderedNodeCount > 1000
-        ? {
-            name: "cose",
-            animate: false,
-            fit: true,
-            padding: 50,
-            nodeRepulsion: () => 8000,
-            idealEdgeLength: () => 80,
-            numIter: 200,
-          } as cytoscape.LayoutOptions
-        : {
-            name: "dagre",
-            rankDir: "LR",
-            nodeSep: 60,
-            rankSep: 100,
-            animate: true,
-            animationDuration: 600,
-            animationEasing: "ease-out-cubic" as unknown as cytoscape.Css.TransitionTimingFunction,
-            fit: true,
-            padding: 50,
-          } as cytoscape.LayoutOptions;
+    const layoutOptions = pickLayoutOptions(renderedNodeCount);
 
     const savedView = viewStateRef.current;
     const restoreView = makeRestoreView(cy, savedView, isRestoringRef);
@@ -818,32 +899,10 @@ export default function GraphCanvas({
 
     const elements = buildElements(neighborhood);
 
-    // Use faster layout for large graphs (>1000 nodes rendered). Only matters
-    // on the full-rebuild path; incremental "Show neighbours" expands reuse
-    // existing node positions via applyGraphDiff.
+    // PR-C: same helper as the hunt-mode effect. Three tiers,
+    // single source of truth.
     const renderedNodeCount = elements.filter((el) => el.group === "nodes").length;
-    const layoutOptions: cytoscape.LayoutOptions =
-      renderedNodeCount > 1000
-        ? {
-            name: "cose",
-            animate: false,
-            fit: true,
-            padding: 50,
-            nodeRepulsion: () => 8000,
-            idealEdgeLength: () => 80,
-            numIter: 200,
-          } as cytoscape.LayoutOptions
-        : {
-            name: "dagre",
-            rankDir: "LR",
-            nodeSep: 60,
-            rankSep: 100,
-            animate: true,
-            animationDuration: 600,
-            animationEasing: "ease-out-cubic" as unknown as cytoscape.Css.TransitionTimingFunction,
-            fit: true,
-            padding: 50,
-          } as cytoscape.LayoutOptions;
+    const layoutOptions = pickLayoutOptions(renderedNodeCount);
 
     const savedView = viewStateRef.current;
     const restoreView = makeRestoreView(cy, savedView, isRestoringRef);

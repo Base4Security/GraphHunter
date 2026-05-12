@@ -75,3 +75,4 @@ docs/**/*.fdb_latexmk
 docs/**/*.fls
 docs/**/*.pdf
 docs/**/out.txt
+.playwright-mcp/
