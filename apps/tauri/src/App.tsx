@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke, errorMessage } from "./lib/tauri";
 // Eager: everything on the initial-render path. The Welcome page, the left-
@@ -22,6 +22,7 @@ const HypothesisBuilder = lazy(() => import("./components/HypothesisBuilder"));
 const NotesPanel = lazy(() => import("./components/NotesPanel"));
 const NodeDetailPanel = lazy(() => import("./components/NodeDetailPanel"));
 const EdgeDetailPanel = lazy(() => import("./components/EdgeDetailPanel"));
+const CommandPalette = lazy(() => import("./components/CommandPalette"));
 const HuntResultsTable = lazy(() => import("./components/HuntResultsTable"));
 const EventsViewPanel = lazy(() => import("./components/EventsViewPanel"));
 const HeatmapView = lazy(() => import("./components/HeatmapView"));
@@ -118,6 +119,22 @@ function AppInner() {
   const { bottomPanelHeight, handleResizeStart } = usePanelResize();
 
   const [helpPanelOpen, setHelpPanelOpen] = useState(false);
+
+  // PR-D: Ctrl+K (Cmd+K) command palette. Global keydown listener
+  // mounted at the AppInner level so the shortcut is reachable from
+  // any focused element (graph canvas, hunt results table, search
+  // input, …).
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCommandPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Perf-flag introspection — populated once at mount from
   // `cmd_get_perf_status`. Renders as a small toolbar badge so the
@@ -680,6 +697,172 @@ function AppInner() {
   // Sentinel event listeners — lives here (never unmounts) so polling
   // continues even when the Datasets panel is closed.
   const sentinel = useSentinelEvents(addLog, stats, setStats);
+
+  // PR-D: curated Command Palette items. Hand-picked rather than
+  // auto-generated from the full Tauri command surface — most
+  // commands need typed payloads (FieldConfig, hypothesis JSON,
+  // node IDs) that the palette can't compose. The items below are
+  // the ones that take no args or trivial args, i.e. things the
+  // analyst would reach for from anywhere.
+  const commandItems = useMemo(
+    () => [
+      // Navigation — toggle the left panels.
+      {
+        id: "nav.datasets",
+        label: "Toggle Datasets panel",
+        category: "navigation" as const,
+        keywords: "left sidebar ingest",
+        action: () =>
+          dispatch({
+            type: "SET_LEFT_MENU",
+            payload: leftMenuOpen === "datasets" ? null : "datasets",
+          }),
+      },
+      {
+        id: "nav.activity",
+        label: "Toggle Activity Log",
+        category: "navigation" as const,
+        keywords: "left sidebar log",
+        action: () =>
+          dispatch({
+            type: "SET_LEFT_MENU",
+            payload: leftMenuOpen === "activity" ? null : "activity",
+          }),
+      },
+      {
+        id: "nav.metrics",
+        label: "Toggle Graph Metrics",
+        category: "navigation" as const,
+        keywords: "left sidebar entity relation",
+        action: () =>
+          dispatch({
+            type: "SET_LEFT_MENU",
+            payload: leftMenuOpen === "metrics" ? null : "metrics",
+          }),
+      },
+      // Navigation — toggle the right panels.
+      {
+        id: "nav.pathnodes",
+        label: "Toggle Path Nodes",
+        category: "navigation" as const,
+        keywords: "right sidebar pinned",
+        action: () =>
+          dispatch({
+            type: "SET_RIGHT_MENU",
+            payload: rightMenuOpen === "pathNodes" ? null : "pathNodes",
+          }),
+      },
+      {
+        id: "nav.notes",
+        label: "Toggle Notes",
+        category: "navigation" as const,
+        keywords: "right sidebar markdown",
+        action: () =>
+          dispatch({
+            type: "SET_RIGHT_MENU",
+            payload: rightMenuOpen === "notes" ? null : "notes",
+          }),
+      },
+      {
+        id: "nav.analysis",
+        label: "Toggle Analysis (AI)",
+        category: "navigation" as const,
+        keywords: "ai llm sparkles",
+        action: () => ai.setAnalyzeAiOpen(!ai.analyzeAiOpen),
+      },
+      {
+        id: "nav.help",
+        label: "Open Help / Guide",
+        category: "navigation" as const,
+        keywords: "manual docs about dsl",
+        hint: "?",
+        action: () => setHelpPanelOpen(true),
+      },
+      // View — switch the bottom tab.
+      {
+        id: "view.hunt",
+        label: "Switch to Hunt mode",
+        category: "view" as const,
+        keywords: "hypothesis dsl",
+        action: () => dispatch({ type: "SET_BOTTOM_TAB", payload: "hunt" }),
+      },
+      {
+        id: "view.explore",
+        label: "Switch to Explorer mode",
+        category: "view" as const,
+        keywords: "search neighbours",
+        action: () => dispatch({ type: "SET_BOTTOM_TAB", payload: "explore" }),
+      },
+      {
+        id: "view.events",
+        label: "Switch to Events view",
+        category: "view" as const,
+        keywords: "timeline rows raw",
+        action: () => dispatch({ type: "SET_BOTTOM_TAB", payload: "events" }),
+      },
+      {
+        id: "view.heatmap",
+        label: "Switch to Heatmap view",
+        category: "view" as const,
+        keywords: "temporal density",
+        action: () => dispatch({ type: "SET_BOTTOM_TAB", payload: "heatmap" }),
+      },
+      {
+        id: "view.timeline",
+        label: "Switch to Timeline view",
+        category: "view" as const,
+        keywords: "chronological",
+        action: () => dispatch({ type: "SET_BOTTOM_TAB", payload: "timeline" }),
+      },
+      // Export quick-actions — surfaces commands with no other UI.
+      {
+        id: "export.subgraph",
+        label: "Export current subgraph as JSON",
+        category: "export" as const,
+        keywords: "download graph snapshot",
+        invoke: { command: "cmd_export_subgraph", args: { format: "json", nodes: [] } },
+      },
+      {
+        id: "export.ocsf.json",
+        label: "Export OCSF v1.4 events (JSON)",
+        category: "export" as const,
+        keywords: "schema events provenance",
+        invoke: {
+          command: "cmd_export_ocsf",
+          args: {
+            format: "json",
+            datasetId: null,
+            pageSize: null,
+            offset: null,
+          },
+        },
+      },
+      {
+        id: "export.ocsf.ndjson",
+        label: "Export OCSF v1.4 events (NDJSON)",
+        category: "export" as const,
+        keywords: "schema events streamable",
+        invoke: {
+          command: "cmd_export_ocsf",
+          args: {
+            format: "ndjson",
+            datasetId: null,
+            pageSize: null,
+            offset: null,
+          },
+        },
+      },
+      // Advanced — backend commands without a UI surface today.
+      {
+        id: "adv.betweenness",
+        label: "Compute Betweenness centrality",
+        category: "advanced" as const,
+        keywords: "scoring graph centrality slow",
+        invoke: { command: "cmd_compute_betweenness" },
+      },
+    ],
+    [dispatch, leftMenuOpen, rightMenuOpen, ai],
+  );
 
   // When no session is selected, show the welcome page (session selector + lateral guide)
   if (!currentSession) {
@@ -1412,6 +1595,20 @@ function AppInner() {
             </div>
           )}
         </div>
+      )}
+      {/* PR-D: global command palette (Ctrl+K / Cmd+K). Lazy-loaded
+          so the initial bundle isn't paying for it until the
+          analyst actually opens it. */}
+      {commandPaletteOpen && (
+        <LazyBoundary>
+          <CommandPalette
+            open={commandPaletteOpen}
+            onClose={() => setCommandPaletteOpen(false)}
+            items={commandItems}
+            onLog={addLog}
+            invokeFn={(cmd, args) => invoke(cmd, args)}
+          />
+        </LazyBoundary>
       )}
     </div>
   );
