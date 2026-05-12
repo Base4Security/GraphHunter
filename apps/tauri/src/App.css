@@ -56,9 +56,20 @@ body {
 
 .app-top-bar {
   grid-column: 1 / -1;
+  /* PR-A v3: simple horizontal flex row, no wrap. Three regions
+     (logo, session-selector, toolbar) sit side by side and DO NOT
+     shrink below their natural content. If the combined width
+     exceeds the viewport, the bar scrolls horizontally — which
+     never happens in practice because compact-mode collapses
+     toolbar labels below 1100 px. The earlier grid approach was
+     squeezing the session column to 0 width when the toolbar's
+     `auto` cell asked for more space than was available, causing
+     session content to overflow on top of the toolbar. With flex
+     and no flex-grow on any region, each region gets exactly its
+     content width and the bar is predictable. */
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  flex-wrap: nowrap;
   gap: 16px;
   padding: 0;
   min-height: var(--top-bar-height, 50px);
@@ -66,6 +77,25 @@ body {
   border-bottom: 1px solid var(--border);
   z-index: 150;
   position: relative;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+/* All direct children of the top-bar keep their intrinsic width
+   so nothing collapses onto a neighbour. The toolbar gets pushed
+   to the far right via auto margin so the gap between session
+   and toolbar fills naturally without flex-grow. */
+.app-top-bar > * {
+  flex-shrink: 0;
+}
+.app-top-bar > .app-toolbar {
+  margin-left: auto;
+  /* PR-A v3 follow-up: when the NodeDetailPanel (a fixed-position
+     320px right rail) is open, reserve space so toolbar buttons
+     don't slide under the panel. React sets `--node-detail-width`
+     via inline style on `.app-container` when `nodeDetails` is
+     non-null. Defaults to 0 — no effect when the panel is closed. */
+  margin-right: var(--node-detail-width, 0px);
 }
 
 .app-logo {
@@ -89,7 +119,10 @@ body {
 }
 
 .app-top-bar .session-selector {
-  flex: 1;
+  /* In the new flex layout, the session-selector keeps its natural
+     content width (`flex-shrink: 0` is inherited from the rule on
+     `.app-top-bar > *`). No need for width: 100% — that would
+     stretch it to fill the bar. */
   min-width: 0;
 }
 
@@ -103,12 +136,24 @@ body {
 
 .app-toolbar {
   display: flex;
-  flex-wrap: wrap;
+  /* PR-A v3: flex-wrap removed in favour of compact-mode (icon-only
+     below 1100px) + horizontal scroll fallback. Two-axis wrap was
+     interacting badly with the grid container — wrapped rows would
+     extend the grid row's height, dragging the session-selector
+     down and creating the "stacked vertically" appearance. With
+     `nowrap`, the toolbar stays exactly one row tall regardless of
+     content; if it ever overflows, the grid cell scrolls
+     horizontally instead of breaking the layout vertically. */
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
-  row-gap: 6px;
   padding: 8px 16px 8px 0;
   min-width: 0;
+  /* Allow horizontal scroll at extreme widths instead of breaking
+     the layout. Compact-mode (icon-only) usually prevents this
+     from being triggered. */
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 /* In compact mode the icon stays but the trailing text label is
@@ -284,6 +329,12 @@ body {
   align-items: center;
   gap: 8px;
   padding: 8px 16px;
+  /* PR-A follow-up: the parent `.app-top-bar` is now
+     `align-items: flex-start`. Keep this wrapper centred to the
+     toolbar's first row when both are short by matching the
+     toolbar's vertical padding. */
+  min-height: var(--top-bar-height, 50px);
+  box-sizing: border-box;
 }
 
 .session-selector-row {
@@ -293,13 +344,33 @@ body {
   flex-wrap: wrap;
 }
 
+/* PR-A follow-up: in the MAIN top-bar (not welcome page), force the
+   row to stay single-line so a squeezed top-bar doesn't stack
+   "Session:" / dropdown / save / trash vertically. This selector
+   is more specific than `.welcome-session-selector-wrap
+   .session-selector-row` (which keeps `flex-wrap: wrap` for the
+   welcome card) so each context gets the right behaviour without
+   `!important`. */
+.app-top-bar .session-selector-row {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
 .session-label {
   font-size: 12px;
   color: var(--text-muted);
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .session-select {
-  min-width: 160px;
+  /* Was `min-width: 160px` — held the dropdown rigid and forced
+     siblings to overflow / wrap. Now allowed to shrink down to 0
+     under pressure; a `max-width` keeps it readable on wide
+     viewports. */
+  min-width: 0;
+  max-width: 220px;
+  flex: 1 1 auto;
   padding: 6px 8px;
   background: var(--bg-input);
   color: var(--text-primary);
@@ -317,6 +388,7 @@ body {
   border-radius: var(--radius);
   border: 1px solid var(--border);
   background: var(--bg-tertiary);
+  flex-shrink: 0;
   color: var(--text-primary);
   cursor: pointer;
 }
@@ -2210,7 +2282,14 @@ body {
 
 .node-detail-panel {
   position: fixed;
-  top: var(--top-bar-height, 50px);
+  /* Was `top: var(--top-bar-height, 50px)` — the panel sat below
+     the top-bar, leaving the toolbar's right-most buttons (Notes,
+     Analysis, …) visually "crossing" the panel's column. Now the
+     panel extends from the very top of the viewport down to the
+     bottom panel, owning the full right column. The top-bar gets
+     a matching right-padding so its content stops before the
+     panel's left edge — see `.app-top-bar` rule above. */
+  top: 0;
   right: 0;
   bottom: calc(var(--bottom-panel-height, 250px) + 6px);
   width: 320px;
@@ -2219,11 +2298,16 @@ body {
   background: var(--bg-panel);
   border-left: 1px solid var(--border);
   box-shadow: -4px 0 20px rgba(0, 0, 0, 0.5);
-  z-index: 100;
+  /* Above the top-bar (z=150) so it covers the right column
+     cleanly. */
+  z-index: 160;
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  padding: 16px;
+  /* Extra top padding to compensate for the panel now starting at
+     y=0 — pushes the close + title row down to roughly match the
+     top-bar's vertical centre. */
+  padding: 14px 16px 16px;
   gap: 12px;
 }
 

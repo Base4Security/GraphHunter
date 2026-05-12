@@ -733,6 +733,12 @@ function AppInner() {
           "--bottom-panel-height": `${bottomPanelHeight}px`,
           "--left-panel-width": leftPanelCount === 0 ? "0px" : `${leftPanelWidth}px`,
           "--right-panel-width": rightPanelCount === 0 ? "0px" : `${rightPanelWidth}px`,
+          // PR-A v3 follow-up: NodeDetailPanel is a fixed-position
+          // floating rail (320 px) that lives OUTSIDE the right-menu
+          // cluster. Expose its width via a CSS var so the top-bar
+          // can reserve matching right-margin and avoid the
+          // "atravezado" overlap.
+          "--node-detail-width": nodeDetails ? "320px" : "0px",
         } as React.CSSProperties
       }
     >
