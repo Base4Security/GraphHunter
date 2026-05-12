@@ -280,6 +280,30 @@ export interface Subgraph {
   edges: SubgraphEdge[];
 }
 
+/**
+ * Per-(source, target, rel_type) bundle produced by edge bundling
+ * in GraphCanvas. Surfaces both the aggregate (for the canvas
+ * label / width / color) and the full list of underlying edges
+ * (for drill-down inside EdgeDetailPanel). The underlying list
+ * preserves every per-edge `metadata` value (sensor_uid, flow_id,
+ * bytes, sni, kerberos_user, …) so the analyst can pivot back to
+ * any single observation that contributed to the bundle.
+ */
+export interface EdgeBundle {
+  source: string;
+  target: string;
+  rel_type: string;
+  /** Number of underlying edges in this bundle. */
+  count: number;
+  /** Earliest `timestamp` across the bundled edges. */
+  first_ts: number;
+  /** Latest `timestamp` across the bundled edges. */
+  last_ts: number;
+  /** Every underlying edge, in insertion order. The first element
+   *  is what `EdgeDetailPanel` auto-selects on open. */
+  underlying: SubgraphEdge[];
+}
+
 // ── Color mapping for entity types ──
 
 export const ENTITY_COLORS: Record<EntityType, string> = {

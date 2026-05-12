@@ -21,6 +21,7 @@ const HelpPanel = lazy(() => import("./components/HelpPanel"));
 const HypothesisBuilder = lazy(() => import("./components/HypothesisBuilder"));
 const NotesPanel = lazy(() => import("./components/NotesPanel"));
 const NodeDetailPanel = lazy(() => import("./components/NodeDetailPanel"));
+const EdgeDetailPanel = lazy(() => import("./components/EdgeDetailPanel"));
 const HuntResultsTable = lazy(() => import("./components/HuntResultsTable"));
 const EventsViewPanel = lazy(() => import("./components/EventsViewPanel"));
 const HeatmapView = lazy(() => import("./components/HeatmapView"));
@@ -473,6 +474,12 @@ function AppInner() {
   // ── Click a node to show details in the lateral panel (works in both Hunt and Explorer) ──
   const handleNodeClick = useCallback(
     async (nodeId: string) => {
+      // PR-B follow-up: clicking a node closes the EdgeDetailPanel
+      // (if open) so the two inspectors stay mutually exclusive.
+      dispatch({ type: "SET_SELECTED_EDGE_BUNDLE", payload: null });
+      if (rightMenuOpen === "edgeDetail") {
+        dispatch({ type: "SET_RIGHT_MENU", payload: null });
+      }
       dispatch({ type: "SET_SELECTED_NODE_ID", payload: nodeId });
       addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), message: `Selected node: ${nodeId}`, level: "info" });
       try {
@@ -484,7 +491,7 @@ function AppInner() {
         addNotification({ message: `Failed to get node details: ${errorMessage(e)}`, type: "error" });
       }
     },
-    [addLog, dispatch, addNotification]
+    [addLog, dispatch, addNotification, rightMenuOpen]
   );
 
   // ── Explorer mode: double-click to expand ──
@@ -968,6 +975,16 @@ function AppInner() {
           entityTypesInGraph={entityTypesInGraph}
           onNodeContextAddToPathNodes={handleAddToPathNodes}
           onNodeContextRemoveFromPathNodes={handleRemoveFromPathNodes}
+          onEdgeClick={(bundle) => {
+            // PR-B follow-up: clear the floating NodeDetailPanel so
+            // it doesn't visually cover the new EdgeDetailPanel.
+            // The two inspectors are mutually exclusive — you're
+            // looking at one thing at a time.
+            dispatch({ type: "SET_NODE_DETAILS", payload: null });
+            dispatch({ type: "SET_SELECTED_NODE_ID", payload: null });
+            dispatch({ type: "SET_SELECTED_EDGE_BUNDLE", payload: bundle });
+            dispatch({ type: "SET_RIGHT_MENU", payload: "edgeDetail" });
+          }}
         >
           {showHuntTable && mode === "hunt" && (
             <LazyBoundary>
@@ -1133,6 +1150,22 @@ function AppInner() {
                   onNotesChange={setNotes}
                   onAutoSave={handleAutoSave}
                   onShowNodeOnMap={(nodeId) => handleNodeContextExpandOrShow(nodeId)}
+                />
+              </LazyBoundary>
+            </div>
+          </div>
+        )}
+        {rightMenuOpen === "edgeDetail" && state.selectedEdgeBundle && (
+          <div className="left-menu-panel right-menu-panel" role="region" aria-label="Edge Detail">
+            <div className="left-menu-panel-content" style={{ padding: 0 }}>
+              <LazyBoundary>
+                <EdgeDetailPanel
+                  bundle={state.selectedEdgeBundle}
+                  onClose={() => dispatch({ type: "SET_RIGHT_MENU", payload: null })}
+                  onCentreNode={(nodeId) =>
+                    dispatch({ type: "SET_CENTER_NODE_ID", payload: nodeId })
+                  }
+                  onPinNode={handleAddToPathNodes}
                 />
               </LazyBoundary>
             </div>

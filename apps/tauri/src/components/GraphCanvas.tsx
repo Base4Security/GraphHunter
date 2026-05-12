@@ -4,10 +4,11 @@ import { invoke } from "../lib/tauri";
 import cytoscape, { type Core, type ElementDefinition } from "cytoscape";
 // @ts-expect-error no types for cytoscape-dagre
 import dagre from "cytoscape-dagre";
-import type { Subgraph, Neighborhood } from "../types";
+import type { Subgraph, Neighborhood, SubgraphEdge, EdgeBundle } from "../types";
 import { ENTITY_COLORS, type EntityType } from "../types";
 import NodeContextMenu from "./NodeContextMenu";
 import { useUIState, useAppDispatch } from "../context/AppStateContext";
+import { relColor, REL_HIGHLIGHT_COLOR } from "../styles/relationPalette";
 
 // Register dagre layout
 cytoscape.use(dagre);
@@ -36,6 +37,11 @@ interface GraphCanvasProps {
   /** When set, center the view on this node (e.g. from Path Nodes list); cleared via onCenterDone */
   centerNodeId?: string | null;
   onCenterDone?: () => void;
+  /** PR-B: fires when the analyst clicks an edge. The bundle carries
+   *  every underlying edge that contributed to the drawn line so the
+   *  detail panel can drill into per-edge metadata (flow_id,
+   *  sensor_uid, bytes, sni, …) without another backend round-trip. */
+  onEdgeClick?: (bundle: EdgeBundle) => void;
   children?: ReactNode;
 }
 
@@ -283,6 +289,7 @@ export default function GraphCanvas({
   onNodeContextRemoveFromPathNodes,
   centerNodeId = null,
   onCenterDone,
+  onEdgeClick,
   children,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -455,8 +462,15 @@ export default function GraphCanvas({
           selector: "edge",
           style: {
             width: "data(width)" as unknown as number,
-            "line-color": "#2d3748",
-            "target-arrow-color": "#2d3748",
+            // PR-B: per-rel-type semantic colors via cytoscape's
+            // function-style mapping. Both the line and the arrow
+            // pull from `data.rel_type`, which buildElements now
+            // sets on every edge. Unknown rel_types fall back to
+            // REL_OTHER_COLOR inside relColor().
+            "line-color": ((ele: cytoscape.EdgeSingular) =>
+              relColor(ele.data("rel_type") as string)) as unknown as string,
+            "target-arrow-color": ((ele: cytoscape.EdgeSingular) =>
+              relColor(ele.data("rel_type") as string)) as unknown as string,
             "target-arrow-shape": "triangle",
             "curve-style": "bezier",
             label: "data(label)",
@@ -471,9 +485,9 @@ export default function GraphCanvas({
           selector: "edge.highlighted",
           style: {
             width: 3,
-            "line-color": "#ff4444",
-            "target-arrow-color": "#ff4444",
-            "overlay-color": "#ff4444",
+            "line-color": REL_HIGHLIGHT_COLOR,
+            "target-arrow-color": REL_HIGHLIGHT_COLOR,
+            "overlay-color": REL_HIGHLIGHT_COLOR,
             "overlay-opacity": 0.1,
           },
         },
@@ -553,18 +567,49 @@ export default function GraphCanvas({
       setContextMenu({ nodeId, x: pos.clientX, y: pos.clientY });
     };
 
+    // PR-B: edge tap → emit the full bundle (source, target,
+    // rel_type, count, first_ts, last_ts, underlying[]) so the
+    // detail panel can drill into per-edge metadata without
+    // another backend round-trip. The underlying array was
+    // stuffed into `data.bundled` by buildElements.
+    const handleEdgeTap = (evt: cytoscape.EventObject) => {
+      if (!onEdgeClick) return;
+      const ed = evt.target;
+      const bundled = ed.data("bundled") as SubgraphEdge[] | undefined;
+      if (!bundled || bundled.length === 0) return;
+      const firstTs = bundled.reduce(
+        (m, e) => Math.min(m, e.timestamp),
+        Number.POSITIVE_INFINITY,
+      );
+      const lastTs = bundled.reduce(
+        (m, e) => Math.max(m, e.timestamp),
+        Number.NEGATIVE_INFINITY,
+      );
+      onEdgeClick({
+        source: ed.data("source") as string,
+        target: ed.data("target") as string,
+        rel_type: ed.data("rel_type") as string,
+        count: bundled.length,
+        first_ts: Number.isFinite(firstTs) ? firstTs : 0,
+        last_ts: Number.isFinite(lastTs) ? lastTs : 0,
+        underlying: bundled,
+      });
+    };
+
     cy.on("tap", "node", handleTap);
     cy.on("dbltap", "node", handleDbltap);
     cy.on("tap", handleTapBackground);
     cy.on("cxttap", "node", handleCxttap);
+    cy.on("tap", "edge", handleEdgeTap);
 
     return () => {
       cy.off("tap", "node", handleTap);
       cy.off("dbltap", "node", handleDbltap);
       cy.off("tap", handleTapBackground);
       cy.off("cxttap", "node", handleCxttap);
+      cy.off("tap", "edge", handleEdgeTap);
     };
-  }, [onNodeClick, onNodeDoubleClick]);
+  }, [onNodeClick, onNodeDoubleClick, onEdgeClick]);
 
   // ── Score-based sizing helper ──
   const scoreToSize = useCallback((score: number) => {
@@ -580,8 +625,23 @@ export default function GraphCanvas({
   const [truncationInfo, setTruncationInfo] = useState<{ nodes: number; edges: number; shownNodes: number; shownEdges: number } | null>(null);
 
   // ── Build Cytoscape elements from subgraph ──
+  //
+  // Accepts either a Subgraph (hunt / events view) or a Neighborhood
+  // (explorer mode). Both shapes share the relevant fields — nodes
+  // with id/entity_type/score/metadata, edges with source/target/
+  // rel_type/timestamp/metadata — so the structural type below
+  // covers both. The `ip_class` on SubgraphNode is optional and
+  // absent on NeighborNode; that's fine since it's only consumed
+  // when present.
   const buildElements = useCallback(
-    (sg: { nodes: Array<{ id: string; entity_type: string; score: number; ip_class?: string | null }>; edges: Array<{ source: string; target: string; rel_type: string; timestamp: number }> }): ElementDefinition[] => {
+    (
+      sg:
+        | Subgraph
+        | {
+            nodes: Subgraph["nodes"];
+            edges: Subgraph["edges"];
+          },
+    ): ElementDefinition[] => {
       const elements: ElementDefinition[] = [];
 
       // Cap nodes: if over limit, take top N by score
@@ -621,30 +681,45 @@ export default function GraphCanvas({
       // Edge bundling: group edges by (source, target, rel_type) to avoid
       // rendering hundreds of parallel edges between the same nodes.
       // Only include edges whose both endpoints are in the rendered node set.
-      const edgeGroups = new Map<string, { source: string; target: string; rel_type: string; count: number }>();
+      //
+      // PR-B: each bundle keeps the full list of underlying SubgraphEdge
+      // records. The drawn edge gets `data.bundled` so the tap handler
+      // can emit them to EdgeDetailPanel without going back to the
+      // backend. ~500 B per record × ~5000 cap = ~50 MB worst case —
+      // fits comfortably and avoids a per-click cmd_get_bundle_details.
+      const edgeGroups = new Map<
+        string,
+        { source: string; target: string; rel_type: string; underlying: SubgraphEdge[] }
+      >();
       for (const edge of sg.edges) {
         if (!renderedNodeIds.has(edge.source) || !renderedNodeIds.has(edge.target)) continue;
         const key = `${edge.source}|${edge.target}|${edge.rel_type}`;
         const existing = edgeGroups.get(key);
         if (existing) {
-          existing.count++;
+          existing.underlying.push(edge);
         } else {
-          edgeGroups.set(key, { source: edge.source, target: edge.target, rel_type: edge.rel_type, count: 1 });
+          edgeGroups.set(key, {
+            source: edge.source,
+            target: edge.target,
+            rel_type: edge.rel_type,
+            underlying: [edge],
+          });
         }
       }
 
       // Cap bundled edges: if still over limit, keep only the highest-count bundles
       let bundledEdges = Array.from(edgeGroups.entries());
       if (bundledEdges.length > MAX_RENDERED_EDGES) {
-        bundledEdges.sort((a, b) => b[1].count - a[1].count);
+        bundledEdges.sort((a, b) => b[1].underlying.length - a[1].underlying.length);
         bundledEdges = bundledEdges.slice(0, MAX_RENDERED_EDGES);
       }
 
       for (const [key, bundle] of bundledEdges) {
-        const label = bundle.count > 1
-          ? `${bundle.rel_type} ×${bundle.count}`
+        const count = bundle.underlying.length;
+        const label = count > 1
+          ? `${bundle.rel_type} ×${count}`
           : bundle.rel_type;
-        const width = Math.min(2 + Math.log2(bundle.count) * 1.5, 8);
+        const width = Math.min(2 + Math.log2(count) * 1.5, 8);
         elements.push({
           group: "edges",
           data: {
@@ -653,6 +728,11 @@ export default function GraphCanvas({
             target: bundle.target,
             label,
             width,
+            // PR-B: surface rel_type and the full underlying list
+            // so the edge style fn can pick a color and the tap
+            // handler can build an EdgeBundle.
+            rel_type: bundle.rel_type,
+            bundled: bundle.underlying,
           },
         });
       }

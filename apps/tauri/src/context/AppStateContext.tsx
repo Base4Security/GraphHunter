@@ -7,6 +7,7 @@ import type {
   NodeDetails,
   SessionInfo,
   Note,
+  EdgeBundle,
 } from "../types";
 
 // ── Mode types ──
@@ -35,11 +36,18 @@ export interface MapState {
 export interface UISlice {
   mode: AppMode;
   bottomTab: BottomTab;
-  rightMenuOpen: "pathNodes" | "notes" | null;
+  rightMenuOpen: "pathNodes" | "notes" | "edgeDetail" | null;
   leftMenuOpen: "datasets" | "activity" | "metrics" | null;
   centerNodeId: string | null;
   bottomPanelHeight: number;
   viewState: { zoom: number; pan: { x: number; y: number } } | null;
+  /** Edge currently displayed in the right-side EdgeDetailPanel.
+   *  `null` when no edge is selected. Set via `onEdgeClick` in
+   *  GraphCanvas; cleared when the panel closes or another panel
+   *  opens. The bundle carries the full list of underlying edges
+   *  so the panel can drill into per-edge metadata without
+   *  another backend round-trip. */
+  selectedEdgeBundle: EdgeBundle | null;
 }
 
 /** Session-scoped data: session identity, stats, notes, path nodes. */
@@ -96,6 +104,7 @@ export const initialAppState: AppState = {
   mapPast: [],
   mapFuture: [],
   viewState: null,
+  selectedEdgeBundle: null,
 };
 
 // ── Action types ──
@@ -119,8 +128,9 @@ export type AppAction =
   | { type: "ADD_PATH_NODE"; payload: string }
   | { type: "REMOVE_PATH_NODE"; payload: string }
   | { type: "SET_ENTITY_TYPES_IN_GRAPH"; payload: string[] }
-  | { type: "SET_RIGHT_MENU"; payload: "pathNodes" | "notes" | null }
+  | { type: "SET_RIGHT_MENU"; payload: "pathNodes" | "notes" | "edgeDetail" | null }
   | { type: "SET_LEFT_MENU"; payload: "datasets" | "activity" | "metrics" | null }
+  | { type: "SET_SELECTED_EDGE_BUNDLE"; payload: EdgeBundle | null }
   | { type: "SET_NOTES"; payload: Note[] }
   | { type: "SET_CENTER_NODE_ID"; payload: string | null }
   | { type: "SET_BOTTOM_PANEL_HEIGHT"; payload: number }
@@ -176,9 +186,18 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case "SET_ENTITY_TYPES_IN_GRAPH":
       return { ...state, entityTypesInGraph: action.payload };
     case "SET_RIGHT_MENU":
-      return { ...state, rightMenuOpen: action.payload };
+      // Clearing the right menu also clears the edge selection so a
+      // future open of the edgeDetail panel doesn't flash stale data.
+      return {
+        ...state,
+        rightMenuOpen: action.payload,
+        selectedEdgeBundle:
+          action.payload === "edgeDetail" ? state.selectedEdgeBundle : null,
+      };
     case "SET_LEFT_MENU":
       return { ...state, leftMenuOpen: action.payload };
+    case "SET_SELECTED_EDGE_BUNDLE":
+      return { ...state, selectedEdgeBundle: action.payload };
     case "SET_NOTES":
       return { ...state, notes: action.payload };
     case "SET_CENTER_NODE_ID":
@@ -225,6 +244,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         mapPast: [],
         mapFuture: [],
         viewState: null,
+        selectedEdgeBundle: null,
       };
     default:
       return state;
@@ -259,9 +279,11 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     centerNodeId: state.centerNodeId,
     bottomPanelHeight: state.bottomPanelHeight,
     viewState: state.viewState,
+    selectedEdgeBundle: state.selectedEdgeBundle,
   }), [
     state.mode, state.bottomTab, state.rightMenuOpen, state.leftMenuOpen,
     state.centerNodeId, state.bottomPanelHeight, state.viewState,
+    state.selectedEdgeBundle,
   ]);
 
   const session: SessionSlice = useMemo(() => ({
