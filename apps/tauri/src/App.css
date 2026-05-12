@@ -93,14 +93,35 @@ body {
   min-width: 0;
 }
 
-/* ── Toolbar (top right) ── */
+/* ── Toolbar (top right) ──
+   `flex-wrap: wrap` lets the button row reflow onto a second line
+   instead of overflowing horizontally on narrow windows (PR-A).
+   The `--compact` modifier kicks in below ~1100px via the
+   useViewportWidth hook in AppInner — it hides label text so the
+   row stays one line on medium-narrow viewports, falling back to
+   wrap when even the icon-only row doesn't fit. */
 
 .app-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  row-gap: 6px;
   padding: 8px 16px 8px 0;
-  flex-shrink: 0;
+  min-width: 0;
+}
+
+/* In compact mode the icon stays but the trailing text label is
+   hidden. Badges are kept visible — they carry data (path-node
+   count, memory %) that's not redundant with the icon. */
+.app-toolbar.app-toolbar--compact .app-toolbar-btn-label {
+  display: none;
+}
+
+/* Icon-only buttons (Back/Forward/Help) keep their tighter padding
+   when in compact mode so the row tightens noticeably. */
+.app-toolbar.app-toolbar--compact .app-toolbar-btn {
+  padding: 6px 8px;
 }
 
 .app-toolbar-btn {
@@ -877,6 +898,29 @@ body {
   position: relative;
 }
 
+/* On viewports narrower than 900px the 280-px-per-side panels squeeze
+   the central canvas to uselessness. Collapse both side columns to
+   zero and let the panels render in-flow at the bottom when the user
+   opens them. The buttons that toggle them remain reachable in the
+   compact toolbar above. */
+@media (max-width: 900px) {
+  .app-container {
+    grid-template-columns: 0 1fr 0;
+  }
+  .app-left-menus,
+  .app-right-menus {
+    position: fixed;
+    top: var(--top-bar-height, 50px);
+    bottom: 0;
+    z-index: 20;
+    width: min(320px, 80vw);
+    background: var(--bg-panel);
+    box-shadow: 0 0 0 1px var(--border);
+  }
+  .app-left-menus { left: 0; }
+  .app-right-menus { right: 0; }
+}
+
 /* Welcome layout: override grid so welcome page fills space below top bar */
 .app-container.app-container--welcome {
   display: flex;
@@ -1229,13 +1273,27 @@ body {
   z-index: 150;
 }
 
-/* ── Mode Tabs ── */
+/* ── Mode Tabs ──
+   Horizontal scroll keeps all 5 tabs reachable on narrow viewports
+   without overflowing the parent grid cell. The thin scrollbar
+   styling avoids a chunky always-visible bar — the row only shows
+   it when overflow actually happens. */
 
 .mode-tabs {
   display: flex;
   gap: 0;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.mode-tabs::-webkit-scrollbar {
+  height: 4px;
+}
+.mode-tabs::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
 }
 
 .mode-tab {
@@ -1250,6 +1308,10 @@ body {
   cursor: pointer;
   transition: all 0.2s;
   border-bottom: 2px solid transparent;
+  /* Don't let tabs shrink — they should overflow horizontally
+     instead, so the active tab text stays readable. */
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .mode-tab:hover {

@@ -33,6 +33,7 @@ import { useAiAnalysis } from "./hooks/useAiAnalysis";
 import { useMapNavigation } from "./hooks/useMapNavigation";
 import { usePanelResize } from "./hooks/usePanelResize";
 import { useSentinelEvents } from "./hooks/useSentinelEvents";
+import { useViewportWidth, TOOLBAR_COMPACT_THRESHOLD_PX } from "./hooks/useViewportWidth";
 import type {
   GraphStats,
   HuntResults,
@@ -93,6 +94,13 @@ function AppInner() {
     notes,
     centerNodeId,
   } = state;
+
+  // PR-A: drive the top-toolbar compact-mode toggle off the viewport
+  // width. Below ~1100px the full row of 8–11 buttons + status badges
+  // overflows, so we collapse to icon-only and let tooltips carry the
+  // labels.
+  const viewportWidth = useViewportWidth();
+  const compactToolbar = viewportWidth < TOOLBAR_COMPACT_THRESHOLD_PX;
 
   const addLog = useCallback(
     (entry: LogEntry) => {
@@ -741,7 +749,7 @@ function AppInner() {
           onError={setSessionError}
           onLog={addLog}
         />
-        <div className="app-toolbar">
+        <div className={`app-toolbar${compactToolbar ? " app-toolbar--compact" : ""}`}>
           <button
             type="button"
             className="app-toolbar-btn app-toolbar-btn-icon"
@@ -768,8 +776,8 @@ function AppInner() {
             onClick={() => dispatch({ type: "SET_LEFT_MENU", payload: leftMenuOpen === "datasets" ? null : "datasets" })}
             title={leftMenuOpen === "datasets" ? "Hide Datasets" : "Show Datasets"}
           >
-            <Database size={14} style={{ marginRight: 4 }} />
-            Datasets
+            <Database size={14} />
+            <span className="app-toolbar-btn-label">Datasets</span>
           </button>
           <button
             type="button"
@@ -777,8 +785,8 @@ function AppInner() {
             onClick={() => dispatch({ type: "SET_LEFT_MENU", payload: leftMenuOpen === "activity" ? null : "activity" })}
             title={leftMenuOpen === "activity" ? "Hide Activity Log" : "Show Activity Log"}
           >
-            <Activity size={14} style={{ marginRight: 4 }} />
-            Activity
+            <Activity size={14} />
+            <span className="app-toolbar-btn-label">Activity</span>
           </button>
           <button
             type="button"
@@ -786,16 +794,18 @@ function AppInner() {
             onClick={() => dispatch({ type: "SET_LEFT_MENU", payload: leftMenuOpen === "metrics" ? null : "metrics" })}
             title={leftMenuOpen === "metrics" ? "Hide Graph Metrics" : "Show Graph Metrics"}
           >
-            <BarChart3 size={14} style={{ marginRight: 4 }} />
-            Metrics
+            <BarChart3 size={14} />
+            <span className="app-toolbar-btn-label">Metrics</span>
           </button>
           <button
             type="button"
             className={`app-toolbar-btn ${rightMenuOpen === "pathNodes" ? "active" : ""}`}
             onClick={() => dispatch({ type: "SET_RIGHT_MENU", payload: rightMenuOpen === "pathNodes" ? null : "pathNodes" })}
             title={rightMenuOpen === "pathNodes" ? "Close Path Nodes" : "Open Path Nodes"}
+            aria-label="Path Nodes"
           >
-            Path Nodes
+            <MapPin size={14} />
+            <span className="app-toolbar-btn-label">Path Nodes</span>
             {pathNodeIds.length > 0 && (
               <span className="app-toolbar-badge">{pathNodeIds.length}</span>
             )}
@@ -805,8 +815,10 @@ function AppInner() {
             className={`app-toolbar-btn ${rightMenuOpen === "notes" ? "active" : ""}`}
             onClick={() => dispatch({ type: "SET_RIGHT_MENU", payload: rightMenuOpen === "notes" ? null : "notes" })}
             title={rightMenuOpen === "notes" ? "Close Notes" : "Open Notes"}
+            aria-label="Notes"
           >
-            Notes
+            <FileText size={14} />
+            <span className="app-toolbar-btn-label">Notes</span>
             {notes.length > 0 && (
               <span className="app-toolbar-badge">{notes.length}</span>
             )}
@@ -821,9 +833,10 @@ function AppInner() {
               }
             }}
             title="Analyze current graph with AI (malicious? next node to expand?)"
+            aria-label="Analysis"
           >
-            <Sparkles size={14} style={{ marginRight: 4 }} />
-            Analysis
+            <Sparkles size={14} />
+            <span className="app-toolbar-btn-label">Analysis</span>
           </button>
           {perfStatus && (
             <span

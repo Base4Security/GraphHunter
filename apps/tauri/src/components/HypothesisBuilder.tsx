@@ -237,12 +237,21 @@ export default function HypothesisBuilder({
 
   return (
     <div className="hypothesis-content">
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <h2>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: 8,
+          rowGap: 6,
+        }}
+      >
+        <h2 style={{ margin: 0, flex: "0 0 auto" }}>
           <Crosshair size={14} style={{ marginRight: 6, verticalAlign: "middle" }} />
           Hypothesis Builder
         </h2>
-        <div style={{ display: "flex", gap: 4 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, rowGap: 6, minWidth: 0 }}>
           <button
             className={`btn btn-sm ${dslMode ? "btn-primary" : ""}`}
             onClick={() => {
@@ -287,6 +296,7 @@ export default function HypothesisBuilder({
               placeholder="Hunt"
               style={{
                 width: 140,
+                minWidth: 0,
                 padding: "2px 4px",
                 fontSize: 11,
                 background: "var(--bg-secondary)",
