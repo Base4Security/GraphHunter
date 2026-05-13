@@ -128,6 +128,7 @@ fn bench_cold_vs_warm(c: &mut Criterion) {
                             hypotheses: templates.clone(),
                             time_window: None,
                             max_results: None,
+                            dedup_mode: None,
                         })
                         .expect("cold batch ok");
                     black_box(resp);
@@ -148,6 +149,7 @@ fn bench_cold_vs_warm(c: &mut Criterion) {
                     hypotheses: templates.clone(),
                     time_window: None,
                     max_results: None,
+                    dedup_mode: None,
                 })
                 .expect("priming batch ok");
             b.iter(|| {
@@ -157,6 +159,7 @@ fn bench_cold_vs_warm(c: &mut Criterion) {
                         hypotheses: templates.clone(),
                         time_window: None,
                         max_results: None,
+                        dedup_mode: None,
                     })
                     .expect("warm batch ok");
                 black_box(resp);

@@ -53,6 +53,19 @@ pub struct RunHuntRequest {
     /// drives this call deterministically — see [`HuntScoring`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scoring: Option<HuntScoring>,
+    /// Optional dedup applied to the raw path list before publishing
+    /// to the hunt cache. When `None` (legacy) or `Some(DedupMode::None)`
+    /// the cache holds the raw DFS output and the page-read layer can
+    /// dedup on demand via [`GetHuntPageRequest::dedup_mode`]. When
+    /// set to `ByPath` or `ByEndpoints`, the run-level dedup collapses
+    /// duplicates immediately so the response's `path_count` reflects
+    /// unique paths and the cache stores unique paths only. Trade-off:
+    /// the per-row `edge_count` info that `score_and_paginate_paths`
+    /// surfaces is lost (every cached path is implicitly count=1);
+    /// callers that need the collapsed counts should leave this `None`
+    /// and dedup at page-read instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedup_mode: Option<DedupMode>,
 }
 
 /// Response shape matching the existing Tauri `HuntResults` for
@@ -110,6 +123,10 @@ pub struct RunHuntBatchRequest {
     pub time_window: Option<(i64, i64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_results: Option<usize>,
+    /// Applied to every entry in the batch. Same semantics as
+    /// [`RunHuntRequest::dedup_mode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedup_mode: Option<DedupMode>,
 }
 
 /// One element per hypothesis in the request, in order. Each entry

@@ -114,6 +114,7 @@ pub(super) async fn handler_run_hunt(
                 time_window: None,
                 max_results: Some(10_000),
                 scoring,
+                dedup_mode: None,
             })
         }),
     )

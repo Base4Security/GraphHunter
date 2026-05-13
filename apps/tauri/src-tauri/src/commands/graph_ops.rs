@@ -56,6 +56,9 @@ pub fn cmd_run_hunt(
             // decides. The MCP `hunt.run` is the path that exposes the
             // per-call override.
             scoring: None,
+            // Dedup is exposed only via the MCP API path for now; the
+            // Tauri UI relies on get_hunt_page's own dedup_mode.
+            dedup_mode: None,
         })
         .map_err(CommandError::from)?;
     Ok(HuntResults {
@@ -90,6 +93,7 @@ pub fn cmd_run_hunt_batch(
         hypotheses,
         time_window,
         max_results: max_results.or(Some(10_000)),
+        dedup_mode: None,
     })
     .map_err(CommandError::from)
 }

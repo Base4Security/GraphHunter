@@ -91,6 +91,7 @@ fn run_hunt_request_shape() {
         time_window: Some((0, 100)),
         max_results: Some(500),
         scoring: None,
+        dedup_mode: None,
     };
     assert_keys(&req, &["hypothesis", "time_window", "max_results"]);
 }

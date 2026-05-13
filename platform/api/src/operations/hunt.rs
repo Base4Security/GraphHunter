@@ -4,13 +4,65 @@
 //! so `get_hunt_page` can paginate/score without re-running the DFS.
 //! `diff_hunts` does not touch the cache — it's a two-query comparison.
 
-use graph_hunter_core::HuntDiff;
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use graph_hunter_core::{DedupMode, HuntDiff};
 
 use crate::dto::hunt::{
     DiffHuntsRequest, GetHuntPageRequest, GetHuntPageResponse, HuntScoring, RunHuntBatchEntry,
     RunHuntBatchRequest, RunHuntBatchResponse, RunHuntRequest, RunHuntResponse,
 };
 use crate::{ApiError, ApiResult, GraphHunterApi};
+
+/// Collapse duplicate paths in-place at hunt-run time.
+///
+/// Mirrors the dedup logic in `score_and_paginate_paths` but operates on
+/// `Vec<Arc<str>>` paths directly — saves a String materialization pass
+/// and keeps the cache shape unchanged downstream. Returns the deduped
+/// vector preserving insertion order.
+///
+/// `DedupMode::None` short-circuits: the input is returned unchanged so
+/// the legacy code path is bit-for-bit identical when no dedup is asked.
+fn dedup_arc_paths(
+    paths: Vec<Vec<Arc<str>>>,
+    mode: DedupMode,
+) -> Vec<Vec<Arc<str>>> {
+    match mode {
+        DedupMode::None => paths,
+        DedupMode::ByPath => {
+            // Key on the Vec<Arc<str>> directly; Arc's PartialEq compares
+            // pointer-equal first then string contents, so paths that
+            // reused interner entries are O(1) per element.
+            let mut seen: HashSet<Vec<Arc<str>>> = HashSet::with_capacity(paths.len());
+            let mut out: Vec<Vec<Arc<str>>> = Vec::with_capacity(paths.len());
+            for p in paths {
+                if seen.insert(p.clone()) {
+                    out.push(p);
+                }
+            }
+            out
+        }
+        DedupMode::ByEndpoints => {
+            let mut seen: HashSet<(Arc<str>, Arc<str>)> = HashSet::with_capacity(paths.len());
+            let mut out: Vec<Vec<Arc<str>>> = Vec::with_capacity(paths.len());
+            for p in paths {
+                if p.is_empty() {
+                    out.push(p);
+                    continue;
+                }
+                let key = (
+                    Arc::clone(p.first().unwrap()),
+                    Arc::clone(p.last().unwrap()),
+                );
+                if seen.insert(key) {
+                    out.push(p);
+                }
+            }
+            out
+        }
+    }
+}
 
 /// Inline threshold for [`RunHuntResponse::paths`]. Matches the legacy
 /// Tauri command's 100-path cutoff so the frontend keeps its current
@@ -98,6 +150,23 @@ impl GraphHunterApi {
                     )
                     .map_err(|e| ApiError::Internal(format!("search failed: {e}")))?
             }
+        };
+
+        // Optional run-time dedup. The raw DFS may emit many
+        // structurally-identical paths (the 2026-04-16 hunt session had
+        // 2523 paths where 1835 were the same `root → /usr/bin/grep`);
+        // when the caller knows up front they only want unique results
+        // they can ask for it here instead of paying for the storage of
+        // duplicates and then dedup'ing at page-read.
+        //
+        // When `dedup_mode` is `None` or `Some(DedupMode::None)` the
+        // function is a no-op identity and the cache stores raw paths
+        // — the legacy `get_hunt_page` flow still works unchanged and
+        // can surface `edge_count` for callers that need the collapsed
+        // counts.
+        let paths = match req.dedup_mode {
+            Some(mode) => dedup_arc_paths(paths, mode),
+            None => paths,
         };
 
         let path_count = paths.len();
@@ -208,6 +277,7 @@ impl GraphHunterApi {
             hypotheses,
             time_window,
             max_results,
+            dedup_mode,
         } = req;
 
         // Whether the indexes are *currently* populated, before
@@ -418,6 +488,10 @@ impl GraphHunterApi {
                     let truncated = raw_paths.len() >= cap;
                     let paths = graph.apply_aggregation((*raw_paths).clone(), &hypothesis);
                     drop(graph);
+                    let paths = match dedup_mode {
+                        Some(mode) => dedup_arc_paths(paths, mode),
+                        None => paths,
+                    };
                     let path_count = paths.len();
                     let inline =
                         if path_count <= 100 { paths.clone() } else { Vec::new() };
@@ -547,6 +621,10 @@ impl GraphHunterApi {
                 // in their aggregation clauses.
                 let paths = graph.apply_aggregation((*raw_paths).clone(), &hypothesis);
                 drop(graph);
+                let paths = match dedup_mode {
+                    Some(mode) => dedup_arc_paths(paths, mode),
+                    None => paths,
+                };
 
                 let path_count = paths.len();
                 let inline =
@@ -794,6 +872,10 @@ impl GraphHunterApi {
                     )
                 };
                 drop(graph);
+                let paths = match dedup_mode {
+                    Some(mode) => dedup_arc_paths(paths, mode),
+                    None => paths,
+                };
                 let path_count = paths.len();
                 let inline = if path_count <= 100 { paths.clone() } else { Vec::new() };
                 // Update the shared hunt cache so cmd_get_hunt_page
@@ -819,6 +901,10 @@ impl GraphHunterApi {
                     // batch hunts inherit v1 behavior — whatever
                     // session-level scoring is active.
                     scoring: None,
+                    // Forward the batch-level dedup choice; run_hunt
+                    // applies it to its own emit/cache, so the
+                    // returned entry is already deduped.
+                    dedup_mode,
                 };
                 let entry = match self.run_hunt(item_req) {
                     Ok(resp) => RunHuntBatchEntry {
@@ -894,6 +980,71 @@ mod tests {
     use graph_hunter_core::{GraphHunter, parse_dsl};
     use std::sync::Arc;
 
+    fn arc_path(items: &[&str]) -> Vec<Arc<str>> {
+        items.iter().map(|s| Arc::<str>::from(*s)).collect()
+    }
+
+    /// `DedupMode::None` is a strict identity — every input row,
+    /// including duplicates, survives in order.
+    #[test]
+    fn dedup_arc_paths_none_is_identity() {
+        let input = vec![
+            arc_path(&["a", "b"]),
+            arc_path(&["a", "b"]),
+            arc_path(&["c", "d"]),
+        ];
+        let out = dedup_arc_paths(input.clone(), DedupMode::None);
+        assert_eq!(out, input);
+    }
+
+    /// `ByPath` collapses identical full sequences into the
+    /// first-seen representative. Matches the 2026-04-16 hunt
+    /// session complaint (1835 identical `root → /usr/bin/grep`
+    /// in 2523 paths).
+    #[test]
+    fn dedup_arc_paths_by_path_collapses_duplicates() {
+        let input = vec![
+            arc_path(&["root", "/usr/bin/grep"]),
+            arc_path(&["root", "/usr/bin/grep"]),
+            arc_path(&["root", "/usr/bin/grep"]),
+            arc_path(&["root", "/usr/bin/ls"]),
+        ];
+        let out = dedup_arc_paths(input, DedupMode::ByPath);
+        assert_eq!(out.len(), 2);
+        // Insertion order preserved: grep first, ls second.
+        assert_eq!(out[0], arc_path(&["root", "/usr/bin/grep"]));
+        assert_eq!(out[1], arc_path(&["root", "/usr/bin/ls"]));
+    }
+
+    /// `ByEndpoints` collapses paths that share the same
+    /// `(first, last)` even when intermediate hops differ.
+    #[test]
+    fn dedup_arc_paths_by_endpoints_collapses_on_endpoints() {
+        let input = vec![
+            arc_path(&["alice", "host1", "10.0.0.1"]),
+            arc_path(&["alice", "host2", "10.0.0.1"]),
+            arc_path(&["alice", "host3", "10.0.0.2"]),
+        ];
+        let out = dedup_arc_paths(input, DedupMode::ByEndpoints);
+        assert_eq!(out.len(), 2);
+        // First wins: alice→host1→10.0.0.1 represents the
+        // (alice, 10.0.0.1) endpoint pair.
+        assert_eq!(out[0], arc_path(&["alice", "host1", "10.0.0.1"]));
+        assert_eq!(out[1], arc_path(&["alice", "host3", "10.0.0.2"]));
+    }
+
+    /// Empty paths are passed through under `ByEndpoints` rather than
+    /// triggering the `unwrap()` on the empty slice's first/last. The
+    /// matcher should never emit empty paths, but the helper must not
+    /// panic on them — the equivalent `score_and_paginate_paths`
+    /// branch skips them silently.
+    #[test]
+    fn dedup_arc_paths_by_endpoints_handles_empty_paths() {
+        let input: Vec<Vec<Arc<str>>> = vec![vec![], arc_path(&["a", "b"])];
+        let out = dedup_arc_paths(input, DedupMode::ByEndpoints);
+        assert_eq!(out.len(), 2);
+    }
+
     /// Process-wide mutex shared by every env-mutating hunt test in
     /// this module. Cargo runs tests in parallel by default, so
     /// `GRAPHHUNTER_YANNAKAKIS=1` set by one test would race with
@@ -936,6 +1087,7 @@ mod tests {
                 time_window: None,
                 max_results: None,
                 scoring: Some(HuntScoring::Anomaly),
+                dedup_mode: None,
             })
             .expect("Anomaly run on empty graph should not error");
         // After the Anomaly run the session has a finalized scorer.
@@ -956,6 +1108,7 @@ mod tests {
                 time_window: None,
                 max_results: None,
                 scoring: Some(HuntScoring::Structural),
+                dedup_mode: None,
             })
             .expect("Structural override after Anomaly must not error");
     }
@@ -970,6 +1123,7 @@ mod tests {
                 time_window: None,
                 max_results: None,
                 scoring: None,
+                dedup_mode: None,
             })
             .expect("should not error on empty graph");
         assert_eq!(resp.path_count, 0);
@@ -1004,6 +1158,7 @@ mod tests {
                 time_window: None,
                 max_results: None,
                 scoring: None,
+                dedup_mode: None,
             })
             .unwrap();
         // Cache is empty for an empty graph, but the path must succeed.
@@ -1032,6 +1187,7 @@ mod tests {
                 ],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("batch should not error on empty graph");
         assert_eq!(resp.entries.len(), 3);
@@ -1052,6 +1208,7 @@ mod tests {
                 hypotheses: vec![hypo("User -[Auth]-> Host")],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("first batch ok");
         // First call may or may not show indexes warm depending on
@@ -1065,6 +1222,7 @@ mod tests {
                 hypotheses: vec![hypo("Host -[Connect]-> IP")],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("second batch ok");
         assert!(
@@ -1098,6 +1256,7 @@ mod tests {
                 ],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("batch ok");
 
@@ -1128,6 +1287,7 @@ mod tests {
                 hypotheses: vec![h.clone(), h.clone(), h],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("batch ok");
         assert_eq!(resp.entries.len(), 3);
@@ -1161,6 +1321,7 @@ mod tests {
                 )],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("first batch ok");
         // Second batch: shares the first 2 steps with batch 1's
@@ -1174,6 +1335,7 @@ mod tests {
                 )],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("second batch ok");
         match prior {
@@ -1206,6 +1368,7 @@ mod tests {
                 hypotheses: vec![h.clone()],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("first batch ok");
         assert_eq!(
@@ -1218,6 +1381,7 @@ mod tests {
                 hypotheses: vec![h],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("second batch ok");
         match prior {
@@ -1255,6 +1419,7 @@ mod tests {
                 hypotheses: vec![h.clone()],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("first batch ok");
         assert_eq!(
@@ -1269,6 +1434,7 @@ mod tests {
                 hypotheses: vec![h],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("second batch ok");
 
@@ -1308,6 +1474,7 @@ mod tests {
                 hypotheses: vec![h_auth.clone()],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("auth batch ok");
         let _b2 = api
@@ -1316,6 +1483,7 @@ mod tests {
                 hypotheses: vec![h_conn],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("connect batch ok");
         let b3 = api
@@ -1324,6 +1492,7 @@ mod tests {
                 hypotheses: vec![h_auth],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("auth-replay batch ok");
 
@@ -1368,6 +1537,7 @@ mod tests {
                 hypotheses: vec![h.clone()],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("first batch ok");
         assert!(
@@ -1382,6 +1552,7 @@ mod tests {
                 hypotheses: vec![h],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("second batch ok");
 
@@ -1418,6 +1589,7 @@ mod tests {
                 hypotheses: vec![h.clone()],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("first batch ok");
 
@@ -1440,6 +1612,7 @@ mod tests {
                 hypotheses: vec![h],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("second batch ok");
 
@@ -1481,6 +1654,7 @@ mod tests {
                 hypotheses: vec![h1, h2],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("batch ok");
         match prior_tri {
@@ -1527,6 +1701,7 @@ mod tests {
                 hypotheses: vec![tri, k4],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("batch ok");
         for (k, v) in [
@@ -1571,6 +1746,7 @@ mod tests {
                 hypotheses: vec![tri, k4],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("batch ok");
         for (k, v) in [
@@ -1604,6 +1780,7 @@ mod tests {
                 hypotheses: vec![h.clone(), h],
                 time_window: Some((100, 200)),
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("batch ok");
         // Same hypothesis, same window — cache fires on entry 2.
@@ -1629,6 +1806,7 @@ mod tests {
                 ],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("batch ok");
         match prior {
@@ -1665,6 +1843,7 @@ mod tests {
                 ],
                 time_window: None,
                 max_results: None,
+                dedup_mode: None,
             })
             .expect("batch ok");
         assert_eq!(resp.entries.len(), 2);
