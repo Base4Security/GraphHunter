@@ -58,6 +58,7 @@ const BUILTIN_YAMLS: &[(&str, &str)] = &[
     ("cat-027", include_str!("builtin/cat-027.yaml")),
     ("cat-028", include_str!("builtin/cat-028.yaml")),
     ("cat-029", include_str!("builtin/cat-029.yaml")),
+    ("cat-030", include_str!("builtin/cat-030.yaml")),
 ];
 
 /// A diagnostic emitted when a YAML file (built-in or user) failed to
@@ -441,8 +442,8 @@ k_simplicity: 1
             .find(|e| e.id == "cat-custom")
             .expect("custom entry should be appended");
         assert_eq!(new_entry.name, "Custom Hypothesis");
-        // Total count is 29 built-in + 1 user.
-        assert_eq!(snap.entries.len(), 30);
+        // Total count is 30 built-in + 1 user.
+        assert_eq!(snap.entries.len(), 31);
     }
 
     #[test]
@@ -476,7 +477,7 @@ k_simplicity: 1
     fn missing_user_dir_is_noop() {
         // `None` user dir → snapshot is just the built-ins.
         let snap = build_snapshot_with_dir(None);
-        assert_eq!(snap.entries.len(), 29);
+        assert_eq!(snap.entries.len(), 30);
         assert!(snap.load_errors.is_empty());
     }
 

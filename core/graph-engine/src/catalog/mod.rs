@@ -5,7 +5,7 @@
 //! Catalog entries are loaded at first access from three ordered
 //! sources (later sources override earlier ones by `id`):
 //!
-//! 1. **Built-in** — 29 YAML files embedded via `include_str!` from
+//! 1. **Built-in** — 30 YAML files embedded via `include_str!` from
 //!    `catalog/builtin/*.yaml`. Always available, never user-editable.
 //! 2. **User file** — `*.yaml` under either
 //!    `$GRAPHHUNTER_CATALOG_DIR` or `$USERPROFILE/.graphhunter/catalog/`.
@@ -191,12 +191,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_catalog_has_29_entries() {
+    fn builtin_catalog_has_30_entries() {
         let entries = get_catalog();
         assert_eq!(
             entries.len(),
-            29,
-            "built-in catalog should have exactly 29 entries"
+            30,
+            "built-in catalog should have exactly 30 entries"
         );
     }
 
