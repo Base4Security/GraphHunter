@@ -44,23 +44,13 @@ CSIRT-Report-*.md
 docs/_archive/incidents/*.md
 !docs/_archive/incidents/.gitkeep
 
-# Personal LaTeX/PDF documentation trees — kept locally except for final PDFs (2026-05-07).
-# These are academic / personal drafts (paper, architecture, algorithms, design,
-# specification, manual). docs/_archive/ remains tracked as historical reference.
-# EXCEPTION: Final PDFs are committed as snapshots before archiving (M0 Task A1).
-docs/algoritmos/*
-!docs/algoritmos/algoritmos.pdf
-docs/arquitectura/*
-!docs/arquitectura/arquitectura.pdf
+# Personal LaTeX/PDF documentation trees — kept locally (2026-05-07).
+# The 5 books (algoritmos/arquitectura/especificacion/manual/paper) were archived
+# under docs/_archive/2026-libros-pre-unificacion/ in M0 (2026-05-20), where they
+# ARE tracked. Other personal trees remain local-only.
 docs/diseno/
-docs/especificacion/*
-!docs/especificacion/especificacion.pdf
 docs/formalization/
 docs/internals-systems/
-docs/manual/*
-!docs/manual/manual.pdf
-docs/paper/*
-!docs/paper/paper.pdf
 
 # LaTeX build artifacts (keep .tex, ignore compile output)
 docs/**/*.aux
@@ -80,5 +70,6 @@ docs/**/*.synctex.gz
 docs/**/*.fdb_latexmk
 docs/**/*.fls
 docs/**/*.pdf
+!docs/_archive/2026-libros-pre-unificacion/**/*.pdf
 docs/**/out.txt
 .playwright-mcp/
