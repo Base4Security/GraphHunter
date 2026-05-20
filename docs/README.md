@@ -1,79 +1,23 @@
 # Documentación de GraphHunter
 
-Este directorio contiene los cuatro libros de documentación del proyecto, compilados desde LaTeX a PDF.
+La documentación viva está en **`docs/libro/`** — un solo libro
+unificado en PDF (`docs/libro/libro.pdf`).
 
-## Libros
-
-| Libro | Carpeta | Propósito |
-|-------|---------|-----------|
-| Arquitectura | `arquitectura/` | Cómo está construido el sistema: capas (core/platform/apps), crates, patrones, ADRs. |
-| Especificación | `especificacion/` | Superficies externas: HTTP API, MCP tools, DSL, C ABI, formatos de log, env vars. |
-| Manual | `manual/` | Guía del operador/analista: instalación, ingesta, caza, exploración, integraciones. |
-| Paper | `paper/` | Reporte interno de investigación: problema, contribuciones, evaluación, limitaciones. |
-
-Todos están en **español** y usan LaTeX con `xelatex`.
-
-## Requisitos
-
-- TeX Live 2022 o superior (o MiKTeX en Windows) con XeLaTeX.
-- `biber` para la bibliografía del paper.
-- Fuentes del sistema: cualquier instalación estándar sirve (el preamble usa fontspec con fallbacks).
-
-## Build
-
-Desde la raíz del repo:
+## Build rápido
 
 ```bash
-# Un libro específico
-make -C docs arquitectura
-make -C docs especificacion
-make -C docs manual
-make -C docs paper
-
-# Todos
-make -C docs all
-
-# Limpiar artefactos intermedios (aux, log, toc, etc.)
-make -C docs clean
+make -C docs/libro fast       # ~15 s, sin biber/índice
+make -C docs/libro all        # ~60 s, completo con bibliografía e índice
 ```
 
-Los PDF resultantes se llaman `arquitectura.pdf`, `especificacion.pdf`, `manual.pdf`, `paper.pdf` en cada carpeta respectiva.
+## Histórico
 
-## Build manual (sin Makefile)
+`docs/_archive/` contiene la documentación previa, incluido el
+snapshot de los 5 libros LaTeX archivados en 2026-05 antes de la
+consolidación. Ver `docs/_archive/2026-libros-pre-unificacion/README.md`
+para el mapeo capítulo viejo → capítulo nuevo.
 
-```bash
-cd docs/arquitectura
-xelatex -shell-escape main.tex
-xelatex -shell-escape main.tex   # segunda pasada para TOC / referencias cruzadas
-```
+## Notas en Markdown
 
-Para el paper, correr `biber` entre pasadas:
-
-```bash
-cd docs/paper
-xelatex -shell-escape main.tex
-biber main
-xelatex -shell-escape main.tex
-xelatex -shell-escape main.tex
-```
-
-## Estructura por libro
-
-Cada libro sigue el mismo patrón:
-
-```
-<libro>/
-├── main.tex          # Documento raíz (clase book o report)
-├── preamble.tex      # Paquetes, colores, comandos — un color distinto por libro
-├── chapters/         # Capítulos numerados (01-*.tex, 02-*.tex, ...)
-│   o sections/       # Para el paper
-└── appendices/       # Apéndices (sólo arq, spec, manual)
-```
-
-## Archivo histórico
-
-`_archive/` contiene la documentación previa (fases 0/1, manual LaTeX antiguo, traducciones EN/ES obsoletas, Sphinx RST, algoritmos en Markdown, reportes CSIRT). No se borra: sirve como referencia para quien quiera trazar la evolución del proyecto.
-
-## CI
-
-El workflow `.github/workflows/docs.yml` compila los 4 PDFs en cada PR que toca `docs/**` y los sube como artifacts. Ver `Actions` en GitHub.
+- `docs/perf/` — bitácora viva de benchmarks por fecha (no se archiva).
+- `docs/superpowers/` — specs y planes de implementación.
