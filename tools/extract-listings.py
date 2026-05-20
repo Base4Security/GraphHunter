@@ -87,7 +87,7 @@ def write_listings(snippets: dict[str, tuple[Path, str]], out_dir: Path) -> int:
     """Escribe cada snippet a out_dir/<name>.rs. Devuelve número escritos."""
     out_dir.mkdir(parents=True, exist_ok=True)
     count = 0
-    for name, (_src, body) in snippets.items():
+    for name, (_, body) in snippets.items():
         target = out_dir / f"{name}.rs"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
