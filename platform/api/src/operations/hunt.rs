@@ -70,6 +70,7 @@ fn dedup_arc_paths(
 const INLINE_PATH_THRESHOLD: usize = 100;
 
 impl GraphHunterApi {
+    // @book-snippet:http/hunt-handler
     /// Execute a temporal pattern search. Populates the hunt cache and
     /// returns either the paths inline (when ≤ 100) or just the count
     /// with the cache populated for pagination.
@@ -207,6 +208,7 @@ impl GraphHunterApi {
             })
         }
     }
+    // @book-snippet-end
 
     /// Paginated, scored, optionally deduplicated page over the cached
     /// hunt result. Safe to call many times — reads only.

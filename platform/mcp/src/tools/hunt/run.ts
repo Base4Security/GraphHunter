@@ -18,6 +18,7 @@ const input = z.object({
     ),
 });
 
+// @book-snippet:mcp/hunt-run-tool
 export const huntRun = defineTool({
   name: "hunt.run",
   description:
@@ -41,3 +42,4 @@ export const huntRun = defineTool({
     );
   },
 });
+// @book-snippet-end

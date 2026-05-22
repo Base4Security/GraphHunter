@@ -15,6 +15,7 @@ use graph_hunter_core::errors::GraphError;
 use graph_hunter_core::graph::{GraphHunter, HuntResult};
 use graph_hunter_core::hypothesis::Hypothesis;
 
+// @book-snippet:ffi/search-temporal-pattern
 /// Temporal pattern search. Delegates to the engine's
 /// `search_temporal_pattern_smart` when an anomaly scorer has been
 /// finalized, otherwise to `search_temporal_pattern`.
@@ -36,3 +37,4 @@ pub fn search_temporal_pattern_simd(
         hunter.search_temporal_pattern(hypothesis, time_window, max_results)
     }
 }
+// @book-snippet-end

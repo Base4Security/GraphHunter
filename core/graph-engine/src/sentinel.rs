@@ -19,6 +19,7 @@ enum SentinelTable {
     Unknown,
 }
 
+// @book-snippet:parsers/sentinel-json
 /// Parser for Azure Sentinel (Microsoft Sentinel) log exports.
 ///
 /// Supports the following Sentinel tables:
@@ -46,6 +47,7 @@ enum SentinelTable {
 /// Timestamps are parsed from `TimeGenerated` or `Timestamp` fields using
 /// ISO 8601 format.
 pub struct SentinelJsonParser;
+// @book-snippet-end
 
 impl SentinelJsonParser {
     /// Parses an ISO 8601 timestamp into Unix epoch seconds.

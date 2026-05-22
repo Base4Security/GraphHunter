@@ -213,6 +213,7 @@ pub enum HypothesisShape {
     Graph,
 }
 
+// @book-snippet:dsl/hypothesis-struct
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Hypothesis {
     pub name: String,
@@ -235,6 +236,7 @@ pub struct Hypothesis {
     #[serde(default)]
     pub shape: HypothesisShape,
 }
+// @book-snippet-end
 
 impl Hypothesis {
     /// Creates a new empty hypothesis with the given name.
