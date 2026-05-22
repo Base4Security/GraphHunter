@@ -23,6 +23,7 @@ impl StrId {
     }
 }
 
+// @book-snippet:types/string-interner
 /// Bidirectional string interner: O(1) amortized intern, O(1) resolve.
 ///
 /// Stores each unique string exactly once. Returns a StrId handle
@@ -38,6 +39,7 @@ pub struct StringInterner {
     map: HashMap<Arc<str>, StrId>,
     strings: Vec<Arc<str>>,
 }
+// @book-snippet-end
 
 impl StringInterner {
     /// Creates a new empty interner.

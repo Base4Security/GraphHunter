@@ -22,6 +22,7 @@ use crate::types::{
     EntityType, MergePolicy, RelationType, entity_type_matches, relation_type_matches,
 };
 
+// @book-snippet:result/hunt-result-type
 /// Result of a successful pattern match: an ordered list of entity IDs
 /// representing the attack path through the graph.
 ///
@@ -34,6 +35,7 @@ use crate::types::{
 /// per element; serde serialization is identical to `Vec<String>`
 /// because `Arc<str>: Serialize` produces the same JSON.
 pub type HuntResult = Vec<std::sync::Arc<str>>;
+// @book-snippet-end
 
 /// Current wall-clock time in epoch seconds. Falls back to the
 /// [`crate::relation::INGEST_EPOCH_BASE`] if the system clock is

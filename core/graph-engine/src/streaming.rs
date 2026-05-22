@@ -92,6 +92,7 @@ impl MmapHandle {
 /// outgoing relations) without spilling to heap.
 pub const INLINE_CAPACITY: usize = 8;
 
+// @book-snippet:streaming/stream-edge-struct
 /// One edge in the streaming view. **Layout-compatible with
 /// `CompactRelation`** so the matcher hot-path can iterate streaming
 /// output without per-edge field translation. The layout is the same
@@ -121,6 +122,7 @@ pub struct StreamEdge {
     pub dataset_tag: u16,
     pub rel_type_tag: u8,
 }
+// @book-snippet-end
 
 impl StreamEdge {
     /// Decode `rel_type_tag` to `RelationType`. Mirrors the
@@ -133,6 +135,7 @@ impl StreamEdge {
     }
 }
 
+// @book-snippet:streaming/neighbor-list-enum
 /// Per-vertex outgoing-edge storage. Two-shape adaptive:
 ///
 ///   * `Inline(SmallVec<[StreamEdge; 8]>)` — degree ≤ 8. Inline,
@@ -168,6 +171,7 @@ pub enum NeighborList {
         len: usize,
     },
 }
+// @book-snippet-end
 
 impl Default for NeighborList {
     fn default() -> Self {
@@ -420,6 +424,7 @@ impl FrozenSnapshot {
     }
 }
 
+// @book-snippet:streaming/backend-struct
 /// Reference in-memory implementation backing the trait. Stage 1
 /// uses a plain `RwLock<HashMap<StrId, Arc<RwLock<NeighborList>>>>`
 /// — readers can snapshot a single vertex's neighbors without
@@ -437,6 +442,7 @@ pub struct InMemoryStreamingBackend {
     /// and swaps every per-vertex slot to `NeighborList::Mmap`.
     spill_state: parking_lot::Mutex<Option<SpillState>>,
 }
+// @book-snippet-end
 
 /// Per-backend auto-spill bookkeeping. Lives behind a `Mutex` (not
 /// `RwLock`) because every `append_edge` has to take a write borrow
