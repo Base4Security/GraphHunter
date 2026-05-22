@@ -42,6 +42,7 @@
 /// All keys are `u64` to keep the trait monomorphic; for graph use we
 /// pack `(StrId.index() as u32) | (timestamp_bucket as u32) << 32` or
 /// similar. The packing is the caller's responsibility.
+// @book-snippet:wcoj/trie-iter-trait
 pub trait TrieIter {
     /// True if the cursor is past the end of the current level. Once
     /// at end, `key` is undefined; call `up` to ascend or restart.
@@ -70,6 +71,7 @@ pub trait TrieIter {
     /// the position it had before `open`.
     fn up(&mut self);
 }
+// @book-snippet-end
 
 /// Reference implementation: a one-level trie over a sorted, deduped
 /// `Vec<u64>`. `open`/`up` are no-ops because there is only one level;
@@ -196,6 +198,7 @@ impl<'a, I: TrieIter> LeapfrogJoin<'a, I> {
     /// Returns the next intersection value, or `None` when the join is
     /// exhausted. Mirrors `Iterator::next` but takes `&mut self` —
     /// the inner iterator slice is borrowed for the lifetime of `self`.
+    // @book-snippet:wcoj/leapfrog-next-match
     pub fn next_match(&mut self) -> Option<u64> {
         if self.done {
             return None;
@@ -232,6 +235,7 @@ impl<'a, I: TrieIter> LeapfrogJoin<'a, I> {
             self.sort_order();
         }
     }
+    // @book-snippet-end
 }
 
 /// Triangle enumeration over a `MaterializedCsrTrie` via LFTJ. A

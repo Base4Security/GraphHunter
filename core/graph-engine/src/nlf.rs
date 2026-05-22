@@ -39,6 +39,7 @@ pub struct NlfTable {
 impl NlfTable {
     /// Walk the graph once and accumulate per-source neighbor-type counts.
     /// Reads `entity_type_tags` (SoA) for the destination tag; an O(1) load.
+    // @book-snippet:nlf/build
     pub fn build(graph: &crate::graph::GraphHunter) -> Self {
         let n = graph.entity_type_tags.len();
         let counts = crate::index_storage::IndexBacking::build_with_writer(
@@ -72,12 +73,14 @@ impl NlfTable {
         .expect("temp file for NLF index");
         Self { counts }
     }
+    // @book-snippet-end
 
     /// True iff `sid` has at least `requirement[ℓ]` outgoing neighbors of
     /// every concrete type `ℓ`. Vertices outside the range default to
     /// "passes" only for an all-zero requirement — i.e. a vertex with no
     /// row is conservatively considered a candidate when no constraint
     /// applies.
+    // @book-snippet:nlf/can-match
     #[inline]
     pub fn can_match(&self, sid: StrId, requirement: &[u32; NLF_TYPE_COUNT]) -> bool {
         let counts = self.counts.as_slice();
@@ -92,6 +95,7 @@ impl NlfTable {
         }
         true
     }
+    // @book-snippet-end
 
     /// Memory footprint in bytes — heap-resident or on-disk
     /// depending on whether the table was spilled.
@@ -116,6 +120,7 @@ impl NlfTable {
     /// `src_sid` is also ignored — it can happen during graph
     /// rebuilds when the table was sized for an earlier vertex
     /// count.
+    // @book-snippet:nlf/try-record-edge
     pub fn try_record_edge(&mut self, src_sid: StrId, dst_tag: u8) -> bool {
         let tag = dst_tag as usize;
         if tag >= NLF_TYPE_COUNT {
@@ -132,6 +137,7 @@ impl NlfTable {
         }
         true
     }
+    // @book-snippet-end
 }
 
 /// Compute the NLF requirement at the start vertex from the first
