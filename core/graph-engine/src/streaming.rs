@@ -705,6 +705,7 @@ impl InMemoryStreamingBackend {
     /// finalize) so this is fine. A future live-tail use case will
     /// need a separate "tail buffer" of unsorted post-finalize
     /// edges merged in at read time.
+    // @book-snippet:streaming/finalize-sort-vertices
     pub fn finalize(&self) {
         let outer = self
             .vertices
@@ -721,6 +722,7 @@ impl InMemoryStreamingBackend {
             }
         }
     }
+    // @book-snippet-end
 
     /// L3 stage 2c part 2 — visit each vertex's full neighbor
     /// slice in one closure call. The outer-table read guard is
@@ -756,6 +758,7 @@ impl InMemoryStreamingBackend {
     /// timestamp)`; consumers that aggregate into HashMaps don't
     /// care about order, but any consumer that did (none today)
     /// would need its own sort step.
+    // @book-snippet:streaming/for-each-edge
     pub fn for_each_edge<F>(&self, mut f: F)
     where
         F: FnMut(StrId, &StreamEdge),
@@ -768,6 +771,7 @@ impl InMemoryStreamingBackend {
             }
         }
     }
+    // @book-snippet-end
 
     /// L3 D4 stage 1 — spill all in-memory neighbor lists to a
     /// single memory-mapped file. After consolidation, every per-

@@ -114,6 +114,7 @@ impl ParserTask {
 
     /// Runs the parser loop until the raw channel closes or the cancel
     /// token fires between messages.
+    // @book-snippet:ingest/parser-task-run
     pub async fn run(
         self,
         mut raw_rx: RawReceiver,
@@ -153,6 +154,7 @@ impl ParserTask {
         }
         self.metrics.snapshot()
     }
+    // @book-snippet-end
 
     /// Decodes a single raw chunk into a `ParsedBatch`. Returns `None`
     /// if the bytes are unparseable (non-UTF-8) or the encoding is
