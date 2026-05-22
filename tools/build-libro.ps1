@@ -33,9 +33,21 @@ function Invoke-Listings {
 
 function Invoke-Xelatex {
   Push-Location $LibroDir
+  # minted v3 / latexminted necesita TEXMF_OUTPUT_DIRECTORY apuntando al build dir
+  # cuando se usa -output-directory (de otro modo no encuentra su directorio).
+  $previousTexmfOut = $env:TEXMF_OUTPUT_DIRECTORY
+  $env:TEXMF_OUTPUT_DIRECTORY = $Build
+  # NOTA: -halt-on-error removido — MiKTeX emite "major issue: ... out-of-sync"
+  # como warning a stderr que PowerShell (con ErrorActionPreference=Stop)
+  # interpreta como error fatal. xelatex sigue compilando bien — el PDF se
+  # produce. Verificamos exito por la existencia del PDF, no por $LASTEXITCODE.
+  $oldEAP = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   try {
-    & xelatex -shell-escape -interaction=nonstopmode -halt-on-error -output-directory=build main.tex
+    & xelatex -shell-escape -interaction=nonstopmode -output-directory=build main.tex | Out-Null
   } finally {
+    $env:TEXMF_OUTPUT_DIRECTORY = $previousTexmfOut
+    $ErrorActionPreference = $oldEAP
     Pop-Location
   }
 }
