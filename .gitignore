@@ -73,3 +73,6 @@ docs/**/*.pdf
 !docs/_archive/2026-libros-pre-unificacion/**/*.pdf
 docs/**/out.txt
 .playwright-mcp/
+
+# Tauri sidecar runtime binaries — downloaded via tools/fetch-sidecar-binaries.sh per release
+apps/tauri/src-tauri/binaries/
