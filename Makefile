@@ -49,7 +49,7 @@ ALL_CRATES := \
 
 CARGO ?= cargo
 
-.PHONY: help pre-merge check check-all test clippy fmt-check layering smoke-bench
+.PHONY: help pre-merge check check-all test clippy fmt-check layering smoke-bench libro libro-clean
 
 help:
 	@echo "GraphHunter Makefile targets:"
@@ -62,6 +62,8 @@ help:
 	@echo "  fmt-check   - Verify rustfmt would not change anything (hot crates)."
 	@echo "  layering    - Run scripts/check-layering.sh."
 	@echo "  smoke-bench - Tiny ingest bench (1K only) to catch catastrophic regressions."
+	@echo "  libro       - Build the unified book PDF (delegates to docs/libro/Makefile)."
+	@echo "  libro-clean - Remove book build artifacts (delegates to docs/libro/Makefile)."
 
 # `pre-merge` intentionally excludes fmt-check and clippy: the codebase has
 # pre-existing fmt drift and clippy warnings that we are not addressing in
@@ -117,3 +119,14 @@ smoke-bench:
 	@$(CARGO) bench --manifest-path core/graph-engine/Cargo.toml \
 		--bench ingest_throughput \
 		-- "ingest-sysmon-ndjson/1000$$" --warm-up-time 1 --measurement-time 2
+
+# Book (unified docs/libro/) — delegates to docs/libro/Makefile. The book's
+# Makefile owns the LaTeX pipeline (xelatex+biber+makeindex); these targets
+# just let users run `make libro` from the repo root without cd.
+libro:
+	@echo ">>> $(MAKE) -C docs/libro all"
+	@$(MAKE) -C docs/libro all
+
+libro-clean:
+	@echo ">>> $(MAKE) -C docs/libro clean"
+	@$(MAKE) -C docs/libro clean
