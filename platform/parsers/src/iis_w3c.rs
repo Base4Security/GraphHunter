@@ -177,7 +177,7 @@ mod tests {
 #Version: 1.0
 #Date: 2025-06-30 05:43:03
 #Fields: date time s-ip cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip cs(User-Agent) cs(Referer) sc-status sc-substatus sc-win32-status time-taken
-2025-06-30 05:43:03 10.7.20.69 GET /attach/profilephotos/18512.jpg 1751262183029 443 - 198.51.100.89 Mozilla/5.0+Windows https://example.com/dashboard 500 19 1330 240
+2025-06-30 05:43:03 10.7.20.69 GET /attach/profilephotos/18512.jpg 1751262183029 443 - 203.0.113.89 Mozilla/5.0+Windows https://example.com/dashboard 500 19 1330 240
 2025-06-30 05:44:10 10.7.20.69 POST /api/upload - 443 admin 192.168.1.50 curl/7.68.0 - 200 0 0 120
 ";
 
@@ -198,7 +198,7 @@ mod tests {
 
         // First triple: client IP -> Connect -> server IP
         let (src, rel, dst) = &triples[0];
-        assert_eq!(src.id, "198.51.100.89");
+        assert_eq!(src.id, "203.0.113.89");
         assert_eq!(src.entity_type, EntityType::IP);
         assert_eq!(dst.id, "10.7.20.69");
         assert_eq!(dst.entity_type, EntityType::Host);
@@ -214,7 +214,7 @@ mod tests {
 
         // Second triple: client IP -> Read -> URL
         let (src, rel, dst) = &triples[1];
-        assert_eq!(src.id, "198.51.100.89");
+        assert_eq!(src.id, "203.0.113.89");
         assert_eq!(dst.id, "/attach/profilephotos/18512.jpg");
         assert_eq!(dst.entity_type, EntityType::URL);
         assert_eq!(rel.rel_type, RelationType::Read);
