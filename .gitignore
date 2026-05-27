@@ -73,3 +73,5 @@ docs/**/*.pdf
 !docs/_archive/2026-libros-pre-unificacion/**/*.pdf
 docs/**/out.txt
 .playwright-mcp/
+
+audit-tmp/
