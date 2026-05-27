@@ -228,7 +228,7 @@ export default function IngestPanel({
       } else {
         unlisten = u;
       }
-    })().catch(() => {});
+    })().catch((err) => console.error("listen ingest-llm-proposal (IngestPanel):", err));
     return () => {
       cancelled = true;
       unlisten?.();

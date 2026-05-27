@@ -108,24 +108,25 @@ fn dedup_by_endpoints_collapses_across_different_intermediates() {
 fn chain_summary_preserves_full_ids_for_emails_and_fqdns() {
     // Regression for the A.2 truncation bug: IDs longer than 20 chars
     // used to lose their first character because the label builder kept
-    // the last 20 bytes (`len - 20..`). Real ID from the post-hunt report:
-    // "userlong1@example.org" (21 chars) became "userlong@example.org".
+    // the last 20 bytes (`len - 20..`). Synthetic example mirroring the
+    // original 21-char ID: "analyst.a@example.com" (21 chars) used to
+    // render as "nalyst.a@example.com".
     let mut g = GraphHunter::new();
-    g.add_entity(Entity::new("userlong1@example.org", EntityType::User))
+    g.add_entity(Entity::new("analyst.a@example.com", EntityType::User))
         .unwrap();
-    g.add_entity(Entity::new("usuarioejemp@example.org", EntityType::User))
+    g.add_entity(Entity::new("analyst.b@example.com", EntityType::User))
         .unwrap();
     g.add_entity(Entity::new("1.2.3.4", EntityType::IP))
         .unwrap();
     g.add_relation(Relation::new(
-        "userlong1@example.org",
+        "analyst.a@example.com",
         "1.2.3.4",
         RelationType::Auth,
         100,
     ))
     .unwrap();
     g.add_relation(Relation::new(
-        "usuarioejemp@example.org",
+        "analyst.b@example.com",
         "1.2.3.4",
         RelationType::Auth,
         200,
@@ -133,18 +134,18 @@ fn chain_summary_preserves_full_ids_for_emails_and_fqdns() {
     .unwrap();
 
     let paths: Vec<Vec<String>> = vec![
-        vec!["userlong1@example.org".into(), "1.2.3.4".into()],
-        vec!["usuarioejemp@example.org".into(), "1.2.3.4".into()],
+        vec!["analyst.a@example.com".into(), "1.2.3.4".into()],
+        vec!["analyst.b@example.com".into(), "1.2.3.4".into()],
     ];
     let (scored, _) = g.score_and_paginate_paths(&paths, 0, 50, None, DedupMode::None);
     for sp in scored {
         assert!(
-            sp.chain_summary.contains("cliteplo@") || sp.chain_summary.contains("jvilcherrez@"),
+            sp.chain_summary.contains("analyst.a@") || sp.chain_summary.contains("analyst.b@"),
             "chain_summary dropped the first char, got: {}",
             sp.chain_summary
         );
         assert!(
-            !sp.chain_summary.starts_with("liteplo"),
+            !sp.chain_summary.starts_with("nalyst."),
             "chain_summary still left-truncates: {}",
             sp.chain_summary
         );

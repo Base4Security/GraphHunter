@@ -8,6 +8,11 @@ use crate::drift::DriftSnapshot;
 use crate::entity::Entity;
 use crate::relation::Relation;
 
+// Re-export ParseError so call sites can write `use graph_hunter_core::parser::ParseError;`
+// alongside the trait, matching the existing ergonomics of `ParsedTriple` /
+// `ParseStats` / `RawIngestEvent`.
+pub use crate::parse_error::ParseError;
+
 /// A triple produced by parsing a single log event:
 /// (source entity, relation, destination entity).
 pub type ParsedTriple = (Entity, Relation, Entity);
@@ -116,7 +121,41 @@ pub trait LogParser: Send + Sync {
     ///
     /// Malformed or unrecognized events are silently skipped (logged in metadata)
     /// to allow best-effort ingestion of real-world, often messy, log sources.
+    ///
+    /// **Silent-drop note (RH-P1-012).** Implementations of this method
+    /// drop malformed rows on the floor. That made DLQ routing impossible
+    /// because there was no failure channel — Unit 18 / `audit-findings/
+    /// F-ingest.md` flagged it as the root cause of silent ingest
+    /// failures. New code should call [`try_parse`](Self::try_parse)
+    /// instead, which surfaces per-row [`ParseError`] variants that the
+    /// ingest pipeline routes to the DLQ surface. `parse` remains
+    /// unchanged so existing impls keep compiling.
     fn parse(&self, data: &str) -> Vec<ParsedTriple>;
+
+    /// Per-row Result variant of [`parse`](Self::parse): each entry is
+    /// either a valid triple or a [`ParseError`] explaining why that row
+    /// failed.
+    ///
+    /// The default implementation wraps `parse(...)` and lifts every
+    /// produced triple into `Ok(_)` — that preserves backward compatibility
+    /// for the 13 existing `impl LogParser` sites without code changes.
+    /// Parsers that want to surface real malformed-row errors should
+    /// override this with row-by-row error emission so callers can route
+    /// failures to the DLQ instead of silently dropping them.
+    ///
+    /// **Callers.** `platform/api/src/operations/ingestion.rs` (Phase 7
+    /// migration) inspects each result and:
+    /// - `Ok(triple)` → inserted into the graph as before;
+    /// - `Err(ParseError::...)` → enqueued into the parse-DLQ table with
+    ///   the `Display` rendering as the human reason.
+    ///
+    /// Added in the release-handoff cycle (RH-P1-012). See
+    /// `core/graph-engine/src/parse_error.rs` for the variant catalogue.
+    fn try_parse(&self, data: &str) -> Vec<Result<ParsedTriple, ParseError>> {
+        // Default: lift every produced triple into Ok. Parsers that have
+        // been migrated to surface real errors override this.
+        self.parse(data).into_iter().map(Ok).collect()
+    }
 
     /// Parses pre-decoded JSON event objects directly, skipping the
     /// `string → simd_json` round-trip that `parse(&str)` performs.

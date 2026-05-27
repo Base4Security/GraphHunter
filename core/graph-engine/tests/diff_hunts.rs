@@ -27,21 +27,23 @@ fn two_stage_spray_graph() -> GraphHunter {
         .unwrap();
     }
     // Current-window IPs (14 new, joining between t=1300 and t=2600).
+    // Anonymized to RFC5737 TEST-NET-2 (198.51.100.0/24); last octet
+    // preserved from the original fixture to keep variance shape.
     let later_ips = [
-        "192.0.2.208",
+        "198.51.100.208",
         "198.51.100.50",
-        "203.0.113.47",
+        "198.51.100.47",
         "198.51.100.74",
-        "192.0.2.73",
+        "198.51.100.73",
         "198.51.100.222",
         "198.51.100.38",
         "198.51.100.54",
-        "203.0.113.217",
-        "192.0.2.183",
+        "198.51.100.217",
+        "198.51.100.183",
         "198.51.100.10",
-        "192.0.2.99",
-        "203.0.113.12",
-        "192.0.2.200",
+        "198.51.100.99",
+        "198.51.100.12",
+        "198.51.100.200",
     ];
     for (i, ip) in later_ips.iter().enumerate() {
         g.add_entity(Entity::new(*ip, EntityType::IP)).unwrap();

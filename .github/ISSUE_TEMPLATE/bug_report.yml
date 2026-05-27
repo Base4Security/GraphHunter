@@ -1,0 +1,99 @@
+name: Reporte de bug
+description: Reportar un bug reproducible en GraphHunter
+title: "[bug]: "
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por tomarte el tiempo de reportar un bug. Por favor completa los siguientes campos
+        para ayudarnos a reproducir y diagnosticar el problema rapidamente.
+
+        Si crees haber encontrado una vulnerabilidad de seguridad, **NO** la reportes aqui.
+        Seguí el procedimiento descrito en [SECURITY.md](../../SECURITY.md).
+
+  - type: textarea
+    id: descripcion
+    attributes:
+      label: Descripcion del bug
+      description: Una descripcion clara y concisa del bug.
+      placeholder: Al ingestar un EVTX de Windows Security, la UI queda colgada en "Procesando..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduccion
+    attributes:
+      label: Pasos para reproducir
+      description: Pasos minimos para reproducir el problema.
+      placeholder: |
+        1. Abrir GraphHunter
+        2. Click en "Ingest" -> seleccionar archivo `Security.evtx` (~500MB)
+        3. Esperar 5 minutos
+        4. Ver que la UI nunca actualiza el progreso
+    validations:
+      required: true
+
+  - type: textarea
+    id: esperado
+    attributes:
+      label: Comportamiento esperado
+      description: Que esperabas que ocurra.
+      placeholder: La barra de progreso deberia avanzar y al finalizar mostrar el grafo cargado.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Comportamiento actual
+      description: Que ocurrio realmente. Incluí mensajes de error si los hay.
+      placeholder: La barra queda en 0% indefinidamente; no aparece error en la UI.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version de GraphHunter
+      description: |
+        Salida de `gh-version`, o si compilaste desde fuente, `git describe --tags --always`.
+      placeholder: "v1.0.0 (o `git describe`: book-v1.0.0-3-gabc1234)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Sistema operativo
+      description: Sistema operativo donde ocurre el bug.
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Otro
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / traces
+      description: |
+        Copia los logs relevantes. Si son muy largos, adjuntalos como archivo o linkea un gist.
+        Tip: en Windows los logs estan en `%APPDATA%\GraphHunter\logs\`; en Linux/macOS en `~/.config/GraphHunter/logs/`.
+      render: shell
+      placeholder: |
+        2026-05-26T10:00:00Z ERROR ingest::evtx parser failed: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: contexto
+    attributes:
+      label: Contexto adicional
+      description: Cualquier otra informacion relevante (hardware, tamano del archivo, screenshots).
+    validations:
+      required: false

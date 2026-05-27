@@ -24,6 +24,7 @@ pub mod mmap_advise;
 pub mod nlf;
 pub mod index_storage;
 pub mod nauty_symmetry;
+pub mod parse_error;
 pub mod parser;
 pub mod planner;
 pub mod streaming;
