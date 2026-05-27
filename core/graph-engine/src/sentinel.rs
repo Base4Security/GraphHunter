@@ -1055,6 +1055,84 @@ impl LogParser for SentinelJsonParser {
         crate::generic::parse_events_with_stats(&events, |ev| Self::parse_event(ev))
     }
 
+    /// Sentinel Result variant (RH-P1-012).
+    ///
+    /// Surfaces two classes of per-row failures the bare `parse` path used
+    /// to swallow:
+    /// 1. NDJSON line that fails `simd_json` decode — emits
+    ///    `ParseError::Encoding`.
+    /// 2. Decoded event that yields zero triples (no known schema fits) —
+    ///    emits `ParseError::MalformedRow` with the same skip-reason text
+    ///    that `parse_with_stats` already aggregates.
+    ///
+    /// Top-level JSON arrays fall back to the legacy `parse` path lifted
+    /// into `Ok(_)` — they don't have a meaningful per-line failure model
+    /// because the array decode is all-or-nothing.
+    fn try_parse(&self, data: &str) -> Vec<Result<ParsedTriple, crate::parser::ParseError>> {
+        let trimmed = data.trim();
+
+        // Array-shaped JSON: all-or-nothing decode. If decode fails, surface
+        // a single Encoding error; otherwise lift each emitted triple to Ok.
+        if trimmed.starts_with('[') {
+            let mut buf = trimmed.as_bytes().to_vec();
+            return match simd_json::serde::from_slice::<Vec<Value>>(&mut buf) {
+                Ok(events) => {
+                    let mut out: Vec<Result<ParsedTriple, crate::parser::ParseError>> = Vec::new();
+                    for (lineno, event) in events.iter().enumerate() {
+                        let triples = Self::parse_event(event);
+                        if triples.is_empty() {
+                            out.push(Err(crate::parser::ParseError::MalformedRow {
+                                line: lineno,
+                                reason: crate::generic::classify_skip_reason(event).to_string(),
+                            }));
+                        } else {
+                            for t in triples {
+                                out.push(Ok(t));
+                            }
+                        }
+                    }
+                    out
+                }
+                Err(e) => vec![Err(crate::parser::ParseError::Encoding(format!(
+                    "top-level JSON array decode failed: {}",
+                    e
+                )))],
+            };
+        }
+
+        // NDJSON path: one line at a time. Surface both decode failures and
+        // zero-triple events as Err so the DLQ sees both classes.
+        let mut out: Vec<Result<ParsedTriple, crate::parser::ParseError>> = Vec::new();
+        for (lineno, line) in trimmed.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut buf = line.as_bytes().to_vec();
+            match simd_json::serde::from_slice::<Value>(&mut buf) {
+                Ok(event) => {
+                    let triples = Self::parse_event(&event);
+                    if triples.is_empty() {
+                        out.push(Err(crate::parser::ParseError::MalformedRow {
+                            line: lineno,
+                            reason: crate::generic::classify_skip_reason(&event).to_string(),
+                        }));
+                    } else {
+                        for t in triples {
+                            out.push(Ok(t));
+                        }
+                    }
+                }
+                Err(e) => {
+                    out.push(Err(crate::parser::ParseError::Encoding(format!(
+                        "NDJSON line {} decode failed: {}",
+                        lineno, e
+                    ))));
+                }
+            }
+        }
+        out
+    }
+
     /// Efficient override of the default `parse_rows`: iterates pre-decoded
     /// `serde_json::Value` rows and dispatches to `parse_event` directly.
     ///
