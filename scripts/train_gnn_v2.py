@@ -6,7 +6,7 @@ feature set produced by `graph_hunter_core::sources::aad_training_export`.
 
 Input format (NDJSON, one example per line):
     {
-      "node_id": "192.0.2.73",
+      "node_id": "198.51.100.73",
       "entity_type": "IP",
       "label": "credential_attack",
       "features": {

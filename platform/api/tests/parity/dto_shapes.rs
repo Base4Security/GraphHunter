@@ -319,8 +319,23 @@ fn subgraph_shape() {
             metadata: HashMap::new(),
             dataset_id: None,
         }],
+        // RH-P1-013: pagination envelope present in the wire shape since
+        // 2026-05-06. Tests must include it so frontends/transports stay
+        // aware that these keys exist on the JSON object.
+        ..Default::default()
     };
-    assert_keys(&sg, &["nodes", "edges"]);
+    assert_keys(
+        &sg,
+        &[
+            "nodes",
+            "edges",
+            "total_edges",
+            "returned_edges",
+            "offset",
+            "page_size",
+            "has_more",
+        ],
+    );
     let v = serde_json::to_value(&sg).unwrap();
     assert_eq!(v["nodes"][0]["id"], "alice");
     // `ip_class` is skipped when None.

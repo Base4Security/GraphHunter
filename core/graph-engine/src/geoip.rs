@@ -48,8 +48,12 @@ pub struct GeoIpResult {
 #[derive(Debug)]
 pub enum GeoIpError {
     Io(std::io::Error),
+    /// 0.28 rename: `MaxMindDBError` (camel + acronym) became
+    /// `MaxMindDbError` (camel + lower 'b'). Pin the new name behind
+    /// the `geoip` feature so non-geoip builds don't compile against
+    /// the dep.
     #[cfg(feature = "geoip")]
-    MaxMind(maxminddb::MaxMindDBError),
+    MaxMind(maxminddb::MaxMindDbError),
     Http(String),
     NotPublicIp,
 }
@@ -117,36 +121,49 @@ pub mod maxmind {
         }
 
         /// Looks up a single IP address.
+        ///
+        /// maxminddb 0.28 API notes (RUSTSEC-2025-0132 forced the bump from
+        /// 0.24): `Reader::lookup` is no longer generic — it returns a
+        /// `LookupResult<'_, _>` handle whose `.decode::<T>()` does the real
+        /// deserialization and returns `Result<Option<T>, _>`. The nested
+        /// `country` / `city` fields on `geoip2::City` are now direct
+        /// structs (not `Option`), with `is_empty()` guards; the localized
+        /// `names` map is no longer a `BTreeMap<&str,&str>` but a typed
+        /// `Names<'a>` with one field per language (English here).
+        /// `is_anonymous_proxy` no longer exists on `Traits` in 0.28 — we
+        /// always emit `None` for that field rather than fabricating a
+        /// value (callers already tolerate `None`).
         pub fn lookup(&self, ip_str: &str) -> Option<GeoIpResult> {
             let addr: IpAddr = ip_str.trim().parse().ok()?;
             let mut result = GeoIpResult::default();
 
             if let Some(reader) = &self.city_reader {
-                if let Ok(city) = reader.lookup::<geoip2::City>(addr) {
-                    if let Some(country) = city.country {
-                        result.country_code = country.iso_code.map(|s| s.to_string());
-                        result.country_name = country
-                            .names
-                            .and_then(|n| n.get("en").map(|s| s.to_string()));
-                    }
-                    if let Some(city_rec) = city.city {
-                        result.city = city_rec
-                            .names
-                            .and_then(|n| n.get("en").map(|s| s.to_string()));
-                    }
-                    if let Some(traits) = city.traits {
-                        result.is_anonymous_proxy =
-                            Some(traits.is_anonymous_proxy.unwrap_or(false));
+                if let Ok(lookup) = reader.lookup(addr) {
+                    if let Ok(Some(city)) = lookup.decode::<geoip2::City>() {
+                        if !city.country.is_empty() {
+                            result.country_code = city.country.iso_code.map(|s| s.to_string());
+                            result.country_name =
+                                city.country.names.english.map(|s| s.to_string());
+                        }
+                        if !city.city.is_empty() {
+                            result.city = city.city.names.english.map(|s| s.to_string());
+                        }
+                        // 0.28: `Traits::is_anonymous_proxy` was removed
+                        // upstream; the field is no longer surfaced. Leave
+                        // `result.is_anonymous_proxy` as `None`.
                     }
                 }
             }
 
             if let Some(reader) = &self.asn_reader {
-                if let Ok(asn) = reader.lookup::<geoip2::Asn>(addr) {
-                    result.asn = asn.autonomous_system_number.map(|n| n as u32);
-                    result.as_org = asn.autonomous_system_organization.map(|s| s.to_string());
-                    // Use AS org as ISP approximation.
-                    result.isp = result.as_org.clone();
+                if let Ok(lookup) = reader.lookup(addr) {
+                    if let Ok(Some(asn)) = lookup.decode::<geoip2::Asn>() {
+                        result.asn = asn.autonomous_system_number;
+                        result.as_org =
+                            asn.autonomous_system_organization.map(|s| s.to_string());
+                        // Use AS org as ISP approximation.
+                        result.isp = result.as_org.clone();
+                    }
                 }
             }
 

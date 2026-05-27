@@ -74,5 +74,7 @@ docs/**/*.pdf
 docs/**/out.txt
 .playwright-mcp/
 
-# Tauri sidecar runtime binaries â€” downloaded via tools/fetch-sidecar-binaries.sh per release
+# Tauri sidecar runtime binaries — downloaded via tools/fetch-sidecar-binaries.sh per release
 apps/tauri/src-tauri/binaries/
+
+audit-tmp/
