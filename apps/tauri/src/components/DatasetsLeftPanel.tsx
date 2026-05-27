@@ -156,7 +156,7 @@ export default function DatasetsLeftPanel({
       } else {
         unlisten = u;
       }
-    })().catch(() => {});
+    })().catch((err) => console.error("listen ingest-llm-proposal:", err));
     return () => {
       cancelled = true;
       unlisten?.();
@@ -341,7 +341,7 @@ export default function DatasetsLeftPanel({
       if (env.azure_resource_group && !azureResourceGroup) setAzureResourceGroup(env.azure_resource_group);
       if (env.azure_workspace_name && !azureWorkspaceName) setAzureWorkspaceName(env.azure_workspace_name);
       // Client secret is not auto-filled for security — env_or fallback handles it on the backend
-    }).catch(() => {});
+    }).catch((err) => console.error("cmd_sentinel_check_env:", err));
   }, []);
 
   // Sentinel event listeners are now in useSentinelEvents hook (App.tsx level)

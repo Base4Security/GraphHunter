@@ -54,7 +54,7 @@ export function useSentinelEvents(
           }));
         }
       })
-      .catch(() => {});
+      .catch((err) => console.error("cmd_sentinel_status:", err));
   }, []);
 
   // Global event listeners — always active when streaming

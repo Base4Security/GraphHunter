@@ -273,7 +273,7 @@ function AppInner() {
       .then((s) => {
         if (!cancelled) dispatch({ type: "SET_STATS", payload: s });
       })
-      .catch(() => {});
+      .catch((err) => console.error("cmd_get_graph_stats:", err));
     invoke<string[]>("cmd_get_path_nodes")
       .then((ids) => {
         if (!cancelled) dispatch({ type: "SET_PATH_NODE_IDS", payload: ids });
@@ -310,7 +310,7 @@ function AppInner() {
       .then((types) => {
         if (!cancelled) dispatch({ type: "SET_ENTITY_TYPES_IN_GRAPH", payload: types });
       })
-      .catch(() => {});
+      .catch((err) => console.error("cmd_get_entity_types_in_graph (refresh):", err));
     return () => {
       cancelled = true;
     };
