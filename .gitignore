@@ -30,7 +30,6 @@ demo_data/mega_dataset_1gb.json
 **/node_modules/
 apps/tauri/dist/
 app/dist/
-graph-hunter-mcp/dist/
 docs/_build/
 **/.claude/
 .vscode/*
@@ -74,7 +73,11 @@ docs/**/*.pdf
 docs/**/out.txt
 .playwright-mcp/
 
-# Tauri sidecar runtime binaries — downloaded via tools/fetch-sidecar-binaries.sh per release
+# Tauri sidecar runtime binaries ï¿½ downloaded via tools/fetch-sidecar-binaries.sh per release
 apps/tauri/src-tauri/binaries/
+
+# Sidecar .NET build artifacts (source lives on feature branches; bin/obj are local)
+sidecar/dotnet/**/bin/
+sidecar/dotnet/**/obj/
 
 audit-tmp/
