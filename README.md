@@ -150,14 +150,14 @@ Graph Hunter can use **GNN-based threat classification** via ONNX models (e.g. f
 
 Graph Hunter is split into a **Rust core** (domain logic, parsing, graph, search), a **Tauri + React** desktop app (UI and persistence), and the optional **`@graphhunter/mcp`** server (under `platform/mcp/`) for AI assistants. The core holds all business logic; the app exposes commands, session state, and an HTTP API.
 
-**Documentation (Spanish, LaTeX → PDF).** Four books under `docs/`:
+**Documentation (Spanish, LaTeX → PDF).** Unified book under `docs/libro/` (M9 → book-v1.0.0) covering:
 
-- `docs/arquitectura/` — internal architecture, shearing layers, 7 ADRs.
-- `docs/especificacion/` — external surfaces: HTTP API, MCP tools, DSL grammar, C ABI, OCSF target, env vars.
-- `docs/manual/` — operator/analyst guide: install, ingest, hunt, explorer, tags, export, integrations.
-- `docs/paper/` — internal research report: contributions (shearing layers, SIMD matcher, composite scoring, typestate FFI, model gate GNN, agentic ingestor), evaluation, limitations.
+- Internal architecture, shearing layers, ADRs.
+- External surfaces: HTTP API, MCP tools, DSL grammar, C ABI, OCSF target, env vars.
+- Operator/analyst guide: install, ingest, hunt, explorer, tags, export, integrations.
+- Research report: contributions (shearing layers, SIMD matcher, composite scoring, typestate FFI, model gate GNN, agentic ingestor), evaluation, limitations.
 
-Build: `cd docs && make all` (requires `xelatex` + `biber`). CI job `.github/workflows/docs.yml` builds the four PDFs on every push touching `docs/**` and uploads them as artifacts.
+Build: `make libro` (requires `xelatex` + `biber`). CI job `.github/workflows/docs.yml` builds the PDF on every push touching `docs/**` and uploads it as an artifact.
 
 ---
 
@@ -174,7 +174,7 @@ You need Rust, Node.js, and the [Tauri v2 prerequisites](https://v2.tauri.app/st
 2. **Clone and run in development:**
 
    ```bash
-   cd app
+   cd apps/tauri
    npm install
    npm run tauri dev
    ```
@@ -184,14 +184,14 @@ You need Rust, Node.js, and the [Tauri v2 prerequisites](https://v2.tauri.app/st
 **Run tests:**
 
 ```bash
-cd graph_hunter_core
+cd core/graph-engine
 cargo test
 ```
 
 **Build for production:**
 
 ```bash
-cd app
+cd apps/tauri
 npm run tauri build
 ```
 
@@ -244,7 +244,7 @@ CI runs the same crates on a `[ubuntu-latest, macos-latest]` matrix (see `.githu
 
 ## SIMD acceleration
 
-Graph Hunter includes **libgraphmatch**, an optional C++20 / AVX2 SIMD graph-matching engine at [`libgraphmatch/`](libgraphmatch/). It ports the DFS hot path of Graph Hunter's pattern matcher to C++ with sorted-set intersection vectorized via AVX2, and is integrated into the Rust core over a C ABI (see `graph_hunter_core/src/simd_matcher.rs`). It is **off by default**; the pure-Rust matcher remains the baseline.
+Graph Hunter includes **libgraphmatch**, an optional C++20 / AVX2 SIMD graph-matching engine at [`libgraphmatch/`](libgraphmatch/). It ports the DFS hot path of Graph Hunter's pattern matcher to C++ with sorted-set intersection vectorized via AVX2, and is integrated into the Rust core over a C ABI (see `core/graph-engine/src/simd_matcher.rs`). It is **off by default**; the pure-Rust matcher remains the baseline.
 
 **How to enable** — build with the `simd` Cargo feature on each crate that consumes it:
 
@@ -254,7 +254,7 @@ cargo build --release --features simd -p graph-hunter-app
 cargo build --release --features simd -p graph_hunter_cli
 ```
 
-When the feature is enabled, `graph_hunter_core/build.rs` compiles `libgraphmatch` via the `cc` crate and links it into the core.
+When the feature is enabled, `core/graph-engine/build.rs` compiles `libgraphmatch` via the `cc` crate and links it into the core.
 
 **Runtime behavior** — `libgraphmatch` detects AVX2 support at runtime via `cpuid`. On hosts without AVX2 (or if SIMD dispatch fails for any reason), the wrapper transparently falls back to the pure-Rust DFS path, so the same binary runs on both vectorized and scalar CPUs. Current ISA selection can be queried from the app via the `cmd_get_simd_isa` Tauri command.
 
@@ -279,7 +279,7 @@ See [`libgraphmatch/README.md`](libgraphmatch/README.md) for architecture detail
 Minimal run: start the app, load a log file, and hunt.
 
 ```bash
-cd app && npm run tauri dev
+cd apps/tauri && npm run tauri dev
 ```
 
 Then in the UI: create or select a session → **Select Log File** → choose a file from `demo_data/` (or your own) → **Auto-detect** → load. Switch to **Hunt Mode**, build a hypothesis (or pick one from the ATT&CK catalog), and click **Run**. Results appear in the graph and in the hunt table when there are many paths.
