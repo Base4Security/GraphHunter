@@ -74,6 +74,23 @@ pub struct Subgraph {
     pub has_more: bool,
 }
 
+impl Default for Subgraph {
+    /// Empty subgraph with zeroed pagination envelope. Lets callers and
+    /// tests build instances with `Subgraph { nodes, edges, ..Default::default() }`
+    /// when they don't care about the pagination metadata (RH-P1-013).
+    fn default() -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            total_edges: 0,
+            returned_edges: 0,
+            offset: 0,
+            page_size: 0,
+            has_more: false,
+        }
+    }
+}
+
 /// Paginated events response for the Event View panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaginatedEvents {
