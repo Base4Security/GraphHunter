@@ -129,13 +129,13 @@ export default function GraphMetricsLeftPanel({
           setW5(Math.round((config.w5_gnn_threat ?? 0) * 100));
         }
       })
-      .catch(() => {});
+      .catch((err) => console.error("cmd_get_anomaly_config:", err));
     // Check GNN model status
     invoke<boolean>("cmd_gnn_model_status")
       .then((loaded) => {
         if (!cancelled) setGnnLoaded(loaded);
       })
-      .catch(() => {});
+      .catch((err) => console.error("cmd_gnn_model_status:", err));
     return () => {
       cancelled = true;
     };
@@ -179,7 +179,7 @@ export default function GraphMetricsLeftPanel({
         setEntitiesForType((prev) => [...prev, ...result.entities]);
         setEntitiesTotalCount(result.total_count);
       })
-      .catch(() => {})
+      .catch((err) => console.error("cmd_get_entities_by_type_paginated (loadMore):", err))
       .finally(() => setEntitiesLoadingMore(false));
   };
 
