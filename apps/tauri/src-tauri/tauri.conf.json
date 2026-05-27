@@ -4,6 +4,12 @@
   "version": "1.0.0",
   "identifier": "com.graphhunter.app",
   "bundle": {
+    "active": true,
+    "targets": ["deb", "rpm", "appimage", "msi", "nsis", "dmg", "app"],
+    "publisher": "GraphHunter Contributors",
+    "category": "DeveloperTool",
+    "shortDescription": "Threat hunting on temporal graphs",
+    "longDescription": "GraphHunter es una plataforma de threat hunting sobre grafos temporales con DSL declarativa, ingestion adaptiva multi-fuente, y motor GNN de scoring.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -13,7 +19,20 @@
     ],
     "resources": [
       "resources/models/*"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "depends": []
+      }
+    },
+    "windows": {
+      "wix": {
+        "language": "en-US"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
   },
   "build": {
     "frontendDist": "../dist",
@@ -32,7 +51,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' tauri:; style-src 'self' 'unsafe-inline'; img-src 'self' data: tauri: asset:; script-src 'self'; connect-src 'self' tauri: ipc: http://ipc.localhost http://localhost:3001 ws://localhost:3001"
     }
   }
 }
