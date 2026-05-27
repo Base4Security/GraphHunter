@@ -308,6 +308,57 @@ impl GraphHunterApi {
             }
         }
     }
+
+    /// Drain a `try_parse` Err stream into the DLQ (RH-P1-012).
+    ///
+    /// Companion to [`Self::record_parse_skips`] for parsers that have
+    /// been migrated to `LogParser::try_parse`. Each `ParseError` from
+    /// the parser's per-row Result stream is appended to the DLQ with
+    /// the variant's `Display` rendering as the reason and the variant
+    /// tag stamped onto `raw_event` so the UI can filter by error class.
+    ///
+    /// No-op when the DLQ store is unconfigured or when `errors` is
+    /// empty. The break-on-store-failure semantics match
+    /// `record_parse_skips` — one failed append stops the drain so we
+    /// don't hammer a broken store with thousands of subsequent appends.
+    pub fn record_parse_errors(
+        &self,
+        dataset_id: &str,
+        source_id: Option<&str>,
+        errors: &[graph_hunter_core::parser::ParseError],
+    ) {
+        if errors.is_empty() {
+            return;
+        }
+        let Some(store) = self.dlq_store() else {
+            return;
+        };
+        let ts = crate::util::now_secs();
+        for err in errors {
+            let variant_tag = match err {
+                graph_hunter_core::parser::ParseError::MalformedRow { .. } => "MalformedRow",
+                graph_hunter_core::parser::ParseError::FieldType { .. } => "FieldType",
+                graph_hunter_core::parser::ParseError::MissingField(_) => "MissingField",
+                graph_hunter_core::parser::ParseError::Encoding(_) => "Encoding",
+                graph_hunter_core::parser::ParseError::SourceSpecific(_) => "SourceSpecific",
+            };
+            let entry = DeadLetter {
+                dlq_id: String::new(),
+                // Stamp the variant tag onto raw_event so DLQ consumers can
+                // filter by class without re-parsing the reason string.
+                raw_event: format!("[try_parse::{}]", variant_tag),
+                failure_kind: FailureKind::ParseFailure,
+                reason: err.to_string(),
+                dataset_id: Some(dataset_id.to_string()),
+                source_id: source_id.map(str::to_string),
+                ts_received: ts,
+            };
+            if let Err(e) = store.append(entry) {
+                tracing::warn!("dlq append (try_parse error) failed: {e}");
+                break;
+            }
+        }
+    }
 }
 
 fn matches_filter(
@@ -489,6 +540,65 @@ mod tests {
             .unwrap();
         assert_eq!(resp.not_found.len(), 1);
         assert_eq!(resp.not_found[0], "no-such-id");
+    }
+
+    #[test]
+    fn record_parse_errors_writes_each_variant_to_dlq() {
+        // RH-P1-012: record_parse_errors must persist each ParseError from
+        // a try_parse stream as a DLQ entry, stamped with its variant tag.
+        use graph_hunter_core::parser::ParseError;
+        let tmp = TempDir::new().unwrap();
+        let api = api_with_dlq(&tmp);
+
+        let errors = vec![
+            ParseError::MalformedRow {
+                line: 3,
+                reason: "expected 5 tokens, got 2".into(),
+            },
+            ParseError::Encoding("not utf8".into()),
+            ParseError::MissingField("timestamp".into()),
+        ];
+        api.record_parse_errors("ds-rh-p1-012", Some("iis_w3c"), &errors);
+
+        let resp = api
+            .list_dead_letters(ListDeadLettersRequest {
+                session: None,
+                dataset_id: Some("ds-rh-p1-012".into()),
+                failure_kind: None,
+                offset: None,
+                limit: None,
+            })
+            .unwrap();
+        assert_eq!(resp.total, 3);
+
+        // Verify variant tags were stamped onto raw_event.
+        let raws: Vec<String> = resp.entries.iter().map(|e| e.raw_event.clone()).collect();
+        assert!(raws.iter().any(|r| r.contains("MalformedRow")), "{:?}", raws);
+        assert!(raws.iter().any(|r| r.contains("Encoding")), "{:?}", raws);
+        assert!(raws.iter().any(|r| r.contains("MissingField")), "{:?}", raws);
+
+        // All entries route through ParseFailure (not InsertFailure).
+        for e in &resp.entries {
+            assert_eq!(e.failure_kind, FailureKind::ParseFailure);
+            assert_eq!(e.source_id.as_deref(), Some("iis_w3c"));
+        }
+    }
+
+    #[test]
+    fn record_parse_errors_empty_input_is_noop() {
+        let tmp = TempDir::new().unwrap();
+        let api = api_with_dlq(&tmp);
+        api.record_parse_errors("ds-noop", None, &[]);
+        let resp = api
+            .list_dead_letters(ListDeadLettersRequest {
+                session: None,
+                dataset_id: Some("ds-noop".into()),
+                failure_kind: None,
+                offset: None,
+                limit: None,
+            })
+            .unwrap();
+        assert_eq!(resp.total, 0);
     }
 
     // Silence the unused-dataset warning for the DatasetInfo type only

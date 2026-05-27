@@ -3347,6 +3347,60 @@ fn generic_garbage_input_returns_empty() {
     assert!(parser.parse("").is_empty());
 }
 
+// RH-P1-012: try_parse must surface malformed rows that the legacy
+// parse() path used to silently drop.
+
+#[test]
+fn generic_try_parse_surfaces_zero_triple_events_as_err() {
+    use crate::parser::{LogParser, ParseError};
+    let parser = GenericParser;
+    // JSON object that GenericParser doesn't recognize — parse() drops
+    // it silently; try_parse must emit a MalformedRow.
+    let input = r#"{"unrecognized_key": "value"}"#;
+    let results = parser.try_parse(input);
+    assert!(
+        results
+            .iter()
+            .any(|r| matches!(r, Err(ParseError::MalformedRow { .. }))),
+        "expected at least one MalformedRow err, got: {:?}",
+        results
+    );
+}
+
+#[test]
+fn sentinel_try_parse_surfaces_decode_failure() {
+    use crate::parser::{LogParser, ParseError};
+    let parser = SentinelJsonParser;
+    // NDJSON line that's not valid JSON at all — must surface as Encoding
+    // err, not silently dropped.
+    let input = "this is not json at all\n";
+    let results = parser.try_parse(input);
+    assert!(
+        results
+            .iter()
+            .any(|r| matches!(r, Err(ParseError::Encoding(_)))),
+        "expected Encoding err for non-JSON input, got: {:?}",
+        results
+    );
+}
+
+#[test]
+fn sentinel_try_parse_surfaces_zero_triple_event_as_err() {
+    use crate::parser::{LogParser, ParseError};
+    let parser = SentinelJsonParser;
+    // Valid JSON, but no SecurityEvent / DeviceProcessEvents / etc. shape
+    // that SentinelJsonParser recognizes.
+    let input = r#"{"some_random_field": 42}"#;
+    let results = parser.try_parse(input);
+    assert!(
+        results
+            .iter()
+            .any(|r| matches!(r, Err(ParseError::MalformedRow { .. }))),
+        "expected MalformedRow err for unrecognized JSON, got: {:?}",
+        results
+    );
+}
+
 // ══════════════════════════════════════════════════
 // ── Phase 6b: CsvParser Tests ──
 // ══════════════════════════════════════════════════

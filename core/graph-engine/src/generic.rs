@@ -1406,6 +1406,33 @@ impl LogParser for GenericParser {
         let events = Self::parse_events(data);
         parse_events_with_stats(&events, |event| Self::parse_event(event))
     }
+
+    /// Generic Result variant (RH-P1-012).
+    ///
+    /// Reuses `parse_events` + per-event triple extraction, but events that
+    /// produce zero triples are surfaced as `Err(ParseError::MalformedRow)`
+    /// instead of being silently counted as "skipped". The reason string
+    /// reuses `classify_skip_reason` so the DLQ explanation matches what
+    /// `parse_with_stats` already reports via `skip_reasons`.
+    fn try_parse(&self, data: &str) -> Vec<Result<ParsedTriple, crate::parser::ParseError>> {
+        let events = Self::parse_events(data);
+        let mut out: Vec<Result<ParsedTriple, crate::parser::ParseError>> = Vec::new();
+        for (lineno, event) in events.iter().enumerate() {
+            let triples = Self::parse_event(event);
+            if triples.is_empty() {
+                let reason = classify_skip_reason(event);
+                out.push(Err(crate::parser::ParseError::MalformedRow {
+                    line: lineno,
+                    reason: reason.to_string(),
+                }));
+            } else {
+                for t in triples {
+                    out.push(Ok(t));
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Runs `per_event` on each event, aggregates the produced triples, and
@@ -1479,7 +1506,7 @@ where
 /// so the UI can drill down into skip counts without asking the parser to
 /// emit a reason per-row. Order matters: empty > no_canonical > no_anchor >
 /// other.
-fn classify_skip_reason(event: &Value) -> &'static str {
+pub(crate) fn classify_skip_reason(event: &Value) -> &'static str {
     let obj = match event.as_object() {
         Some(o) if !o.is_empty() => o,
         _ => return "empty_row",

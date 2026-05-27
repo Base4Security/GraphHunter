@@ -32,6 +32,10 @@ serde_json = "1"
 # if/when we revisit.
 serde_yaml = "0.9"
 simd-json = "0.14"
+# RH-P1-012: ParseError variants for malformed-row propagation via
+# LogParser::try_parse. Pinned to v1 to match platform/local-llm and
+# platform/api which are already on v1 (avoids dual-crate bloat).
+thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
 rayon = "1"
 ahash = "0.8"

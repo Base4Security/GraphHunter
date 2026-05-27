@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use graph_hunter_core::entity::Entity;
-use graph_hunter_core::parser::{LogParser, ParsedTriple};
+use graph_hunter_core::parser::{LogParser, ParseError, ParsedTriple};
 use graph_hunter_core::relation::Relation;
 use graph_hunter_core::types::{EntityType, RelationType};
 
@@ -115,6 +115,126 @@ impl LogParser for IisW3cParser {
         }
 
         triples
+    }
+
+    /// IIS-aware Result variant (RH-P1-012).
+    ///
+    /// Surfaces three classes of per-row failures that the bare `parse`
+    /// path used to swallow:
+    /// 1. Data line before any `#Fields:` header — emits
+    ///    `ParseError::MissingField("#Fields header")`.
+    /// 2. Column-count mismatch (fewer tokens than declared fields) —
+    ///    emits `ParseError::MalformedRow`.
+    /// 3. Both c-ip and s-ip resolve to "-" or absent — emits
+    ///    `ParseError::MissingField("c-ip|s-ip")`.
+    ///
+    /// Comment lines, blank lines, and `#Fields:` directives are NOT
+    /// surfaced as errors (they're structural, not malformed). Successful
+    /// rows still emit 1-3 `Ok(triple)` entries each, matching `parse`.
+    fn try_parse(&self, data: &str) -> Vec<Result<ParsedTriple, ParseError>> {
+        let mut out: Vec<Result<ParsedTriple, ParseError>> = Vec::new();
+        let mut fields: Vec<String> = Vec::new();
+
+        for (lineno, raw_line) in data.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // Comment/metadata lines — structural, not malformed.
+            if line.starts_with('#') {
+                if let Some(rest) = line.strip_prefix("#Fields:") {
+                    fields = rest
+                        .trim()
+                        .split_whitespace()
+                        .map(|s| s.to_lowercase().to_string())
+                        .collect();
+                }
+                continue;
+            }
+
+            // Data line before any #Fields: header — surface as error.
+            if fields.is_empty() {
+                out.push(Err(ParseError::MissingField(
+                    "#Fields header (data line preceded the IIS field declaration)".into(),
+                )));
+                continue;
+            }
+
+            let values: Vec<&str> = line.split_whitespace().collect();
+            if values.len() < fields.len() {
+                out.push(Err(ParseError::MalformedRow {
+                    line: lineno,
+                    reason: format!(
+                        "expected {} tokens (per #Fields), got {}",
+                        fields.len(),
+                        values.len()
+                    ),
+                }));
+                continue;
+            }
+
+            let mut fmap: HashMap<&str, &str> = HashMap::with_capacity(fields.len());
+            for (i, fname) in fields.iter().enumerate() {
+                if i < values.len() {
+                    fmap.insert(fname.as_str(), values[i]);
+                }
+            }
+
+            let client_ip = fmap.get("c-ip").copied().unwrap_or("-");
+            let server_ip = fmap.get("s-ip").copied().unwrap_or("-");
+            let uri_stem = fmap.get("cs-uri-stem").copied().unwrap_or("-");
+            let method = fmap.get("cs-method").copied().unwrap_or("-");
+            let username = fmap.get("cs-username").copied().unwrap_or("-");
+            let status = fmap.get("sc-status").copied().unwrap_or("-");
+
+            let date_str = fmap.get("date").copied().unwrap_or("");
+            let time_str = fmap.get("time").copied().unwrap_or("");
+            let timestamp = parse_w3c_datetime(date_str, time_str);
+
+            if client_ip == "-" || server_ip == "-" {
+                out.push(Err(ParseError::MissingField(format!(
+                    "c-ip|s-ip (line {}: both must be non-dash to emit triples)",
+                    lineno
+                ))));
+                continue;
+            }
+
+            let mut meta = HashMap::new();
+            if method != "-" {
+                meta.insert("method".into(), method.into());
+            }
+            if status != "-" {
+                meta.insert("status".into(), status.into());
+            }
+
+            let src = Entity::new(client_ip, EntityType::IP);
+            let dst = Entity::new(server_ip, EntityType::Host);
+            let mut rel = Relation::new(client_ip, server_ip, RelationType::Connect, timestamp);
+            rel.metadata = meta;
+            out.push(Ok((src, rel, dst)));
+
+            if uri_stem != "-" && uri_stem != "/" {
+                let rel_type = match method {
+                    "GET" | "HEAD" | "OPTIONS" => RelationType::Read,
+                    "POST" | "PUT" | "DELETE" | "PATCH" => RelationType::Write,
+                    _ => RelationType::Connect,
+                };
+                let src2 = Entity::new(client_ip, EntityType::IP);
+                let dst2 = Entity::new(uri_stem, EntityType::URL);
+                let rel2 = Relation::new(client_ip, uri_stem, rel_type, timestamp);
+                out.push(Ok((src2, rel2, dst2)));
+            }
+
+            if username != "-" && !username.is_empty() {
+                let src3 = Entity::new(username, EntityType::User);
+                let dst3 = Entity::new(server_ip, EntityType::Host);
+                let rel3 = Relation::new(username, server_ip, RelationType::Auth, timestamp);
+                out.push(Ok((src3, rel3, dst3)));
+            }
+        }
+
+        out
     }
 }
 
@@ -326,6 +446,77 @@ more data
 ";
         let header = extract_fields_header(text).unwrap();
         assert_eq!(header, "#Fields: date time s-ip c-ip cs-method");
+    }
+
+    // RH-P1-012: try_parse must surface malformed rows that the legacy
+    // parse() path used to silently drop.
+
+    #[test]
+    fn try_parse_emits_err_for_data_line_before_fields_header() {
+        // No #Fields: directive yet — data line should produce Err, not be
+        // silently dropped.
+        let log = "\
+#Software: Microsoft Internet Information Services 10.0
+2025-01-01 00:00:00 10.0.0.1 GET /page1 80 - 1.2.3.4 200
+";
+        let parser = IisW3cParser;
+        let results = parser.try_parse(log);
+        assert!(
+            results.iter().any(|r| matches!(r, Err(ParseError::MissingField(s)) if s.contains("#Fields"))),
+            "expected MissingField error for data line before #Fields header, got: {:?}",
+            results
+        );
+    }
+
+    #[test]
+    fn try_parse_emits_err_for_short_row() {
+        // #Fields declares 7 tokens; the data line only has 4 — must surface
+        // MalformedRow instead of dropping.
+        let log = "\
+#Fields: date time s-ip cs-method cs-uri-stem c-ip sc-status
+2025-01-01 GET /page 1.2.3.4
+";
+        let parser = IisW3cParser;
+        let results = parser.try_parse(log);
+        assert!(
+            results.iter().any(|r| matches!(r, Err(ParseError::MalformedRow { .. }))),
+            "expected MalformedRow error for short row, got: {:?}",
+            results
+        );
+    }
+
+    #[test]
+    fn try_parse_emits_err_for_dash_only_ips() {
+        // Both c-ip and s-ip resolve to "-" — legacy parse() dropped these
+        // silently; try_parse should surface a MissingField error so the
+        // DLQ can see them.
+        let log = "\
+#Fields: date time s-ip cs-method cs-uri-stem c-ip sc-status
+2025-01-01 00:00:00 - GET /page1 - 200
+";
+        let parser = IisW3cParser;
+        let results = parser.try_parse(log);
+        assert!(
+            results.iter().any(|r| matches!(r, Err(ParseError::MissingField(_)))),
+            "expected MissingField error for dash-only ips, got: {:?}",
+            results
+        );
+    }
+
+    #[test]
+    fn try_parse_preserves_ok_rows_alongside_errs() {
+        // Mixed input: one good row, one short row. Must surface both.
+        let log = "\
+#Fields: date time s-ip cs-method cs-uri-stem s-port cs-username c-ip cs(User-Agent) cs(Referer) sc-status sc-substatus sc-win32-status time-taken
+2025-06-30 05:43:03 10.7.20.69 GET / 443 - 1.2.3.4 Mozilla/5.0 - 200 0 0 10
+2025-06-30 05:43:04 too-few-fields
+";
+        let parser = IisW3cParser;
+        let results = parser.try_parse(log);
+        let ok_count = results.iter().filter(|r| r.is_ok()).count();
+        let err_count = results.iter().filter(|r| r.is_err()).count();
+        assert!(ok_count >= 1, "expected at least one Ok row, got {} (results: {:?})", ok_count, results);
+        assert!(err_count >= 1, "expected at least one Err row, got {} (results: {:?})", err_count, results);
     }
 
     #[test]
