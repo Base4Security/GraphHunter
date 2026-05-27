@@ -59,7 +59,7 @@ def extract_snippets(rs_path: Path) -> Iterator[tuple[str, str]]:
 def find_all_snippets(repo_root: Path) -> dict[str, tuple[Path, str]]:
     """Devuelve dict name -> (path, body) de todos los snippets en el repo."""
     snippets: dict[str, tuple[Path, str]] = {}
-    skip_dirs = {".git", "target", "node_modules", "build", "dist", "_archive"}
+    skip_dirs = {".git", ".claude", "target", "node_modules", "build", "dist", "_archive"}
     for rs in repo_root.rglob("*.rs"):
         if any(part in skip_dirs for part in rs.parts):
             continue
