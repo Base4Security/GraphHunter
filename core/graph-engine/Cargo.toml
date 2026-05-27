@@ -85,7 +85,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 quick-xml = "0.38"
 # MaxMind GeoLite2 offline GeoIP/ASN lookup. Optional: only pulled when the
 # `geoip` feature is enabled. The reader is ~50KB compiled, no network deps.
-maxminddb = { version = "0.24", optional = true }
+maxminddb = { version = "0.28", optional = true }
 # LogSource trait + Azure connectors live in platform/sources per F2.11.
 # Core re-exports these under the old `sources::` path so existing call
 # sites (ingest pipeline, watermark_store, ingest_adapter) keep

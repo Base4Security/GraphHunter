@@ -62,10 +62,10 @@ export default function RenameTypeModal({
       onClose();
       invoke<GraphStats>("cmd_get_graph_stats")
         .then(onStatsUpdate)
-        .catch(() => {});
+        .catch((err) => console.error("cmd_get_graph_stats (rename type):", err));
       invoke<DatasetInfo[]>("cmd_list_datasets")
         .then(onDatasetsChange)
-        .catch(() => {});
+        .catch((err) => console.error("cmd_list_datasets (rename type):", err));
       onLog({
         time: now(),
         message: `Renamed ${fromType} → ${effectiveToType} in dataset`,

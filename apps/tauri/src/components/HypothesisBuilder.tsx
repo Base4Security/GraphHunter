@@ -72,7 +72,7 @@ export default function HypothesisBuilder({
     if (!catalogOpen || catalog.length > 0) return;
     invoke<CatalogEntry[]>("cmd_get_catalog")
       .then(setCatalog)
-      .catch(() => {});
+      .catch((err) => console.error("cmd_get_catalog:", err));
   }, [catalogOpen, catalog.length]);
 
   // Sync: steps -> DSL text (when chain UI changes)

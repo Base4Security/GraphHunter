@@ -88,16 +88,41 @@ ignore = [
 # List of explicitly allowed licenses
 # See https://spdx.org/licenses/ for list of possible licenses
 # [possible values: any SPDX 3.11 short identifier (+ optional exception)].
+# GPL-3.0-compatible permissive licenses (LICENSE is GPL-3.0).
+# All listed licenses are OSI-approved and one-way compatible with GPL-3.0.
+# See https://www.gnu.org/licenses/license-list.html for GNU's compatibility analysis.
+#
+# `Unicode-3.0` is the new ICU license (Unicode-DFS-2016 was retired in
+# favor of this for icu_collections / icu_locale_core / icu_normalizer /
+# icu_properties — all transitively pulled in via idna -> url -> reqwest).
+# It is OSI-approved and GPL-compatible.
+#
+# `GPL-3.0` (deprecated SPDX identifier; modern is `GPL-3.0-only`) is the
+# license of our own workspace crates. Cargo-deny still flags the
+# deprecation, but the identifier is unambiguous and we allow it here so
+# the workspace itself passes the scan. A follow-up cleanup can migrate
+# every per-crate Cargo.toml to `GPL-3.0-only`.
 allow = [
-    #"MIT",
-    #"Apache-2.0",
-    #"Apache-2.0 WITH LLVM-exception",
+    "GPL-3.0",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Zlib",
+    "Unlicense",
+    "0BSD",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
 ]
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the
 # canonical license text of a valid SPDX license file.
 # [possible values: any between 0.0 and 1.0].
-confidence-threshold = 0.8
+confidence-threshold = 0.93
 # Allow 1 or more licenses on a per-crate basis, so that particular licenses
 # aren't accepted for every possible crate as with the normal allow list
 exceptions = [

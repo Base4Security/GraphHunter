@@ -1,0 +1,24 @@
+name: Reporte de seguridad (NO USAR)
+description: Las vulnerabilidades NO se reportan como issue publico. Ver SECURITY.md.
+title: "[security]: NO USAR ESTE TEMPLATE"
+labels:
+  - security
+body:
+  - type: markdown
+    attributes:
+      value: |
+        # No reportes vulnerabilidades en issues publicos
+
+        Este template existe solo para redirigirte. **No completes ni envies este formulario.**
+
+        Si crees haber encontrado una vulnerabilidad de seguridad en GraphHunter, seguí el
+        procedimiento descrito en [SECURITY.md](../../SECURITY.md):
+
+        - Reporta de forma privada por email a **idi@base4security.com**, o
+        - Usa **[GitHub Security Advisories](https://github.com/lsotomayorb4/Graph-Hunter/security/advisories/new)**
+          para enviar el reporte de forma confidencial.
+
+        Damos un plazo razonable (~90 dias) para parchear antes de cualquier disclosure
+        publico. Acreditamos al reportante en las release notes con su permiso.
+
+        Cerrá esta pestana y volvé al canal correcto. Gracias por hacer disclosure responsable.

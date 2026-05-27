@@ -269,6 +269,11 @@ fn subgraph_for_seed_covers_expected_edges() {
         .get_subgraph(SubgraphRequest {
             session: None,
             node_ids: vec!["alice".into(), "web-01".into(), "cmd.exe".into()],
+            // RH-P1-013: pagination knobs added 2026-05-06. `None` keeps
+            // the legacy default cap so the test asserts the same edges
+            // as before.
+            page_size: None,
+            offset: None,
         })
         .unwrap();
     // 3 entities in, 3 requested nodes out. Edges: alice→web-01 and
