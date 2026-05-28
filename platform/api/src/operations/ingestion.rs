@@ -445,7 +445,9 @@ impl GraphHunterApi {
         // Record post-finalize appends only after the graph write guard is
         // released: note_post_finalize_appends re-acquires graph.read(), and
         // a read-while-write on the same thread self-deadlocks the RwLock.
-        // no-ops because sync batch ingest never enters LiveTail phase (Track O owns that transition)
+        // no-ops here: phase is Finalizing at this point (the FinalizePhaseGuard has
+        // not dropped yet), so the Ready->LiveTail transition is skipped. Sync batch
+        // ingest intentionally never enters LiveTail anyway (Track O owns that).
         note_post_finalize_appends(&session, new_relations);
         let _ = used_auto_config; // reserved for future telemetry (which path served the ingest)
 
@@ -643,7 +645,9 @@ impl GraphHunterApi {
         };
         // Record post-finalize appends after the write guard is dropped
         // (calling while holding the graph write lock self-deadlocks the RwLock).
-        // no-ops because sync batch ingest never enters LiveTail phase (Track O owns that transition)
+        // no-ops here: phase is Finalizing at this point (the FinalizePhaseGuard has
+        // not dropped yet), so the Ready->LiveTail transition is skipped. Sync batch
+        // ingest intentionally never enters LiveTail anyway (Track O owns that).
         note_post_finalize_appends(&session, new_relations);
 
         {
@@ -752,7 +756,9 @@ impl GraphHunterApi {
         };
         // Record post-finalize appends after the write guard is dropped
         // (calling while holding the graph write lock self-deadlocks the RwLock).
-        // no-ops because sync batch ingest never enters LiveTail phase (Track O owns that transition)
+        // no-ops here: phase is Finalizing at this point (the FinalizePhaseGuard has
+        // not dropped yet), so the Ready->LiveTail transition is skipped. Sync batch
+        // ingest intentionally never enters LiveTail anyway (Track O owns that).
         note_post_finalize_appends(&session, new_relations);
 
         {
