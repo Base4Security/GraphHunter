@@ -141,7 +141,6 @@ fn cost_estimate(
 }
 
 /// Physical operator selected by the planner.
-// @book-snippet:planner/dispatch-plan-enum
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DispatchPlan {
     /// Default — generic DFS-Match path with NLF/D5/B9/D2-lite prunes.
@@ -175,14 +174,12 @@ pub enum DispatchPlan {
     /// FFI, no LFTJ trie build.
     Yannakakis,
 }
-// @book-snippet-end
 
 /// Decide which operator should execute `hypothesis`. Pure function of
 /// the hypothesis and process env — no graph access, cheap to call at
 /// query entry. Order matters: K4 LFTJ has a strictly larger
 /// asymptotic win on its shape, so it gets first refusal; Yannakakis
 /// covers the remaining α-acyclic shapes the DSL emits.
-// @book-snippet:planner/plan-dispatch
 pub fn plan(hypothesis: &Hypothesis) -> DispatchPlan {
     if triangle_name_marker_dispatch(hypothesis) {
         return DispatchPlan::TriangleLftj;
@@ -215,7 +212,6 @@ pub fn plan(hypothesis: &Hypothesis) -> DispatchPlan {
     }
     DispatchPlan::DfsMatch
 }
-// @book-snippet-end
 
 /// D1 stage 2 — cost-aware planner with lazy hint construction.
 /// Equivalent to `plan_with_hints` but only invokes the

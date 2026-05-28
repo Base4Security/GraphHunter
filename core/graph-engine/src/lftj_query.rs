@@ -312,7 +312,6 @@ pub fn enumerate_triangles_lftj_simd(
 /// the trie, applying the same time-respecting predicate. Reported
 /// path order matches `enumerate_triangles_lftj` so result-set parity
 /// is well-defined (sort by `(a, b, c)` for comparison).
-// @book-snippet:lftj/enumerate-triangles-naive
 pub fn enumerate_triangles_naive(
     graph: &GraphHunter,
     trie: &MaterializedCsrTrie,
@@ -369,7 +368,6 @@ pub fn enumerate_triangles_naive(
     }
     out
 }
-// @book-snippet-end
 
 /// SIMD enumerator with a time-window predicate. Emits only triangles
 /// whose `t_ab` falls in `[t_lo, t_hi)`. The narrower the window, the
@@ -601,7 +599,6 @@ pub fn enumerate_4cliques_naive(
 /// intersect) — the d-candidates. The temporal predicate is layered
 /// on top, with the strongest cuts (`t_ad < t_bc`, `t_ac < t_bc`)
 /// applied as early as possible to short-circuit the inner intersect.
-// @book-snippet:lftj/enumerate-4cliques-simd
 pub fn enumerate_4cliques_lftj_simd(
     graph: &GraphHunter,
     trie: &MaterializedCsrTrie,
@@ -712,7 +709,6 @@ pub fn enumerate_4cliques_lftj_simd(
     }
     out
 }
-// @book-snippet-end
 
 /// Rayon-parallel 4-clique enumeration. Outer `par_iter` over `a`;
 /// each worker keeps its own scratch intersect buffers via

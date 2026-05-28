@@ -1,23 +1,18 @@
 # Documentación de GraphHunter
 
-La documentación viva está en **`docs/libro/`** — un solo libro
-unificado en PDF (`docs/libro/libro.pdf`).
+Documentación técnica del proyecto. La guía de usuario/operador y la
+referencia online viven en [readthedocs](https://graphhunter.readthedocs.io/).
 
-## Build rápido
+## Estructura
 
-```bash
-make -C docs/libro fast       # ~15 s, sin biber/índice
-make -C docs/libro all        # ~60 s, completo con bibliografía e índice
-```
+- **`arquitectura/`** — notas vivas de arquitectura (layering, excepciones).
+- **`decisions/`** — Architecture Decision Records (ADR-lite). Decisiones
+  persistentes de diseño con su contexto.
+- **`perf/`** — bitácora de benchmarks por fecha (DFS baseline/post, SIMD audit, etc.).
+- **`images/`** — logo y screenshots usados en el README.
 
 ## Histórico
 
-`docs/_archive/` contiene la documentación previa, incluido el
-snapshot de los 5 libros LaTeX archivados en 2026-05 antes de la
-consolidación. Ver `docs/_archive/2026-libros-pre-unificacion/README.md`
-para el mapeo capítulo viejo → capítulo nuevo.
-
-## Notas en Markdown
-
-- `docs/perf/` — bitácora viva de benchmarks por fecha (no se archiva).
-- `docs/superpowers/` — specs y planes de implementación.
+`docs/_archive/` contiene material previo conservado como referencia:
+ADRs antiguos, snapshots de arquitectura (en/es), notas de fases iniciales,
+estrategia GNN, y utilidades de charlas. No es documentación viva.

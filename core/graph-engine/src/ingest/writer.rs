@@ -140,7 +140,6 @@ impl<A: GraphAccess + 'static> GraphWriter<A> {
         self.metrics.snapshot()
     }
 
-    // @book-snippet:ingest/writer-write-one-batch
     async fn write_one_batch(&self, batch: ParsedBatch, cancel: &CancellationToken) {
         // Record the priority for metrics. The writer doesn't actually
         // reorder batches — this counter just lets operators see
@@ -202,7 +201,6 @@ impl<A: GraphAccess + 'static> GraphWriter<A> {
                 .fetch_add(1, Ordering::Relaxed);
         }
     }
-    // @book-snippet-end
 }
 
 // ---------------------------------------------------------------------------

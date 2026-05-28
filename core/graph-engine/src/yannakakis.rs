@@ -250,7 +250,6 @@ impl Hypergraph {
 /// cycle ⇒ not α-acyclic. The returned `Vec<usize>` is the
 /// step-index sequence in elimination order, which `JoinTree::build`
 /// reverses to derive parent pointers.
-// @book-snippet:yannakakis/gyo-reduce
 pub fn gyo_reduce(g: &Hypergraph) -> Option<Vec<usize>> {
     if g.edges.is_empty() {
         return Some(Vec::new());
@@ -294,7 +293,6 @@ pub fn gyo_reduce(g: &Hypergraph) -> Option<Vec<usize>> {
 
     Some(order)
 }
-// @book-snippet-end
 
 /// True iff the hypergraph is α-acyclic. Convenience wrapper over
 /// `gyo_reduce` for callers that only need the boolean answer.
@@ -496,7 +494,6 @@ pub fn materialize_bag(
 /// is *not* enforced here — that's a per-row constraint applied
 /// during enumeration. Conservative: we keep rows that the temporal
 /// filter might still drop, but never drop rows that could survive.
-// @book-snippet:yannakakis/semijoin-reduce-chain
 pub fn semijoin_reduce_chain(bags: &mut [Bag]) {
     let n = bags.len();
     if n <= 1 {
@@ -519,7 +516,6 @@ pub fn semijoin_reduce_chain(bags: &mut [Bag]) {
         bags[i].rows.retain(|r| live_dests.contains(&r.origin));
     }
 }
-// @book-snippet-end
 
 /// Enumerate every full path through the (already-reduced) chain
 /// of bags, respecting strict temporal ordering and `k_simplicity`.
@@ -1057,7 +1053,6 @@ fn enumerate_tree(
 ///
 /// Cyclic hypotheses (any shape) return an empty result with
 /// `truncated = false`. The planner is the gate on α-acyclicity.
-// @book-snippet:yannakakis/search-entry
 pub fn search_temporal_pattern_yannakakis(
     graph: &GraphHunter,
     hypothesis: &Hypothesis,
@@ -1077,7 +1072,6 @@ pub fn search_temporal_pattern_yannakakis(
         .collect();
     search_temporal_pattern_yannakakis_with_bags(graph, hypothesis, bags, max_results)
 }
-// @book-snippet-end
 
 /// L2 stage 2 — Yannakakis variant that takes pre-materialized
 /// `Bag`s. Used by the batch entry point's CSH bucketing layer

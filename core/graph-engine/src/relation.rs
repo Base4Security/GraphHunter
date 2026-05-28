@@ -69,7 +69,6 @@ impl Relation {
     }
 }
 
-// @book-snippet:types/compact-relation
 /// Memory-efficient edge representation for the adjacency list.
 ///
 /// **Layout note (2026-04-07 repack):** the previous field order was
@@ -110,7 +109,6 @@ pub struct CompactRelation {
     pub rel_type_tag: u8,     // 1 byte
                               // 31 bytes inline + 1 byte trailing struct-alignment padding (mult. of 8) = 32 B.
 }
-// @book-snippet-end
 
 /// Epoch base for [`CompactRelation::ingested_at_delta`].
 /// `2024-01-01T00:00:00Z` — chosen so the `u32` delta covers

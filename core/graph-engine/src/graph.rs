@@ -22,7 +22,6 @@ use crate::types::{
     EntityType, MergePolicy, RelationType, entity_type_matches, relation_type_matches,
 };
 
-// @book-snippet:result/hunt-result-type
 /// Result of a successful pattern match: an ordered list of entity IDs
 /// representing the attack path through the graph.
 ///
@@ -35,7 +34,6 @@ use crate::types::{
 /// per element; serde serialization is identical to `Vec<String>`
 /// because `Arc<str>: Serialize` produces the same JSON.
 pub type HuntResult = Vec<std::sync::Arc<str>>;
-// @book-snippet-end
 
 /// Current wall-clock time in epoch seconds. Falls back to the
 /// [`crate::relation::INGEST_EPOCH_BASE`] if the system clock is
@@ -775,7 +773,6 @@ impl GraphHunter {
     /// binary search bounds time windows in O(log d) per frame.
     /// Call once after ingestion completes. Subsequent calls are
     /// no-ops.
-    // @book-snippet:graph/sort-edges-by-timestamp
     pub fn sort_edges_by_timestamp(&mut self) -> Result<(), GraphError> {
         if self.edges_sorted {
             return Ok(());
@@ -798,7 +795,6 @@ impl GraphHunter {
         self.streaming_snapshot = std::sync::OnceLock::new();
         Ok(())
     }
-    // @book-snippet-end
 
     /// Searches for paths matching a temporal hypothesis pattern.
     /// For best performance, call `sort_edges_by_timestamp()` after ingestion.
@@ -870,7 +866,6 @@ impl GraphHunter {
                 .unwrap_or_default()
         };
 
-        // @book-snippet:matcher/nlf-prune-pass
         // B2 — NLF prune: drop starts that can't satisfy the first step's
         // `dest_type` requirement. Skipped when the requirement is trivial
         // (Any / Other dest_type). Heavy-logs #3.5: NLF builds lazily on
@@ -881,9 +876,7 @@ impl GraphHunter {
             let nlf = self.ensure_nlf();
             start_sids.retain(|&sid| nlf.can_match(sid, &nlf_req));
         }
-        // @book-snippet-end
 
-        // @book-snippet:matcher/khop-prune-pass
         // D5 — k-hop reachability prune: drop starts that cannot reach
         // a vertex of the hypothesis's *final* dest_type within MAX_DEPTH
         // hops. Multi-hop generalization of NLF — only meaningful when
@@ -897,7 +890,6 @@ impl GraphHunter {
             let reach = self.ensure_khop_reach();
             start_sids.retain(|&sid| reach.can_reach_in_window(sid, khop_mask, time_window));
         }
-        // @book-snippet-end
 
         // D2-lite — bidirectional semi-join. Runs the Yannakakis bottom-up
         // pass over the linear chain to drop start vertices that can't
@@ -1829,7 +1821,6 @@ impl GraphHunter {
     /// thousands of small allocations per search. The function clears them
     /// on entry to make the contract explicit; the buffers are also left
     /// empty by the natural backtrack at the end of the DFS.
-    // @book-snippet:matcher/dfs-baseline-init
     fn dfs_match_iterative(
         &self,
         start_sid: StrId,
@@ -1866,9 +1857,7 @@ impl GraphHunter {
         // Hoist the streaming snapshot above the per-frame loop —
         // see dfs_match_smart for rationale.
         let snap = self.streaming_snapshot();
-    // @book-snippet-end
 
-        // @book-snippet:matcher/dfs-baseline-step
         while let Some(frame) = stack.last_mut() {
             if result_count.load(Ordering::Relaxed) >= cap {
                 break;
@@ -2023,7 +2012,6 @@ impl GraphHunter {
             }
         }
     }
-    // @book-snippet-end
 
     /// Test/bench entry point that always uses the AMAC path,
     /// regardless of the `GRAPHHUNTER_AMAC` env var. Used by parity

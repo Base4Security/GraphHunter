@@ -150,15 +150,6 @@ Graph Hunter can use **GNN-based threat classification** via ONNX models (e.g. f
 
 Graph Hunter is split into a **Rust core** (domain logic, parsing, graph, search), a **Tauri + React** desktop app (UI and persistence), and the optional **`@graphhunter/mcp`** server (under `platform/mcp/`) for AI assistants. The core holds all business logic; the app exposes commands, session state, and an HTTP API.
 
-**Documentation (Spanish, LaTeX → PDF).** Unified book under `docs/libro/` (M9 → book-v1.0.0) covering:
-
-- Internal architecture, shearing layers, ADRs.
-- External surfaces: HTTP API, MCP tools, DSL grammar, C ABI, OCSF target, env vars.
-- Operator/analyst guide: install, ingest, hunt, explorer, tags, export, integrations.
-- Research report: contributions (shearing layers, SIMD matcher, composite scoring, typestate FFI, model gate GNN, agentic ingestor), evaluation, limitations.
-
-Build: `make libro` (requires `xelatex` + `biber`). CI job `.github/workflows/docs.yml` builds the PDF on every push touching `docs/**` and uploads it as an artifact.
-
 ---
 
 ## Installation

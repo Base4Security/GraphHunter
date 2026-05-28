@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-// @book-snippet:types/entity-type
 /// Represents the type of entity observed in the network/host telemetry.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EntityType {
@@ -20,7 +19,6 @@ pub enum EntityType {
     /// User-defined type name (e.g. from "Rename type" custom field).
     Other(String),
 }
-// @book-snippet-end
 
 impl fmt::Display for EntityType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -60,7 +58,6 @@ impl FromStr for EntityType {
     }
 }
 
-// @book-snippet:types/relation-type
 /// Represents the type of relationship between two entities.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RelationType {
@@ -82,7 +79,6 @@ pub enum RelationType {
     /// correct even across FFI round-trips.
     Other(String),
 }
-// @book-snippet-end
 
 impl fmt::Display for RelationType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

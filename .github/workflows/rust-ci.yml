@@ -8,7 +8,7 @@ on:
       - '**/*.rs'
       - '.github/workflows/rust-ci.yml'
   push:
-    branches: [main, docs/libro-m9-pulido]
+    branches: [main]
 
 concurrency:
   group: rust-ci-${{ github.ref }}

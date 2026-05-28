@@ -22,9 +22,9 @@
 
 ## Checklist
 
-- [ ] Tests pasan (`cargo test` para Rust, `make libro` para el libro, etc.)
+- [ ] Tests pasan (`cargo test` para Rust, `npm test` para Tauri/MCP)
 - [ ] CHANGELOG.md actualizado si aplica
-- [ ] Docs actualizadas (README, CONTRIBUTING, libro)
+- [ ] Docs actualizadas (README, CONTRIBUTING)
 - [ ] Sin secrets en el diff (corrí `gitleaks detect --staged`)
 - [ ] PR linkea issue o spec si aplica
 

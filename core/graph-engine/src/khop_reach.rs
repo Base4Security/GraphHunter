@@ -107,7 +107,6 @@ impl KHopReach {
     /// internally). This is a pessimistic over-approximation — a miss
     /// is a structural-vs-temporal mismatch and the DFS will still
     /// validate the chain.
-    // @book-snippet:khop/build-seed-and-rank
     pub fn build(graph: &crate::graph::GraphHunter) -> Self {
         let n = graph.entity_type_tags.len();
         let mut bits = vec![0u16; n];
@@ -138,7 +137,6 @@ impl KHopReach {
             }
         });
         let n_ranked = n_ranked as usize;
-    // @book-snippet-end
 
         // Heap-or-mmap backings for the temporal arrays. Build phase
         // gets `&mut [[i64; 9]]` either way; the auto-spill threshold
@@ -307,7 +305,6 @@ impl KHopReach {
     ///
     /// On `false`, the index may be partially updated; the caller
     /// must invalidate to regain a clean state.
-    // @book-snippet:khop/try-record-edge-delta
     pub fn try_record_edge_delta(
         &mut self,
         u: StrId,
@@ -452,7 +449,6 @@ impl KHopReach {
 
         true
     }
-    // @book-snippet-end
 
     /// True iff vertex `sid` can reach (within `MAX_DEPTH` hops) at least
     /// one vertex matching every bit set in `required_mask`. Vertices

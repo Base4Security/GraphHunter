@@ -4,63 +4,39 @@ All notable changes to Graph Hunter are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [book-v1.0.0] – 2026-05-27 (release date pending merge to main)
+## [code-v1.0.0] – 2026-05-28
 
-**First stable OSS public release.** Marks the cut from `docs/libro-m9-pulido` into `main` + tag `book-v1.0.0` with `libro.pdf` attached as GitHub Release artifact. Release-gated by the Release & Handoff Audit (18 discovery units + 13 fix tasks + 1 deferred follow-up unit; 27 PRs landed). See `docs/superpowers/specs/2026-05-26-release-handoff-audit-design.md` for the full audit spec.
+**First stable OSS public release** of the GraphHunter engine + app. Release-gated by a security & handoff audit; the user-facing book is maintained separately (internal).
 
-### Documentation
+### Added
 
-- Libro unificado (~844pp): M0..M9 mergeados, 53 capítulos + 9 apéndices, ~440 ejercicios, ~150 problemas, 59 refs.bib entries, ~38 `@book-snippet` markers conectando libro↔código.
-- README + CONTRIBUTING swept for 5 stale paths (`cd app`→`apps/tauri`, `graph_hunter_core/`→`core/graph-engine/`, `cd docs && make all`→`make libro`, `docs/{manual,especificacion,paper}/`→`docs/libro/`, `master`→`main`). Closes RH-P1-004.
-- `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1 español) added.
-- `.github/ISSUE_TEMPLATE/` (bug/feature/security + config) + `pull_request_template.md` added.
-- `docs/decisions/2026-05-26-sidecar-integration.md` — ADR-lite documenting sidecar landing strategy + GPL-3.0↔MS License Terms analysis (IPC mere aggregation).
-- `audit-findings/{A4-pii,A5-attribution,B-libro,C-core,D-tauri,E-ubuntu,F-ingest}.md` — 7 discovery audit reports persisted as repo artifacts.
-
-### CI / Build
-
+- `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) + `.github/ISSUE_TEMPLATE/` (bug/feature/security) + `pull_request_template.md`.
 - `.github/workflows/rust-ci.yml` — matrix `os: [ubuntu-latest, windows-latest] × 14 manifests`. Hard gates: `cargo build --release` + `cargo test`. Soft: clippy, fmt, deny, audit.
-- `.github/workflows/libro-cross-os.yml` — Linux + Windows libro builds with sha256 reproducibility check (`SOURCE_DATE_EPOCH` + `\hypersetup` PDF metadata pinning).
 - `.github/dependabot.yml` — 14 cargo manifests (lockfile-only) + npm (apps/tauri) + github-actions, weekly schedule.
-- Root `build-libro.sh` — Bash wrapper invoking `make -C docs/libro all` with `SOURCE_DATE_EPOCH` + reproducibility checks.
-- Top-level `Makefile` expose `libro` + `libro-clean` delegate targets. Closes RH-P1-007.
-
-### Removed
-
-- `graph-hunter-mcp/` legacy MCP monolith (1 670 LOC). Superseded by `platform/mcp/` since `platform/mcp 1.0.0` (2026-04-24). Kept on disk for one release cycle per stability policy; that cycle is now complete. Operators previously pinning the 1.3.0 binary should migrate to `@graphhunter/mcp 1.0.0+` from `platform/mcp/`.
+- `docs/decisions/2026-05-26-sidecar-integration.md` — ADR-lite for the Sentinel sidecar landing strategy + GPL-3.0↔MS License Terms analysis (IPC mere aggregation).
 
 ### Security
 
-- **PII purge** (3 P0 closed): 2 real `@base4sec.com` employee emails anonymized in test fixtures + archived LaTeX (RH-P0-002). 14 public IPs in attacker-spray fixtures + 1 LATAM ISP IP in IIS fixture replaced with RFC5737 doc ranges (RH-P0-003, RH-P0-004).
-- **CVE fixes**: maxminddb 0.24→0.28.1 (RUSTSEC-2025-0132) in `platform/api`+`core/graph-engine`+`apps/tauri/src-tauri`. rustls-webpki 0.103.12→0.103.13 (RUSTSEC-2026-0104). rkyv 0.8.15→0.8.16 (RUSTSEC-2026-0122). Closes RH-P1-001/002/003/005.
-- **Tauri webview**: strict CSP (`default-src 'self' tauri:`) replaces `csp: null`. Closes RH-P1-009. Bundle.targets + publisher metadata + cross-OS config (RH-P1-011 closed). Empty `.catch(() => {})` handlers replaced with `console.error` logging in 11 sites across 7 files (RH-P1-010).
-- `deny.toml` allow-list explícito (MIT, Apache-2.0, BSD-2/3, ISC, MPL-2.0, CC0-1.0, Zlib, Unlicense, 0BSD, Unicode-DFS-2016, Unicode-3.0, GPL-3.0). Closes RH-P2-001.
-- `apps/tauri/src-tauri/binaries/` agregado a `.gitignore` (355 DLLs runtime .NET no se commitean; fetch script stub `tools/fetch-sidecar-binaries.sh` documenta convención de release artifact).
+- **PII purge** (3 issues): 2 real `@base4sec.com` employee emails anonymized in test fixtures. 14 public IPs in attacker-spray fixtures + 1 LATAM ISP IP in an IIS fixture replaced with RFC5737 documentation ranges.
+- **CVE fixes**: maxminddb 0.24→0.28.1 (RUSTSEC-2025-0132) across `platform/api` + `core/graph-engine` + `apps/tauri/src-tauri`. rustls-webpki 0.103.12→0.103.13 (RUSTSEC-2026-0104). rkyv 0.8.15→0.8.16 (RUSTSEC-2026-0122).
+- **Tauri webview**: strict CSP (`default-src 'self' tauri:`) replaces `csp: null`. Bundle.targets + publisher metadata + cross-OS config. Empty `.catch(() => {})` handlers replaced with `console.error` logging (11 sites, 7 files).
+- `deny.toml` license allow-list (MIT, Apache-2.0, BSD-2/3, ISC, MPL-2.0, CC0-1.0, Zlib, Unlicense, 0BSD, Unicode-DFS-2016, Unicode-3.0, GPL-3.0).
+- `apps/tauri/src-tauri/binaries/` gitignored (355 .NET runtime DLLs are release artifacts, not source; `tools/fetch-sidecar-binaries.sh` documents the fetch convention).
 
 ### Ingest
 
-- `LogParser::try_parse` trait method (aditivo, non-breaking) — emite `Result<Vec<ParsedTriple>, ParseError>` por row. ParseError enum (MalformedRow/FieldType/MissingField/Encoding/SourceSpecific). 3/13 source impls migrated (IIS, Generic, Sentinel JSON); helper `record_parse_errors` enruta a DLQ. 10 source impls restantes compilan via default impl (drop silencioso preservado) — follow-up. Closes RH-P1-012 (partial).
-- `Subgraph` DTO: `impl Default` + 5 pagination fields (`total_edges`, `returned_edges`, `offset`, `page_size`, `has_more`). `tests/parity` ahora compila. Closes RH-P1-013.
+- `LogParser::try_parse` trait method (additive, non-breaking) — emits `Result<Vec<ParsedTriple>, ParseError>` per row. `ParseError` enum (MalformedRow/FieldType/MissingField/Encoding/SourceSpecific). 3/13 source impls migrated (IIS, Generic, Sentinel JSON); `record_parse_errors` routes to the DLQ. Remaining 10 impls compile via the default impl (silent-drop preserved) — follow-up.
+- `Subgraph` DTO: `impl Default` + 5 pagination fields (`total_edges`, `returned_edges`, `offset`, `page_size`, `has_more`). `tests/parity` now compiles.
 
-### Process
+### Removed
 
-- 18 discovery audit units + 13 fix execution tasks + 1 deferred (dependabot) = 27 PRs landed.
-- Audit findings tracking: `audit-findings/TEMPLATE.md` define schema con 9 campos por finding; los 7 reports siguen la convención y son consolidados en spec Sec 5.
-- Cumple gates duros del spec Sec 7: gitleaks clean (1 placeholder wontfix), CVE clean post-bumps, licencias GPL-3-compatibles, cross-OS builds verdes, PDF reproducible, 0 P0 open, 1 P1 open (RH-P1-014 Ubuntu apt → post-release issue).
-
-### Notable corrections during audit (Unit 18 over Unit 14)
-
-- `unimplemented!()` en `platform/api/src/operations/dlq.rs:498` reportado como P0 por Unit 14: **RETRACTED**. Verificado dentro de `#[cfg(test)] mod tests` con `#[allow(dead_code)]` — warning-silencer helper, nunca invocado. DLQ surface (record/list/reingest/purge) está fully implemented.
-- "260 unwraps en hot paths" reportado como P1 fleet liability por Unit 14: **DOWNGRADED P1→P3**. Verificación archivo-por-archivo en 4 archivos más gordos (overflow.rs, source_poller.rs, khop_reach.rs, lftj.rs): **0 de 150 unwraps están en código producción** — todos pasada la barrera `#[cfg(test)]`. Memoria stale por aggressive grep sin filtrar test modules.
+- `graph-hunter-mcp/` legacy MCP monolith (1 670 LOC). Superseded by `platform/mcp/` since `platform/mcp 1.0.0` (2026-04-24). Operators previously pinning the 1.3.0 binary should migrate to `@graphhunter/mcp 1.0.0+`.
 
 ### Pending / out-of-scope for v1.0.0
 
-- **Sidecar source landing**: 4+ feature branches sin mergear (`feat/sp2-alt-polling-differential`, `feat/sp3-kql-parser-offline`, `feat/sp4-sentinel-management`). Decision doc + checklist en `docs/decisions/2026-05-26-sidecar-integration.md`. Multi-PR follow-up post-release.
-- **LogParser migration**: 10/13 source impls aún emit silent drops via default `try_parse`. Follow-up PR para EVTX, PCAP, Fortianalyzer, Cognito, etc.
-- **README Ubuntu apt packages** (RH-P1-014): documentar dependencies inline (libwebkit2gtk-4.1-dev etc) — post-release issue.
-- **P2 backlog** (~10 issues): GCP IP en libro narrative, lsotomayor Windows path en debug stub, listings drift TS, SAFETY comments en SIMD prefetch, Tauri bare-return commands, `let _ = handle.emit()` silencing, `.env.example` template, PerfBadge UI surface, agentic ingestor adoption de constrained-decode.
-- **Internationalization libro → inglés**: decision separada.
-- **Pen-test**: post v1.0.0 if scope+budget align.
+- **Sentinel sidecar landing**: feature branches `feat/sp1-4` to be rebased onto this release. Strategy in `docs/decisions/2026-05-26-sidecar-integration.md`.
+- **LogParser migration**: 10/13 source impls still emit silent drops via the default `try_parse`. Follow-up PR for EVTX, PCAP, Fortianalyzer, Cognito, etc.
+- **Quality backlog**: SAFETY comments on 3 SIMD prefetch blocks, Tauri bare-return commands → `Result`, `let _ = handle.emit()` logging, `.env.example` template, PerfBadge UI surface, agentic ingestor adoption of constrained-decode.
 
 ## [platform/mcp 1.0.0] – 2026-04-24
 

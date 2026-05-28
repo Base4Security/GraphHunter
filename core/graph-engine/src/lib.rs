@@ -45,7 +45,6 @@ pub mod symmetry;
 pub mod sysmon;
 pub mod watermark_store;
 
-// @book-snippet:core/lib-facade-exports
 // Re-export core types at crate root for ergonomic imports.
 pub use analytics::{
     AUTO_GROUPED_THRESHOLD, DedupMode, ExplainedPeer, ExplainedScore, GraphSummary,
@@ -94,7 +93,6 @@ pub use preview::{preview_generic_from_keys, preview_sentinel, preview_sysmon};
 pub use relation::{CompactRelation, Relation};
 pub use sentinel::SentinelJsonParser;
 pub use sysmon::SysmonJsonParser;
-// @book-snippet-end
 // F2.11: the sources module lives in `platform/sources`. Re-exported
 // here so call-sites that imported `graph_hunter_core::sources::X` keep
 // resolving during the migration. The alias lets `crate::sources::Y`

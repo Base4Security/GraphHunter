@@ -72,7 +72,6 @@ pub struct DslParseResult {
     pub formatted: String,
 }
 
-// @book-snippet:dsl/parse-entry
 /// Parses a DSL string into a Hypothesis.
 ///
 /// Syntax: `EntityType -[RelationType]-> EntityType -[RelationType]-> EntityType ...`
@@ -82,9 +81,7 @@ pub struct DslParseResult {
 pub fn parse_dsl(input: &str, name: Option<&str>) -> Result<DslParseResult, DslError> {
     DslParser::v1().parse(input, name)
 }
-// @book-snippet-end
 
-// @book-snippet:dsl/ast-root
 /// Stateful DSL parser holding the three extension registries
 /// (entity types, relation types, predicates). Construct with
 /// [`DslParser::v1`] for the stable grammar, then chain
@@ -101,7 +98,6 @@ pub struct DslParser {
     relation_types: RelationTypeRegistry,
     predicates: PredicateRegistry,
 }
-// @book-snippet-end
 
 impl DslParser {
     /// Returns a parser for the v1 grammar with no extensions installed.
