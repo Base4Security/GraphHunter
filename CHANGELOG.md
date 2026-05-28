@@ -25,6 +25,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Root `build-libro.sh` — Bash wrapper invoking `make -C docs/libro all` with `SOURCE_DATE_EPOCH` + reproducibility checks.
 - Top-level `Makefile` expose `libro` + `libro-clean` delegate targets. Closes RH-P1-007.
 
+### Removed
+
+- `graph-hunter-mcp/` legacy MCP monolith (1 670 LOC). Superseded by `platform/mcp/` since `platform/mcp 1.0.0` (2026-04-24). Kept on disk for one release cycle per stability policy; that cycle is now complete. Operators previously pinning the 1.3.0 binary should migrate to `@graphhunter/mcp 1.0.0+` from `platform/mcp/`.
+
 ### Security
 
 - **PII purge** (3 P0 closed): 2 real `@base4sec.com` employee emails anonymized in test fixtures + archived LaTeX (RH-P0-002). 14 public IPs in attacker-spray fixtures + 1 LATAM ISP IP in IIS fixture replaced with RFC5737 doc ranges (RH-P0-003, RH-P0-004).

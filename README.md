@@ -361,7 +361,7 @@ The **`@graphhunter/mcp`** package (under [`platform/mcp/`](platform/mcp/)) is a
 | API token | Copy `GRAPHHUNTER_API_TOKEN` from the app startup log into your MCP config `env` so the MCP can authenticate. |
 | MCP config | Add the `graph-hunter-mcp` binary (shipped by `@graphhunter/mcp`) to your MCP client pointing at the app’s API URL. |
 
-**Quick setup:** See **[platform/mcp/README.md](platform/mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required). The older [`graph-hunter-mcp/`](graph-hunter-mcp/) package stays on disk for one release cycle for operators pinning the 1.3.0 binary.
+**Quick setup:** See **[platform/mcp/README.md](platform/mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required).
 
 ---
 

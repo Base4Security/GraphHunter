@@ -1,14 +1,12 @@
 # @graphhunter/mcp
 
-Modular MCP server per ADR-004. Canonical replacement for `graph-hunter-mcp/` (1 670 LOC monolithic, 54 tools).
+Modular MCP server per ADR-004. Canonical MCP package since book-v1.0.0; replaced the legacy `graph-hunter-mcp/` monolith (1 670 LOC, 54 tools in one file) which was removed in the v1.0.0 release cycle.
 
 ## Status — stable
 
 - Infrastructure (`Tool` interface, API client, logger, registry, server bootstrap): **done**.
 - Tool migration: **54 / 54** across navigation (10), hunting (6), scoring (3), graph-views (4), catalogs (4), notes (6), export (3), data-quality (7), agentic (8), integrations (3).
 - Contract tests cover every migrated endpoint against `/v1/schema`.
-
-`graph-hunter-mcp/` remains on disk for one release cycle so operators pinning the 1.3.0 binary can still build it locally; new work should target this package.
 
 ## Adding a tool
 
@@ -97,4 +95,4 @@ contract suite fails before a client IA hits the broken path.
 
 - `docs/architecture/phase1/ADR/004-mcp-tools-architecture.md` — full contract
 - `platform/api/src/operations/schema.rs` — authoritative endpoint registry
-- `graph-hunter-mcp/src/index.ts` — legacy monolith, retained one release cycle for operators with 1.3.0 pinned
+- Legacy `graph-hunter-mcp/` monolith removed in book-v1.0.0 (see CHANGELOG); see git log for archaeology if needed.
