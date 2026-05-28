@@ -407,6 +407,7 @@ impl GraphHunterApi {
         }
         let resume_phase = resume_phase_after_finalize(session.phase());
         session.set_phase(crate::state::SessionPhase::Finalizing);
+        let _phase_guard = FinalizePhaseGuard { session: Arc::clone(&session), resume: resume_phase };
         let (new_entities, new_relations, ingest_stats, used_auto_config) = {
             let mut graph = session
                 .graph
@@ -444,7 +445,7 @@ impl GraphHunterApi {
         // Record post-finalize appends only after the graph write guard is
         // released: note_post_finalize_appends re-acquires graph.read(), and
         // a read-while-write on the same thread self-deadlocks the RwLock.
-        // no-ops while Finalizing; sync batch ingest does not enter LiveTail (Track O owns that)
+        // no-ops because sync batch ingest never enters LiveTail phase (Track O owns that transition)
         note_post_finalize_appends(&session, new_relations);
         let _ = used_auto_config; // reserved for future telemetry (which path served the ingest)
 
@@ -476,7 +477,6 @@ impl GraphHunterApi {
             .as_ref()
             .map(|s| s.rows_seen > 0 && s.rows_with_triples == 0)
             .unwrap_or(false);
-        session.set_phase(resume_phase);
         Ok(LoadResult {
             new_entities,
             new_relations,
@@ -626,6 +626,7 @@ impl GraphHunterApi {
 
         let resume_phase = resume_phase_after_finalize(session.phase());
         session.set_phase(crate::state::SessionPhase::Finalizing);
+        let _phase_guard = FinalizePhaseGuard { session: Arc::clone(&session), resume: resume_phase };
         let (new_entities, new_relations) = {
             let mut graph = session
                 .graph
@@ -642,7 +643,7 @@ impl GraphHunterApi {
         };
         // Record post-finalize appends after the write guard is dropped
         // (calling while holding the graph write lock self-deadlocks the RwLock).
-        // no-ops while Finalizing; sync batch ingest does not enter LiveTail (Track O owns that)
+        // no-ops because sync batch ingest never enters LiveTail phase (Track O owns that transition)
         note_post_finalize_appends(&session, new_relations);
 
         {
@@ -668,7 +669,6 @@ impl GraphHunterApi {
             )
         };
 
-        session.set_phase(resume_phase);
         Ok(LoadResult {
             new_entities,
             new_relations,
@@ -727,6 +727,7 @@ impl GraphHunterApi {
 
         let resume_phase = resume_phase_after_finalize(session.phase());
         session.set_phase(crate::state::SessionPhase::Finalizing);
+        let _phase_guard = FinalizePhaseGuard { session: Arc::clone(&session), resume: resume_phase };
         let (new_entities, new_relations, ingest_stats) = {
             let mut graph = session
                 .graph
@@ -751,7 +752,7 @@ impl GraphHunterApi {
         };
         // Record post-finalize appends after the write guard is dropped
         // (calling while holding the graph write lock self-deadlocks the RwLock).
-        // no-ops while Finalizing; sync batch ingest does not enter LiveTail (Track O owns that)
+        // no-ops because sync batch ingest never enters LiveTail phase (Track O owns that transition)
         note_post_finalize_appends(&session, new_relations);
 
         {
@@ -788,7 +789,6 @@ impl GraphHunterApi {
             .as_ref()
             .map(|s| s.rows_seen > 0 && s.rows_with_triples == 0)
             .unwrap_or(false);
-        session.set_phase(resume_phase);
         Ok(LoadResult {
             new_entities,
             new_relations,
@@ -1594,6 +1594,29 @@ fn resume_phase_after_finalize(
     }
 }
 
+/// RAII guard that restores the session phase on scope exit (success, `?`-error,
+/// or panic unwind), so a failed or short-circuited sync ingest can never strand
+/// the session in `Finalizing` (which would silently reject all future hunts with
+/// a 409 and leave the session unrecoverable without a restart).
+///
+/// Usage: set the session to `Finalizing` first, then immediately construct this
+/// guard with the phase to resume. On any exit path — normal return, early `?`,
+/// or panic — `Drop` fires and calls `session.set_phase(resume)`.
+///
+/// Stores an `Arc<Session>` rather than a borrow to sidestep lifetime entanglement
+/// with the caller's `Arc<Session>` local and to make the guard `Send`-compatible
+/// for future async use. The clone is a single atomic ref-count bump.
+struct FinalizePhaseGuard {
+    session: Arc<Session>,
+    resume: crate::state::SessionPhase,
+}
+
+impl Drop for FinalizePhaseGuard {
+    fn drop(&mut self) {
+        self.session.set_phase(self.resume);
+    }
+}
+
 #[cfg(test)]
 mod resume_phase_tests {
     use super::*;
@@ -1605,6 +1628,51 @@ mod resume_phase_tests {
         assert_eq!(resume_phase_after_finalize(Ready), Ready);
         assert_eq!(resume_phase_after_finalize(Loading), Ready);
         assert_eq!(resume_phase_after_finalize(Finalizing), Ready);
+    }
+
+    /// Proves that `FinalizePhaseGuard` restores the session phase on ANY exit
+    /// path — including an early return that bypasses the happy-path tail.
+    ///
+    /// This is the regression guard for the C5 bug: before the RAII fix, an
+    /// early `?`-return between `set_phase(Finalizing)` and the trailing
+    /// `set_phase(resume_phase)` would strand the session in `Finalizing`
+    /// forever, silently rejecting all subsequent hunts with a 409.
+    #[test]
+    fn finalize_guard_restores_phase_on_early_exit() {
+        use crate::state::SessionPhase;
+
+        let session = Arc::new(Session::new("guard-test", "guard-test", GraphHunter::new(), 0));
+        session.set_phase(SessionPhase::Ready);
+
+        // Simulate the ingest preamble: set Finalizing, create the guard.
+        let resume = resume_phase_after_finalize(session.phase());
+        session.set_phase(SessionPhase::Finalizing);
+        assert_eq!(session.phase(), SessionPhase::Finalizing);
+
+        // Enter a block that creates the guard and then "early-exits" without
+        // reaching a normal success path. The closure returns an Err, which
+        // causes the guard to be dropped when the block scope ends.
+        let result: Result<(), &str> = (|| {
+            let _guard = FinalizePhaseGuard { session: Arc::clone(&session), resume };
+            // Simulate a mid-ingest error that would have `?`-returned in
+            // the real load_data / ingest_siem / load_data_with_config.
+            return Err("simulated lock-poisoned error");
+            #[allow(unreachable_code)]
+            Ok(())
+        })();
+
+        assert!(result.is_err(), "closure must return Err to simulate early exit");
+        // The critical assertion: the session must NOT be stranded in Finalizing.
+        assert_ne!(
+            session.phase(),
+            SessionPhase::Finalizing,
+            "session must not be stranded in Finalizing after early exit"
+        );
+        assert_eq!(
+            session.phase(),
+            SessionPhase::Ready,
+            "guard must restore Ready when entry phase was Ready"
+        );
     }
 }
 
