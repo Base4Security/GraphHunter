@@ -1,6 +1,6 @@
 //! Golden test for the built-in catalog.
 //!
-//! Asserts that the 29 built-in entries loaded from YAML have
+//! Asserts that the 30 built-in entries loaded from YAML have
 //! byte-exact fields matching the pre-P2-C Rust consts. If this test
 //! fails, a YAML edit accidentally changed a pattern, description, or
 //! id, and downstream tools (MCP, frontend dropdowns, Sigma exports)
@@ -254,6 +254,14 @@ const EXPECTED: &[Expected] = &[
         mitre_id: "T1053.005",
         description: "User authenticates to a host, creates a scheduled Task, and the Task triggers a Process — cross-host persistence installed over the network.",
         dsl_pattern: "User -[Auth]-> Host -[Create]-> Task -[Execute]-> Process",
+        k_simplicity: 1,
+    },
+    Expected {
+        id: "cat-030",
+        name: "Impossible Travel (proxy)",
+        mitre_id: "T1078.004",
+        description: "Successful authentications by the same user from 2+ distinct IPs within a one-hour window — proxy for impossible travel. The DSL itself does not consult geo metadata; pair this match with GeoIP enrichment (`enrich_ip`) on the matched IPs to confirm physical impossibility versus benign roaming (VPN, mobile carriers). Complementary to cat-017 (password spraying, looser 24h spray window) and cat-019 (anonymizing service).",
+        dsl_pattern: r#"User -[Auth {status="Success"}]-> IP HAVING count(distinct IP) >= 2 WITHIN 1h"#,
         k_simplicity: 1,
     },
 ];
