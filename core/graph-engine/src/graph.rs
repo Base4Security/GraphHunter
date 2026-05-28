@@ -423,7 +423,7 @@ impl GraphHunter {
             .get(dst_sid.index())
             .copied()
             .unwrap_or(crate::nlf::NLF_TYPE_COUNT as u8);
-        self.push_to_streaming(&compact);
+        self.push_to_streaming(&compact)?;
         // The cached streaming-outer snapshot is now stale (the
         // vertex set may have grown / per-vertex slot layout
         // changed). Drop it so the next matcher invocation
@@ -660,14 +660,14 @@ impl GraphHunter {
     /// `#[repr(C)]` layout-identity between `CompactRelation` and
     /// `StreamEdge` to byte-copy without per-field translation.
     #[inline]
-    fn push_to_streaming(&self, compact: &CompactRelation) {
-        use crate::streaming::StreamingGraphBackend;
+    fn push_to_streaming(&self, compact: &CompactRelation) -> Result<(), GraphError> {
         // SAFETY: CompactRelation and StreamEdge are both
         // #[repr(C)] with identical field order and types.
         let edge: crate::streaming::StreamEdge = unsafe {
             std::ptr::read(compact as *const _ as *const crate::streaming::StreamEdge)
         };
-        self.streaming.append_edge(compact.source_sid, edge);
+        self.streaming
+            .append_edge_checked(compact.source_sid, edge)
     }
 
     /// Internal: get compact relations by StrId and type.
@@ -2499,7 +2499,7 @@ impl GraphHunter {
 
             // Always insert relation
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-            self.push_to_streaming(&compact);
+            self.push_to_streaming(&compact)?;
             new_relations += 1;
         }
 
@@ -2541,7 +2541,7 @@ impl GraphHunter {
 
         self.streaming.clear();
         for c in &kept {
-            self.push_to_streaming(c);
+            self.push_to_streaming(c)?;
         }
         self.streaming.finalize();
 
@@ -2863,7 +2863,7 @@ impl GraphHunter {
             };
 
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-            self.push_to_streaming(&compact);
+            self.push_to_streaming(&compact)?;
             new_relations += 1;
 
             if (i + 1) % chunk_size == 0 || i + 1 == total {
@@ -2991,7 +2991,7 @@ impl GraphHunter {
             };
 
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-            self.push_to_streaming(&compact);
+            self.push_to_streaming(&compact)?;
             new_relations += 1;
         }
 
@@ -3078,7 +3078,7 @@ impl GraphHunter {
             };
 
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-            self.push_to_streaming(&compact);
+            self.push_to_streaming(&compact)?;
             new_relations += 1;
         }
 
@@ -3296,7 +3296,7 @@ impl GraphHunter {
                 ingested_at_delta: 0,
             };
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-            self.push_to_streaming(&compact);
+            self.push_to_streaming(&compact)?;
         }
         self.streaming.finalize();
 

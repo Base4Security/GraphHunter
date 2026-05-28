@@ -448,6 +448,8 @@ struct SpillState {
     /// hits this value, `append_edge` triggers `auto_spill`.
     budget_edges: usize,
     edges_since_last_spill: usize,
+    /// Test hook: `auto_spill` returns an I/O error without touching disk.
+    force_fail: bool,
     /// Directory hosting the auto-spill files. Either an externally-
     /// supplied session-scoped path (`with_spill_dir`) or an internal
     /// `tempfile::TempDir` that auto-deletes on drop.
@@ -498,6 +500,7 @@ impl InMemoryStreamingBackend {
             _temp_dir: Some(temp),
             current_path: None,
             spill_round: 0,
+            force_fail: false,
         });
         self
     }
@@ -521,6 +524,28 @@ impl InMemoryStreamingBackend {
             _temp_dir: None,
             current_path: None,
             spill_round: 0,
+            force_fail: false,
+        });
+        self
+    }
+
+    /// Test hook: enable auto-spill with `budget_edges = 1` and force
+    /// the next spill attempt to fail. Used by unit tests that assert
+    /// spill errors propagate through `append_edge_checked`.
+    pub fn with_spill_fail(self, fail: bool) -> Self {
+        if !fail {
+            return self;
+        }
+        let temp = tempfile::tempdir().expect("streaming auto-spill tempdir");
+        let dir = temp.path().to_path_buf();
+        *self.spill_state.lock() = Some(SpillState {
+            budget_edges: 1,
+            edges_since_last_spill: 0,
+            spill_dir: dir,
+            _temp_dir: Some(temp),
+            current_path: None,
+            spill_round: 0,
+            force_fail: true,
         });
         self
     }
@@ -925,6 +950,17 @@ impl InMemoryStreamingBackend {
     /// state is left consistent (vertices still on the previous
     /// `Mmap` or in-memory variants).
     fn auto_spill(&self) -> std::io::Result<()> {
+        if self
+            .spill_state
+            .lock()
+            .as_ref()
+            .is_some_and(|s| s.force_fail)
+        {
+            return Err(std::io::Error::other(
+                "streaming auto-spill forced failure (test hook)",
+            ));
+        }
+
         use std::io::Write;
         const MAGIC: u32 = 0x47485353;
         const VERSION: u32 = 1;
@@ -1052,10 +1088,37 @@ impl InMemoryStreamingBackend {
 
         Ok(())
     }
-}
 
-impl StreamingGraphBackend for InMemoryStreamingBackend {
-    fn append_edge(&self, src: StrId, edge: StreamEdge) {
+    /// Append one edge and surface auto-spill failures to the caller.
+    pub fn try_append_edge(&self, src: StrId, edge: StreamEdge) -> Result<(), crate::errors::GraphError> {
+        self.append_edge_inner(src, edge);
+        let needs_spill = {
+            let mut state = self.spill_state.lock();
+            match state.as_mut() {
+                Some(s) => {
+                    s.edges_since_last_spill += 1;
+                    s.edges_since_last_spill >= s.budget_edges
+                }
+                None => false,
+            }
+        };
+        if needs_spill {
+            self.auto_spill()
+                .map_err(|e| crate::errors::GraphError::Spill(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Checked append used by the ingest writer path (`push_to_streaming`).
+    pub fn append_edge_checked(
+        &self,
+        src: StrId,
+        edge: StreamEdge,
+    ) -> Result<(), crate::errors::GraphError> {
+        self.try_append_edge(src, edge)
+    }
+
+    fn append_edge_inner(&self, src: StrId, edge: StreamEdge) {
         // Fast path: vertex already exists, take a read lock on
         // the outer table and a write lock on the per-vertex slot.
         {
@@ -1076,31 +1139,18 @@ impl StreamingGraphBackend for InMemoryStreamingBackend {
                 guard.push(edge);
             }
         }
+    }
+}
 
-        // L3 D4 stage 2 — budget-triggered auto-spill. The Mutex
-        // is taken last so the per-vertex critical section is the
-        // smallest possible window; the only contention is between
-        // concurrent appenders crossing the threshold simultaneously
-        // (one wins the spill, the other re-checks and is a no-op).
-        let needs_spill = {
-            let mut state = self.spill_state.lock();
-            match state.as_mut() {
-                Some(s) => {
-                    s.edges_since_last_spill += 1;
-                    s.edges_since_last_spill >= s.budget_edges
-                }
-                None => false,
-            }
-        };
-        if needs_spill {
-            // Best-effort: a failed auto-spill is logged but does not
-            // abort the ingest. The ingest can keep using RAM until
-            // memory pressure forces an OS-level OOM, at which point
-            // the analyst sees a hard failure rather than a silent
-            // data loss.
-            if let Err(e) = self.auto_spill() {
-                eprintln!("streaming auto-spill failed: {e}");
-            }
+impl StreamingGraphBackend for InMemoryStreamingBackend {
+    fn append_edge(&self, src: StrId, edge: StreamEdge) {
+        if let Err(e) = self.try_append_edge(src, edge) {
+            // Trait API stays infallible for legacy/tests; writer path
+            // uses `append_edge_checked` via `push_to_streaming`.
+            #[cfg(debug_assertions)]
+            eprintln!("streaming append_edge spill failure: {e}");
+            #[cfg(not(debug_assertions))]
+            let _ = e;
         }
     }
 
@@ -1369,6 +1419,16 @@ mod tests {
         let lo = s.partition_point(|e| e.timestamp < 10);
         let hi = s.partition_point(|e| e.timestamp <= 30);
         assert_eq!(hi - lo, 21, "mmap slice supports binary search");
+    }
+
+    #[test]
+    fn append_edge_surfaces_spill_failure() {
+        use crate::errors::GraphError;
+
+        let backend = InMemoryStreamingBackend::new().with_spill_fail(true);
+        let src = StrId::from_raw(1);
+        let err = backend.append_edge_checked(src, edge(2, 100, 0));
+        assert!(matches!(err, Err(GraphError::Spill(_))));
     }
 
     #[test]

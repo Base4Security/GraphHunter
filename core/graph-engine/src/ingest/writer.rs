@@ -33,6 +33,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
 
+use crate::errors::GraphError;
+
 use super::batch::{ParsedBatch, Priority};
 use super::channels::ParsedReceiver;
 use super::graph_access::{DEFAULT_WRITE_CHUNK_SIZE, GraphAccess};
@@ -55,8 +57,10 @@ pub struct WriterMetrics {
     /// dropped.
     pub batches_cancelled: AtomicU64,
     /// `GraphAccess::insert_chunk` error returns. Does NOT include
-    /// cancellations or channel closures.
+    /// cancellations, channel closures, or spill failures.
     pub errors: AtomicU64,
+    /// Auto-spill failures surfaced as [`GraphError::Spill`].
+    pub spill_errors: AtomicU64,
     /// Batches drained that carried `Priority::Enrichment`.
     pub enrichment_batches: AtomicU64,
 }
@@ -69,6 +73,7 @@ impl WriterMetrics {
             chunks_written: self.chunks_written.load(Ordering::Relaxed),
             batches_cancelled: self.batches_cancelled.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
+            spill_errors: self.spill_errors.load(Ordering::Relaxed),
             enrichment_batches: self.enrichment_batches.load(Ordering::Relaxed),
         }
     }
@@ -83,6 +88,7 @@ pub struct WriterMetricsSnapshot {
     pub chunks_written: u64,
     pub batches_cancelled: u64,
     pub errors: u64,
+    pub spill_errors: u64,
     pub enrichment_batches: u64,
 }
 
@@ -178,8 +184,14 @@ impl<A: GraphAccess + 'static> GraphWriter<A> {
                         break;
                     }
                 }
-                Err(_) => {
-                    self.metrics.errors.fetch_add(1, Ordering::Relaxed);
+                Err(e) => {
+                    if matches!(e, GraphError::Spill(_)) {
+                        self.metrics
+                            .spill_errors
+                            .fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        self.metrics.errors.fetch_add(1, Ordering::Relaxed);
+                    }
                     // Abandon the rest of this batch. A more
                     // sophisticated policy (retry, dead-letter queue)
                     // is a Phase 5 concern.
