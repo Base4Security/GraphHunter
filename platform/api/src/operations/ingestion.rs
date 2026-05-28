@@ -49,10 +49,7 @@ fn restore_huntable_phase_after_ingest_failure(session: &Session) {
 }
 
 fn note_post_finalize_appends(session: &Session, new_relations: usize) {
-    if new_relations == 0 {
-        return;
-    }
-    session.note_live_tail_relations(new_relations as u64, now_secs());
+    session.note_post_finalize_appends(new_relations as u64, now_secs());
 }
 
 // ── Constants for load_data_streaming (lifted from Tauri commands) ─────

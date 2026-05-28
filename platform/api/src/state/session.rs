@@ -372,8 +372,32 @@ impl Session {
             .unwrap_or_else(|e| e.into_inner()) = phase;
     }
 
+    /// Record post-finalize appends: when the streaming graph is finalized
+    /// and new relations land while the session is `Ready`, enter
+    /// `LiveTail` and bump live-tail stats.
+    pub fn note_post_finalize_appends(&self, count: u64, timestamp: i64) {
+        if count == 0 {
+            return;
+        }
+        let finalized = self
+            .graph
+            .read()
+            .ok()
+            .map(|g| g.streaming_is_finalized())
+            .unwrap_or(false);
+        if !finalized {
+            return;
+        }
+        match self.phase() {
+            SessionPhase::Ready => self.set_phase(SessionPhase::LiveTail),
+            SessionPhase::LiveTail => {}
+            _ => return,
+        }
+        self.note_live_tail_relations(count, timestamp);
+    }
+
     /// Increment live-tail counters when post-finalize appends land.
-    pub fn note_live_tail_relations(&self, count: u64, timestamp: i64) {
+    fn note_live_tail_relations(&self, count: u64, timestamp: i64) {
         if count == 0 || self.phase() != SessionPhase::LiveTail {
             return;
         }
@@ -606,5 +630,47 @@ mod tests {
             .unwrap()
             .insert("x".to_string(), fresh_session("x"));
         assert!(handle_b.read().unwrap().contains_key("x"));
+    }
+
+    #[test]
+    fn post_finalize_append_transitions_ready_to_live_tail() {
+        use graph_hunter_core::parser::RawIngestEvent;
+        use graph_hunter_core::{EntityType, RelationType};
+
+        fn edge(src: &str, dst: &str, ts: i64) -> RawIngestEvent {
+            RawIngestEvent {
+                src_id: src.into(),
+                src_type: EntityType::User,
+                src_metadata: Default::default(),
+                dst_id: dst.into(),
+                dst_type: EntityType::Host,
+                dst_metadata: Default::default(),
+                rel_type: RelationType::Auth,
+                rel_metadata: Default::default(),
+                timestamp: ts,
+            }
+        }
+
+        let mut g = GraphHunter::new();
+        g.insert_raw_events(vec![edge("u1", "h1", 100)], None)
+            .unwrap();
+        g.sort_edges_by_timestamp().unwrap();
+        assert!(g.streaming_is_finalized());
+
+        let session = Session::new("s", "s", g, 0);
+        session.set_phase(SessionPhase::Ready);
+
+        let new_relations = {
+            let mut g = session.graph.write().unwrap();
+            let (_, nr) = g.insert_raw_events(vec![edge("u2", "h2", 200)], None)
+                .unwrap();
+            nr
+        };
+        session.note_post_finalize_appends(new_relations as u64, 42);
+
+        assert_eq!(session.phase(), SessionPhase::LiveTail);
+        let stats = session.live_tail_stats.read().unwrap();
+        assert_eq!(stats.tail_edge_count, 1);
+        assert_eq!(stats.last_append_at, Some(42));
     }
 }
