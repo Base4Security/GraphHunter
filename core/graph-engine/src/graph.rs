@@ -411,6 +411,9 @@ impl GraphHunter {
             scorer.observe_edge(&relation.source_id, &relation.dest_id);
         }
 
+        // meta_store.append precedes the fallible push_to_streaming below; on a
+        // spill failure the offset is orphaned (unreferenced) but harmless — the
+        // store is append-only and non-structural. Intentional C3a trade-off.
         let meta_offset = self.meta_store.append(&relation.metadata);
         let ds_tag = self.intern_dataset_tag(relation.dataset_id.as_deref());
         let compact = CompactRelation {
