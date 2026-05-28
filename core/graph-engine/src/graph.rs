@@ -218,6 +218,19 @@ impl GraphHunter {
         }
     }
 
+    /// Test hook: construct a GraphHunter whose streaming backend is armed with
+    /// `with_spill_fail(true)` — budget_edges=1, force_fail=true.  The first
+    /// `push_to_streaming` call will return `GraphError::Spill(_)`.  Used by
+    /// C3a regression tests only; do not call from production code.
+    #[cfg(test)]
+    fn with_spill_failing_backend() -> Self {
+        let mut g = Self::new();
+        g.streaming = std::sync::Arc::new(
+            crate::streaming::InMemoryStreamingBackend::new().with_spill_fail(true),
+        );
+        g
+    }
+
     /// D3 stage 3 — current mutation version. Caller-side caches
     /// (Session-level LFTJ trie, NLF/khop indexes that survive
     /// across batches) compare this to a cached snapshot of the
@@ -410,8 +423,9 @@ impl GraphHunter {
             ingested_at_delta: encode_ingested_at(now_seconds()),
         };
 
-        self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
+        // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
         self.push_to_streaming(&compact)?;
+        self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
         self.on_streaming_edge_appended(src_sid, dst_sid);
         Ok(())
     }
@@ -2527,8 +2541,9 @@ impl GraphHunter {
             };
 
             // Always insert relation
-            self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
+            // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
             self.push_to_streaming(&compact)?;
+            self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
             new_relations += 1;
         }
 
@@ -2891,8 +2906,9 @@ impl GraphHunter {
                 ingested_at_delta: 0,
             };
 
-            self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
+            // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
             self.push_to_streaming(&compact)?;
+            self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
             new_relations += 1;
 
             if (i + 1) % chunk_size == 0 || i + 1 == total {
@@ -3019,8 +3035,9 @@ impl GraphHunter {
                 ingested_at_delta: 0,
             };
 
-            self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
+            // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
             self.push_to_streaming(&compact)?;
+            self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
             self.on_streaming_edge_appended(src_sid, dst_sid);
             new_relations += 1;
         }
@@ -3107,8 +3124,9 @@ impl GraphHunter {
                 ingested_at_delta: 0,
             };
 
-            self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
+            // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
             self.push_to_streaming(&compact)?;
+            self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
             self.on_streaming_edge_appended(src_sid, dst_sid);
             new_relations += 1;
         }
@@ -3326,8 +3344,9 @@ impl GraphHunter {
                 dataset_tag: ds_tag,
                 ingested_at_delta: 0,
             };
-            self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
+            // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
             self.push_to_streaming(&compact)?;
+            self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
         }
         self.streaming.finalize();
 
@@ -3440,6 +3459,52 @@ mod tests {
         assert!(
             g.khop_reach.get().is_none(),
             "khop_reach must be invalidated after post-finalize append (C2 fix)"
+        );
+    }
+
+    /// C3a regression: when `push_to_streaming` spills and returns
+    /// `GraphError::Spill`, `add_relation` must propagate the error AND
+    /// leave no dangling reverse edge for the destination entity.
+    ///
+    /// Before the fix: `reverse_adj[dst].push(src)` runs first, then the
+    /// fallible `push_to_streaming` bails — leaving dst with a phantom
+    /// src in its reverse-adjacency list even though the forward edge was
+    /// never written.
+    ///
+    /// After the fix: `push_to_streaming` runs first; on error we return
+    /// immediately before touching `reverse_adj`.
+    #[test]
+    fn spill_failure_leaves_no_dangling_reverse_edge() {
+        use crate::errors::GraphError;
+
+        let mut g = GraphHunter::with_spill_failing_backend();
+
+        // Add source and destination entities.
+        g.add_entity(Entity::new("A", EntityType::User)).unwrap();
+        g.add_entity(Entity::new("B", EntityType::Host)).unwrap();
+
+        // The streaming backend is armed to fail on the first spill.
+        let result = g.add_relation(Relation::new("A", "B", RelationType::Auth, 100));
+
+        // Must surface a Spill error.
+        assert!(
+            matches!(result, Err(GraphError::Spill(_))),
+            "expected Err(GraphError::Spill(_)), got {:?}",
+            result
+        );
+
+        // No dangling reverse edge: B's reverse-adjacency list must NOT
+        // contain A.  Before the C3a fix the reverse push happened before
+        // push_to_streaming, so a spill failure left dst with a phantom src.
+        let b_sid = g.interner.get("B").expect("B was added");
+        let dangling = g
+            .reverse_adj
+            .get(&b_sid)
+            .map(|v| v.iter().any(|&s| s == g.interner.get("A").unwrap()))
+            .unwrap_or(false);
+        assert!(
+            !dangling,
+            "reverse_adj must not contain A->B after a spill failure (C3a)"
         );
     }
 }
