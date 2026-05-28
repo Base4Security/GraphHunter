@@ -423,6 +423,27 @@ impl GraphHunter {
         self.edges_sorted = false;
         self.streaming_snapshot = std::sync::OnceLock::new();
 
+        // C2 fix: incremental deltas read BASE neighbors only (via
+        // `streaming.with_neighbors` / `neighbors_arc`), which does NOT
+        // include the post-finalize TAIL buffer. Any delta applied after
+        // finalize would silently produce a stale index that misses every
+        // tail edge. The only safe action is a full invalidate-and-rebuild:
+        // drop the OnceLocks so the next hunt pays the O(E) rebuild cost
+        // against the complete base+tail graph.
+        //
+        // Pre-finalize appends still reach the incremental path below because
+        // all edges are in the base at that point and deltas are sound.
+        if self.streaming.is_finalized() {
+            if self.nlf.get().is_some() {
+                self.nlf = std::sync::OnceLock::new();
+            }
+            if self.khop_reach.get().is_some() {
+                self.khop_reach = std::sync::OnceLock::new();
+            }
+            self.bump_mutation_version();
+            return;
+        }
+
         let dst_tag = self
             .entity_type_tags
             .get(dst_sid.index())
@@ -3342,5 +3363,79 @@ pub struct CompactionStats {
 impl Default for GraphHunter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::Entity;
+    use crate::hypothesis::{Hypothesis, HypothesisStep};
+    use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
+
+    /// C2 regression: after indexes are built on a finalized graph, a
+    /// post-finalize `add_relation` must INVALIDATE both `nlf` and
+    /// `khop_reach` so they rebuild tail-inclusively on the next hunt.
+    ///
+    /// Before the fix: `on_streaming_edge_appended` runs the incremental
+    /// delta path which reads BASE neighbors only and silently succeeds,
+    /// leaving both OnceLocks populated with stale (tail-blind) data.
+    ///
+    /// After the fix: the finalized-gate fires, both OnceLocks are reset
+    /// to `OnceLock::new()` (empty), and the function returns early.
+    #[test]
+    fn post_finalize_tail_edge_is_visible_to_khop() {
+        let mut g = GraphHunter::new();
+
+        // Build A(User) --Auth--> B(Host) at t=100
+        g.add_entity(Entity::new("A", EntityType::User)).unwrap();
+        g.add_entity(Entity::new("B", EntityType::Host)).unwrap();
+        g.add_relation(Relation::new("A", "B", RelationType::Auth, 100))
+            .unwrap();
+
+        // Finalize: sorts edges and arms the streaming base.
+        g.sort_edges_by_timestamp().unwrap();
+        assert!(g.streaming.is_finalized(), "should be finalized after sort");
+
+        // Warm-up hunt: use a 2-step hypothesis so both NLF and khop_reach
+        // are built (khop is skipped for single-step hypotheses per
+        // `khop_reach::is_trivial`). Results may be empty — we only care
+        // that the indexes are populated.
+        let warmup = Hypothesis::new("warmup")
+            .add_step(HypothesisStep::new(
+                EntityType::User,
+                RelationType::Auth,
+                EntityType::Host,
+            ))
+            .add_step(HypothesisStep::new(
+                EntityType::Host,
+                RelationType::Auth,
+                EntityType::User,
+            ));
+        let _ = g.search_temporal_pattern(&warmup, None, None);
+
+        // Both indexes must be populated after the hunt.
+        assert!(g.nlf.get().is_some(), "NLF must be built after warm-up hunt");
+        assert!(
+            g.khop_reach.get().is_some(),
+            "khop_reach must be built after warm-up hunt"
+        );
+
+        // Post-finalize append: add new vertex C and edge B --Auth--> C.
+        g.add_entity(Entity::new("C", EntityType::User)).unwrap();
+        g.add_relation(Relation::new("B", "C", RelationType::Auth, 200))
+            .unwrap();
+
+        // After the fix: both OnceLocks must be invalidated (None) so the
+        // next hunt rebuilds them against the full base+tail graph.
+        assert!(
+            g.nlf.get().is_none(),
+            "NLF must be invalidated after post-finalize append (C2 fix)"
+        );
+        assert!(
+            g.khop_reach.get().is_none(),
+            "khop_reach must be invalidated after post-finalize append (C2 fix)"
+        );
     }
 }
