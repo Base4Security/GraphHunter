@@ -69,7 +69,7 @@ fn dedup_arc_paths(
 /// UX (small result sets render immediately; larger sets paginate).
 const INLINE_PATH_THRESHOLD: usize = 100;
 
-fn ensure_huntable_phase(phase: crate::state::SessionPhase) -> ApiResult<()> {
+pub(crate) fn ensure_huntable_phase(phase: crate::state::SessionPhase) -> ApiResult<()> {
     match phase {
         crate::state::SessionPhase::Ready | crate::state::SessionPhase::LiveTail => Ok(()),
         crate::state::SessionPhase::Loading => Err(ApiError::Conflict(

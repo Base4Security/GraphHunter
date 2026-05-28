@@ -271,7 +271,7 @@ impl GraphHunterApi {
                     .graph
                     .write()
                     .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
-                tool_results.push(execute_ai_tool(tc, &mut graph));
+                tool_results.push(execute_ai_tool(tc, &mut graph, session.phase()));
             }
 
             let now = now_secs();
@@ -399,7 +399,15 @@ pub(crate) fn build_graph_stats_for_prompt(graph: &GraphHunter) -> String {
 /// Execute a single tool call against the graph. Truncates large
 /// result payloads to 8 KB so the LLM context doesn't explode on
 /// `expand_node` against a hub.
-fn execute_ai_tool(tool_call: &ai::ToolCall, graph: &mut GraphHunter) -> ai::ToolResult {
+///
+/// `phase` is the session's current lifecycle phase; `run_hunt` is
+/// gated to `Ready`/`LiveTail` — identical to the HTTP `run_hunt`
+/// entrypoint — so the AI agent cannot bypass the phase fence.
+fn execute_ai_tool(
+    tool_call: &ai::ToolCall,
+    graph: &mut GraphHunter,
+    phase: crate::state::SessionPhase,
+) -> ai::ToolResult {
     let result: Result<String, String> = match tool_call.tool.as_str() {
         "search_entities" => {
             let query = tool_call
@@ -453,6 +461,15 @@ fn execute_ai_tool(tool_call: &ai::ToolCall, graph: &mut GraphHunter) -> ai::Too
             }
         }
         "run_hunt" => {
+            // Gate: reject hunts while the session is Loading or Finalizing,
+            // mirroring `ensure_huntable_phase` used by every HTTP hunt path.
+            if let Err(e) = crate::operations::hunt::ensure_huntable_phase(phase) {
+                return ai::ToolResult {
+                    tool: tool_call.tool.clone(),
+                    success: false,
+                    data: e.to_string(),
+                };
+            }
             let dsl = tool_call
                 .params
                 .get("hypothesis_dsl")
@@ -512,5 +529,56 @@ impl ApiError {
             service: "ai".into(),
             message,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::SessionPhase;
+    use graph_hunter_core::GraphHunter;
+    use serde_json::json;
+
+    fn run_hunt_tool_call(dsl: &str) -> ai::ToolCall {
+        ai::ToolCall {
+            tool: "run_hunt".to_string(),
+            params: json!({ "hypothesis_dsl": dsl }),
+        }
+    }
+
+    /// Gate: the AI `run_hunt` tool must be rejected when the session is
+    /// in `Finalizing` phase. The result must be an error whose message
+    /// indicates the session is not huntable.
+    #[test]
+    fn ai_run_hunt_rejected_while_finalizing() {
+        let mut graph = GraphHunter::new();
+        let tc = run_hunt_tool_call("User -[Auth]-> Host");
+        let result = execute_ai_tool(&tc, &mut graph, SessionPhase::Finalizing);
+        assert!(
+            !result.success,
+            "run_hunt should fail in Finalizing phase but returned success"
+        );
+        let msg = result.data.to_lowercase();
+        assert!(
+            msg.contains("finaliz") || msg.contains("loading"),
+            "error message should mention finalizing/loading, got: {}",
+            result.data
+        );
+    }
+
+    /// Sanity: the AI `run_hunt` tool succeeds (no error from the gate)
+    /// when the session is in `Ready` phase. The empty graph yields 0
+    /// paths but does not error.
+    #[test]
+    fn ai_run_hunt_allowed_while_ready() {
+        let mut graph = GraphHunter::new();
+        let tc = run_hunt_tool_call("User -[Auth]-> Host");
+        let result = execute_ai_tool(&tc, &mut graph, SessionPhase::Ready);
+        // On an empty graph the hunt succeeds with 0 paths.
+        assert!(
+            result.success,
+            "run_hunt should succeed in Ready phase, got: {}",
+            result.data
+        );
     }
 }
