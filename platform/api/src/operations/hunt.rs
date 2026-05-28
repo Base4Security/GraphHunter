@@ -69,6 +69,18 @@ fn dedup_arc_paths(
 /// UX (small result sets render immediately; larger sets paginate).
 const INLINE_PATH_THRESHOLD: usize = 100;
 
+fn ensure_huntable_phase(phase: crate::state::SessionPhase) -> ApiResult<()> {
+    match phase {
+        crate::state::SessionPhase::Ready | crate::state::SessionPhase::LiveTail => Ok(()),
+        crate::state::SessionPhase::Loading => Err(ApiError::Conflict(
+            "session is still loading; wait for ingest to complete".into(),
+        )),
+        crate::state::SessionPhase::Finalizing => Err(ApiError::Conflict(
+            "session is finalizing; hunt unavailable".into(),
+        )),
+    }
+}
+
 impl GraphHunterApi {
     /// Execute a temporal pattern search. Populates the hunt cache and
     /// returns either the paths inline (when ≤ 100) or just the count
@@ -79,6 +91,7 @@ impl GraphHunterApi {
     pub fn run_hunt(&self, req: RunHuntRequest) -> ApiResult<RunHuntResponse> {
         let max_results = req.max_results.unwrap_or(10_000);
         let session = self.resolve_session(req.session.as_ref())?;
+        ensure_huntable_phase(session.phase())?;
 
         // Per-call scoring override (v2 follow-up). When the caller
         // asks for `Anomaly` or `Gnn`, ensure the per-session scorer
@@ -289,6 +302,7 @@ impl GraphHunterApi {
         // `khop_is_built` peek. Cheap because OnceLock::get is a
         // single atomic load.
         let session_handle = self.resolve_session(session.as_ref())?;
+        ensure_huntable_phase(session_handle.phase())?;
         let indexes_were_warm = {
             let graph = session_handle
                 .graph
@@ -1061,9 +1075,38 @@ mod tests {
     fn api() -> GraphHunterApi {
         let api = GraphHunterApi::new_noop();
         let s = Arc::new(Session::new("s1", "t", GraphHunter::new(), 0));
+        s.set_phase(crate::state::SessionPhase::Ready);
         api.sessions().insert(s);
         api.sessions().set_current(Some("s1".into()));
         api
+    }
+
+    #[test]
+    fn hunt_rejected_while_finalizing() {
+        let api = GraphHunterApi::new_noop();
+        let s = Arc::new(Session::new("s1", "t", GraphHunter::new(), 0));
+        s.set_phase(crate::state::SessionPhase::Finalizing);
+        api.sessions().insert(s);
+        api.sessions().set_current(Some("s1".into()));
+
+        let err = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: None,
+                dedup_mode: None,
+            })
+            .unwrap_err();
+
+        match &err {
+            ApiError::Conflict(msg) => {
+                assert!(msg.contains("finalizing"), "unexpected message: {msg}");
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(err.status_code(), 409);
     }
 
     fn hypo(dsl: &str) -> graph_hunter_core::Hypothesis {

@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 **First stable OSS public release** of the GraphHunter engine + app. Release-gated by a security & handoff audit; the user-facing book is maintained separately (internal).
 
+### Performance
+
+- **Semijoin start pruning** and **AMAC interleaved DFS** are now enabled by default on multi-step hunts. Opt out for one release with `GRAPHHUNTER_SEMIJOIN=0` or `GRAPHHUNTER_AMAC=0`.
+- Optional parallel streaming finalize for hub-heavy ingest: set `GRAPHHUNTER_PARALLEL_FINALIZE=1` before `sort_edges_by_timestamp()`.
+
+### Hybrid sessions (Track H)
+
+- **`SessionPhase`** lifecycle (`loading` → `finalizing` → `ready` / `live_tail`) gates hunts during ingest finalize; HTTP/Tauri callers receive **409 Conflict** while loading or finalizing.
+
 ### Added
 
 - `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) + `.github/ISSUE_TEMPLATE/` (bug/feature/security) + `pull_request_template.md`.

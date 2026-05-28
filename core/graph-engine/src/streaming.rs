@@ -731,19 +731,34 @@ impl InMemoryStreamingBackend {
     /// need a separate "tail buffer" of unsorted post-finalize
     /// edges merged in at read time.
     pub fn finalize(&self) {
-        let outer = self
-            .vertices
-            .read();
+        let outer = self.vertices.read();
         for slot in outer.values() {
-            let mut guard = slot.write();
-            match &mut *guard {
-                NeighborList::Inline(sv) => sv.sort_unstable_by_key(|e| e.timestamp),
-                NeighborList::Vec(v) => v.sort_unstable_by_key(|e| e.timestamp),
-                // Already spilled; the file is sorted by construction
-                // (consolidate writes runs in their current order, and
-                // production today calls finalize() before consolidate()).
-                NeighborList::Mmap { .. } => {}
-            }
+            Self::sort_neighbor_slot(&mut *slot.write());
+        }
+    }
+
+    /// Same semantics as [`Self::finalize`] but sorts per-vertex lists in
+    /// parallel. Hub-heavy graphs benefit; Mmap-backed rows are unchanged.
+    pub fn finalize_parallel(&self) {
+        use rayon::prelude::*;
+
+        let slots: Vec<_> = {
+            let outer = self.vertices.read();
+            outer.values().cloned().collect()
+        };
+        slots.par_iter().for_each(|slot| {
+            Self::sort_neighbor_slot(&mut *slot.write());
+        });
+    }
+
+    fn sort_neighbor_slot(guard: &mut NeighborList) {
+        match guard {
+            NeighborList::Inline(sv) => sv.sort_unstable_by_key(|e| e.timestamp),
+            NeighborList::Vec(v) => v.sort_unstable_by_key(|e| e.timestamp),
+            // Already spilled; the file is sorted by construction
+            // (consolidate writes runs in their current order, and
+            // production today calls finalize() before consolidate()).
+            NeighborList::Mmap { .. } => {}
         }
     }
 
@@ -1691,6 +1706,46 @@ mod tests {
         for w in hs.windows(2) {
             assert!(w[0].timestamp <= w[1].timestamp, "hub sorted");
         }
+    }
+
+    #[test]
+    fn finalize_parallel_matches_sequential() {
+        fn seed(backend: &InMemoryStreamingBackend) {
+            for src_raw in 1..=10u32 {
+                let src = StrId::from_raw(src_raw);
+                for i in 0..10u32 {
+                    let ts = ((src_raw * 17 + i * 13) % 1000) as i64;
+                    backend.append_edge(src, edge(src_raw + 100 + i, ts, 0));
+                }
+            }
+        }
+
+        fn neighbor_timestamps(backend: &InMemoryStreamingBackend) -> Vec<(StrId, Vec<i64>)> {
+            let mut out = Vec::new();
+            for src_raw in 1..=10u32 {
+                let src = StrId::from_raw(src_raw);
+                let arc = backend.neighbors_arc(src).expect("vertex");
+                let guard = arc.read();
+                out.push((
+                    src,
+                    guard.as_slice().iter().map(|e| e.timestamp).collect(),
+                ));
+            }
+            out
+        }
+
+        let sequential = InMemoryStreamingBackend::new();
+        seed(&sequential);
+        sequential.finalize();
+
+        let parallel = InMemoryStreamingBackend::new();
+        seed(&parallel);
+        parallel.finalize_parallel();
+
+        assert_eq!(
+            neighbor_timestamps(&sequential),
+            neighbor_timestamps(&parallel)
+        );
     }
 
     #[test]

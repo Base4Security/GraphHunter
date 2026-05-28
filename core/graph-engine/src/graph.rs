@@ -777,7 +777,14 @@ impl GraphHunter {
         if self.edges_sorted {
             return Ok(());
         }
-        self.streaming.finalize();
+        let parallel_finalize = std::env::var("GRAPHHUNTER_PARALLEL_FINALIZE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if parallel_finalize {
+            self.streaming.finalize_parallel();
+        } else {
+            self.streaming.finalize();
+        }
         self.edges_sorted = true;
         // Heavy-logs #3.5: index builds (NLF + khop_reach) are
         // *lazy* now. Resetting the OnceLocks here ensures any
@@ -899,8 +906,8 @@ impl GraphHunter {
         // hypotheses (single-step or all-Any). Behind an env gate so
         // it can be A/B'd against the regular path.
         let semijoin_enabled = std::env::var("GRAPHHUNTER_SEMIJOIN")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
         if semijoin_enabled && !crate::semijoin::is_trivial(hypothesis) {
             let mut cands = crate::semijoin::CandidateSets::seed(self, hypothesis);
             crate::semijoin::refine(self, hypothesis, &mut cands);
@@ -944,14 +951,14 @@ impl GraphHunter {
             }
         };
 
-        // C2 — AMAC interleaved DFS. Default OFF; opt-in via the
-        // `GRAPHHUNTER_AMAC=1` env var. Processes starts in chunks of K
+        // C2 — AMAC interleaved DFS. Default ON; opt-out via
+        // `GRAPHHUNTER_AMAC=0`. Processes starts in chunks of K
         // contexts that round-robin through the inner edge loop, with
         // cross-context prefetch on the next context's pending edge.
         // Result-set parity with the regular DFS is verified by tests.
         let amac_enabled = std::env::var("GRAPHHUNTER_AMAC")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
 
         let results: Vec<HuntResult> = if amac_enabled && start_sids.len() >= 8 {
             let rc = Arc::clone(&result_count);

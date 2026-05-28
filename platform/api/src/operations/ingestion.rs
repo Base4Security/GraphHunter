@@ -30,9 +30,23 @@ use crate::evtx::{
 };
 use crate::format_registry::{make_parser_for_format, resolve_format, rich_preview_for_format};
 use crate::scoring::{run_full_scoring, run_scoring_adaptive};
-use crate::state::DatasetInfo;
+use crate::state::{DatasetInfo, Session, SessionPhase};
 use crate::util::now_secs;
 use crate::{ApiError, ApiResult, EventEmitter, GraphHunterApi};
+
+/// After a failed streaming ingest, unblock hunts when the graph still has data.
+fn restore_huntable_phase_after_ingest_failure(session: &Session) {
+    let has_graph = session
+        .graph
+        .read()
+        .map(|g| g.entity_count() > 0)
+        .unwrap_or(false);
+    session.set_phase(if has_graph {
+        SessionPhase::Ready
+    } else {
+        SessionPhase::Loading
+    });
+}
 
 // ── Constants for load_data_streaming (lifted from Tauri commands) ─────
 /// Number of lines per batch during streaming line-based ingestion.
@@ -451,6 +465,7 @@ impl GraphHunterApi {
             .as_ref()
             .map(|s| s.rows_seen > 0 && s.rows_with_triples == 0)
             .unwrap_or(false);
+        session.set_phase(crate::state::SessionPhase::Ready);
         Ok(LoadResult {
             new_entities,
             new_relations,
@@ -636,6 +651,7 @@ impl GraphHunterApi {
             )
         };
 
+        session.set_phase(crate::state::SessionPhase::Ready);
         Ok(LoadResult {
             new_entities,
             new_relations,
@@ -749,6 +765,7 @@ impl GraphHunterApi {
             .as_ref()
             .map(|s| s.rows_seen > 0 && s.rows_with_triples == 0)
             .unwrap_or(false);
+        session.set_phase(crate::state::SessionPhase::Ready);
         Ok(LoadResult {
             new_entities,
             new_relations,
@@ -863,8 +880,11 @@ impl GraphHunterApi {
             let panic_emitter = Arc::clone(&bg_emitter);
             let panic_job_id = bg_job_id.clone();
             let panic_dataset_id = bg_dataset_id.clone();
+            let panic_session = Arc::clone(&bg_session);
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                bg_session.set_phase(SessionPhase::Loading);
+
                 const MAX_INGEST_LINES: usize = usize::MAX;
 
                 // Date-range filter for line-based formats (IIS, CSV). Lines
@@ -1419,10 +1439,13 @@ impl GraphHunterApi {
                             }),
                         );
 
+                        bg_session.set_phase(crate::state::SessionPhase::Finalizing);
+
                         {
                             let mut graph = match bg_session.graph.write() {
                                 Ok(g) => g,
                                 Err(e) => {
+                                    bg_session.set_phase(SessionPhase::Ready);
                                     bg_emitter.emit(
                                         INGEST_ERROR,
                                         serde_json::to_value(&IngestError {
@@ -1456,6 +1479,8 @@ impl GraphHunterApi {
                             })
                             .unwrap_or((0, 0, Vec::new()));
 
+                        bg_session.set_phase(crate::state::SessionPhase::Ready);
+
                         bg_emitter.emit(
                             INGEST_COMPLETE,
                             serde_json::to_value(&IngestComplete {
@@ -1475,6 +1500,7 @@ impl GraphHunterApi {
                         );
                     }
                     Err(e) => {
+                        restore_huntable_phase_after_ingest_failure(&bg_session);
                         bg_emitter.emit(
                             INGEST_ERROR,
                             serde_json::to_value(&IngestError {
@@ -1489,6 +1515,7 @@ impl GraphHunterApi {
             })); // end catch_unwind
 
             if let Err(panic_info) = result {
+                restore_huntable_phase_after_ingest_failure(&panic_session);
                 let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
                     s.to_string()
                 } else if let Some(s) = panic_info.downcast_ref::<String>() {

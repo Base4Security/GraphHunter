@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use crate::ai::AiConversation;
 use crate::state::agentic::MappingReviewQueue;
-use crate::state::session_types::{DatasetInfo, EntityTag, Note};
+use crate::state::session_types::{DatasetInfo, EntityTag, LiveTailStats, Note, SessionPhase};
 
 /// Opaque identifier for a loaded session.
 ///
@@ -127,6 +127,10 @@ pub struct Session {
     /// running many α-acyclic templates doesn't OOM — bags can be
     /// large (one row per matching edge, 24 B per row).
     pub yannakakis_cache: RwLock<Option<YannakakisSessionCache>>,
+    /// Hybrid ingest lifecycle — gates hunts during load/finalize.
+    pub phase: RwLock<SessionPhase>,
+    /// Post-finalize tail append counters (Track H).
+    pub live_tail_stats: RwLock<LiveTailStats>,
 }
 
 /// D3 stage 3+4 — Session-level LFTJ index cache. Built lazily on
@@ -349,7 +353,23 @@ impl Session {
             agentic_review: RwLock::new(MappingReviewQueue::new()),
             lftj_cache: RwLock::new(None),
             yannakakis_cache: RwLock::new(None),
+            phase: RwLock::new(SessionPhase::Loading),
+            live_tail_stats: RwLock::new(LiveTailStats::default()),
         }
+    }
+
+    pub fn phase(&self) -> SessionPhase {
+        *self
+            .phase
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn set_phase(&self, phase: SessionPhase) {
+        *self
+            .phase
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = phase;
     }
 }
 

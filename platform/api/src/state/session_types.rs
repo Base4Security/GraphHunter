@@ -7,6 +7,24 @@
 use graph_hunter_core::{Entity, FieldConfig, ParseStats, Relation};
 use serde::{Deserialize, Serialize};
 
+/// Lifecycle phase for hybrid batch + live-tail sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPhase {
+    #[default]
+    Loading,
+    Finalizing,
+    Ready,
+    LiveTail,
+}
+
+/// Counters surfaced when the session accepts post-finalize tail appends.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LiveTailStats {
+    pub tail_edge_count: u64,
+    pub last_append_at: Option<i64>,
+}
+
 /// A note: standalone or linked to a node.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Note {
