@@ -816,16 +816,22 @@ mod tests {
     }
 
     #[test]
-    fn delta_update_invalidates_when_budget_exceeded() {
-        // Build a graph where adding one edge would force the
-        // cascade to visit > BUDGET predecessors. Setting a
-        // tiny budget exposes the fallback-to-invalidate path.
+    fn post_finalize_append_on_high_fanin_vertex_invalidates_khop() {
+        // Repurposed from the old `delta_update_invalidates_when_budget_exceeded`
+        // test which exercised `try_record_edge_delta` directly — a path that is
+        // no longer reached in production after the C2 fix.
+        //
+        // Production path (post-C2): `add_relation` → `on_streaming_edge_appended`
+        // → sees `streaming.is_finalized()` → drops the khop_reach OnceLock
+        // unconditionally, regardless of fan-in. The budget fallback inside
+        // `try_record_edge_delta` is therefore never reached on a finalized graph.
+        //
+        // This test verifies the REAL production behaviour: a post-finalize append
+        // on a high-fan-in vertex (200 predecessors) must invalidate the khop
+        // index via the finalized-gate, not via a budget check.
         let mut g = GraphHunter::new();
-        // Star: 200 hosts all pointing at the same IP, plus the
-        // IP eventually reaching a Process via a single edge.
-        // After we add IP→Process, the cascade revisits all 200
-        // hosts as predecessors of IP. With budget = 50 it must
-        // bail.
+        // Star: 200 hosts all pointing at the same IP, plus a Process node that
+        // will be wired in post-finalize.
         for i in 0..200 {
             g.add_entity(Entity::new(
                 &format!("h{i}"),
@@ -844,38 +850,19 @@ mod tests {
             ))
             .unwrap();
         }
+        // Finalize (sort) and build the k-hop index.
         g.sort_edges_by_timestamp().unwrap();
         let _ = g.ensure_khop_reach();
-        assert!(g.khop_reach_is_built());
+        assert!(g.khop_reach_is_built(), "khop_reach must be built after ensure_khop_reach");
 
-        // Manually call try_record_edge_delta with a tiny budget.
-        // First push the new edge through the normal path (which
-        // will trigger an invalidate because of the budget…).
-        // Instead, exercise the function directly with budget=10.
-        let reach = g.khop_reach.get_mut().unwrap();
-        let ip_sid = g.interner.get("ip1").unwrap();
-        let streaming = g.streaming.clone();
-        // Append the new edge directly into streaming so the
-        // delta can see it.
-        use crate::streaming::StreamingGraphBackend;
-        streaming.append_edge(
-            ip_sid,
-            crate::streaming::StreamEdge {
-                timestamp: 999,
-                metadata_offset: 0,
-                source_sid: ip_sid,
-                dest_sid: g.interner.get("p1").unwrap(),
-                ingested_at_delta: 0,
-                dataset_tag: 0,
-                rel_type_tag: RelationType::Auth.to_u8(),
-            },
+        // Post-finalize append via the production path: add_relation fires
+        // on_streaming_edge_appended → finalized-gate → OnceLock reset.
+        g.add_relation(Relation::new("ip1", "p1", RelationType::Auth, 999))
+            .unwrap();
+
+        assert!(
+            !g.khop_reach_is_built(),
+            "post-finalize append on high-fan-in vertex must invalidate khop_reach (C2 finalized-gate)"
         );
-        let ok = reach.try_record_edge_delta(
-            ip_sid,
-            &streaming,
-            &g.reverse_adj,
-            10, // tiny budget
-        );
-        assert!(!ok, "tight budget must force fallback");
     }
 }
