@@ -48,6 +48,13 @@ fn restore_huntable_phase_after_ingest_failure(session: &Session) {
     });
 }
 
+fn note_post_finalize_appends(session: &Session, new_relations: usize) {
+    if new_relations == 0 {
+        return;
+    }
+    session.note_live_tail_relations(new_relations as u64, now_secs());
+}
+
 // ── Constants for load_data_streaming (lifted from Tauri commands) ─────
 /// Number of lines per batch during streaming line-based ingestion.
 const BATCH_LINES: usize = 50_000;
@@ -421,6 +428,7 @@ impl GraphHunterApi {
                 .insert_raw_events(events, Some(dataset_id.as_str()))
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             run_full_scoring(&mut graph);
+            note_post_finalize_appends(&session, nr);
             // An empty ParseStats (rows_seen == 0) means the parser didn't
             // report real stats — treat as "unknown".
             let stats = if stats.rows_seen == 0 {
@@ -625,6 +633,7 @@ impl GraphHunterApi {
                 .insert_raw_events(events, Some(dataset_id.as_str()))
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             run_full_scoring(&mut graph);
+            note_post_finalize_appends(&session, r);
             (e, r)
         };
 
@@ -725,6 +734,7 @@ impl GraphHunterApi {
                 let (ne, nr) = graph
                     .insert_raw_events(events, Some(dataset_id.as_str()))
                     .map_err(|e| ApiError::Internal(e.to_string()))?;
+                note_post_finalize_appends(&session, nr);
                 (ne, nr, Some(stats))
             };
             run_full_scoring(&mut graph);
@@ -1278,6 +1288,7 @@ impl GraphHunterApi {
                                             .insert_raw_events(events, Some(&bg_dataset_id))
                                             .map_err(|e| e.to_string())?
                                     };
+                                    note_post_finalize_appends(&bg_session, nr);
                                     total_new_entities += ne;
                                     total_new_relations += nr;
 
@@ -1375,6 +1386,7 @@ impl GraphHunterApi {
                                             .insert_raw_events(events, Some(&bg_dataset_id))
                                             .map_err(|e| e.to_string())?
                                     };
+                                    note_post_finalize_appends(&bg_session, nr);
                                     total_new_entities += ne;
                                     total_new_relations += nr;
                                 }
@@ -1418,6 +1430,7 @@ impl GraphHunterApi {
                             let (ne, nr) = graph
                                 .insert_raw_events(events, Some(&bg_dataset_id))
                                 .map_err(|e| e.to_string())?;
+                            note_post_finalize_appends(&bg_session, nr);
                             tracing::info!("INGEST: inserted ({}, {})", ne, nr);
                             Ok((ne, nr, stats.drift))
                         }

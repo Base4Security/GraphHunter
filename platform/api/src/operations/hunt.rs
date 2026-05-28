@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use graph_hunter_core::{DedupMode, HuntDiff};
+use graph_hunter_core::{DedupMode, HuntDiff, LiveTailCoverage};
 
 use crate::dto::hunt::{
     DiffHuntsRequest, GetHuntPageRequest, GetHuntPageResponse, HuntScoring, RunHuntBatchEntry,
@@ -79,6 +79,16 @@ fn ensure_huntable_phase(phase: crate::state::SessionPhase) -> ApiResult<()> {
             "session is finalizing; hunt unavailable".into(),
         )),
     }
+}
+
+fn live_tail_coverage_for_session(
+    session: &crate::state::Session,
+) -> Option<LiveTailCoverage> {
+    if session.phase() != crate::state::SessionPhase::LiveTail {
+        return None;
+    }
+    let graph = session.graph.read().ok()?;
+    graph.live_tail_coverage("live_tail")
 }
 
 impl GraphHunterApi {
@@ -193,6 +203,7 @@ impl GraphHunterApi {
         } else {
             None
         };
+        let live_tail_coverage = live_tail_coverage_for_session(&session);
 
         // Publish to the shared cache so get_hunt_page can serve it.
         let mut cache = self
@@ -209,6 +220,7 @@ impl GraphHunterApi {
                 path_count,
                 truncated,
                 diagnostic,
+                live_tail_coverage,
             })
         } else {
             *cache = paths;
@@ -217,6 +229,7 @@ impl GraphHunterApi {
                 path_count,
                 truncated,
                 diagnostic,
+                live_tail_coverage,
             })
         }
     }
@@ -303,6 +316,7 @@ impl GraphHunterApi {
         // single atomic load.
         let session_handle = self.resolve_session(session.as_ref())?;
         ensure_huntable_phase(session_handle.phase())?;
+        let batch_live_tail_coverage = live_tail_coverage_for_session(&session_handle);
         let indexes_were_warm = {
             let graph = session_handle
                 .graph
@@ -517,6 +531,7 @@ impl GraphHunterApi {
                         path_count,
                         truncated,
                         diagnostic: None,
+                        live_tail_coverage: batch_live_tail_coverage.clone(),
                         error: None,
                     };
                     result_cache.insert(result_cache_key, entry.clone());
@@ -651,6 +666,7 @@ impl GraphHunterApi {
                     path_count,
                     truncated,
                     diagnostic: None,
+                    live_tail_coverage: batch_live_tail_coverage.clone(),
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -902,6 +918,7 @@ impl GraphHunterApi {
                     path_count,
                     truncated,
                     diagnostic: None,
+                    live_tail_coverage: batch_live_tail_coverage.clone(),
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -926,6 +943,7 @@ impl GraphHunterApi {
                         path_count: resp.path_count,
                         truncated: resp.truncated,
                         diagnostic: resp.diagnostic,
+                        live_tail_coverage: resp.live_tail_coverage,
                         error: None,
                     },
                     Err(e) => RunHuntBatchEntry {
@@ -933,6 +951,7 @@ impl GraphHunterApi {
                         path_count: 0,
                         truncated: false,
                         diagnostic: None,
+                        live_tail_coverage: batch_live_tail_coverage.clone(),
                         error: Some(e.to_string()),
                     },
                 };

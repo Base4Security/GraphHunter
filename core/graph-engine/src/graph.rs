@@ -411,71 +411,42 @@ impl GraphHunter {
         };
 
         self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-        self.edges_sorted = false;
+        self.push_to_streaming(&compact)?;
+        self.on_streaming_edge_appended(src_sid, dst_sid);
+        Ok(())
+    }
 
-        // L3 stage 2c part 2 — single canonical write path. The
-        // dual-write to edge_store is gone; streaming is the sole
-        // store. CompactRelation is constructed only for the NLF /
-        // delta-aware index updates that follow; the streaming
-        // append_edge takes a transmuted StreamEdge directly.
+    /// Shared post-append hook: invalidate cached snapshot, try incremental
+    /// NLF/k-hop updates, bump mutation version. Used by `add_relation` and
+    /// `insert_raw_events` so live-tail appends stay matcher-visible.
+    fn on_streaming_edge_appended(&mut self, src_sid: StrId, dst_sid: StrId) {
+        self.edges_sorted = false;
+        self.streaming_snapshot = std::sync::OnceLock::new();
+
         let dst_tag = self
             .entity_type_tags
             .get(dst_sid.index())
             .copied()
             .unwrap_or(crate::nlf::NLF_TYPE_COUNT as u8);
-        self.push_to_streaming(&compact)?;
-        // The cached streaming-outer snapshot is now stale (the
-        // vertex set may have grown / per-vertex slot layout
-        // changed). Drop it so the next matcher invocation
-        // re-snapshots. Cheap (atomic) when the snapshot wasn't
-        // built yet (the typical path during ingest).
-        self.streaming_snapshot = std::sync::OnceLock::new();
 
-        // L3 stage 2 — incremental NLF update. Try mutating the
-        // existing NlfTable in place; on success the lazy build
-        // doesn't have to re-run on the next query, saving an
-        // O(E) full rebuild per ingest. Falls back to invalidate
-        // when the table is mmap-spilled (read-only) or hasn't
-        // been built yet.
         let mut nlf_invalidate = true;
         if let Some(nlf) = self.nlf.get_mut() {
             if nlf.try_record_edge(src_sid, dst_tag) {
                 nlf_invalidate = false;
             }
         } else if self.nlf.get().is_none() {
-            // NLF was never built — nothing to invalidate either.
             nlf_invalidate = false;
         }
         if nlf_invalidate {
             self.nlf = std::sync::OnceLock::new();
         }
 
-        // L3 stage 2b — incremental khop_reach delta-update. When
-        // the index is built and heap-resident, propagate the new
-        // edge through up to MAX_DEPTH-1 rounds of reverse
-        // adjacency. On hub blowout (>budget visited) or
-        // mmap-spilled backing, fall back to invalidate.
         const KHOP_DELTA_BUDGET: usize = 100_000;
         let mut khop_invalidate = true;
-        // Take a separate handle to the streaming Arc and a borrow
-        // of reverse_adj BEFORE getting the mutable handle to
-        // khop_reach — borrow checker can't split the field
-        // accesses through `self.khop_reach.get_mut()` itself.
         let streaming_handle = self.streaming.clone();
         let reverse_adj_view: &ahash::HashMap<StrId, Vec<StrId>> = &self.reverse_adj;
-        // SAFETY: we promise not to mutate `reverse_adj` during the
-        // delta call. The mutation below is on `self.khop_reach`'s
-        // internals only (bits / rank / temporal arrays), which
-        // are disjoint from `reverse_adj`. Using a raw pointer to
-        // sidestep the borrow checker's coarse view of `self`.
         let reverse_adj_ptr: *const ahash::HashMap<StrId, Vec<StrId>> = reverse_adj_view;
         if let Some(reach) = self.khop_reach.get_mut() {
-            // SAFETY: the pointer was derived from a live borrow of
-            // `self.reverse_adj`; `reach` is a mutable borrow of
-            // `self.khop_reach`. The two fields are disjoint, so
-            // dereferencing `reverse_adj_ptr` while `reach` is
-            // borrowed is sound — we just can't express that
-            // through plain references.
             let reverse_adj_safe: &ahash::HashMap<StrId, Vec<StrId>> =
                 unsafe { &*reverse_adj_ptr };
             if reach.try_record_edge_delta(
@@ -487,14 +458,40 @@ impl GraphHunter {
                 khop_invalidate = false;
             }
         } else if self.khop_reach.get().is_none() {
-            // Never built — nothing to invalidate.
             khop_invalidate = false;
         }
         if khop_invalidate {
             self.khop_reach = std::sync::OnceLock::new();
         }
         self.bump_mutation_version();
-        Ok(())
+    }
+
+    /// Whether the streaming backend has finalized base neighbor lists.
+    pub fn streaming_is_finalized(&self) -> bool {
+        self.streaming.is_finalized()
+    }
+
+    /// Edges appended after finalize (tail buffer only).
+    pub fn streaming_tail_edge_count(&self) -> u64 {
+        self.streaming.tail_edge_count()
+    }
+
+    /// Coverage metadata for hunts during live-tail ingest.
+    pub fn live_tail_coverage(&self, phase: &str) -> Option<crate::analytics::LiveTailCoverage> {
+        if phase != "live_tail" {
+            return None;
+        }
+        let tail = self.streaming.tail_edge_count();
+        if tail == 0 {
+            return None;
+        }
+        let total = self.streaming_edge_count().max(1) as f64;
+        let index_coverage = 1.0 - (tail as f64 / total).min(0.5);
+        Some(crate::analytics::LiveTailCoverage {
+            phase: phase.to_string(),
+            tail_edge_count: tail,
+            index_coverage,
+        })
     }
 
     /// Gets or creates a dataset tag index.
@@ -2999,6 +2996,7 @@ impl GraphHunter {
 
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
             self.push_to_streaming(&compact)?;
+            self.on_streaming_edge_appended(src_sid, dst_sid);
             new_relations += 1;
         }
 
@@ -3086,6 +3084,7 @@ impl GraphHunter {
 
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
             self.push_to_streaming(&compact)?;
+            self.on_streaming_edge_appended(src_sid, dst_sid);
             new_relations += 1;
         }
 

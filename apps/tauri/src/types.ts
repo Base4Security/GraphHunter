@@ -176,6 +176,11 @@ export interface HuntResults {
   paths: string[][];
   path_count: number;
   truncated?: boolean;
+  live_tail_coverage?: {
+    phase: string;
+    tail_edge_count: number;
+    index_coverage: number;
+  };
 }
 
 export interface ScoreBreakdown {

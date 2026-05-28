@@ -261,6 +261,14 @@ pub struct HuntDiagnostic {
     pub first_step_matches: usize,
 }
 
+/// Metadata surfaced when hunting during post-finalize live-tail ingest.
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct LiveTailCoverage {
+    pub phase: String,
+    pub tail_edge_count: u64,
+    pub index_coverage: f64,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct ScoredPath {
     pub path: Vec<String>,

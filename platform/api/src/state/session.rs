@@ -371,6 +371,19 @@ impl Session {
             .write()
             .unwrap_or_else(|e| e.into_inner()) = phase;
     }
+
+    /// Increment live-tail counters when post-finalize appends land.
+    pub fn note_live_tail_relations(&self, count: u64, timestamp: i64) {
+        if count == 0 || self.phase() != SessionPhase::LiveTail {
+            return;
+        }
+        let mut stats = self
+            .live_tail_stats
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        stats.tail_edge_count = stats.tail_edge_count.saturating_add(count);
+        stats.last_append_at = Some(timestamp);
+    }
 }
 
 impl LftjSessionCache {

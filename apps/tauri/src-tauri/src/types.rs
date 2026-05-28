@@ -23,6 +23,8 @@ pub struct HuntResults {
     /// have failed and (when possible) suggests a fix. See `HuntDiagnostic`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<graph_hunter_core::HuntDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_tail_coverage: Option<graph_hunter_core::LiveTailCoverage>,
 }
 
 #[derive(Serialize)]

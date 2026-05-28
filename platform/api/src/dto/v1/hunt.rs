@@ -7,7 +7,7 @@
 //! result sets.
 
 use crate::state::SessionHandle;
-use graph_hunter_core::{DedupMode, HuntDiagnostic, Hypothesis, ScoredPath};
+use graph_hunter_core::{DedupMode, HuntDiagnostic, Hypothesis, LiveTailCoverage, ScoredPath};
 use serde::{Deserialize, Serialize};
 
 /// Per-call scoring mode (v2 follow-up — replaces the
@@ -83,6 +83,8 @@ pub struct RunHuntResponse {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<HuntDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_tail_coverage: Option<LiveTailCoverage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +144,8 @@ pub struct RunHuntBatchEntry {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<HuntDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_tail_coverage: Option<LiveTailCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
