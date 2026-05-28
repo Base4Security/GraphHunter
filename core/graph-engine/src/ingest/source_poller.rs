@@ -42,7 +42,7 @@
 use futures::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::watermark_store::{WatermarkKey, WatermarkStore};
@@ -87,10 +87,13 @@ impl CircuitBreaker {
     }
 
     fn now_millis() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64
+        use std::sync::OnceLock;
+        use std::time::Instant;
+        // Monotonic process baseline: immune to wall-clock / NTP steps, which
+        // previously let a SystemTime jump widen or collapse the circuit-breaker
+        // backoff window (C7).
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_millis() as i64
     }
 
     fn state(metrics: &PollerMetrics) -> CircuitState {
@@ -802,5 +805,33 @@ mod tests {
         let snapshot = handle.await.unwrap();
         assert_eq!(snapshot.circuit_state, CircuitState::Open);
         assert!(snapshot.errors >= 3);
+    }
+
+    /// Open→success→Closed: after the circuit opens it must fully reset when
+    /// record_success is called (consecutive_failures → 0, open_until → 0).
+    /// This is clock-independent so it also validates the monotonic-clock fix
+    /// doesn't break the reset path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn circuit_recovers_after_success() {
+        let metrics = PollerMetrics::default();
+        let breaker = CircuitBreaker::new(3, std::time::Duration::from_millis(10));
+
+        // Drive the circuit open.
+        for _ in 0..3 {
+            breaker.record_failure(&metrics);
+        }
+        assert!(CircuitBreaker::is_open(&metrics), "circuit must be open after max failures");
+
+        // A single success resets everything.
+        breaker.record_success(&metrics);
+        assert!(
+            !CircuitBreaker::is_open(&metrics),
+            "circuit must be closed after record_success"
+        );
+        assert_eq!(
+            metrics.circuit_consecutive_failures.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "consecutive_failures must be zero after recovery"
+        );
     }
 }
