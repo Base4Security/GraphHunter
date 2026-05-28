@@ -112,10 +112,11 @@ impl NlfTable {
     /// scratch.
     ///
     /// `dst_tag` values outside `[0, NLF_TYPE_COUNT)` are ignored
-    /// (those entity types don't get an NLF slot). Out-of-range
-    /// `src_sid` is also ignored — it can happen during graph
-    /// rebuilds when the table was sized for an earlier vertex
-    /// count.
+    /// (those entity types don't get an NLF slot) and return `true`.
+    /// An out-of-range `src_sid` (a vertex added after the last NLF
+    /// build) returns `false` to force a full rebuild — a silent no-op
+    /// would leave the new vertex with an all-zero row and prune it
+    /// from every hunt (C4).
     pub fn try_record_edge(&mut self, src_sid: StrId, dst_tag: u8) -> bool {
         let tag = dst_tag as usize;
         if tag >= NLF_TYPE_COUNT {

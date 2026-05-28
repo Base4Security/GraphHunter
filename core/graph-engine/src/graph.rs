@@ -432,7 +432,11 @@ impl GraphHunter {
         // against the complete base+tail graph.
         //
         // Pre-finalize appends still reach the incremental path below because
-        // all edges are in the base at that point and deltas are sound.
+        // all edges are in the base at that point and deltas are sound. NOTE:
+        // the lazy NLF/k-hop indexes are only built on the first hunt (which
+        // requires a finalized graph), so the incremental delta path below is
+        // currently dormant in production. Track H revisits it with a
+        // tail-aware delta; until then, do not assume it runs.
         if self.streaming.is_finalized() {
             if self.nlf.get().is_some() {
                 self.nlf = std::sync::OnceLock::new();
