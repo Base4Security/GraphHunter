@@ -405,6 +405,8 @@ impl GraphHunterApi {
                 ingest_stats: None,
             });
         }
+        let resume_phase = resume_phase_after_finalize(session.phase());
+        session.set_phase(crate::state::SessionPhase::Finalizing);
         let (new_entities, new_relations, ingest_stats, used_auto_config) = {
             let mut graph = session
                 .graph
@@ -442,6 +444,7 @@ impl GraphHunterApi {
         // Record post-finalize appends only after the graph write guard is
         // released: note_post_finalize_appends re-acquires graph.read(), and
         // a read-while-write on the same thread self-deadlocks the RwLock.
+        // no-ops while Finalizing; sync batch ingest does not enter LiveTail (Track O owns that)
         note_post_finalize_appends(&session, new_relations);
         let _ = used_auto_config; // reserved for future telemetry (which path served the ingest)
 
@@ -473,7 +476,7 @@ impl GraphHunterApi {
             .as_ref()
             .map(|s| s.rows_seen > 0 && s.rows_with_triples == 0)
             .unwrap_or(false);
-        session.set_phase(crate::state::SessionPhase::Ready);
+        session.set_phase(resume_phase);
         Ok(LoadResult {
             new_entities,
             new_relations,
@@ -621,6 +624,8 @@ impl GraphHunterApi {
             });
         }
 
+        let resume_phase = resume_phase_after_finalize(session.phase());
+        session.set_phase(crate::state::SessionPhase::Finalizing);
         let (new_entities, new_relations) = {
             let mut graph = session
                 .graph
@@ -637,6 +642,7 @@ impl GraphHunterApi {
         };
         // Record post-finalize appends after the write guard is dropped
         // (calling while holding the graph write lock self-deadlocks the RwLock).
+        // no-ops while Finalizing; sync batch ingest does not enter LiveTail (Track O owns that)
         note_post_finalize_appends(&session, new_relations);
 
         {
@@ -662,7 +668,7 @@ impl GraphHunterApi {
             )
         };
 
-        session.set_phase(crate::state::SessionPhase::Ready);
+        session.set_phase(resume_phase);
         Ok(LoadResult {
             new_entities,
             new_relations,
@@ -719,6 +725,8 @@ impl GraphHunterApi {
             });
         }
 
+        let resume_phase = resume_phase_after_finalize(session.phase());
+        session.set_phase(crate::state::SessionPhase::Finalizing);
         let (new_entities, new_relations, ingest_stats) = {
             let mut graph = session
                 .graph
@@ -743,6 +751,7 @@ impl GraphHunterApi {
         };
         // Record post-finalize appends after the write guard is dropped
         // (calling while holding the graph write lock self-deadlocks the RwLock).
+        // no-ops while Finalizing; sync batch ingest does not enter LiveTail (Track O owns that)
         note_post_finalize_appends(&session, new_relations);
 
         {
@@ -779,7 +788,7 @@ impl GraphHunterApi {
             .as_ref()
             .map(|s| s.rows_seen > 0 && s.rows_with_triples == 0)
             .unwrap_or(false);
-        session.set_phase(crate::state::SessionPhase::Ready);
+        session.set_phase(resume_phase);
         Ok(LoadResult {
             new_entities,
             new_relations,
@@ -1571,6 +1580,32 @@ fn _ensure_logparser_imported() {
 #[allow(dead_code)]
 fn _ensure_arc_imported() -> Option<Arc<u8>> {
     None
+}
+
+/// Determines which phase to restore after a synchronous ingest re-finalizes.
+/// If the session was in LiveTail (live streaming active), we must not clobber
+/// that — restore LiveTail. For any other entry phase, restore Ready.
+fn resume_phase_after_finalize(
+    prior: crate::state::SessionPhase,
+) -> crate::state::SessionPhase {
+    match prior {
+        crate::state::SessionPhase::LiveTail => crate::state::SessionPhase::LiveTail,
+        _ => crate::state::SessionPhase::Ready,
+    }
+}
+
+#[cfg(test)]
+mod resume_phase_tests {
+    use super::*;
+
+    #[test]
+    fn resume_phase_preserves_live_tail_else_ready() {
+        use crate::state::SessionPhase::*;
+        assert_eq!(resume_phase_after_finalize(LiveTail), LiveTail);
+        assert_eq!(resume_phase_after_finalize(Ready), Ready);
+        assert_eq!(resume_phase_after_finalize(Loading), Ready);
+        assert_eq!(resume_phase_after_finalize(Finalizing), Ready);
+    }
 }
 
 #[cfg(test)]
