@@ -238,7 +238,9 @@ fn dataset_with_field_config_stamps_real_vrl_hash() {
         })
         .expect("export_ocsf");
 
-    let line = out.lines().next().expect("at least one event");
+    // The ndjson stream leads with a `_meta` pagination envelope line
+    // (added in 6507f11); the first real event is the second line.
+    let line = out.lines().nth(1).expect("at least one event");
     let v: Value = serde_json::from_str(line).expect("event parses");
     let prov = &v["provenance"];
     let stamped_hash = prov["mapping_hash"].as_str().expect("mapping_hash str");
