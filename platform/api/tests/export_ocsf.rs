@@ -163,9 +163,12 @@ fn json_array_format_returns_a_valid_array() {
             offset: None,
         })
         .expect("export_ocsf json");
-    let v: Value = serde_json::from_str(&out).expect("json array parses");
-    let arr = v.as_array().expect("json array");
+    let v: Value = serde_json::from_str(&out).expect("json envelope parses");
+    let arr = v["events"].as_array().expect("events array");
     assert_eq!(arr.len(), 7);
+    assert_eq!(v["_meta"]["returned"].as_u64(), Some(7));
+    assert_eq!(v["_meta"]["total_in_session"].as_u64(), Some(7));
+    assert_eq!(v["_meta"]["has_more"].as_bool(), Some(false));
 }
 
 /// M3.d acceptance: when a dataset has a FieldConfig, the
