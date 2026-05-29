@@ -721,11 +721,11 @@ impl InMemoryStreamingBackend {
                 if tail.is_empty() || frozen.contains_key(&sid) {
                     continue;
                 }
-                let mut sorted: Vec<StreamEdge> = tail.iter().copied().collect();
-                sorted.sort_unstable_by_key(|e| e.timestamp);
+                // tail is maintained sorted-on-insert; copy directly.
+                let arc: Arc<[StreamEdge]> = tail.iter().copied().collect();
                 frozen.insert(
                     sid,
-                    FrozenNeighborList::InMemory(Arc::from(sorted.into_boxed_slice())),
+                    FrozenNeighborList::InMemory(arc),
                 );
             }
         }
@@ -756,13 +756,13 @@ impl InMemoryStreamingBackend {
         if tail.is_empty() {
             return base_frozen.clone();
         }
+        // tail is maintained sorted-on-insert (see append_edge_inner);
+        // no per-read sort needed — straight two-way merge.
         let base_slice = base_guard.as_slice();
-        let mut tail_sorted: Vec<StreamEdge> = tail.iter().copied().collect();
-        tail_sorted.sort_unstable_by_key(|e| e.timestamp);
         let merged = if base_slice.is_empty() {
-            tail_sorted
+            tail.to_vec()
         } else {
-            Self::merge_sorted_edge_slices(base_slice, &tail_sorted)
+            Self::merge_sorted_edge_slices(base_slice, tail)
         };
         FrozenNeighborList::InMemory(Arc::from(merged.into_boxed_slice()))
     }
@@ -851,7 +851,9 @@ impl InMemoryStreamingBackend {
             }
         };
 
-        let mut tail_in_window: Vec<StreamEdge> = self
+        // tail is maintained sorted-on-insert; filter preserves order
+        // so tail_in_window is already sorted — no per-read sort needed.
+        let tail_in_window: Vec<StreamEdge> = self
             .tails
             .read()
             .get(&src)
@@ -865,7 +867,6 @@ impl InMemoryStreamingBackend {
         if tail_in_window.is_empty() {
             return base_in_window;
         }
-        tail_in_window.sort_unstable_by_key(|e| e.timestamp);
         Self::merge_sorted_edge_slices(&base_in_window, &tail_in_window)
     }
 
@@ -1271,11 +1272,14 @@ impl InMemoryStreamingBackend {
 
     fn append_edge_inner(&self, src: StrId, edge: StreamEdge) {
         if self.finalized.load(Ordering::Acquire) {
-            self.tails
-                .write()
-                .entry(src)
-                .or_default()
-                .push(edge);
+            // Tail is kept sorted by timestamp (same tiebreak as the
+            // sorted base: timestamp only). Insert at the sorted position
+            // so freeze() and neighbors_in_window() can skip the
+            // per-read sort and go straight to two-way merge.
+            let mut tails = self.tails.write();
+            let tail = tails.entry(src).or_default();
+            let pos = tail.partition_point(|e| e.timestamp <= edge.timestamp);
+            tail.insert(pos, edge);
             return;
         }
         // Fast path: vertex already exists, take a read lock on
@@ -2006,5 +2010,78 @@ mod tests {
         assert!(backend
             .with_neighbors(absent, |list| list.len())
             .is_none());
+    }
+
+    // ── H-3 property test ─────────────────────────────────────────────────
+    //
+    // For random append streams split at a random index into pre-finalize
+    // (go to base via append_edge) and post-finalize (go to tail), the
+    // merged read output must equal a full re-sort of all appended edges
+    // by timestamp.
+    //
+    // Uses a deterministic inline LCG (Knuth MMIX) seeded by a constant
+    // so the test is reproducible without a `rand` dev-dependency.
+    #[test]
+    fn tail_merge_matches_full_resort_on_random_streams() {
+        // Knuth MMIX LCG: next state = state * 6364136223846793005 + 1442695040888963407
+        fn lcg_next(state: &mut u64) -> u64 {
+            *state = state.wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *state
+        }
+
+        let mut rng = 0xDEAD_BEEF_CAFE_BABEu64;
+        let src = StrId::from_raw(1);
+
+        for _iter in 0..200 {
+            // N in [2, 20]
+            let n = (lcg_next(&mut rng) % 19 + 2) as usize;
+
+            // Generate N timestamps in [0, 999]
+            let timestamps: Vec<i64> = (0..n)
+                .map(|_| (lcg_next(&mut rng) % 1000) as i64)
+                .collect();
+
+            // Split index in [1, n) — at least one pre-finalize edge so the
+            // base is non-empty, at least one post-finalize edge in the tail.
+            let split = (lcg_next(&mut rng) % (n as u64 - 1) + 1) as usize;
+
+            let backend = InMemoryStreamingBackend::new();
+
+            // Pre-finalize: edges[0..split] go into the sorted base.
+            for &ts in &timestamps[..split] {
+                backend.append_edge(src, edge(2, ts, 0));
+            }
+            backend.finalize();
+
+            // Post-finalize: edges[split..n] go into the tail.
+            for &ts in &timestamps[split..] {
+                backend.append_edge(src, edge(2, ts, 0));
+            }
+
+            // Expected: full re-sort of all timestamps.
+            let mut expected = timestamps.clone();
+            expected.sort_unstable();
+
+            // --- Check via freeze().neighbors() ---
+            let snap = backend.freeze();
+            let frozen = snap.neighbors(src).expect("src has edges");
+            let got_freeze: Vec<i64> = frozen.as_slice().iter().map(|e| e.timestamp).collect();
+            assert_eq!(
+                got_freeze, expected,
+                "iter={_iter} n={n} split={split}: freeze merge mismatch"
+            );
+
+            // --- Check via neighbors_in_window (full window) ---
+            let got_window: Vec<i64> = backend
+                .neighbors_in_window(src, (i64::MIN, i64::MAX))
+                .iter()
+                .map(|e| e.timestamp)
+                .collect();
+            assert_eq!(
+                got_window, expected,
+                "iter={_iter} n={n} split={split}: neighbors_in_window merge mismatch"
+            );
+        }
     }
 }
