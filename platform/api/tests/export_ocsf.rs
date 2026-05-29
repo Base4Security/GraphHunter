@@ -93,7 +93,16 @@ fn ndjson_export_covers_every_shipping_class_and_validates_against_schema() {
         })
         .expect("export_ocsf");
 
-    let lines: Vec<&str> = out.lines().collect();
+    // The ndjson stream leads with a `_meta` pagination envelope line
+    // (added in 6507f11); drop it so the body assertion counts only the
+    // one-event-per-relation projection.
+    let lines: Vec<&str> = out
+        .lines()
+        .filter(|line| {
+            let v: Value = serde_json::from_str(line).expect("each line is JSON");
+            v.get("_meta").is_none()
+        })
+        .collect();
     assert_eq!(lines.len(), 7, "one event per seeded relation");
 
     let schema: Value = serde_json::from_str(OCSF_V1_4_SCHEMA).expect("schema parses");
