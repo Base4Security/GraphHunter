@@ -183,6 +183,12 @@ impl GraphHunterApi {
             });
         }
 
+        // Live Sentinel ingest is active: mark the session huntable so hunts
+        // are not 409-blocked while polling (Track H LiveTail). Without this
+        // the session stays in its initial Loading phase and every hunt returns
+        // 409; sentinel_disconnect restores Ready.
+        session.set_phase(crate::state::SessionPhase::LiveTail);
+
         // Announce on the canonical event channel.
         self.emitter_arc().emit(
             "sentinel-connected",
@@ -207,11 +213,14 @@ impl GraphHunterApi {
         handle.cancel_token.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(10), handle.task_handle).await;
 
-        // Final scoring pass.
+        // Final scoring pass, then restore Ready: live ingest has stopped and
+        // the graph is scored/stable, so the session is huntable again. The
+        // connector left it in LiveTail; without this it would never leave it.
         if let Some(session) = self.sessions().current_session() {
             if let Ok(mut graph) = session.graph.write() {
                 let _ = run_scoring_adaptive(&mut graph);
             }
+            session.set_phase(crate::state::SessionPhase::Ready);
         }
         // Emit status so the UI updates promptly.
         self.emitter_arc().emit(
