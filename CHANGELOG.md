@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Performance
 
 - **Semijoin start pruning** and **AMAC interleaved DFS** are now enabled by default on multi-step hunts. Opt out for one release with `GRAPHHUNTER_SEMIJOIN=0` or `GRAPHHUNTER_AMAC=0`.
-- Optional parallel streaming finalize for hub-heavy ingest: set `GRAPHHUNTER_PARALLEL_FINALIZE=1` before `sort_edges_by_timestamp()`.
+- **Parallel streaming finalize** is now on by default for large graphs (>50 000 vertices or >1 000 000 edges). The rayon sort pass replaces the sequential O(Σ d log d) finalize without extra configuration. Opt out for one release with `GRAPHHUNTER_PARALLEL_FINALIZE=0`; force on for smaller graphs with `=1`.
 
 ### Hybrid sessions (Track H)
 

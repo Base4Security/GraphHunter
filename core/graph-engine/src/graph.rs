@@ -182,6 +182,38 @@ fn relation_type_tag_matches(pattern: &RelationType, tag: u8) -> bool {
     *pattern == RelationType::Any || pattern.to_u8() == tag
 }
 
+// ── Parallel-finalize dispatch ────────────────────────────────────────────────
+
+/// Minimum vertex count above which the parallel sort path is chosen by
+/// default.  Below this the rayon scheduler overhead exceeds sorting gains.
+const PARALLEL_FINALIZE_VERTEX_THRESHOLD: usize = 50_000;
+
+/// Minimum edge count above which the parallel sort path is chosen by default.
+/// A graph with many edges but few vertices (dense hubs) also benefits.
+const PARALLEL_FINALIZE_EDGE_THRESHOLD: usize = 1_000_000;
+
+/// Decides whether `finalize_parallel` should be used for a graph of the
+/// given shape.
+///
+/// * `env_override = Some(true)`  — `GRAPHHUNTER_PARALLEL_FINALIZE=1`; force
+///   parallel regardless of size.
+/// * `env_override = Some(false)` — `GRAPHHUNTER_PARALLEL_FINALIZE=0`; escape
+///   hatch for one release if rayon-scheduler regressions appear.
+/// * `env_override = None`        — size threshold decides.
+pub(crate) fn should_finalize_parallel(
+    vertex_count: usize,
+    edge_count: usize,
+    env_override: Option<bool>,
+) -> bool {
+    match env_override {
+        Some(forced) => forced,
+        None => {
+            vertex_count > PARALLEL_FINALIZE_VERTEX_THRESHOLD
+                || edge_count > PARALLEL_FINALIZE_EDGE_THRESHOLD
+        }
+    }
+}
+
 impl GraphHunter {
     /// Creates a new empty graph.
     pub fn new() -> Self {
@@ -816,10 +848,16 @@ impl GraphHunter {
         if self.edges_sorted {
             return Ok(());
         }
-        let parallel_finalize = std::env::var("GRAPHHUNTER_PARALLEL_FINALIZE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        if parallel_finalize {
+        // Parse the env-var into an explicit opt-in/opt-out (Some(true/false)),
+        // or None meaning "use the size threshold".  Keep =0 as a one-release
+        // escape hatch in case of rayon-scheduler regressions.
+        let env_override: Option<bool> = std::env::var("GRAPHHUNTER_PARALLEL_FINALIZE")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        use crate::streaming::StreamingGraphBackend as _;
+        let vcount = self.streaming.vertex_count();
+        let ecount = self.streaming.edge_count();
+        if should_finalize_parallel(vcount, ecount, env_override) {
             self.streaming.finalize_parallel();
         } else {
             self.streaming.finalize();
@@ -3508,6 +3546,43 @@ mod tests {
         assert!(
             !dangling,
             "reverse_adj must not contain A->B after a spill failure (C3a)"
+        );
+    }
+
+    /// P-2: the dispatch helper must pick the parallel path above the size
+    /// threshold by default and respect explicit env overrides in both
+    /// directions — all without touching the env var in the test.
+    #[test]
+    fn parallel_finalize_default_above_threshold() {
+        // Large graph → parallel by default.
+        assert!(
+            should_finalize_parallel(60_000, 2_000_000, None),
+            "large graph (vertex+edge both above threshold) should use parallel"
+        );
+        // Large by vertex count alone.
+        assert!(
+            should_finalize_parallel(60_000, 500, None),
+            "high vertex count alone should trigger parallel"
+        );
+        // Large by edge count alone.
+        assert!(
+            should_finalize_parallel(100, 2_000_000, None),
+            "high edge count alone should trigger parallel"
+        );
+        // Small graph → sequential by default.
+        assert!(
+            !should_finalize_parallel(100, 500, None),
+            "small graph should stay sequential"
+        );
+        // Explicit opt-out wins over large graph.
+        assert!(
+            !should_finalize_parallel(60_000, 2_000_000, Some(false)),
+            "GRAPHHUNTER_PARALLEL_FINALIZE=0 must override threshold"
+        );
+        // Explicit opt-in wins over small graph.
+        assert!(
+            should_finalize_parallel(100, 500, Some(true)),
+            "GRAPHHUNTER_PARALLEL_FINALIZE=1 must override threshold"
         );
     }
 }

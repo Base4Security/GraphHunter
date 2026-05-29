@@ -811,6 +811,10 @@ impl InMemoryStreamingBackend {
 
     /// Same semantics as [`Self::finalize`] but sorts per-vertex lists in
     /// parallel. Hub-heavy graphs benefit; Mmap-backed rows are unchanged.
+    ///
+    /// Slots with fewer than 2 edges are skipped — a 0- or 1-element list is
+    /// already sorted and scheduling a rayon task for it costs more than it
+    /// saves.
     pub fn finalize_parallel(&self) {
         use rayon::prelude::*;
 
@@ -819,6 +823,10 @@ impl InMemoryStreamingBackend {
             outer.values().cloned().collect()
         };
         slots.par_iter().for_each(|slot| {
+            // Skip no-op sorts: a list of 0 or 1 edges needs no ordering.
+            if slot.read().len() < 2 {
+                return;
+            }
             Self::sort_neighbor_slot(&mut *slot.write());
         });
         self.finalized.store(true, Ordering::Release);
