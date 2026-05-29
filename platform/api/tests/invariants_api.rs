@@ -82,6 +82,30 @@ fn seeded_api() -> GraphHunterApi {
     graph.add_relation(r).ok();
 
     drop(graph);
+
+    // Register the datasets the graph references so they exist in
+    // `session.datasets`. `check_invariants` validates `dataset_id`
+    // against this registry (a 400 instead of a fail-silent vacuum,
+    // commit 6507f11) — the graph's per-row `dataset_id` tags and the
+    // session registry are intentionally decoupled, so a fixture that
+    // models a real ingested session must populate both.
+    {
+        use graph_hunter_api::state::DatasetInfo;
+        let mut ds = session.datasets.write().expect("datasets write lock");
+        for id in ["dsA", "dsB"] {
+            ds.push(DatasetInfo {
+                id: id.into(),
+                name: id.into(),
+                path: None,
+                created_at: 0,
+                entity_count: 0,
+                relation_count: 0,
+                field_config: None,
+                ingest_stats: None,
+            });
+        }
+    }
+
     api
 }
 
