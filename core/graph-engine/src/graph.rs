@@ -851,9 +851,20 @@ impl GraphHunter {
         // Parse the env-var into an explicit opt-in/opt-out (Some(true/false)),
         // or None meaning "use the size threshold".  Keep =0 as a one-release
         // escape hatch in case of rayon-scheduler regressions.
-        let env_override: Option<bool> = std::env::var("GRAPHHUNTER_PARALLEL_FINALIZE")
-            .ok()
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        let env_override: Option<bool> = match std::env::var("GRAPHHUNTER_PARALLEL_FINALIZE") {
+            Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => Some(true),
+            Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => Some(false),
+            Ok(v) => {
+                // Unrecognized value: fall through to the size threshold rather
+                // than silently forcing sequential (which would mask a typo like
+                // `=tru` on a large graph the user meant to parallelize).
+                eprintln!(
+                    "GraphHunter: GRAPHHUNTER_PARALLEL_FINALIZE=\"{v}\" not recognized (expected 1/0/true/false); using size-threshold default"
+                );
+                None
+            }
+            Err(_) => None,
+        };
         use crate::streaming::StreamingGraphBackend as _;
         let vcount = self.streaming.vertex_count();
         let ecount = self.streaming.edge_count();
