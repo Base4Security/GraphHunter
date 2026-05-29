@@ -22,7 +22,7 @@ const input = z.object({
 });
 
 export const ingestInvariantsHypothetical = defineTool({
-  name: "ingest.invariants_hypothetical",
+  name: "ingest_invariants_hypothetical",
   description:
     "Run the P1–P5 invariant suite against a *hypothetical* graph: replay a dataset's events through a candidate VRL program, project the resulting triples, and evaluate invariants over that synthetic graph. Lets you sanity-check a candidate mapping before approval without paying any ingest cost. Kept separate from ingest.invariants_live because the inputs are disjoint (live takes only an optional dataset_id; this requires both VRL + dataset_id).",
   category: "ingest",

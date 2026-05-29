@@ -8,7 +8,7 @@ const input = z.object({
 });
 
 export const nodeSearch = defineTool({
-  name: "node.search",
+  name: "node_search",
   description:
     "Search entities by substring. Use to find nodes by ID, name, or metadata. Optional type filter (e.g. IP, Host).",
   category: "node",

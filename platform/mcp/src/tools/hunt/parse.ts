@@ -10,7 +10,7 @@ const input = z.object({
 });
 
 export const huntParse = defineTool({
-  name: "hunt.parse",
+  name: "hunt_parse",
   description:
     "Validate a hunt hypothesis DSL pattern WITHOUT executing it. Returns whether the DSL is valid, the formatted version, and step count. Use BEFORE hunt.run to catch syntax errors cheaply. DSL syntax: 'EntityType -[RelationType]-> EntityType -[RelationType]-> EntityType'. Example: 'IP -[Connect]-> Host -[Auth]-> User -[Execute]-> Process'.",
   category: "hunt",

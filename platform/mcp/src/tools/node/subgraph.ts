@@ -39,7 +39,7 @@ const input = z.object({
 });
 
 export const nodeSubgraph = defineTool({
-  name: "node.subgraph",
+  name: "node_subgraph",
   description:
     "Get the subgraph (nodes and edges) for a list of node IDs. Default output=inline returns the parsed JSON for in-flight analysis; output=file returns rendered text (JSON or CSV) suitable for saving — use the latter to produce a detailed report of a suspicious path or bulk-export entity metadata.",
   category: "node",

@@ -12,7 +12,7 @@ const input = z.object({
 });
 
 export const ingestCanonicalMap = defineTool({
-  name: "ingest.canonical_map",
+  name: "ingest_canonical_map",
   description:
     "Given a FieldConfig, decide which OCSF v1.4 category it projects to (process_activity, network_activity, authentication, dns_activity, file_activity, or 'other') and return a ProvenanceTemplate stamp. The common cases are pinned deterministically by entity-type signature; the LLM is only consulted when a target_ocsf_category is supplied that contradicts the deterministic pick.",
   category: "ingest",

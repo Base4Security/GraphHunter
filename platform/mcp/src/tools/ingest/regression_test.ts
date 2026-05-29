@@ -20,7 +20,7 @@ const input = z.object({
 });
 
 export const ingestRegressionTest = defineTool({
-  name: "ingest.regression_test",
+  name: "ingest_regression_test",
   description:
     "Replay a baseline dataset's events through a candidate VRL program and diff the resulting triples (Jaccard), OCSF field coverage, and invariant-violation counts against the live mapping. Returns verdict 'pass' | 'warn' | 'fail'. Zero production-graph writes — the candidate never touches the live state. Pair with ingest.parser_generate before promoting a new mapping via review(op=approve).",
   category: "ingest",

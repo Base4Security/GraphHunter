@@ -12,7 +12,7 @@ const input = z.object({
 });
 
 export const catalogGet = defineTool({
-  name: "catalog.get",
+  name: "catalog_get",
   description:
     "Get the catalog of pre-built threat-hunting hypotheses based on MITRE ATT&CK techniques. Each entry has an id, name, description, and DSL pattern that can be passed to hunt.run. Optional `include` parameter merges diagnostics from the catalog loader and/or per-entry compatibility against the current graph.",
   category: "catalog",

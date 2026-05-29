@@ -11,7 +11,7 @@ const input = z.object({
 });
 
 export const ingestPublishMapping = defineTool({
-  name: "ingest.publish_mapping",
+  name: "ingest_publish_mapping",
   description:
     "Force-publish any review-queue draft (Pending / Approved / Rejected) to the shared mapping library. Mirrors what review(op=approve) does as a side effect, but is the analyst path: stamps PublishSource::Manual so audit can distinguish auto-publication from explicit override. Errors with InvalidState when the mapping library is not configured (headless / tests) or when the draft has no field_config to fingerprint.",
   category: "ingest",

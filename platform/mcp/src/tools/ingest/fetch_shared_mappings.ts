@@ -18,7 +18,7 @@ const input = z.object({
 });
 
 export const ingestFetchSharedMappings = defineTool({
-  name: "ingest.fetch_shared_mappings",
+  name: "ingest_fetch_shared_mappings",
   description:
     "List published mappings from the shared library as compact summaries. Optionally filter by exact fingerprint or ocsf_category; pass `limit` to cap the page (newest first). Returns `total` pre-limit so the caller can paginate. The library lives on disk and is shared across sessions — drafts auto-publish on review(op=approve), and analysts can force-publish via ingest.publish_mapping.",
   category: "ingest",

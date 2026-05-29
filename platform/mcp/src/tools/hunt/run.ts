@@ -19,7 +19,7 @@ const input = z.object({
 });
 
 export const huntRun = defineTool({
-  name: "hunt.run",
+  name: "hunt_run",
   description:
     "Run a threat-hunting hypothesis. Pass a DSL chain like 'IP -[Connect]-> Host -[Execute]-> Process' and (optionally) a scoring mode. Returns path count and whether results were truncated. After running, use hunt.results to retrieve paths with the per-mode scores. The transcript is **fully self-contained**: each call carries its own scoring mode, the backend honors the per-call override (Structural always uses plain DFS, Anomaly/Gnn always finalizes the scorer first), so replay produces identical paths regardless of prior session state. The legacy `enable_anomaly_scoring` latch is no longer load-bearing.",
   category: "hunt",

@@ -17,7 +17,7 @@ const input = z.object({
 });
 
 export const ingestParserGenerate = defineTool({
-  name: "ingest.parser_generate",
+  name: "ingest_parser_generate",
   description:
     "Compile a FieldConfig to a deterministic VRL program (via field_config_to_vrl) and register the result as a pending MappingDraft in the review queue. Returns the VRL source and its mapping_hash (sha256 of the source). With optimization_hint='fidelity', the LLM is allowed to propose refinements — still gated by the review queue and (in M6) by constrained decoding, so malformed VRL can never be emitted.",
   category: "ingest",

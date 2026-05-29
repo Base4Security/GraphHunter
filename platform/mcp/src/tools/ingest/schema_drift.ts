@@ -12,7 +12,7 @@ const input = z.object({
 });
 
 export const ingestSchemaDrift = defineTool({
-  name: "ingest.schema_drift",
+  name: "ingest_schema_drift",
   description:
     "Report per-field drift signals for a dataset — type-tag histogram mix, null-rate EWMA, and a recommended action ('none' | 'review' | 'renegotiate'). Backed by the drift store written by the ingest path; no LLM is consulted. Use as a scheduled trigger for re-running ingest.negotiate when a source starts producing novel field shapes.",
   category: "ingest",

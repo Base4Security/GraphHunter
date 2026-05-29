@@ -29,7 +29,7 @@ const input = z.object({
 });
 
 export const nodeEvents = defineTool({
-  name: "node.events",
+  name: "node_events",
   description:
     "Get relations/events for a node (incoming and outgoing edges). Pass `page` + `page_size` for paginated, sortable output (better for high-degree nodes); omit both to get the full event list at once. Returns total_count when paginating.",
   category: "node",

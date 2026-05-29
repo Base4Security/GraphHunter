@@ -15,7 +15,7 @@ const input = z.object({
 });
 
 export const huntResults = defineTool({
-  name: "hunt.results",
+  name: "hunt_results",
   description:
     "Get one page of the last hunt.run results. When the run was scored with anomaly/gnn, paths include anomaly_score and anomaly_breakdown (including gnn_threat) and are sorted by anomaly (highest first). For structural runs, paths still include max_score and total_score and are sorted by those. Use total_paths and filtered_paths in the response to decide whether to fetch more pages.",
   category: "hunt",

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { defineTool } from "../../lib/types.js";
 
 export const graphSummary = defineTool({
-  name: "graph.summary",
+  name: "graph_summary",
   description:
     "Get a comprehensive summary of the entire graph: entity counts, relation counts, type distribution, time range, and top anomalies. This is the best starting point for understanding what data is in the graph. Call this first to orient yourself before diving into specific entities or hunts.",
   category: "graph",

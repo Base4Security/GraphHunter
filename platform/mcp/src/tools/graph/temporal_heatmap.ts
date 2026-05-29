@@ -13,7 +13,7 @@ const input = z.object({
 });
 
 export const graphTemporalHeatmap = defineTool({
-  name: "graph.temporal_heatmap",
+  name: "graph_temporal_heatmap",
   description:
     "Get bucketed activity patterns per relation type. Default bucket is 1h; pass `bucket_size_seconds` (60..86400) to rebucket. Output densifies zero-count buckets between first and last event so gaps are explicit rather than silently skipped.",
   category: "graph",

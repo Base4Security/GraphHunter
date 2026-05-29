@@ -7,7 +7,7 @@ const input = z.object({
 });
 
 export const nodeGet = defineTool({
-  name: "node.get",
+  name: "node_get",
   description:
     "Get detailed information about a node: scores, degrees, neighbor counts, time range. For the long-form anomaly narrative + score breakdown, use `node.score_explanation` instead.",
   category: "node",

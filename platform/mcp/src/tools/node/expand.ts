@@ -22,7 +22,7 @@ const input = z.object({
 });
 
 export const nodeExpand = defineTool({
-  name: "node.expand",
+  name: "node_expand",
   description:
     "Expand from a node to get its neighbors (nodes and edges). Default mode=raw returns individual edges; mode=grouped returns per-edge-type summaries (better for hubs). Use to explore the graph from a starting node and find suspicious paths.",
   category: "node",
