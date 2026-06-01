@@ -46,6 +46,21 @@ use graph_hunter_core::parser::{LogParser, ParsedTriple};
 use graph_hunter_core::relation::Relation;
 use graph_hunter_core::types::{EntityType, RelationType};
 
+// NOTE on input modes: this parser deliberately exposes only the two
+// modes that are actually reachable from production wiring:
+//   * raw KV log lines (default `LogParser::parse` path),
+//   * CSV-with-headers (auto-detected when the first line has commas
+//     but no `=`).
+// An earlier draft also shipped an `xlsx` entry point behind the
+// `xlsx` cargo feature, but it took a `&Path` and could not be reached
+// through `LogParser::parse(&str)` — the registry has no `.xlsx`
+// extension hook (see `platform/api/src/format_registry.rs`
+// `resolve_format_with_ext`) and no caller existed in the repo. Rather
+// than ship dead code + the `calamine` transitive dependency (zip,
+// xml, regex), the xlsx mode was removed; if/when xlsx ingest is
+// scoped, it will need its own dispatch since the trait can't accept a
+// path.
+
 /// Fields propagated from a FortiGate KV line onto every emitted
 /// `Relation::metadata`. Order is preserved across inserts so callers
 /// reading the HashMap see a stable shape; the order itself is the
@@ -76,12 +91,11 @@ const EDGE_METADATA_FIELDS: &[&str] = &[
     "subtype",
 ];
 
-/// Native FortiGate parser. Accepts three input shapes:
+/// Native FortiGate parser. Accepts two input shapes both routed
+/// through `LogParser::parse(&str)`:
 ///  * raw KV log lines (one event per newline-terminated record),
 ///  * CSV with a header row (header cell becomes the KV key, body cell
-///    becomes the value),
-///  * (xlsx, behind the `xlsx` cargo feature) workbooks where each
-///    cell is itself a KV pair.
+///    becomes the value).
 #[derive(Debug, Default, Clone)]
 pub struct FortiGateParser;
 
@@ -116,58 +130,6 @@ impl FortiGateParser {
         out
     }
 
-    /// xlsx entry point. Walks every sheet, treats each cell as a KV
-    /// pair, concatenates a row's cells into one space-separated KV
-    /// line, and feeds that into [`parse_kv_line`].
-    ///
-    /// Behind the `xlsx` cargo feature so callers that don't need
-    /// Excel ingest can skip the calamine dep + its transitive zip /
-    /// xml crates.
-    #[cfg(feature = "xlsx")]
-    pub fn parse_xlsx(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<Vec<ParsedTriple>, calamine::Error> {
-        use calamine::{Data, DataType, Reader, open_workbook_auto};
-
-        let mut wb = open_workbook_auto(path)?;
-        let sheet_names = wb.sheet_names().to_owned();
-        let mut out = Vec::new();
-        for sheet in sheet_names {
-            let range = wb.worksheet_range(&sheet)?;
-            for row in range.rows() {
-                let mut kv_line = String::new();
-                for cell in row.iter() {
-                    let s = match cell {
-                        Data::Empty => continue,
-                        Data::String(s) => s.clone(),
-                        Data::Int(n) => n.to_string(),
-                        Data::Float(f) => f.to_string(),
-                        Data::Bool(b) => b.to_string(),
-                        Data::DateTime(_) | Data::DateTimeIso(_) => cell
-                            .as_datetime()
-                            .map(|dt: NaiveDateTime| {
-                                dt.format("%Y-%m-%dT%H:%M:%S").to_string()
-                            })
-                            .unwrap_or_else(|| cell.as_string().unwrap_or_default()),
-                        Data::DurationIso(s) => s.clone(),
-                        Data::Error(_) => continue,
-                    };
-                    if s.trim().is_empty() {
-                        continue;
-                    }
-                    if !kv_line.is_empty() {
-                        kv_line.push(' ');
-                    }
-                    kv_line.push_str(s.trim());
-                }
-                if !kv_line.is_empty() {
-                    out.extend(parse_kv_line(&kv_line));
-                }
-            }
-        }
-        Ok(out)
-    }
 }
 
 impl LogParser for FortiGateParser {

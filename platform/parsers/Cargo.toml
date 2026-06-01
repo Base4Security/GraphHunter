@@ -17,12 +17,3 @@ chrono = { version = "0.4", features = ["serde"] }
 # FortiAnalyzer XML report parser (raw event-based Reader API, no
 # serialize feature needed).
 quick-xml = "0.38"
-# FortiGate xlsx ingest (task #65). Cells are stringified through the
-# `Data` enum; the `chrono` feature lets DateTime serials normalise to
-# `chrono::NaiveDateTime` so the rest of the parsers crate keeps its
-# existing chrono-based timestamp plumbing.
-calamine = { version = "0.34", features = ["chrono"], optional = true }
-
-[features]
-default = ["xlsx"]
-xlsx = ["dep:calamine"]
