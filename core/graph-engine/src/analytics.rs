@@ -1028,77 +1028,109 @@ impl GraphHunter {
         let sid = self.interner.get(node_id)?;
         let entity = self.entities.get(&sid)?;
 
-        let out_arc = self.streaming.neighbors_arc(sid);
-        let out_guard = out_arc.as_ref().map(|a| a.read());
-        let out_edges: &[crate::streaming::StreamEdge] = out_guard
-            .as_deref()
-            .map(|g| g.as_slice())
-            .unwrap_or(&[]);
-        let out_degree = out_edges.len();
+        // Tail-aware degree: `degree_of` reads BOTH the per-vertex base
+        // neighbor list AND the post-finalize tail buffer. The previous
+        // `out_edges.len()` path via `neighbors_arc` was base-only and
+        // silently dropped every edge appended after the first finalize
+        // (e.g. ingest of a second/third dataset in the same session).
+        let out_degree = self.streaming.degree_of(sid);
+        // `reverse_adj` is updated on every `add_relation` (including
+        // post-finalize appends — see graph.rs:463 C3a ordering), so it
+        // is already tail-aware by construction.
         let in_degree = self.reverse_adj.get(&sid).map(|v| v.len()).unwrap_or(0);
 
         let mut min_ts = i64::MAX;
         let mut max_ts = i64::MIN;
         let mut has_timestamps = false;
 
-        for edge in out_edges.iter().take(config::MAX_SCAN_EDGES) {
-            if edge.timestamp != 0 {
-                min_ts = min_ts.min(edge.timestamp);
-                max_ts = max_ts.max(edge.timestamp);
-                has_timestamps = true;
-            }
-        }
-        // For incoming edges, sample reverse_adj instead of scanning all
-        if let Some(sources) = self.reverse_adj.get(&sid) {
-            for &source_sid in sources.iter().take(config::MAX_SCAN_EDGES) {
-                if let Some(arc) = self.streaming.neighbors_arc(source_sid) {
-                    let g = arc.read();
-                    for edge in g.as_slice() {
-                        if edge.dest_sid == sid && edge.timestamp != 0 {
-                            min_ts = min_ts.min(edge.timestamp);
-                            max_ts = max_ts.max(edge.timestamp);
-                            has_timestamps = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
         let mut neighbor_types: HashMap<String, usize> = HashMap::new();
         let mut seen: HashSet<StrId> = HashSet::new();
         let mut neighbors: Vec<NeighborSummary> = Vec::new();
 
-        // Cap iteration to avoid stalling on extremely high-degree nodes (1M+ edges).
-        // neighbor_types counts become approximate beyond MAX_SCAN_EDGES; neighbors list
-        // is already capped at MAX_NEIGHBORS_RETURNED.
-        for edge in out_edges.iter().take(config::MAX_SCAN_EDGES) {
-            if let Some(dest) = self.entities.get(&edge.dest_sid) {
-                *neighbor_types
-                    .entry(format!("{}", dest.entity_type))
-                    .or_default() += 1;
-                if seen.insert(edge.dest_sid) && neighbors.len() < config::MAX_NEIGHBORS_RETURNED
-                {
-                    neighbors.push(NeighborSummary {
-                        id: dest.id.clone(),
-                        entity_type: format!("{}", dest.entity_type),
-                    });
+        // Outgoing pass: chain base + tail under a single lock acquisition.
+        //
+        // Cap iteration to avoid stalling on extremely high-degree nodes
+        // (1M+ edges). The neighbors list is also capped at
+        // MAX_NEIGHBORS_RETURNED. neighbor_types counts UNIQUE destination
+        // entity_types (gated by `seen`) — previously the count incremented
+        // per-edge, so a hub with N edges to a single neighbor reported
+        // N for that type (capped at MAX_SCAN_EDGES). The fix collapses
+        // to per-unique-neighbor, matching the intended semantics: "how
+        // many neighbors of each type does this node have?".
+        self.streaming.with_neighbors_and_tail(sid, |base, tail| {
+            let mut scanned = 0usize;
+            for edge in base.iter().chain(tail.iter()) {
+                if scanned >= config::MAX_SCAN_EDGES {
+                    break;
                 }
-            }
-        }
-        if let Some(sources) = self.reverse_adj.get(&sid) {
-            for &source_sid in sources.iter().take(config::MAX_SCAN_EDGES) {
-                if let Some(src) = self.entities.get(&source_sid) {
-                    *neighbor_types
-                        .entry(format!("{}", src.entity_type))
-                        .or_default() += 1;
-                    if seen.insert(source_sid) && neighbors.len() < config::MAX_NEIGHBORS_RETURNED {
-                        neighbors.push(NeighborSummary {
-                            id: src.id.clone(),
-                            entity_type: format!("{}", src.entity_type),
-                        });
+                scanned += 1;
+                if edge.timestamp != 0 {
+                    min_ts = min_ts.min(edge.timestamp);
+                    max_ts = max_ts.max(edge.timestamp);
+                    has_timestamps = true;
+                }
+                if let Some(dest) = self.entities.get(&edge.dest_sid) {
+                    // Count + push only on the first sighting of this
+                    // distinct destination. neighbor_types is a unique-
+                    // neighbor-by-type histogram, NOT an edge-count
+                    // histogram. (Fan-out info lives in `out_degree`.)
+                    if seen.insert(edge.dest_sid) {
+                        *neighbor_types
+                            .entry(format!("{}", dest.entity_type))
+                            .or_default() += 1;
+                        if neighbors.len() < config::MAX_NEIGHBORS_RETURNED {
+                            neighbors.push(NeighborSummary {
+                                id: dest.id.clone(),
+                                entity_type: format!("{}", dest.entity_type),
+                            });
+                        }
                     }
                 }
+            }
+        });
+
+        // Incoming pass: walk reverse_adj (already tail-aware). Same
+        // unique-by-source semantics as the outgoing pass. For timestamp
+        // discovery we look up the source's outgoing edges via the
+        // tail-aware helper and find the first edge that lands on us;
+        // any single timestamp suffices to extend the min/max range.
+        if let Some(sources) = self.reverse_adj.get(&sid) {
+            let mut scanned = 0usize;
+            for &source_sid in sources.iter() {
+                if scanned >= config::MAX_SCAN_EDGES {
+                    break;
+                }
+                scanned += 1;
+                let Some(src_entity) = self.entities.get(&source_sid) else {
+                    continue;
+                };
+                // Unique-by-source: skip if we've already counted this
+                // source (e.g. same source sent multiple edges to us).
+                if !seen.insert(source_sid) {
+                    continue;
+                }
+                *neighbor_types
+                    .entry(format!("{}", src_entity.entity_type))
+                    .or_default() += 1;
+                if neighbors.len() < config::MAX_NEIGHBORS_RETURNED {
+                    neighbors.push(NeighborSummary {
+                        id: src_entity.id.clone(),
+                        entity_type: format!("{}", src_entity.entity_type),
+                    });
+                }
+                // Sample a timestamp from this source's outgoing edges
+                // (base + tail) for the time_range computation.
+                self.streaming
+                    .with_neighbors_and_tail(source_sid, |base, tail| {
+                        for edge in base.iter().chain(tail.iter()) {
+                            if edge.dest_sid == sid && edge.timestamp != 0 {
+                                min_ts = min_ts.min(edge.timestamp);
+                                max_ts = max_ts.max(edge.timestamp);
+                                has_timestamps = true;
+                                break;
+                            }
+                        }
+                    });
             }
         }
 

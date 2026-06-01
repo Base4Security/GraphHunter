@@ -658,6 +658,55 @@ impl InMemoryStreamingBackend {
         Some(f(&*guard))
     }
 
+    /// Tail-aware companion to [`Self::with_neighbors`]: invoke `f` with
+    /// the base neighbor slice AND the post-finalize tail slice for
+    /// `src`. Either slice may be empty; `f` is called as long as `src`
+    /// has any outgoing edges in either store (returns `None` only when
+    /// the vertex is truly degree-0 in both base and tail).
+    ///
+    /// Use this for read paths that must see the COMPLETE set of
+    /// outgoing edges, including post-finalize appends that landed in
+    /// the per-vertex tail buffer instead of the sorted base list.
+    /// `neighbors_arc` / `with_neighbors` / `neighbors_snapshot` all
+    /// return BASE only and silently drop tail edges — this helper is
+    /// the read-side counterpart to the tail-aware [`Self::degree_of`].
+    ///
+    /// Holds the per-vertex base `RwLock` read guard AND the global
+    /// tails `RwLock` read guard for the duration of `f`. Keep `f`
+    /// short: collect the values you need (or push into a buffer) and
+    /// exit so concurrent post-finalize appenders are not starved.
+    pub fn with_neighbors_and_tail<R, F>(&self, src: StrId, f: F) -> Option<R>
+    where
+        F: FnOnce(&[StreamEdge], &[StreamEdge]) -> R,
+    {
+        let outer = self.vertices.read();
+        let tails = self.tails.read();
+        let base_slot = outer.get(&src);
+        let tail_entry = tails.get(&src);
+
+        // Vertex is degree-0 if both stores are empty/absent.
+        if base_slot.is_none() && tail_entry.is_none() {
+            return None;
+        }
+
+        // Materialize a base read guard if the slot exists; otherwise
+        // provide an empty slice. Same for the tail.
+        let base_guard = base_slot.map(|slot| slot.read());
+        let base_slice: &[StreamEdge] = base_guard
+            .as_deref()
+            .map(|g| g.as_slice())
+            .unwrap_or(&[]);
+        let tail_slice: &[StreamEdge] = tail_entry
+            .map(|t| t.as_slice())
+            .unwrap_or(&[]);
+
+        if base_slice.is_empty() && tail_slice.is_empty() {
+            return None;
+        }
+
+        Some(f(base_slice, tail_slice))
+    }
+
     /// L3 post-2c2 — capture a lock-free point-in-time read view
     /// over the outer vertex table. The matcher hot-path holds the
     /// snapshot for one hunt and per-frame does
