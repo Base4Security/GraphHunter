@@ -39,7 +39,7 @@
 
 use std::collections::HashMap;
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, NaiveDateTime};
 
 use graph_hunter_core::entity::Entity;
 use graph_hunter_core::parser::{LogParser, ParsedTriple};
@@ -259,16 +259,37 @@ fn collect_edge_metadata(kv: &HashMap<String, String>) -> HashMap<String, String
 /// Derive the Relation::timestamp (epoch seconds) from a FortiGate KV
 /// map. Tries, in order:
 ///  1. `timestamp=` already-numeric epoch (handles `s`, `ms`, `us`, `ns`),
-///  2. `date=YYYY-MM-DD` + `time=HH:MM:SS` combined as naive UTC,
-///  3. `eventtime=` (FortiOS 6.x+ ns-since-epoch),
-///  4. 0 (parser never errors on this; downstream tooling sorts by 0).
+///  1b. `timestamp=` as ISO 8601 string (FortiGate `.final.csv` shape),
+///  2. `eventtime=` (FortiOS 6.x+ ns-since-epoch), numeric then ISO,
+///  3. `date=YYYY-MM-DD` + `time=HH:MM:SS` combined as naive UTC,
+///  4. 0 + `eprintln!` warn (parser never errors / drops the row;
+///     downstream tooling sorts by 0 so existing semantics are preserved).
+///
+/// Bug #69: FortiGate `.final.csv` exports carry the timestamp as a
+/// single STRING `YYYY-MM-DDTHH:MM:SS` cell, which the original
+/// numeric-only branch silently dropped to 0 — leaving every emitted
+/// Relation with `timestamp:0` and `graph_summary.time_range = null`.
 fn derive_timestamp(kv: &HashMap<String, String>) -> i64 {
-    if let Some(ts) = kv.get("timestamp").and_then(|s| s.parse::<i64>().ok()) {
-        return normalize_epoch(ts);
+    // 1. Numeric epoch (s/ms/us/ns) in `timestamp=`
+    if let Some(raw) = kv.get("timestamp") {
+        if let Ok(ts) = raw.parse::<i64>() {
+            return normalize_epoch(ts);
+        }
+        // 1b. String ISO 8601 in `timestamp=` (FortiGate `.final.csv`).
+        if let Some(epoch) = parse_iso_timestamp(raw) {
+            return epoch;
+        }
     }
-    if let Some(ts) = kv.get("eventtime").and_then(|s| s.parse::<i64>().ok()) {
-        return normalize_epoch(ts);
+    // 2. Numeric epoch in `eventtime=`; defensively also accept ISO.
+    if let Some(raw) = kv.get("eventtime") {
+        if let Ok(ts) = raw.parse::<i64>() {
+            return normalize_epoch(ts);
+        }
+        if let Some(epoch) = parse_iso_timestamp(raw) {
+            return epoch;
+        }
     }
+    // 3. Combined `date=` + `time=`.
     if let (Some(d), Some(t)) = (kv.get("date"), kv.get("time")) {
         let combined = format!("{d} {t}");
         for fmt in &["%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
@@ -277,7 +298,49 @@ fn derive_timestamp(kv: &HashMap<String, String>) -> i64 {
             }
         }
     }
+    // 4. Fall back to 0 + warn. We deliberately preserve the row (a
+    //    null/0 timestamp is better than dropped data for syslog-style
+    //    inputs whose field shape varies across FortiOS versions).
+    eprintln!(
+        "Warning: FortiGate parser could not derive timestamp from KV \
+         (timestamp={:?}, eventtime={:?}, date={:?}, time={:?})",
+        kv.get("timestamp"),
+        kv.get("eventtime"),
+        kv.get("date"),
+        kv.get("time"),
+    );
     0
+}
+
+/// Parse an ISO 8601 timestamp into Unix epoch seconds.
+///
+/// Accepts FortiGate's actual shape `YYYY-MM-DDTHH:MM:SS` (treated as
+/// UTC), plus defensive variants:
+///   * trailing `Z`         (`...:25Z`)
+///   * fractional seconds   (`...:25.123`)
+///   * explicit offset      (`...:25+02:00`, `...:25-05:00`)
+///
+/// Mirrors the cascade in `core/graph-engine/src/sentinel.rs` so the
+/// two parsers agree on what counts as a parseable timestamp.
+fn parse_iso_timestamp(ts: &str) -> Option<i64> {
+    let trimmed = ts.trim();
+    // 1. RFC 3339 / ISO 8601 with timezone offset (e.g. `...+00:00`, `...Z`).
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.timestamp());
+    }
+    // 2. Naive UTC, no fractional seconds (FortiGate's actual `.final.csv` shape).
+    if let Ok(dt) =
+        NaiveDateTime::parse_from_str(trimmed.trim_end_matches('Z'), "%Y-%m-%dT%H:%M:%S")
+    {
+        return Some(dt.and_utc().timestamp());
+    }
+    // 3. Naive UTC with fractional seconds.
+    if let Ok(dt) =
+        NaiveDateTime::parse_from_str(trimmed.trim_end_matches('Z'), "%Y-%m-%dT%H:%M:%S%.f")
+    {
+        return Some(dt.and_utc().timestamp());
+    }
+    None
 }
 
 /// FortiOS variants store epoch in seconds, milliseconds, microseconds
@@ -560,8 +623,114 @@ mod tests {
         let triples = parser.parse(KV_LINE_NO_ATTACK);
         assert_eq!(triples.len(), 1);
         let ts = triples[0].1.timestamp;
-        // 2026-05-28T14:14:21Z (naive UTC) → 1779977661
-        assert_eq!(ts, 1_779_977_661);
+        // Expected epoch is computed from chrono — no magic constants.
+        let expected = NaiveDateTime::parse_from_str(
+            "2026-05-28T14:14:21",
+            "%Y-%m-%dT%H:%M:%S",
+        )
+        .unwrap()
+        .and_utc()
+        .timestamp();
+        assert_eq!(ts, expected);
+        assert_ne!(ts, 0, "bug #69 regression: ts must not fall back to 0");
+    }
+
+    /// Bug #69 primary regression: FortiGate `.final.csv` exports ship a
+    /// single STRING `timestamp=YYYY-MM-DDTHH:MM:SS` cell. The original
+    /// numeric-only parse silently dropped this to 0. Assert the new
+    /// ISO-string branch picks it up.
+    #[test]
+    fn timestamp_iso_string_in_timestamp_field() {
+        let line = r#"timestamp="2026-05-21T23:18:25" devname="FW-CORE-01" srcip="10.0.1.31" dstip="10.0.1.32" dstport="443" action="dropped""#;
+        let parser = FortiGateParser::new();
+        let triples = parser.parse(line);
+        assert_eq!(triples.len(), 1, "expected one Connect triple");
+        let ts = triples[0].1.timestamp;
+        let expected = NaiveDateTime::parse_from_str(
+            "2026-05-21T23:18:25",
+            "%Y-%m-%dT%H:%M:%S",
+        )
+        .unwrap()
+        .and_utc()
+        .timestamp();
+        assert_eq!(ts, expected);
+        assert_ne!(ts, 0, "bug #69 regression: ISO timestamp must parse, not fall back to 0");
+        // metadata.timestamp_raw should still carry the original ISO string for analyst inspection.
+        assert_eq!(
+            triples[0].1.metadata.get("timestamp_raw").map(|s| s.as_str()),
+            Some("2026-05-21T23:18:25")
+        );
+    }
+
+    /// Defensive: accept `Z`, millisecond, and offset suffixes too.
+    #[test]
+    fn timestamp_iso_defensive_variants_all_parse() {
+        let expected_naive = NaiveDateTime::parse_from_str(
+            "2026-05-21T23:18:25",
+            "%Y-%m-%dT%H:%M:%S",
+        )
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+        let parser = FortiGateParser::new();
+        // (a) trailing Z
+        let line_z = r#"timestamp="2026-05-21T23:18:25Z" srcip="1.1.1.1" dstip="2.2.2.2""#;
+        assert_eq!(parser.parse(line_z)[0].1.timestamp, expected_naive);
+        // (b) millis
+        let line_ms = r#"timestamp="2026-05-21T23:18:25.123" srcip="1.1.1.1" dstip="2.2.2.2""#;
+        assert_eq!(parser.parse(line_ms)[0].1.timestamp, expected_naive);
+        // (c) explicit +00:00 offset → identical epoch
+        let line_off = r#"timestamp="2026-05-21T23:18:25+00:00" srcip="1.1.1.1" dstip="2.2.2.2""#;
+        assert_eq!(parser.parse(line_off)[0].1.timestamp, expected_naive);
+        // (d) explicit -05:00 offset → epoch shifts by +5h
+        let line_neg = r#"timestamp="2026-05-21T23:18:25-05:00" srcip="1.1.1.1" dstip="2.2.2.2""#;
+        assert_eq!(
+            parser.parse(line_neg)[0].1.timestamp,
+            expected_naive + 5 * 3600
+        );
+    }
+
+    /// Negative: missing/malformed timestamp must fall back to 0 (not
+    /// panic, not drop the row). Preserves the "never drop rows" contract.
+    #[test]
+    fn timestamp_missing_or_malformed_falls_back_to_zero() {
+        let parser = FortiGateParser::new();
+        // (a) no timestamp / date / time at all
+        let line_none = r#"srcip="1.1.1.1" dstip="2.2.2.2" action="allow""#;
+        let triples_none = parser.parse(line_none);
+        assert_eq!(triples_none.len(), 1, "row must NOT be dropped");
+        assert_eq!(triples_none[0].1.timestamp, 0);
+        // (b) malformed ISO string
+        let line_bad = r#"timestamp="not-a-date" srcip="1.1.1.1" dstip="2.2.2.2""#;
+        let triples_bad = parser.parse(line_bad);
+        assert_eq!(triples_bad.len(), 1, "row must NOT be dropped on malformed ts");
+        assert_eq!(triples_bad[0].1.timestamp, 0);
+    }
+
+    /// Bug #69 multi-emission guard: an IPS event yields a Connect AND a
+    /// Triggered edge — both must carry the SAME parsed (non-zero) timestamp,
+    /// derived from a single parse of the line.
+    #[test]
+    fn timestamp_shared_across_connect_and_triggered_emissions() {
+        let line = r#"timestamp="2026-05-21T23:18:25" devname="FW-CORE-01" srcip="10.0.1.31" dstip="10.0.1.32" dstport="443" action="dropped" attack="FortiOS.SSL.VPN.Custom.Information.Disclosure""#;
+        let parser = FortiGateParser::new();
+        let triples = parser.parse(line);
+        assert_eq!(triples.len(), 2, "expected Connect + Triggered triples");
+        let ts_connect = triples[0].1.timestamp;
+        let ts_triggered = triples[1].1.timestamp;
+        assert_ne!(ts_connect, 0, "Connect ts must be parsed, not 0");
+        assert_ne!(ts_triggered, 0, "Triggered ts must be parsed, not 0");
+        assert_eq!(
+            ts_connect, ts_triggered,
+            "both emissions from the same event must share the same timestamp"
+        );
+        // Confirm both edges are correctly typed too (regression guard).
+        assert_eq!(triples[0].1.rel_type, RelationType::Connect);
+        assert_eq!(
+            triples[1].1.rel_type,
+            RelationType::Other("Triggered".to_string())
+        );
     }
 
     #[test]
