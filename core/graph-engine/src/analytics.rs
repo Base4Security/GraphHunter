@@ -43,6 +43,21 @@ pub struct NeighborEdge {
     pub metadata: HashMap<String, String>,
 }
 
+/// Reports the result of live-source hydration performed before an
+/// expansion. Attached to `Neighborhood` when an expand ran with the
+/// live flag. `skipped=true` with a `reason` means hydration could not
+/// run (non-Sentinel session, missing creds, unmapped entity type).
+#[derive(Serialize, Clone, Debug)]
+pub struct HydrationOutcome {
+    pub skipped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub new_entities: usize,
+    pub new_relations: usize,
+    pub tables_hit: usize,
+    pub tables_attempted: usize,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct Neighborhood {
     pub center: String,
@@ -58,6 +73,10 @@ pub struct Neighborhood {
     pub auto_grouped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_group_reason: Option<String>,
+    /// Present when this expansion ran with live hydration (Enfoque A).
+    /// See `HydrationOutcome`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hydration: Option<HydrationOutcome>,
 }
 
 /// A grouped edge that collapses N edges sharing the same source,
@@ -604,6 +623,7 @@ impl GraphHunter {
             truncated,
             auto_grouped: false,
             auto_group_reason: None,
+            hydration: None,
         })
     }
 
@@ -1923,5 +1943,39 @@ impl GraphHunter {
             ),
             first_step_matches: first_matches,
         }
+    }
+}
+
+#[cfg(test)]
+mod hydration_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn neighborhood_default_omits_hydration_in_json() {
+        let hood = Neighborhood {
+            center: "x".into(),
+            nodes: vec![],
+            edges: vec![],
+            truncated: false,
+            auto_grouped: false,
+            auto_group_reason: None,
+            hydration: None,
+        };
+        let json = serde_json::to_string(&hood).unwrap();
+        assert!(!json.contains("hydration"), "None hydration must be skipped: {json}");
+    }
+
+    #[test]
+    fn hydration_outcome_serializes_counts() {
+        let o = HydrationOutcome {
+            skipped: false,
+            reason: None,
+            new_entities: 3,
+            new_relations: 7,
+            tables_hit: 2,
+            tables_attempted: 3,
+        };
+        let json = serde_json::to_string(&o).unwrap();
+        assert!(json.contains("\"new_relations\":7"));
     }
 }

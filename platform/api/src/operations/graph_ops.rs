@@ -355,6 +355,7 @@ impl GraphHunterApi {
                 truncated: grouped.truncated,
                 auto_grouped: true,
                 auto_group_reason: Some(reason),
+                hydration: None,
             }
         } else {
             graph
