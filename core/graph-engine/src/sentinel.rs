@@ -1276,6 +1276,32 @@ pub fn sentinel_entity_targets(
     }
 }
 
+/// Escapes a value for embedding in a KQL double-quoted string literal.
+/// KQL string literals escape `"` and `\` with a backslash.
+pub fn kql_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Builds an entity-scoped hydration query for one Sentinel table.
+/// Shape: `<table> | <time_filter> | where C1 == "v" or C2 == "v" | take N`.
+/// `time_filter` is a pre-rendered clause beginning with `where`. `value`
+/// is escaped internally.
+pub fn build_hydration_kql(
+    table: &str,
+    columns: &[&str],
+    value: &str,
+    time_filter: &str,
+    take: u32,
+) -> String {
+    let escaped = kql_escape(value);
+    let predicate = columns
+        .iter()
+        .map(|c| format!("{c} == \"{escaped}\""))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    format!("{table} | {time_filter} | where {predicate} | take {take}")
+}
+
 #[cfg(test)]
 mod hydration_tests {
     use super::*;
@@ -1336,6 +1362,39 @@ mod hydration_tests {
             (E::File, "DeviceFileEvents", "FolderPath"),
             (E::File, "DeviceFileEvents", "FileName"),
         ]
+    }
+
+    #[test]
+    fn kql_escape_neutralizes_quotes_and_backslashes() {
+        assert_eq!(kql_escape(r#"a"b\c"#), r#"a\"b\\c"#);
+        assert_eq!(kql_escape("plain"), "plain");
+    }
+
+    #[test]
+    fn hydration_kql_builds_or_clause_across_columns() {
+        let kql = build_hydration_kql(
+            "CommonSecurityLog",
+            &["SourceIP", "DestinationIP"],
+            "10.0.0.1",
+            "where TimeGenerated > ago(24h)",
+            5000,
+        );
+        assert_eq!(
+            kql,
+            r#"CommonSecurityLog | where TimeGenerated > ago(24h) | where SourceIP == "10.0.0.1" or DestinationIP == "10.0.0.1" | take 5000"#
+        );
+    }
+
+    #[test]
+    fn hydration_kql_escapes_value() {
+        let kql = build_hydration_kql(
+            "SigninLogs",
+            &["UserPrincipalName"],
+            r#"ev"il"#,
+            "where TimeGenerated > ago(1h)",
+            100,
+        );
+        assert!(kql.contains(r#"UserPrincipalName == "ev\"il""#), "value not escaped: {kql}");
     }
 
     #[test]
