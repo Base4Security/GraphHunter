@@ -1235,3 +1235,71 @@ impl LogParser for SentinelJsonParser {
         (all_events, stats)
     }
 }
+
+/// Inverse of the parser's column→entity mapping: for an entity type,
+/// the `(Sentinel table name, columns)` pairs where a value of that type
+/// can appear. Used to build entity-scoped hydration KQL.
+///
+/// MUST stay in sync with what the table parsers above read — the
+/// `map_covers_every_parser_identifier_column` test enforces this.
+/// TODO(owner): tune columns to your tenant (e.g. add `LocalIP` for IP,
+/// `SHA256` for Process) — these lines define how complete hydration is.
+pub fn sentinel_entity_targets(
+    ty: &crate::types::EntityType,
+) -> &'static [(&'static str, &'static [&'static str])] {
+    use crate::types::EntityType;
+    match ty {
+        EntityType::User => &[
+            ("SecurityEvent", &["TargetUserName", "Account", "SubjectUserName"]),
+            ("SigninLogs", &["UserPrincipalName", "UserDisplayName"]),
+            ("DeviceProcessEvents", &["AccountName", "InitiatingProcessAccountName"]),
+        ],
+        EntityType::IP => &[
+            ("SigninLogs", &["IPAddress"]),
+            ("DeviceNetworkEvents", &["RemoteIP"]),
+            ("CommonSecurityLog", &["SourceIP", "DestinationIP"]),
+        ],
+        EntityType::Host => &[
+            ("SecurityEvent", &["Computer"]),
+            ("DeviceNetworkEvents", &["DeviceName"]),
+        ],
+        EntityType::Process => &[
+            ("SecurityEvent", &["NewProcessName", "ParentProcessName", "ProcessName"]),
+            ("DeviceProcessEvents", &["FolderPath", "FileName", "InitiatingProcessFolderPath"]),
+            ("DeviceFileEvents", &["InitiatingProcessFolderPath", "InitiatingProcessFileName"]),
+        ],
+        EntityType::File => &[
+            ("SecurityEvent", &["ObjectName"]),
+            ("DeviceFileEvents", &["FolderPath", "FileName"]),
+        ],
+        _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod hydration_tests {
+    use super::*;
+    use crate::types::EntityType;
+
+    #[test]
+    fn targets_for_ip_cover_three_tables() {
+        let targets = sentinel_entity_targets(&EntityType::IP);
+        let tables: Vec<&str> = targets.iter().map(|(t, _)| *t).collect();
+        assert!(tables.contains(&"SigninLogs"));
+        assert!(tables.contains(&"DeviceNetworkEvents"));
+        assert!(tables.contains(&"CommonSecurityLog"));
+    }
+
+    #[test]
+    fn targets_for_user_include_signin_upn() {
+        let targets = sentinel_entity_targets(&EntityType::User);
+        let signin = targets.iter().find(|(t, _)| *t == "SigninLogs").unwrap();
+        assert!(signin.1.contains(&"UserPrincipalName"));
+    }
+
+    #[test]
+    fn targets_for_unmapped_type_are_empty() {
+        assert!(sentinel_entity_targets(&EntityType::Domain).is_empty());
+        assert!(sentinel_entity_targets(&EntityType::Any).is_empty());
+    }
+}
