@@ -1302,4 +1302,53 @@ mod hydration_tests {
         assert!(sentinel_entity_targets(&EntityType::Domain).is_empty());
         assert!(sentinel_entity_targets(&EntityType::Any).is_empty());
     }
+
+    /// Declarative source of truth: every (table, column) the parsers read as
+    /// an entity *identifier* (not metadata), grouped by entity type. When a
+    /// parser starts reading a new identifier column, add it here AND to
+    /// `sentinel_entity_targets` — this test fails until both match.
+    fn parser_identifier_columns() -> &'static [(crate::types::EntityType, &'static str, &'static str)]
+    {
+        use crate::types::EntityType as E;
+        &[
+            (E::User, "SecurityEvent", "TargetUserName"),
+            (E::User, "SecurityEvent", "Account"),
+            (E::User, "SecurityEvent", "SubjectUserName"),
+            (E::User, "SigninLogs", "UserPrincipalName"),
+            (E::User, "SigninLogs", "UserDisplayName"),
+            (E::User, "DeviceProcessEvents", "AccountName"),
+            (E::User, "DeviceProcessEvents", "InitiatingProcessAccountName"),
+            (E::IP, "SigninLogs", "IPAddress"),
+            (E::IP, "DeviceNetworkEvents", "RemoteIP"),
+            (E::IP, "CommonSecurityLog", "SourceIP"),
+            (E::IP, "CommonSecurityLog", "DestinationIP"),
+            (E::Host, "SecurityEvent", "Computer"),
+            (E::Host, "DeviceNetworkEvents", "DeviceName"),
+            (E::Process, "SecurityEvent", "NewProcessName"),
+            (E::Process, "SecurityEvent", "ParentProcessName"),
+            (E::Process, "SecurityEvent", "ProcessName"),
+            (E::Process, "DeviceProcessEvents", "FolderPath"),
+            (E::Process, "DeviceProcessEvents", "FileName"),
+            (E::Process, "DeviceProcessEvents", "InitiatingProcessFolderPath"),
+            (E::Process, "DeviceFileEvents", "InitiatingProcessFolderPath"),
+            (E::Process, "DeviceFileEvents", "InitiatingProcessFileName"),
+            (E::File, "SecurityEvent", "ObjectName"),
+            (E::File, "DeviceFileEvents", "FolderPath"),
+            (E::File, "DeviceFileEvents", "FileName"),
+        ]
+    }
+
+    #[test]
+    fn map_covers_every_parser_identifier_column() {
+        for (ty, table, column) in parser_identifier_columns() {
+            let targets = sentinel_entity_targets(ty);
+            let covered = targets
+                .iter()
+                .any(|(t, cols)| t == table && cols.contains(column));
+            assert!(
+                covered,
+                "parser reads {column} in {table} as {ty:?}, but sentinel_entity_targets omits it",
+            );
+        }
+    }
 }
