@@ -173,6 +173,13 @@ pub struct ExpandNodeRequest {
     pub max_nodes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter: Option<ExpandFilter>,
+    /// When true, hydrate the target node from Sentinel before expanding
+    /// (Enfoque A). Ignored on non-Sentinel sessions (soft no-op).
+    #[serde(default)]
+    pub live: bool,
+    /// Time window for the hydration KQL. Defaults to 24h when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<crate::dto::v1::sentinel::TimeWindow>,
 }
 
 /// Node and edge counts for the resolved session's graph.

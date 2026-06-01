@@ -231,6 +231,8 @@ pub fn cmd_expand_node(
         max_hops,
         max_nodes,
         filter,
+        live: false,
+        time_window: None,
     })
     .map_err(CommandError::from)
 }
@@ -252,6 +254,8 @@ pub fn cmd_expand_node_grouped(
         max_hops,
         max_nodes,
         filter,
+        live: false,
+        time_window: None,
     })
     .map_err(CommandError::from)
 }

@@ -118,6 +118,8 @@ pub(super) async fn handler_expand(
                 max_hops: q.max_hops,
                 max_nodes: q.max_nodes,
                 filter: None,
+                live: false,
+                time_window: None,
             })
         }),
     )
@@ -340,6 +342,8 @@ pub(super) async fn handler_expand_grouped(
                 max_hops: q.max_hops,
                 max_nodes: q.max_nodes,
                 filter: None,
+                live: false,
+                time_window: None,
             })
         }),
     )
