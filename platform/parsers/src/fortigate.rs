@@ -706,6 +706,17 @@ mod tests {
         let triples_bad = parser.parse(line_bad);
         assert_eq!(triples_bad.len(), 1, "row must NOT be dropped on malformed ts");
         assert_eq!(triples_bad[0].1.timestamp, 0);
+        // (c) empty-string timestamp (chrono parsers all reject empty → 0 fallback)
+        let line_empty = r#"timestamp="" srcip="1.1.1.1" dstip="2.2.2.2""#;
+        let triples_empty = parser.parse(line_empty);
+        assert_eq!(triples_empty.len(), 1, "row must NOT be dropped on empty ts");
+        assert_eq!(triples_empty[0].1.timestamp, 0);
+        // (d) date-only ISO ("YYYY-MM-DD") — no time component, all chrono
+        // parsers fail because they require HH:MM:SS → 0 fallback preserves row.
+        let line_date_only = r#"timestamp="2026-05-21" srcip="1.1.1.1" dstip="2.2.2.2""#;
+        let triples_date_only = parser.parse(line_date_only);
+        assert_eq!(triples_date_only.len(), 1, "row must NOT be dropped on date-only ts");
+        assert_eq!(triples_date_only[0].1.timestamp, 0);
     }
 
     /// Bug #69 multi-emission guard: an IPS event yields a Connect AND a
@@ -756,6 +767,32 @@ mod tests {
         assert_eq!(rel.rel_type, RelationType::Connect);
         assert_eq!(rel.metadata.get("action").map(|s| s.as_str()), Some("dropped"));
         assert_eq!(rel.metadata.get("dstport").map(|s| s.as_str()), Some("443"));
+    }
+
+    /// Bug #69 end-to-end: a `.final.csv` export with a single `timestamp`
+    /// ISO column (no separate date/time) must produce Relations with the
+    /// parsed epoch — not the 0 fallback. This is the exact customer shape.
+    #[test]
+    fn csv_with_headers_iso_timestamp_column() {
+        let csv = concat!(
+            "timestamp,srcip,dstip,dstport,action\n",
+            "2026-05-21T23:18:25,1.1.1.1,2.2.2.2,443,allow\n",
+        );
+        let parser = FortiGateParser::new();
+        let triples = parser.parse(csv);
+        assert_eq!(triples.len(), 1);
+        // Expected epoch: 2026-05-21T23:18:25 UTC
+        let expected = chrono::NaiveDate::from_ymd_opt(2026, 5, 21)
+            .unwrap()
+            .and_hms_opt(23, 18, 25)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        assert_eq!(
+            triples[0].1.timestamp, expected,
+            "single-column ISO `timestamp` must be parsed, not 0"
+        );
+        assert_ne!(triples[0].1.timestamp, 0);
     }
 
     #[test]
