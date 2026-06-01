@@ -1264,7 +1264,7 @@ pub fn sentinel_entity_targets(
             ("DeviceNetworkEvents", &["DeviceName"]),
         ],
         EntityType::Process => &[
-            ("SecurityEvent", &["NewProcessName", "ParentProcessName", "ProcessName"]),
+            ("SecurityEvent", &["NewProcessName", "ParentProcessName", "ProcessName", "Process"]),
             ("DeviceProcessEvents", &["FolderPath", "FileName", "InitiatingProcessFolderPath"]),
             ("DeviceFileEvents", &["InitiatingProcessFolderPath", "InitiatingProcessFileName"]),
         ],
@@ -1286,6 +1286,11 @@ pub fn kql_escape(value: &str) -> String {
 /// Shape: `<table> | <time_filter> | where C1 == "v" or C2 == "v" | take N`.
 /// `time_filter` is a pre-rendered clause beginning with `where`. `value`
 /// is escaped internally.
+///
+/// # Precondition
+/// `time_filter` is interpolated verbatim and must be a valid KQL clause
+/// beginning with `where` (e.g. `"where TimeGenerated > ago(24h)"`).
+/// `columns` must not be empty; passing an empty slice will panic.
 pub fn build_hydration_kql(
     table: &str,
     columns: &[&str],
@@ -1293,6 +1298,7 @@ pub fn build_hydration_kql(
     time_filter: &str,
     take: u32,
 ) -> String {
+    assert!(!columns.is_empty(), "build_hydration_kql: columns must not be empty");
     let escaped = kql_escape(value);
     let predicate = columns
         .iter()
@@ -1319,7 +1325,8 @@ mod hydration_tests {
     #[test]
     fn targets_for_user_include_signin_upn() {
         let targets = sentinel_entity_targets(&EntityType::User);
-        let signin = targets.iter().find(|(t, _)| *t == "SigninLogs").unwrap();
+        let signin = targets.iter().find(|(t, _)| *t == "SigninLogs")
+            .expect("User targets should include SigninLogs");
         assert!(signin.1.contains(&"UserPrincipalName"));
     }
 
@@ -1353,6 +1360,7 @@ mod hydration_tests {
             (E::Process, "SecurityEvent", "NewProcessName"),
             (E::Process, "SecurityEvent", "ParentProcessName"),
             (E::Process, "SecurityEvent", "ProcessName"),
+            (E::Process, "SecurityEvent", "Process"),
             (E::Process, "DeviceProcessEvents", "FolderPath"),
             (E::Process, "DeviceProcessEvents", "FileName"),
             (E::Process, "DeviceProcessEvents", "InitiatingProcessFolderPath"),
@@ -1395,6 +1403,12 @@ mod hydration_tests {
             100,
         );
         assert!(kql.contains(r#"UserPrincipalName == "ev\"il""#), "value not escaped: {kql}");
+    }
+
+    #[test]
+    #[should_panic(expected = "columns must not be empty")]
+    fn hydration_kql_panics_on_empty_columns() {
+        let _ = build_hydration_kql("SigninLogs", &[], "x", "where TimeGenerated > ago(1h)", 100);
     }
 
     #[test]
