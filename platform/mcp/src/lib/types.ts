@@ -29,6 +29,7 @@ export type ToolCategory =
   | "scores"
   | "review"
   | "ingest"
+  | "sentinel"
   | "enrich"
   | "export"
   | "publish";
