@@ -5,9 +5,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use graph_hunter_core::sentinel::{build_hydration_kql, sentinel_entity_targets};
+use graph_hunter_core::types::EntityType;
 use graph_hunter_siem::{
     HttpSentinelTransport, SentinelAuth, SentinelPollingConfig, SentinelTokenCache,
-    run_sentinel_query,
+    SentinelTransport, normalize_response, run_sentinel_query,
 };
 use uuid::Uuid;
 
@@ -17,7 +19,7 @@ use crate::dto::sentinel::{
 };
 use crate::events::events as event_names;
 use crate::format_registry::make_parser_for_format;
-use crate::scoring::{run_full_scoring, run_scoring_adaptive};
+use crate::scoring::{run_full_scoring, run_scoring_adaptive, run_scoring_incremental};
 use crate::sentinel_connector::{
     ConnectorStatus, SentinelConnectorHandle, default_tables, polling_loop,
 };
@@ -425,6 +427,107 @@ impl GraphHunterApi {
         })
         .await
     }
+
+    /// Hydrate a single node from Sentinel: for each (table, columns)
+    /// where its type can appear, run an entity-scoped KQL, parse, and
+    /// ingest into the current session graph. Generic over transport for
+    /// mockability; the live-expand path builds the real HTTP transport.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn hydrate_node_with<T: SentinelTransport>(
+        &self,
+        transport: &T,
+        token_cache: &SentinelTokenCache,
+        value: &str,
+        entity_type: &EntityType,
+        time_filter: &str,
+        workspace_id: &str,
+        auth: &SentinelAuth,
+    ) -> ApiResult<graph_hunter_core::analytics::HydrationOutcome> {
+        use graph_hunter_core::analytics::HydrationOutcome;
+
+        let targets = sentinel_entity_targets(entity_type);
+        if targets.is_empty() {
+            return Ok(HydrationOutcome {
+                skipped: true,
+                reason: Some(format!("no Sentinel column mapping for type {entity_type}")),
+                new_entities: 0,
+                new_relations: 0,
+                tables_hit: 0,
+                tables_attempted: 0,
+            });
+        }
+
+        let token = token_cache
+            .get_or_refresh(transport, auth)
+            .await
+            .map_err(|e| ApiError::Upstream {
+                service: "sentinel-auth".into(),
+                message: e,
+            })?;
+
+        const HYDRATION_TAKE: u32 = 5000;
+        const HYDRATION_DATASET: &str = "Sentinel Hydration (live)";
+
+        let parser = make_parser_for_format("sentinel").map_err(ApiError::InvalidInput)?;
+        let session = self.sessions().current_session().ok_or_else(|| {
+            ApiError::InvalidState("No current session.".into())
+        })?;
+
+        let mut tables_hit = 0usize;
+        let mut new_e = 0usize;
+        let mut new_r = 0usize;
+        let tables_attempted = targets.len();
+
+        for (table, columns) in targets {
+            let kql = build_hydration_kql(table, columns, value, time_filter, HYDRATION_TAKE);
+            match transport.execute_query(workspace_id, &kql, &token).await {
+                Ok(raw) => match normalize_response(&raw) {
+                    Ok(result) if !result.data.is_empty() && result.data != "[]" => {
+                        let triples = parser.parse(&result.data);
+                        if !triples.is_empty() {
+                            match session.graph.write() {
+                                Ok(mut graph) => {
+                                    match graph.insert_triples(triples, Some(HYDRATION_DATASET)) {
+                                        Ok((e, r)) => {
+                                            new_e += e;
+                                            new_r += r;
+                                            tables_hit += 1;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("hydration insert {table}: {e}");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "hydration graph lock poisoned {table}: {e}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("hydration normalize {table}: {e}"),
+                },
+                Err(e) => tracing::warn!("hydration query {table}: {e}"),
+            }
+        }
+
+        if new_e > 0 || new_r > 0 {
+            if let Ok(mut graph) = session.graph.write() {
+                run_scoring_incremental(&mut graph);
+            }
+        }
+
+        Ok(HydrationOutcome {
+            skipped: false,
+            reason: None,
+            new_entities: new_e,
+            new_relations: new_r,
+            tables_hit,
+            tables_attempted,
+        })
+    }
 }
 
 /// Phase L: prepend `where TimeGenerated > ...` to the analyst's
@@ -558,6 +661,7 @@ pub fn preview_hunting_template(template: HuntingTemplateId, window: &TimeWindow
 
 #[cfg(test)]
 mod sugar_tests {
+
     use super::*;
     use crate::dto::sentinel::LookbackPreset;
 
@@ -598,5 +702,136 @@ mod sugar_tests {
     fn take_limit_none_when_no_take() {
         let kql = "SigninLogs | summarize by Account";
         assert_eq!(extract_take_limit(kql), None);
+    }
+}
+
+#[cfg(test)]
+mod hydrate_tests {
+    use super::*;
+    use crate::dto::session::CreateSessionRequest;
+    use graph_hunter_siem::{SentinelTransport, TokenResponse};
+    use std::sync::Mutex;
+
+    struct MockTransport {
+        queries: Mutex<Vec<String>>,
+        response: serde_json::Value,
+    }
+
+    impl SentinelTransport for MockTransport {
+        async fn acquire_token(
+            &self,
+            _t: &str,
+            _c: &str,
+            _s: &str,
+        ) -> Result<TokenResponse, String> {
+            Ok(TokenResponse {
+                access_token: "tok".into(),
+                expires_in: 3600,
+            })
+        }
+
+        async fn execute_query(
+            &self,
+            _ws: &str,
+            query: &str,
+            _b: &str,
+        ) -> Result<serde_json::Value, String> {
+            self.queries.lock().unwrap().push(query.to_string());
+            Ok(self.response.clone())
+        }
+    }
+
+    fn one_signin_row() -> serde_json::Value {
+        serde_json::json!({
+            "tables": [{
+                "name": "PrimaryResult",
+                "columns": [
+                    {"name": "TimeGenerated"}, {"name": "Type"},
+                    {"name": "UserPrincipalName"}, {"name": "IPAddress"}, {"name": "ResultType"}
+                ],
+                "rows": [[
+                    "2026-06-01T10:00:00Z", "SigninLogs",
+                    "alice@corp.com", "10.0.0.9", "0"
+                ]]
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn hydrate_ip_issues_three_table_queries_and_ingests() {
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("hydrate-test".into()),
+        })
+        .expect("create_session");
+        let transport = MockTransport {
+            queries: Mutex::new(vec![]),
+            response: one_signin_row(),
+        };
+        let cache = graph_hunter_siem::SentinelTokenCache::new();
+
+        let outcome = api
+            .hydrate_node_with(
+                &transport,
+                &cache,
+                "10.0.0.9",
+                &graph_hunter_core::types::EntityType::IP,
+                "where TimeGenerated > ago(24h)",
+                "ws-1",
+                &SentinelAuth {
+                    tenant_id: "t".into(),
+                    client_id: "c".into(),
+                    client_secret: "s".into(),
+                },
+            )
+            .await
+            .expect("hydrate");
+
+        // IP maps to 3 tables (SigninLogs, DeviceNetworkEvents, CommonSecurityLog) -> 3 queries.
+        assert_eq!(transport.queries.lock().unwrap().len(), 3);
+        assert_eq!(outcome.tables_attempted, 3);
+        assert!(!outcome.skipped);
+        // The mock returns a SigninLogs row for every query; at least one table ingested.
+        assert!(
+            outcome.new_relations >= 1,
+            "expected ingested relations, got {}",
+            outcome.new_relations
+        );
+    }
+
+    #[tokio::test]
+    async fn hydrate_unmapped_type_is_skipped() {
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("hydrate-test2".into()),
+        })
+        .expect("create_session");
+        let transport = MockTransport {
+            queries: Mutex::new(vec![]),
+            response: serde_json::json!({"tables": []}),
+        };
+        let cache = graph_hunter_siem::SentinelTokenCache::new();
+        let outcome = api
+            .hydrate_node_with(
+                &transport,
+                &cache,
+                "evil.com",
+                &graph_hunter_core::types::EntityType::Domain,
+                "where TimeGenerated > ago(24h)",
+                "ws-1",
+                &SentinelAuth {
+                    tenant_id: "t".into(),
+                    client_id: "c".into(),
+                    client_secret: "s".into(),
+                },
+            )
+            .await
+            .expect("hydrate");
+        assert!(outcome.skipped);
+        assert_eq!(
+            transport.queries.lock().unwrap().len(),
+            0,
+            "unmapped type must not query"
+        );
     }
 }
