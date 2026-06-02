@@ -511,6 +511,7 @@ impl GraphHunterApi {
                     &time_filter,
                     &ws,
                     &auth,
+                    "Sentinel Hydration (live)",
                 )
                 .await
                 .unwrap_or_else(|e| skip(&format!("hydration error: {e}")))

@@ -442,6 +442,7 @@ impl GraphHunterApi {
         time_filter: &str,
         workspace_id: &str,
         auth: &SentinelAuth,
+        dataset_tag: &str,
     ) -> ApiResult<graph_hunter_core::analytics::HydrationOutcome> {
         use graph_hunter_core::analytics::HydrationOutcome;
 
@@ -466,7 +467,6 @@ impl GraphHunterApi {
             })?;
 
         const HYDRATION_TAKE: u32 = 5000;
-        const HYDRATION_DATASET: &str = "Sentinel Hydration (live)";
 
         let parser = make_parser_for_format("sentinel").map_err(ApiError::InvalidInput)?;
         let session = self.sessions().current_session().ok_or_else(|| {
@@ -490,7 +490,7 @@ impl GraphHunterApi {
                         if !triples.is_empty() {
                             match session.graph.write() {
                                 Ok(mut graph) => {
-                                    match graph.insert_triples(triples, Some(HYDRATION_DATASET)) {
+                                    match graph.insert_triples(triples, Some(dataset_tag)) {
                                         Ok((e, r)) => {
                                             new_e += e;
                                             new_r += r;
@@ -786,6 +786,7 @@ mod hydrate_tests {
                     client_id: "c".into(),
                     client_secret: "s".into(),
                 },
+                "Sentinel Hydration (live)",
             )
             .await
             .expect("hydrate");
@@ -828,6 +829,7 @@ mod hydrate_tests {
                     client_id: "c".into(),
                     client_secret: "s".into(),
                 },
+                "Sentinel Hydration (live)",
             )
             .await
             .expect("hydrate");
