@@ -15,8 +15,10 @@ use uuid::Uuid;
 
 use crate::dto::sentinel::{
     ConnectorStatusResponse, HuntingTemplateId, KqlResult, RunHuntingTemplateRequest,
-    RunKqlRequest, SentinelConnectRequest, SentinelConnectedEvent, SentinelEnvStatus, TimeWindow,
+    RunKqlRequest, SeedFromIocRequest, SeedResult, SentinelConnectRequest, SentinelConnectedEvent,
+    SentinelEnvStatus, TimeWindow,
 };
+use crate::util::parse_entity_type;
 use crate::events::events as event_names;
 use crate::format_registry::make_parser_for_format;
 use crate::scoring::{run_full_scoring, run_scoring_adaptive, run_scoring_incremental};
@@ -531,6 +533,161 @@ impl GraphHunterApi {
             tables_attempted,
         })
     }
+
+    /// Generic seed engine (mockable). Assumes the entity type is valid
+    /// and a session is current. Hydrates the IoC, expands its node, and
+    /// ranks the neighborhood by anomaly score.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn seed_from_ioc_with<T: SentinelTransport>(
+        &self,
+        transport: &T,
+        token_cache: &SentinelTokenCache,
+        value: &str,
+        entity_type: &EntityType,
+        time_filter: &str,
+        workspace_id: &str,
+        auth: &SentinelAuth,
+    ) -> ApiResult<SeedResult> {
+        let hydration = self
+            .hydrate_node_with(
+                transport,
+                token_cache,
+                value,
+                entity_type,
+                time_filter,
+                workspace_id,
+                auth,
+                "Sentinel Seed",
+            )
+            .await?;
+        let neighborhood = self.seeded_neighborhood(value)?;
+        let top_anomalies = Self::rank_top_anomalies(&neighborhood, 5);
+        Ok(SeedResult {
+            hydration,
+            neighborhood,
+            top_anomalies,
+        })
+    }
+
+    /// Public cold-start entry: validate type → ensure session →
+    /// resolve creds (skip if absent) → hydrate+expand+rank.
+    pub async fn seed_from_ioc(&self, req: SeedFromIocRequest) -> ApiResult<SeedResult> {
+        use graph_hunter_core::analytics::HydrationOutcome;
+
+        let ty = parse_entity_type(&req.entity_type)
+            .filter(|t| !sentinel_entity_targets(t).is_empty())
+            .ok_or_else(|| {
+                ApiError::InvalidInput(format!(
+                    "entity_type must be one of IP, User, Host, Process, File (got '{}')",
+                    req.entity_type
+                ))
+            })?;
+
+        if self.sessions().current_session().is_none() {
+            self.create_session(crate::dto::session::CreateSessionRequest {
+                name: Some(format!("Sentinel Seed: {}", req.value)),
+            })?;
+        }
+
+        let time_filter = req
+            .time_window
+            .as_ref()
+            .map(|w| w.kql_filter())
+            .unwrap_or_else(|| "where TimeGenerated > ago(24h)".to_string());
+
+        let creds = (
+            std::env::var("AZURE_WORKSPACE_ID").ok(),
+            std::env::var("AZURE_TENANT_ID").ok(),
+            std::env::var("AZURE_CLIENT_ID").ok(),
+            std::env::var("AZURE_CLIENT_SECRET").ok(),
+        );
+        match creds {
+            (Some(ws), Some(tenant), Some(client), Some(secret)) => {
+                let transport = HttpSentinelTransport::new();
+                let cache = SentinelTokenCache::new();
+                let auth = SentinelAuth {
+                    tenant_id: tenant,
+                    client_id: client,
+                    client_secret: secret,
+                };
+                self.seed_from_ioc_with(&transport, &cache, &req.value, &ty, &time_filter, &ws, &auth)
+                    .await
+            }
+            _ => {
+                let neighborhood = self.seeded_neighborhood(&req.value)?;
+                let top_anomalies = Self::rank_top_anomalies(&neighborhood, 5);
+                Ok(SeedResult {
+                    hydration: HydrationOutcome {
+                        skipped: true,
+                        reason: Some(
+                            "Azure credentials not configured (set AZURE_* or connect Sentinel)"
+                                .into(),
+                        ),
+                        new_entities: 0,
+                        new_relations: 0,
+                        tables_hit: 0,
+                        tables_attempted: 0,
+                    },
+                    neighborhood,
+                    top_anomalies,
+                })
+            }
+        }
+    }
+
+    /// Build the neighborhood of the seeded node, or an empty centered
+    /// neighborhood if the node was not created (empty/failed hydration).
+    fn seeded_neighborhood(
+        &self,
+        value: &str,
+    ) -> ApiResult<graph_hunter_core::analytics::Neighborhood> {
+        let exists = {
+            let session = self
+                .sessions()
+                .current_session()
+                .ok_or_else(|| ApiError::InvalidState("no session".into()))?;
+            let g = session
+                .graph
+                .read()
+                .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+            g.get_entity(value).is_some()
+        };
+        if exists {
+            self.expand_node(crate::dto::graph_ops::ExpandNodeRequest {
+                session: None,
+                node_id: value.to_string(),
+                max_hops: Some(1),
+                max_nodes: Some(50),
+                filter: None,
+                live: false,
+                time_window: None,
+            })
+        } else {
+            Ok(graph_hunter_core::analytics::Neighborhood {
+                center: value.to_string(),
+                nodes: vec![],
+                edges: vec![],
+                truncated: false,
+                auto_grouped: false,
+                auto_group_reason: None,
+                hydration: None,
+            })
+        }
+    }
+
+    fn rank_top_anomalies(
+        hood: &graph_hunter_core::analytics::Neighborhood,
+        n: usize,
+    ) -> Vec<graph_hunter_core::analytics::NeighborNode> {
+        let mut nodes = hood.nodes.clone();
+        nodes.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        nodes.truncate(n);
+        nodes
+    }
 }
 
 /// Phase L: prepend `where TimeGenerated > ...` to the analyst's
@@ -839,5 +996,144 @@ mod hydrate_tests {
             0,
             "unmapped type must not query"
         );
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+    use crate::dto::session::CreateSessionRequest;
+    use crate::dto::v1::sentinel::SeedFromIocRequest;
+
+    struct MockTransport {
+        response: serde_json::Value,
+    }
+
+    impl SentinelTransport for MockTransport {
+        async fn acquire_token(
+            &self,
+            _t: &str,
+            _c: &str,
+            _s: &str,
+        ) -> Result<graph_hunter_siem::TokenResponse, String> {
+            Ok(graph_hunter_siem::TokenResponse {
+                access_token: "tok".into(),
+                expires_in: 3600,
+            })
+        }
+
+        async fn execute_query(
+            &self,
+            _ws: &str,
+            _q: &str,
+            _b: &str,
+        ) -> Result<serde_json::Value, String> {
+            Ok(self.response.clone())
+        }
+    }
+
+    fn one_signin_row() -> serde_json::Value {
+        serde_json::json!({
+            "tables": [{
+                "name": "PrimaryResult",
+                "columns": [
+                    {"name": "TimeGenerated"}, {"name": "Type"},
+                    {"name": "UserPrincipalName"}, {"name": "IPAddress"}, {"name": "ResultType"}
+                ],
+                "rows": [["2026-06-02T10:00:00Z", "SigninLogs", "alice@corp.com", "10.0.0.9", "0"]]
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn seed_ip_populates_neighborhood_and_ranks_anomalies() {
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("seed-test".into()),
+        })
+        .expect("session");
+        let transport = MockTransport {
+            response: one_signin_row(),
+        };
+        let cache = graph_hunter_siem::SentinelTokenCache::new();
+        let auth = SentinelAuth {
+            tenant_id: "t".into(),
+            client_id: "c".into(),
+            client_secret: "s".into(),
+        };
+
+        let result = api
+            .seed_from_ioc_with(
+                &transport,
+                &cache,
+                "10.0.0.9",
+                &graph_hunter_core::types::EntityType::IP,
+                "where TimeGenerated > ago(24h)",
+                "ws-1",
+                &auth,
+            )
+            .await
+            .expect("seed");
+
+        assert!(!result.hydration.skipped);
+        assert!(result.hydration.new_relations >= 1);
+        assert_eq!(result.neighborhood.center, "10.0.0.9");
+        assert!(!result.neighborhood.nodes.is_empty());
+        assert!(result.top_anomalies.len() <= 5);
+        for w in result.top_anomalies.windows(2) {
+            assert!(
+                w[0].score >= w[1].score,
+                "top_anomalies must be score-descending"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn seed_without_session_auto_creates_one() {
+        for k in [
+            "AZURE_WORKSPACE_ID",
+            "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID",
+            "AZURE_CLIENT_SECRET",
+        ] {
+            // SAFETY: no other test in this binary reads AZURE_* from the env.
+            unsafe {
+                std::env::remove_var(k);
+            }
+        }
+        let api = GraphHunterApi::new_noop();
+        let result = api
+            .seed_from_ioc(SeedFromIocRequest {
+                session: None,
+                entity_type: "IP".into(),
+                value: "10.0.0.9".into(),
+                time_window: None,
+            })
+            .await
+            .expect("seed");
+        assert!(result.hydration.skipped, "no creds → skipped");
+        let session = api
+            .sessions()
+            .current_session()
+            .expect("auto-created session");
+        assert!(session.name.contains("Sentinel Seed"));
+    }
+
+    #[tokio::test]
+    async fn seed_rejects_unseedable_type() {
+        let api = GraphHunterApi::new_noop();
+        let err = api
+            .seed_from_ioc(SeedFromIocRequest {
+                session: None,
+                entity_type: "Domain".into(),
+                value: "evil.com".into(),
+                time_window: None,
+            })
+            .await
+            .unwrap_err();
+        match err {
+            ApiError::InvalidInput(_) => {}
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 }
