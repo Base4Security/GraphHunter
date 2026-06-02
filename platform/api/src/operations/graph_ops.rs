@@ -600,8 +600,12 @@ mod expand_live_tests {
             "AZURE_CLIENT_ID",
             "AZURE_CLIENT_SECRET",
         ] {
-            // SAFETY: tests are single-threaded by default (no other thread
-            // reads these env vars concurrently in this crate's test suite).
+            // SAFETY: no other test in this binary reads AZURE_* from the
+            // process environment (the production readers in sentinel.rs are
+            // not exercised by any test; hydrate_tests passes creds as
+            // literals), so stripping them races with no concurrent observer.
+            // A future test calling sentinel_check_env/connect_sentinel must
+            // serialize against this one or pass creds via request fields.
             unsafe { std::env::remove_var(k) };
         }
         let api = GraphHunterApi::new_noop();
