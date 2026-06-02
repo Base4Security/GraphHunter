@@ -217,24 +217,32 @@ pub fn cmd_search_entities(
 /// High-degree nodes auto-fall-back to grouped expansion (see
 /// `cmd_expand_node_grouped`). Pinned path nodes from the current session
 /// are merged into the result so the analyst's workspace stays visible.
+/// `live` and `time_window` are optional — absent callers receive the
+/// existing static-graph behaviour unchanged.
 #[tauri::command]
-pub fn cmd_expand_node(
-    api: State<Arc<GraphHunterApi>>,
+pub async fn cmd_expand_node(
+    api: State<'_, Arc<GraphHunterApi>>,
     node_id: String,
     max_hops: Option<usize>,
     max_nodes: Option<usize>,
     filter: Option<ExpandFilter>,
+    live: Option<bool>,
+    time_window: Option<graph_hunter_api::dto::sentinel::TimeWindow>,
 ) -> Result<Neighborhood, CommandError> {
-    api.expand_node(ExpandNodeRequest {
+    let req = ExpandNodeRequest {
         session: None,
         node_id,
         max_hops,
         max_nodes,
         filter,
-        live: false,
-        time_window: None,
-    })
-    .map_err(CommandError::from)
+        live: live.unwrap_or(false),
+        time_window,
+    };
+    if req.live {
+        api.expand_node_live(req).await.map_err(CommandError::from)
+    } else {
+        api.expand_node(req).map_err(CommandError::from)
+    }
 }
 
 /// Expands a node's neighborhood with grouped edges (for high-degree
