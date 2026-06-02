@@ -236,3 +236,25 @@ pub struct PublishIocsResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub azure_response_body: Option<String>,
 }
+
+// ── Cold-start seed from a known IoC (MCP-first) ───────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SeedFromIocRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    /// One of: "IP" | "User" | "Host" | "Process" | "File".
+    pub entity_type: String,
+    /// The IoC value (e.g. "10.0.0.9", "alice@corp.com").
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<TimeWindow>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SeedResult {
+    pub hydration: graph_hunter_core::analytics::HydrationOutcome,
+    pub neighborhood: graph_hunter_core::analytics::Neighborhood,
+    /// Top-N seeded neighborhood nodes by anomaly score (descending).
+    pub top_anomalies: Vec<graph_hunter_core::analytics::NeighborNode>,
+}
