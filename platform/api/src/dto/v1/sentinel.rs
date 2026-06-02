@@ -241,6 +241,10 @@ pub struct PublishIocsResponse {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SeedFromIocRequest {
+    /// Reserved for DTO symmetry with the other request types. The
+    /// cold-start path is session-agnostic: `seed_from_ioc` operates on
+    /// the current session (auto-creating one when none exists) and does
+    /// not consult this field today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionHandle>,
     /// One of: "IP" | "User" | "Host" | "Process" | "File".
