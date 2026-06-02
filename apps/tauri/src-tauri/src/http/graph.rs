@@ -108,7 +108,7 @@ pub(super) struct ExpandQuery {
     pub lookback: Option<String>,
 }
 
-fn lookback_to_window(
+pub(super) fn lookback_to_window(
     lookback: Option<&str>,
 ) -> Option<graph_hunter_api::dto::sentinel::TimeWindow> {
     use graph_hunter_api::dto::sentinel::{LookbackPreset, TimeWindow};

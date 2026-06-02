@@ -59,6 +59,42 @@ pub(super) async fn handler_run_kql(
     }
 }
 
+#[derive(Deserialize)]
+pub(super) struct SeedBody {
+    pub entity_type: String,
+    pub value: String,
+    #[serde(default)]
+    pub lookback: Option<String>,
+}
+
+/// Cold-start the graph from a known Sentinel IoC. Pulls the IoC's
+/// events, ingests them, returns the seeded neighborhood + anomalies.
+pub(super) async fn handler_seed_from_ioc(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<SeedBody>,
+) -> Response {
+    let time_window = super::graph::lookback_to_window(body.lookback.as_deref());
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        api.seed_from_ioc(graph_hunter_api::dto::sentinel::SeedFromIocRequest {
+            session: None,
+            entity_type: body.entity_type,
+            value: body.value,
+            time_window,
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(v)) => ok_json(v),
+        Ok(Err(e)) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Err(_) => err_json("Sentinel seed timed out (120s)"),
+    }
+}
+
 /// Get current Sentinel connector status.
 pub(super) async fn handler_sentinel_status(State(api): State<Arc<GraphHunterApi>>) -> Response {
     match api.sentinel_status() {
