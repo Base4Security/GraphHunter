@@ -101,6 +101,26 @@ pub(super) struct ExpandQuery {
     node_id: String,
     max_hops: Option<usize>,
     max_nodes: Option<usize>,
+    #[serde(default)]
+    pub live: bool,
+    /// Lookback preset for hydration window: "1h" | "6h" | "24h" | "7d" | "30d".
+    #[serde(default)]
+    pub lookback: Option<String>,
+}
+
+fn lookback_to_window(
+    lookback: Option<&str>,
+) -> Option<graph_hunter_api::dto::sentinel::TimeWindow> {
+    use graph_hunter_api::dto::sentinel::{LookbackPreset, TimeWindow};
+    let preset = match lookback? {
+        "1h" => LookbackPreset::H1,
+        "6h" => LookbackPreset::H6,
+        "24h" => LookbackPreset::H24,
+        "7d" => LookbackPreset::D7,
+        "30d" => LookbackPreset::D30,
+        _ => return None,
+    };
+    Some(TimeWindow::Preset { lookback: preset })
 }
 
 pub(super) async fn handler_expand(
@@ -108,6 +128,35 @@ pub(super) async fn handler_expand(
     State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<ExpandQuery>,
 ) -> Response {
+    if q.live {
+        let req = graph_hunter_api::dto::graph_ops::ExpandNodeRequest {
+            session: None,
+            node_id: q.node_id.clone(),
+            max_hops: q.max_hops,
+            max_nodes: q.max_nodes,
+            filter: None,
+            live: true,
+            time_window: lookback_to_window(q.lookback.as_deref()),
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(90),
+            api.expand_node_live(req),
+        )
+        .await
+        .unwrap_or_else(|_| Err(graph_hunter_api::ApiError::Internal("expand (live) timed out".into())));
+        return match result {
+            Ok(hood) => {
+                let sg = neighborhood_to_subgraph(&hood);
+                mcp_emit_view(state.as_ref(), sg);
+                ok_json(hood)
+            }
+            Err(e) => {
+                let code = StatusCode::from_u16(e.status_code())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+            }
+        };
+    }
     let api_clone = api.clone();
     let result = tokio::time::timeout(
         Duration::from_secs(60),
