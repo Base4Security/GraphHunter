@@ -482,7 +482,10 @@ impl GraphHunterApi {
             let kql = build_hydration_kql(table, columns, value, time_filter, HYDRATION_TAKE);
             match transport.execute_query(workspace_id, &kql, &token).await {
                 Ok(raw) => match normalize_response(&raw) {
-                    Ok(result) if !result.data.is_empty() && result.data != "[]" => {
+                    // `normalize_response` serializes rows as a JSON array, so the
+                    // empty case is exactly "[]" (never ""). Skip those; the
+                    // `triples.is_empty()` guard below covers rows-that-don't-parse.
+                    Ok(result) if result.data != "[]" => {
                         let triples = parser.parse(&result.data);
                         if !triples.is_empty() {
                             match session.graph.write() {
@@ -792,6 +795,7 @@ mod hydrate_tests {
         assert_eq!(outcome.tables_attempted, 3);
         assert!(!outcome.skipped);
         // The mock returns a SigninLogs row for every query; at least one table ingested.
+        assert!(outcome.tables_hit >= 1, "expected ≥1 table ingested, got {}", outcome.tables_hit);
         assert!(
             outcome.new_relations >= 1,
             "expected ingested relations, got {}",
