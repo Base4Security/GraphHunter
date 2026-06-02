@@ -440,6 +440,90 @@ impl GraphHunterApi {
                 .ok_or_else(|| ApiError::NotFound(format!("entity: {}", req.node_id)))
         })
     }
+
+    /// Live-backed expansion (Enfoque A): hydrate the target node from
+    /// Sentinel (when possible), then run the synchronous `expand_node`
+    /// and attach the hydration outcome. Soft no-op (skipped outcome)
+    /// when the session is not Sentinel-capable or the type is unmapped.
+    pub async fn expand_node_live(
+        &self,
+        req: ExpandNodeRequest,
+    ) -> ApiResult<graph_hunter_core::analytics::Neighborhood> {
+        use graph_hunter_core::analytics::HydrationOutcome;
+
+        if !req.live {
+            return self.expand_node(req);
+        }
+
+        // Clone the values we need before moving `req` into `expand_node`.
+        let node_id = req.node_id.clone();
+        let session_handle = req.session.clone();
+        let time_filter = req
+            .time_window
+            .as_ref()
+            .map(|w| w.kql_filter())
+            .unwrap_or_else(|| "where TimeGenerated > ago(24h)".to_string());
+
+        // Resolve the node's entity type (brief read lock).
+        let entity_type = {
+            let session = self.resolve_session(session_handle.as_ref())?;
+            let graph = session
+                .graph
+                .read()
+                .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+            graph.get_entity(&node_id).map(|e| e.entity_type.clone())
+        };
+
+        let creds = (
+            std::env::var("AZURE_WORKSPACE_ID").ok(),
+            std::env::var("AZURE_TENANT_ID").ok(),
+            std::env::var("AZURE_CLIENT_ID").ok(),
+            std::env::var("AZURE_CLIENT_SECRET").ok(),
+        );
+
+        let skip = |reason: &str| HydrationOutcome {
+            skipped: true,
+            reason: Some(reason.to_string()),
+            new_entities: 0,
+            new_relations: 0,
+            tables_hit: 0,
+            tables_attempted: 0,
+        };
+
+        let outcome = match (entity_type, creds) {
+            (None, _) => skip("node not in graph; cannot infer entity type"),
+            (
+                Some(ty),
+                (Some(ws), Some(tenant), Some(client), Some(secret)),
+            ) => {
+                let transport = graph_hunter_siem::HttpSentinelTransport::new();
+                let cache = graph_hunter_siem::SentinelTokenCache::new();
+                let auth = graph_hunter_siem::SentinelAuth {
+                    tenant_id: tenant,
+                    client_id: client,
+                    client_secret: secret,
+                };
+                self.hydrate_node_with(
+                    &transport,
+                    &cache,
+                    &node_id,
+                    &ty,
+                    &time_filter,
+                    &ws,
+                    &auth,
+                )
+                .await
+                .unwrap_or_else(|e| skip(&format!("hydration error: {e}")))
+            }
+            (Some(_), _) => skip(
+                "Azure credentials not configured (set AZURE_* or connect Sentinel)",
+            ),
+        };
+
+        let mut hood = self.expand_node(req)?;
+        hood.hydration = Some(outcome);
+        Ok(hood)
+    }
 }
 
 /// Build a [`SubgraphEdge`] from a core [`graph_hunter_core::CompactRelation`]
@@ -498,5 +582,99 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, ApiError::Io(_)));
+    }
+}
+
+#[cfg(test)]
+mod expand_live_tests {
+    use super::*;
+    use crate::dto::session::CreateSessionRequest;
+    use crate::dto::v1::graph_ops::ExpandNodeRequest;
+
+    #[tokio::test]
+    async fn expand_live_without_creds_soft_skips_and_still_expands() {
+        // Ensure no Azure creds in this test process (new_noop does not load .env).
+        for k in [
+            "AZURE_WORKSPACE_ID",
+            "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID",
+            "AZURE_CLIENT_SECRET",
+        ] {
+            // SAFETY: tests are single-threaded by default (no other thread
+            // reads these env vars concurrently in this crate's test suite).
+            unsafe { std::env::remove_var(k) };
+        }
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("expand-live-test".into()),
+        })
+        .expect("create_session");
+        // Seed a single IP node so the wrapper can resolve its entity type.
+        {
+            let session = api.resolve_session(None).expect("session");
+            let mut g = session.graph.write().unwrap();
+            g.add_entity(graph_hunter_core::Entity::new(
+                "10.0.0.9",
+                graph_hunter_core::types::EntityType::IP,
+            ))
+            .unwrap();
+        }
+
+        let hood = api
+            .expand_node_live(ExpandNodeRequest {
+                session: None,
+                node_id: "10.0.0.9".into(),
+                max_hops: Some(1),
+                max_nodes: Some(50),
+                filter: None,
+                live: true,
+                time_window: None,
+            })
+            .await
+            .expect("expand_node_live ok");
+
+        let h = hood
+            .hydration
+            .expect("hydration block present on live expand");
+        assert!(
+            h.skipped,
+            "should soft-skip without creds, reason: {:?}",
+            h.reason
+        );
+        assert_eq!(hood.center, "10.0.0.9");
+    }
+
+    #[tokio::test]
+    async fn expand_non_live_has_no_hydration_block() {
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("expand-nolive".into()),
+        })
+        .expect("create_session");
+        {
+            let session = api.resolve_session(None).expect("session");
+            let mut g = session.graph.write().unwrap();
+            g.add_entity(graph_hunter_core::Entity::new(
+                "host-1",
+                graph_hunter_core::types::EntityType::Host,
+            ))
+            .unwrap();
+        }
+        let hood = api
+            .expand_node_live(ExpandNodeRequest {
+                session: None,
+                node_id: "host-1".into(),
+                max_hops: Some(1),
+                max_nodes: Some(50),
+                filter: None,
+                live: false,
+                time_window: None,
+            })
+            .await
+            .expect("ok");
+        assert!(
+            hood.hydration.is_none(),
+            "non-live expand must not attach hydration"
+        );
     }
 }
