@@ -534,6 +534,18 @@ impl GraphHunterApi {
         })
     }
 
+    /// Build a SeedResult from a (possibly skipped) hydration outcome:
+    /// expands the seeded node's neighborhood and ranks its top anomalies.
+    fn build_seed_result(
+        &self,
+        value: &str,
+        hydration: graph_hunter_core::analytics::HydrationOutcome,
+    ) -> ApiResult<SeedResult> {
+        let neighborhood = self.seeded_neighborhood(value)?;
+        let top_anomalies = Self::rank_top_anomalies(&neighborhood, 5);
+        Ok(SeedResult { hydration, neighborhood, top_anomalies })
+    }
+
     /// Generic seed engine (mockable). Assumes the entity type is valid
     /// and a session is current. Hydrates the IoC, expands its node, and
     /// ranks the neighborhood by anomaly score.
@@ -560,13 +572,7 @@ impl GraphHunterApi {
                 "Sentinel Seed",
             )
             .await?;
-        let neighborhood = self.seeded_neighborhood(value)?;
-        let top_anomalies = Self::rank_top_anomalies(&neighborhood, 5);
-        Ok(SeedResult {
-            hydration,
-            neighborhood,
-            top_anomalies,
-        })
+        self.build_seed_result(value, hydration)
     }
 
     /// Public cold-start entry: validate type → ensure session →
@@ -613,25 +619,14 @@ impl GraphHunterApi {
                 self.seed_from_ioc_with(&transport, &cache, &req.value, &ty, &time_filter, &ws, &auth)
                     .await
             }
-            _ => {
-                let neighborhood = self.seeded_neighborhood(&req.value)?;
-                let top_anomalies = Self::rank_top_anomalies(&neighborhood, 5);
-                Ok(SeedResult {
-                    hydration: HydrationOutcome {
-                        skipped: true,
-                        reason: Some(
-                            "Azure credentials not configured (set AZURE_* or connect Sentinel)"
-                                .into(),
-                        ),
-                        new_entities: 0,
-                        new_relations: 0,
-                        tables_hit: 0,
-                        tables_attempted: 0,
-                    },
-                    neighborhood,
-                    top_anomalies,
-                })
-            }
+            _ => self.build_seed_result(&req.value, HydrationOutcome {
+                skipped: true,
+                reason: Some("Azure credentials not configured (set AZURE_* or connect Sentinel)".into()),
+                new_entities: 0,
+                new_relations: 0,
+                tables_hit: 0,
+                tables_attempted: 0,
+            }),
         }
     }
 
@@ -1096,10 +1091,15 @@ mod seed_tests {
             "AZURE_CLIENT_ID",
             "AZURE_CLIENT_SECRET",
         ] {
-            // SAFETY: no other test in this binary reads AZURE_* from the env.
-            unsafe {
-                std::env::remove_var(k);
-            }
+            // SAFETY: no TEST in this binary reads AZURE_* from the process
+            // environment — the production readers (run_kql, sentinel_connect,
+            // sentinel_check_env) are never exercised by a test, and
+            // hydrate_tests/seed_tests pass credentials as literals. So
+            // stripping these vars races with no concurrent observer. If a
+            // future test calls an env-reading production path, serialize it
+            // (e.g. add the serial_test dep + #[serial]) or pass creds via
+            // request fields.
+            unsafe { std::env::remove_var(k); }
         }
         let api = GraphHunterApi::new_noop();
         let result = api
