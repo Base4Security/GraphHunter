@@ -687,6 +687,46 @@ impl GraphHunterApi {
         nodes.truncate(n);
         nodes
     }
+
+    /// Resume (start) the paused polling loop. No-op if already running.
+    /// Errors if no connector is registered.
+    pub fn sentinel_resume(&self) -> ApiResult<()> {
+        {
+            let handle_slot = self.sentinel_connector_handle();
+            let guard = handle_slot
+                .read()
+                .map_err(|e| ApiError::Internal(format!("sentinel lock poisoned: {e}")))?;
+            let h = guard.as_ref().ok_or_else(|| {
+                ApiError::InvalidState("No Sentinel connector is running. Connect first.".into())
+            })?;
+            let _ = h.pause_tx.send(false);
+        }
+        self.emitter_arc().emit(
+            event_names::SENTINEL_STATUS,
+            serde_json::json!({"resumed": true}),
+        );
+        Ok(())
+    }
+
+    /// Pause the polling loop (stop querying; keep the connector). No-op
+    /// if already paused. Errors if no connector is registered.
+    pub fn sentinel_pause(&self) -> ApiResult<()> {
+        {
+            let handle_slot = self.sentinel_connector_handle();
+            let guard = handle_slot
+                .read()
+                .map_err(|e| ApiError::Internal(format!("sentinel lock poisoned: {e}")))?;
+            let h = guard.as_ref().ok_or_else(|| {
+                ApiError::InvalidState("No Sentinel connector is running. Connect first.".into())
+            })?;
+            let _ = h.pause_tx.send(true);
+        }
+        self.emitter_arc().emit(
+            event_names::SENTINEL_STATUS,
+            serde_json::json!({"paused": true}),
+        );
+        Ok(())
+    }
 }
 
 /// Phase L: prepend `where TimeGenerated > ...` to the analyst's
@@ -816,6 +856,25 @@ fn render_hunting_template(template: HuntingTemplateId, window: &TimeWindow) -> 
 /// run.
 pub fn preview_hunting_template(template: HuntingTemplateId, window: &TimeWindow) -> String {
     render_hunting_template(template, window)
+}
+
+#[cfg(test)]
+mod resume_pause_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn resume_without_connector_errors() {
+        let api = GraphHunterApi::new_noop();
+        let err = api.sentinel_resume().unwrap_err();
+        match err { ApiError::InvalidState(_) => {}, o => panic!("expected InvalidState, got {o:?}") }
+    }
+
+    #[tokio::test]
+    async fn pause_without_connector_errors() {
+        let api = GraphHunterApi::new_noop();
+        let err = api.sentinel_pause().unwrap_err();
+        match err { ApiError::InvalidState(_) => {}, o => panic!("expected InvalidState, got {o:?}") }
+    }
 }
 
 #[cfg(test)]
