@@ -53,6 +53,7 @@ pub enum ConnectorStatus {
         total_relations: usize,
     },
     Polling,
+    Paused,
     Error {
         message: String,
         consecutive: u32,
@@ -68,6 +69,7 @@ pub struct SentinelConnectorHandle {
     pub cancel_token: CancellationToken,
     pub task_handle: JoinHandle<()>,
     pub status_rx: watch::Receiver<ConnectorStatus>,
+    pub pause_tx: watch::Sender<bool>,
 }
 
 // ── Event payloads ─────────────────────────────────────────────────────
@@ -111,6 +113,7 @@ pub async fn polling_loop<T: SentinelTransport>(
     cancel: CancellationToken,
     status_tx: watch::Sender<ConnectorStatus>,
     dataset_id: String,
+    mut pause_rx: watch::Receiver<bool>,
 ) {
     let watermarks: Arc<RwLock<SentinelWatermarkStore>> =
         Arc::new(RwLock::new(SentinelWatermarkStore::new()));
@@ -128,6 +131,19 @@ pub async fn polling_loop<T: SentinelTransport>(
     });
 
     loop {
+        // Wait while paused: no token, no query, no ingest.
+        while *pause_rx.borrow() {
+            let _ = status_tx.send(ConnectorStatus::Paused);
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    let _ = status_tx.send(ConnectorStatus::Disconnected);
+                    emitter.emit(event_names::SENTINEL_STATUS, serde_json::json!({"disconnected": true}));
+                    return;
+                }
+                _ = pause_rx.changed() => {}
+            }
+        }
+        // ── existing first_poll / interval-sleep logic stays here, unchanged ──
         if first_poll {
             first_poll = false;
             tokio::time::sleep(Duration::from_secs(FIRST_POLL_DELAY_SECS)).await;
@@ -379,4 +395,125 @@ pub fn default_tables() -> Vec<String> {
         "DeviceFileEvents".into(),
         "CommonSecurityLog".into(),
     ]
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+    use crate::{GraphHunterApi, NoopEmitter};
+    use crate::dto::session::CreateSessionRequest;
+    use graph_hunter_siem::{SentinelAuth, SentinelTransport, TokenResponse};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingTransport {
+        queries: AtomicUsize,
+    }
+
+    impl SentinelTransport for CountingTransport {
+        async fn acquire_token(
+            &self,
+            _t: &str,
+            _c: &str,
+            _s: &str,
+        ) -> Result<TokenResponse, String> {
+            Ok(TokenResponse {
+                access_token: "tok".into(),
+                expires_in: 3600,
+            })
+        }
+
+        async fn execute_query(
+            &self,
+            _ws: &str,
+            _q: &str,
+            _b: &str,
+        ) -> Result<serde_json::Value, String> {
+            self.queries.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({ "tables": [] }))
+        }
+    }
+
+    fn test_config() -> SentinelPollingConfig {
+        SentinelPollingConfig {
+            workspace_id: "ws".into(),
+            auth: SentinelAuth {
+                tenant_id: "t".into(),
+                client_id: "c".into(),
+                client_secret: "s".into(),
+            },
+            poll_interval_secs: 5,
+            tables: vec!["SigninLogs".into()],
+            batch_size: 100,
+            initial_time_window_filter: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn paused_loop_issues_no_queries_until_resumed() {
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("pause-test".into()),
+        })
+        .expect("session");
+        let session = api.sessions().current_session().expect("session");
+
+        let transport = Arc::new(CountingTransport {
+            queries: AtomicUsize::new(0),
+        });
+        let cache = Arc::new(SentinelTokenCache::new());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (status_tx, _status_rx) =
+            tokio::sync::watch::channel(ConnectorStatus::Paused);
+        let (pause_tx, pause_rx) = tokio::sync::watch::channel(true);
+
+        let loop_handle = tokio::spawn(polling_loop(
+            test_config(),
+            transport.clone(),
+            cache,
+            session,
+            "sid".into(),
+            Arc::new(NoopEmitter) as Arc<dyn EventEmitter>,
+            cancel.clone(),
+            status_tx,
+            "ds".into(),
+            pause_rx,
+        ));
+
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        assert_eq!(
+            transport.queries.load(Ordering::SeqCst),
+            0,
+            "paused loop must not query"
+        );
+
+        pause_tx.send(false).unwrap();
+        // Bounded poll: wait up to 50s for the first query to arrive.
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if transport.queries.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+        }
+        assert!(
+            transport.queries.load(Ordering::SeqCst) >= 1,
+            "resumed loop must query"
+        );
+
+        pause_tx.send(true).unwrap();
+        // Drain: allow the loop to finish any in-flight iteration, then
+        // snapshot the count. The loop's poll_interval is 5s so one full
+        // cycle plus a little slack is enough.
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let after_pause = transport.queries.load(Ordering::SeqCst);
+        // Now 60 more seconds must pass without any new query.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        assert_eq!(
+            transport.queries.load(Ordering::SeqCst),
+            after_pause,
+            "paused again -> no new queries"
+        );
+
+        cancel.cancel();
+        let _ = loop_handle.await;
+    }
 }

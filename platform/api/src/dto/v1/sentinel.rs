@@ -110,6 +110,9 @@ pub struct SentinelConnectedEvent {
     pub connector_id: String,
     pub tables: Vec<String>,
     pub poll_interval_secs: u64,
+    /// True when the connector was registered paused (no polling yet).
+    #[serde(default)]
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

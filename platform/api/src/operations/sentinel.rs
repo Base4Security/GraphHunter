@@ -150,12 +150,14 @@ impl GraphHunterApi {
         let transport = Arc::new(HttpSentinelTransport::new());
         let token_cache = Arc::new(SentinelTokenCache::new());
         let cancel = tokio_util::sync::CancellationToken::new();
-        let (status_tx, status_rx) = tokio::sync::watch::channel(ConnectorStatus::Connecting);
+        let (status_tx, status_rx) = tokio::sync::watch::channel(ConnectorStatus::Paused);
+        let (pause_tx, pause_rx) = tokio::sync::watch::channel(true);
 
         let event = SentinelConnectedEvent {
             connector_id: connector_id.clone(),
             tables: config.tables.clone(),
             poll_interval_secs: config.poll_interval_secs,
+            paused: true,
         };
 
         let task_cancel = cancel.clone();
@@ -171,6 +173,7 @@ impl GraphHunterApi {
             task_cancel,
             status_tx,
             dataset_id,
+            pause_rx,
         ));
 
         // Register the handle.
@@ -184,6 +187,7 @@ impl GraphHunterApi {
                 cancel_token: cancel,
                 task_handle,
                 status_rx,
+                pause_tx,
             });
         }
 
