@@ -95,6 +95,30 @@ pub(super) async fn handler_seed_from_ioc(
     }
 }
 
+/// Resume the paused Sentinel polling loop.
+pub(super) async fn handler_sentinel_resume(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    match api.sentinel_resume() {
+        Ok(()) => ok_json(serde_json::json!({ "resumed": true })),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
+/// Pause the Sentinel polling loop.
+pub(super) async fn handler_sentinel_pause(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    match api.sentinel_pause() {
+        Ok(()) => ok_json(serde_json::json!({ "paused": true })),
+        Err(e) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+    }
+}
+
 /// Get current Sentinel connector status.
 pub(super) async fn handler_sentinel_status(State(api): State<Arc<GraphHunterApi>>) -> Response {
     match api.sentinel_status() {
