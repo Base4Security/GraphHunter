@@ -124,23 +124,27 @@ pub async fn polling_loop<T: SentinelTransport>(
     let mut consecutive_errors: u32 = 0;
     let mut first_poll = true;
 
-    let _ = status_tx.send(ConnectorStatus::Connected {
-        last_data_at: "starting".into(),
-        total_entities: 0,
-        total_relations: 0,
-    });
-
     loop {
         // Wait while paused: no token, no query, no ingest.
+        let mut announced_paused = false;
         while *pause_rx.borrow() {
-            let _ = status_tx.send(ConnectorStatus::Paused);
+            if !announced_paused {
+                let _ = status_tx.send(ConnectorStatus::Paused);
+                announced_paused = true;
+            }
             tokio::select! {
                 _ = cancel.cancelled() => {
                     let _ = status_tx.send(ConnectorStatus::Disconnected);
                     emitter.emit(event_names::SENTINEL_STATUS, serde_json::json!({"disconnected": true}));
                     return;
                 }
-                _ = pause_rx.changed() => {}
+                result = pause_rx.changed() => {
+                    if result.is_err() {
+                        let _ = status_tx.send(ConnectorStatus::Disconnected);
+                        emitter.emit(event_names::SENTINEL_STATUS, serde_json::json!({"disconnected": true}));
+                        return;
+                    }
+                }
             }
         }
         // ── existing first_poll / interval-sleep logic stays here, unchanged ──
@@ -462,7 +466,7 @@ mod pause_tests {
         });
         let cache = Arc::new(SentinelTokenCache::new());
         let cancel = tokio_util::sync::CancellationToken::new();
-        let (status_tx, _status_rx) =
+        let (status_tx, status_rx) =
             tokio::sync::watch::channel(ConnectorStatus::Paused);
         let (pause_tx, pause_rx) = tokio::sync::watch::channel(true);
 
@@ -484,6 +488,10 @@ mod pause_tests {
             transport.queries.load(Ordering::SeqCst),
             0,
             "paused loop must not query"
+        );
+        assert!(
+            matches!(*status_rx.borrow(), ConnectorStatus::Paused),
+            "status must be Paused while paused"
         );
 
         pause_tx.send(false).unwrap();
