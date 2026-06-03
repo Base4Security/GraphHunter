@@ -341,6 +341,8 @@ pub fn run() {
             commands::sentinel::cmd_sentinel_connect,
             commands::sentinel::cmd_sentinel_disconnect,
             commands::sentinel::cmd_sentinel_status,
+            commands::sentinel::cmd_sentinel_resume,
+            commands::sentinel::cmd_sentinel_pause,
             commands::sentinel::cmd_sentinel_check_env,
             commands::sentinel::cmd_run_kql,
             commands::sentinel::cmd_run_hunting_template,

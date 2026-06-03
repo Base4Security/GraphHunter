@@ -51,6 +51,18 @@ pub fn cmd_sentinel_status(
     api.sentinel_status().map_err(CommandError::from)
 }
 
+/// Resume the paused Sentinel polling loop.
+#[tauri::command]
+pub fn cmd_sentinel_resume(api: State<Arc<GraphHunterApi>>) -> Result<(), CommandError> {
+    api.sentinel_resume().map_err(CommandError::from)
+}
+
+/// Pause the Sentinel polling loop (stop querying; keep the connector).
+#[tauri::command]
+pub fn cmd_sentinel_pause(api: State<Arc<GraphHunterApi>>) -> Result<(), CommandError> {
+    api.sentinel_pause().map_err(CommandError::from)
+}
+
 /// Ad-hoc KQL query against Log Analytics — ingest results into the
 /// current session's graph and run full scoring.
 #[tauri::command]
