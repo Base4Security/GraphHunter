@@ -616,6 +616,33 @@ function SentinelStreamingControls({
   onStart: () => void;
   onStop: () => void;
 }) {
+  const [polling, setPolling] = useState(false);
+
+  // Reset polling state whenever the stream is stopped or restarted.
+  const handleStart = () => {
+    setPolling(false);
+    onStart();
+  };
+  const handleStop = () => {
+    setPolling(false);
+    onStop();
+  };
+
+  const togglePolling = async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      if (polling) {
+        await invoke("cmd_sentinel_pause");
+        setPolling(false);
+      } else {
+        await invoke("cmd_sentinel_resume");
+        setPolling(true);
+      }
+    } catch {
+      // errors surface in Tauri's console; nothing to do here
+    }
+  };
+
   return (
     <div
       style={{
@@ -659,7 +686,7 @@ function SentinelStreamingControls({
       {!streaming ? (
         <button
           className="btn btn-primary"
-          onClick={onStart}
+          onClick={handleStart}
           disabled={loading}
           style={{ width: "100%", background: "#22c55e", borderColor: "#16a34a" }}
         >
@@ -669,7 +696,7 @@ function SentinelStreamingControls({
       ) : (
         <button
           className="btn btn-primary"
-          onClick={onStop}
+          onClick={handleStop}
           disabled={loading}
           style={{ width: "100%", background: "#ef4444", borderColor: "#dc2626" }}
         >
@@ -724,6 +751,52 @@ function SentinelStreamingControls({
           <div style={{ color: "var(--text-muted)" }}>
             +{liveStats.entities.toLocaleString()} entities, +
             {liveStats.relations.toLocaleString()} relations
+          </div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginTop: 8,
+            }}
+          >
+            <button
+              type="button"
+              onClick={togglePolling}
+              style={{
+                padding: "3px 10px",
+                fontSize: 10,
+                background: polling
+                  ? "rgba(234, 179, 8, 0.2)"
+                  : "rgba(34, 197, 94, 0.2)",
+                border: polling
+                  ? "1px solid rgba(234, 179, 8, 0.5)"
+                  : "1px solid rgba(34, 197, 94, 0.5)",
+                borderRadius: 3,
+                color: polling ? "#facc15" : "#86efac",
+                cursor: "pointer",
+                fontWeight: 600,
+              }}
+            >
+              {polling ? "Pause polling" : "Start polling"}
+            </button>
+            <span
+              style={{
+                padding: "2px 8px",
+                fontSize: 10,
+                background: polling
+                  ? "rgba(34, 197, 94, 0.12)"
+                  : "rgba(234, 179, 8, 0.15)",
+                border: polling
+                  ? "1px solid rgba(34, 197, 94, 0.35)"
+                  : "1px solid rgba(234, 179, 8, 0.4)",
+                borderRadius: 10,
+                color: polling ? "#86efac" : "#facc15",
+                fontWeight: 600,
+              }}
+            >
+              {polling ? "Polling" : "Paused"}
+            </span>
           </div>
         </div>
       )}
