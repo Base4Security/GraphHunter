@@ -25,17 +25,14 @@
 //!
 //! This parser hard-codes the correct mapping:
 //!
-//! ```text
-//! srcip --[Connect]--> dstip          (action -> rel.metadata["action"])
-//! srcip --[Triggered]--> attack       (only if `attack` field present)
-//! ```
-//!
-//! `dstport`, `severity`, `service`, `policyid`, `policyname`,
-//! `duration`, `sentbyte`, `sentpkt`, `trandisp`, `transip`, and
-//! `devname` are all attached to **`Relation::metadata`** (not promoted
-//! to entities). `devname` deliberately does *not* become a Host node —
-//! every event would link back to it, creating a star hub that
-//! dominates centrality measures (PageRank/degree).
+//! This parser hard-codes the correct mapping. Up to 5 triples per line:
+//! `srcip -[Connect]-> dstip` (always); `srcip -[SNAT]-> transip` when
+//! source-NATted; `dstip -[Exposes]-> Service("dstip:port")` when `dstport`
+//! present (the `dstip` node is deduped by the graph layer); and
+//! `srcip -[MatchedPolicy]-> Policy(policyname)` when `policyname` present.
+//! `devname` deliberately does *not* become a Host node — every event would
+//! link back to it, creating a star hub that dominates centrality measures
+//! (PageRank/degree).
 
 use std::collections::HashMap;
 
@@ -192,13 +189,14 @@ pub fn looks_like_fortigate(contents: &str) -> bool {
 
 // ── KV line parsing ─────────────────────────────────────────────────
 
-/// Parse one FortiGate KV log line into 0..2 triples.
+/// Parse one FortiGate KV log line into 0..5 triples.
 ///
-/// Returns:
-/// * empty vec if `srcip` and `dstip` are not both present;
-/// * one triple `srcip -[Connect]-> dstip` always, plus
-/// * one extra triple `srcip -[Other("Triggered")]-> attack` if the
-///   line carries an `attack` field (IPS event).
+/// Returns (empty if `srcip`/`dstip` not both present):
+/// * `srcip -[Connect]-> dstip` (always);
+/// * `srcip -[SNAT]-> transip` if `trandisp=="snat"` and `transip` present;
+/// * `dstip -[Exposes]-> Service("dstip:port")` if `dstport` present;
+/// * `srcip -[MatchedPolicy]-> Policy(policyname)` if `policyname` present;
+/// * `srcip -[Triggered]-> attack` if an `attack` field is present (IPS event).
 fn parse_kv_line(line: &str) -> Vec<ParsedTriple> {
     let kv = extract_kv_pairs(line);
     let srcip = match kv.get("srcip") {
@@ -669,11 +667,11 @@ mod tests {
             }
         }
         // …but devname must be on edge metadata.
-        let (_, rel, _) = &triples[0];
-        assert_eq!(
-            rel.metadata.get("devname").map(|s| s.as_str()),
-            Some("FW-CORE-01")
-        );
+        let (_, rel, _) = triples
+            .iter()
+            .find(|(_, r, _)| r.rel_type == RelationType::Connect)
+            .expect("Connect triple");
+        assert_eq!(rel.metadata.get("devname").map(|s| s.as_str()), Some("FW-CORE-01"));
     }
 
     #[test]
@@ -904,6 +902,8 @@ mod tests {
         assert_eq!(pol.2.id, "POLITICA EJEMPLO");
         assert_eq!(pol.2.entity_type, EntityType::Other("Policy".to_string()));
         assert_eq!(pol.2.metadata.get("policyid").map(String::as_str), Some("348"));
+
+        assert_eq!(triples.len(), 4, "SNAT flow with dstport+policyname+snat => Connect+SNAT+Exposes+MatchedPolicy");
     }
 
     #[test]
