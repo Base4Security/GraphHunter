@@ -596,6 +596,10 @@ impl GraphHunter {
     /// Append edge metadata, injecting the reserved `_rel_type` key when the
     /// relation is a custom `Other(name)` (whose name the 1-byte tag can't
     /// preserve). Built-in types inject nothing — no clone on the common path.
+    ///
+    /// NOTE: `_rel_type` is a reserved internal key — it is stripped by
+    /// `materialize_relation`, but raw metadata readers (DSL edge predicates)
+    /// can see it. The `_` prefix marks it as not-a-real-field.
     fn append_edge_metadata(
         &mut self,
         rel_type: &crate::types::RelationType,
@@ -628,6 +632,24 @@ impl GraphHunter {
             metadata,
             dataset_id: self.resolve_dataset_tag(compact.dataset_tag),
         }
+    }
+
+    /// Resolve a relation's display name from a CompactRelation, recovering
+    /// custom `Other(name)` types from the `_rel_type` metadata key (which the
+    /// 1-byte tag cannot hold). Built-in types come straight from the tag.
+    ///
+    /// This is the DRY helper for all export/display paths that need the
+    /// human-readable rel-type string — use it instead of `format!("{}", compact.rel_type())`.
+    pub fn resolve_rel_type_name(&self, compact: &CompactRelation) -> String {
+        if compact.rel_type_tag == crate::types::RelationType::Other(String::new()).to_u8() {
+            let meta = self.meta_store.get(compact.metadata_offset);
+            if let Some(name) = meta.get("_rel_type") {
+                if !name.is_empty() {
+                    return name.clone();
+                }
+            }
+        }
+        format!("{}", compact.rel_type())
     }
 
     /// Retrieves an entity by its ID.
@@ -3496,6 +3518,23 @@ mod tests {
             !snat.metadata.contains_key("_rel_type"),
             "_rel_type must be stripped from returned metadata"
         );
+    }
+
+    /// SP-B Task 1: `Other("")` (empty name) must NOT inject `_rel_type` into
+    /// metadata, and must round-trip back to `Other("")` without leaking the
+    /// internal key. Complements `other_rel_type_name_survives_roundtrip`.
+    #[test]
+    fn empty_other_rel_type_roundtrips_without_key() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(vec![(
+            Entity::new("a", EntityType::IP),
+            Relation::new("a", "b", RelationType::Other(String::new()), 7),
+            Entity::new("b", EntityType::IP),
+        )], None).unwrap();
+        let rels = g.get_relations("a");
+        // Other("") injects no _rel_type; round-trips back to Other("").
+        assert!(rels.iter().any(|r| matches!(&r.rel_type, RelationType::Other(n) if n.is_empty())));
+        assert!(rels.iter().all(|r| !r.metadata.contains_key("_rel_type")));
     }
 
     /// SP-B Task 1: built-in rel-types must not be affected by the _rel_type

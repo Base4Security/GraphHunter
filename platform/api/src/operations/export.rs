@@ -68,7 +68,7 @@ impl GraphHunterApi {
                     }
                     let src = graph.interner.resolve(compact.source_sid).to_string();
                     let dst = dest_str.to_string();
-                    let rel = format!("{}", compact.rel_type());
+                    let rel = graph.resolve_rel_type_name(&compact);
                     let key = (src.clone(), dst.clone(), rel.clone(), compact.timestamp);
                     if !seen.insert(key) {
                         continue;
