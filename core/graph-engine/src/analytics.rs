@@ -2011,7 +2011,6 @@ impl GraphHunter {
     /// with volume metrics, ranked by count desc (bytes desc tiebreak). Does
     /// not mutate the graph. Recovers custom rel-type names from `_rel_type`.
     pub fn heavy_edges(&self, opts: &HeavyEdgesOpts) -> Vec<HeavyEdge> {
-        #[derive(Default)]
         struct Agg {
             count: usize,
             bytes: u64,
@@ -2021,6 +2020,10 @@ impl GraphHunter {
             last_ts: i64,
         }
         let mut groups: HashMap<(StrId, StrId, String), Agg> = HashMap::new();
+        // NOTE: `meta_store.get` allocates a fresh HashMap per edge. Fine for
+        // this on-demand analytical query; if ever called per-tick or at
+        // 500k+ edges, add a borrowing `visit_kv(offset, |k,v|)` accessor to
+        // MetadataStore (cf. its existing `visit_keys`) to avoid the alloc.
         self.streaming.for_each_edge(|src, e| {
             let md = self.meta_store.get(e.metadata_offset);
             let rt = md.get("_rel_type").cloned()
@@ -2053,6 +2056,10 @@ impl GraphHunter {
                 entry.last_ts = e.timestamp;
             }
         });
+        // NOTE: `for_each_edge` walks base edges only — edges appended after a
+        // graph finalize() (e.g. live Sentinel tail) are NOT visited. Correct
+        // for forensic analysis of ingested data; tail coverage is a tracked
+        // follow-up if heavy_edges is ever run against a live finalized graph.
         let mut out: Vec<HeavyEdge> = groups
             .into_iter()
             .filter(|((_, _, rt), _)| opts.rel_type.as_ref().map_or(true, |w| w == rt))
