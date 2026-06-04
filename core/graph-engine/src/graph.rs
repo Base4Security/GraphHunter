@@ -446,7 +446,7 @@ impl GraphHunter {
         // meta_store.append precedes the fallible push_to_streaming below; on a
         // spill failure the offset is orphaned (unreferenced) but harmless — the
         // store is append-only and non-structural. Intentional C3a trade-off.
-        let meta_offset = self.meta_store.append(&relation.metadata);
+        let meta_offset = self.append_edge_metadata(&relation.rel_type, &relation.metadata);
         let ds_tag = self.intern_dataset_tag(relation.dataset_id.as_deref());
         let compact = CompactRelation {
             source_sid: src_sid,
@@ -593,14 +593,39 @@ impl GraphHunter {
         }
     }
 
+    /// Append edge metadata, injecting the reserved `_rel_type` key when the
+    /// relation is a custom `Other(name)` (whose name the 1-byte tag can't
+    /// preserve). Built-in types inject nothing — no clone on the common path.
+    fn append_edge_metadata(
+        &mut self,
+        rel_type: &crate::types::RelationType,
+        metadata: &std::collections::HashMap<String, String>,
+    ) -> u64 {
+        if let crate::types::RelationType::Other(name) = rel_type {
+            if !name.is_empty() {
+                let mut m = metadata.clone();
+                m.insert("_rel_type".to_string(), name.clone());
+                return self.meta_store.append(&m);
+            }
+        }
+        self.meta_store.append(metadata)
+    }
+
     /// Materializes a CompactRelation into a full Relation.
+    /// Recovers the `Other(name)` from the `_rel_type` metadata key (if
+    /// present) and strips that internal key before returning.
     pub fn materialize_relation(&self, compact: &CompactRelation) -> Relation {
+        let mut metadata = self.meta_store.get(compact.metadata_offset);
+        let rel_type = match metadata.remove("_rel_type") {
+            Some(name) => crate::types::RelationType::Other(name),
+            None => compact.rel_type(),
+        };
         Relation {
             source_id: self.interner.resolve(compact.source_sid).to_string(),
             dest_id: self.interner.resolve(compact.dest_sid).to_string(),
-            rel_type: compact.rel_type(),
+            rel_type,
             timestamp: compact.timestamp,
-            metadata: self.meta_store.get(compact.metadata_offset),
+            metadata,
             dataset_id: self.resolve_dataset_tag(compact.dataset_tag),
         }
     }
@@ -2581,7 +2606,7 @@ impl GraphHunter {
                 scorer.observe_edge(&rel.source_id, &rel.dest_id);
             }
 
-            let meta_offset = self.meta_store.append(&rel.metadata);
+            let meta_offset = self.append_edge_metadata(&rel.rel_type, &rel.metadata);
             let compact = CompactRelation {
                 source_sid: src_sid,
                 dest_sid: dst_sid,
@@ -2947,7 +2972,7 @@ impl GraphHunter {
                 scorer.observe_edge(&rel.source_id, &rel.dest_id);
             }
 
-            let meta_offset = self.meta_store.append(&rel.metadata);
+            let meta_offset = self.append_edge_metadata(&rel.rel_type, &rel.metadata);
             let compact = CompactRelation {
                 source_sid: src_sid,
                 dest_sid: dst_sid,
@@ -3076,7 +3101,7 @@ impl GraphHunter {
                 scorer.observe_edge(&rel.source_id, &rel.dest_id);
             }
 
-            let meta_offset = self.meta_store.append(&rel.metadata);
+            let meta_offset = self.append_edge_metadata(&rel.rel_type, &rel.metadata);
             let compact = CompactRelation {
                 source_sid: src_sid,
                 dest_sid: dst_sid,
@@ -3165,7 +3190,7 @@ impl GraphHunter {
                 scorer.observe_edge(&src_id, &dst_id);
             }
 
-            let meta_offset = self.meta_store.append(&rel_metadata);
+            let meta_offset = self.append_edge_metadata(&rel_type, &rel_metadata);
             let compact = CompactRelation {
                 source_sid: src_sid,
                 dest_sid: dst_sid,
@@ -3385,7 +3410,7 @@ impl GraphHunter {
         for rel in all_edges {
             let src_sid = self.interner.intern(&rel.source_id);
             let dst_sid = self.interner.intern(&rel.dest_id);
-            let meta_offset = self.meta_store.append(&rel.metadata);
+            let meta_offset = self.append_edge_metadata(&rel.rel_type, &rel.metadata);
             let ds_tag = self.intern_dataset_tag(rel.dataset_id.as_deref());
             let compact = CompactRelation {
                 source_sid: src_sid,
@@ -3448,6 +3473,52 @@ mod tests {
     use crate::hypothesis::{Hypothesis, HypothesisStep};
     use crate::relation::Relation;
     use crate::types::{EntityType, RelationType};
+
+    /// SP-B Task 1: a custom `Other("SNAT")` rel-type name must survive the
+    /// insert→materialize roundtrip. Before the fix `from_u8(254)` returns
+    /// `Other("")` because the 1-byte tag can't encode the name.
+    #[test]
+    fn other_rel_type_name_survives_roundtrip() {
+        let mut g = GraphHunter::new();
+        let rel = Relation::new("a", "b", RelationType::Other("SNAT".to_string()), 100);
+        let triple = (
+            Entity::new("a", EntityType::IP),
+            rel,
+            Entity::new("b", EntityType::IP),
+        );
+        g.insert_triples(vec![triple], None).unwrap();
+        let rels = g.get_relations("a");
+        let snat = rels
+            .iter()
+            .find(|r| matches!(&r.rel_type, RelationType::Other(n) if n == "SNAT"))
+            .expect("Other(\"SNAT\") must survive ingest");
+        assert!(
+            !snat.metadata.contains_key("_rel_type"),
+            "_rel_type must be stripped from returned metadata"
+        );
+    }
+
+    /// SP-B Task 1: built-in rel-types must not be affected by the _rel_type
+    /// injection logic — no extra key in returned metadata.
+    #[test]
+    fn builtin_rel_type_unaffected() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![(
+                Entity::new("a", EntityType::IP),
+                Relation::new("a", "b", RelationType::Connect, 100),
+                Entity::new("b", EntityType::IP),
+            )],
+            None,
+        )
+        .unwrap();
+        let rels = g.get_relations("a");
+        assert!(rels.iter().any(|r| r.rel_type == RelationType::Connect));
+        assert!(
+            rels.iter().all(|r| !r.metadata.contains_key("_rel_type")),
+            "builtin injects no _rel_type"
+        );
+    }
 
     /// C2 regression: after indexes are built on a finalized graph, a
     /// post-finalize `add_relation` must INVALIDATE both `nlf` and
