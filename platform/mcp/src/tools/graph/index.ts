@@ -7,6 +7,7 @@ import { graphTemporalHeatmap } from "./temporal_heatmap.js";
 import { graphDatasets } from "./datasets.js";
 import { graphPathNodes } from "./path_nodes.js";
 import { graphHeavyEdges } from "./heavy_edges.js";
+import { graphChannelBehavior } from "./channel_behavior.js";
 
 export const graphTools: Tool[] = [
   graphSummary,
@@ -17,4 +18,5 @@ export const graphTools: Tool[] = [
   graphDatasets,
   graphPathNodes,
   graphHeavyEdges,
+  graphChannelBehavior,
 ];

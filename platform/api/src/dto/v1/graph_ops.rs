@@ -221,3 +221,20 @@ pub struct HeavyEdgesRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rel_type: Option<String>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChannelBehaviorRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_n: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rel_type: Option<String>,
+    /// "beacon" (default) | "resets" | "volume"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<String>,
+}

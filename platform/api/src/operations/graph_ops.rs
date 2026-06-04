@@ -10,9 +10,9 @@ use graph_hunter_core::{
 
 use crate::dto::entity::{NodeScopedRequest, SessionOnly};
 use crate::dto::graph_ops::{
-    ComputeScoresRequest, EventsForNodeRequest, EventsPaginatedRequest, ExpandNodeRequest,
-    GraphStats, HeavyEdgesRequest, PaginatedEvents, PreviewFieldsRequest, RuntimeInfo,
-    SearchEntitiesRequest, Subgraph, SubgraphEdge, SubgraphNode, SubgraphRequest,
+    ChannelBehaviorRequest, ComputeScoresRequest, EventsForNodeRequest, EventsPaginatedRequest,
+    ExpandNodeRequest, GraphStats, HeavyEdgesRequest, PaginatedEvents, PreviewFieldsRequest,
+    RuntimeInfo, SearchEntitiesRequest, Subgraph, SubgraphEdge, SubgraphNode, SubgraphRequest,
 };
 use crate::util::{parse_entity_type, to_core_filter};
 use crate::{ApiError, ApiResult, GraphHunterApi};
@@ -457,6 +457,29 @@ impl GraphHunterApi {
             rel_type: req.rel_type,
         };
         self.with_graph_read(req.session.as_ref(), |graph| Ok(graph.heavy_edges(&opts)))
+    }
+
+    /// Per-channel temporal behavior: beaconing score, reset bursts, and
+    /// volume spikes for each (source → target : rel_type). Delegates
+    /// directly to `GraphHunter::channel_behavior`.
+    pub fn graph_channel_behavior(
+        &self,
+        req: ChannelBehaviorRequest,
+    ) -> ApiResult<Vec<graph_hunter_core::analytics::ChannelBehavior>> {
+        use graph_hunter_core::analytics::{ChannelBehaviorOpts, ChannelSortBy};
+        let sort_by = match req.sort_by.as_deref() {
+            Some("resets") => ChannelSortBy::Resets,
+            Some("volume") => ChannelSortBy::Volume,
+            _ => ChannelSortBy::Beacon,
+        };
+        let opts = ChannelBehaviorOpts {
+            top_n: req.top_n.unwrap_or(50),
+            min_count: req.min_count.or(Some(4)),
+            window_secs: req.window_secs.unwrap_or(60),
+            rel_type: req.rel_type,
+            sort_by,
+        };
+        self.with_graph_read(req.session.as_ref(), |graph| Ok(graph.channel_behavior(&opts)))
     }
 
     /// Live-backed expansion (Enfoque A): hydrate the target node from

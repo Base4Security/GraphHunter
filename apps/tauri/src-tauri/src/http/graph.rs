@@ -399,6 +399,36 @@ pub(super) async fn handler_heavy_edges(
     }))
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct ChannelBehaviorQuery {
+    #[serde(default)]
+    pub top_n: Option<usize>,
+    #[serde(default)]
+    pub min_count: Option<usize>,
+    #[serde(default)]
+    pub window_secs: Option<u64>,
+    #[serde(default)]
+    pub rel_type: Option<String>,
+    #[serde(default)]
+    pub sort_by: Option<String>,
+}
+
+pub(super) async fn handler_channel_behavior(
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<ChannelBehaviorQuery>,
+) -> Response {
+    api_response(api.graph_channel_behavior(
+        graph_hunter_api::dto::graph_ops::ChannelBehaviorRequest {
+            session: None,
+            top_n: q.top_n,
+            min_count: q.min_count,
+            window_secs: q.window_secs,
+            rel_type: q.rel_type,
+            sort_by: q.sort_by,
+        },
+    ))
+}
+
 pub(super) async fn handler_expand_grouped(
     State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<ExpandQuery>,
