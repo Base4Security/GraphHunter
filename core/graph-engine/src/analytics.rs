@@ -424,6 +424,9 @@ pub struct ChannelBehavior {
     pub first_ts: i64,
     pub last_ts: i64,
     pub interval_mean_secs: f64,
+    /// Coefficient of variation of inter-arrival intervals (population stddev / mean).
+    /// 0.0 when count < 3 (not enough data) or when mean == 0 — indistinguishable
+    /// from a genuine zero-variance result; pair with `count` to disambiguate.
     pub interval_cv: f64,
     pub beacon_score: f64,
     pub max_resets_in_window: usize,
@@ -2141,7 +2144,8 @@ impl GraphHunter {
         let mut groups: HashMap<(StrId, StrId, String), Vec<(i64, u64, bool)>> = HashMap::new();
         self.streaming.for_each_edge(|src, ed| {
             let md = self.meta_store.get(ed.metadata_offset);
-            let rt = self.resolve_rel_type_name_raw(ed.rel_type_tag, ed.metadata_offset);
+            let rt = md.get("_rel_type").cloned()
+                .unwrap_or_else(|| format!("{}", crate::types::RelationType::from_u8(ed.rel_type_tag)));
             let bytes = md.get("sentbyte").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
             let is_reset = matches!(
                 md.get("action").map(|s| s.as_str()),
@@ -2502,5 +2506,36 @@ mod channel_behavior_tests {
         assert_eq!(ab.max_resets_in_window, 3);
         assert_eq!(ab.max_bytes_in_window, 1500);
         assert_eq!(ab.max_count_in_window, 3);
+    }
+
+    #[test]
+    fn min_count_filters_small_channels() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(vec![
+            e("A","B",0,None,None), e("A","B",60,None,None), e("A","B",120,None,None), // count 3
+            e("A","C",0,None,None), // count 1
+        ], None).unwrap();
+        let out = g.channel_behavior(&ChannelBehaviorOpts {
+            top_n: 10, min_count: Some(3), window_secs: 60, rel_type: None, sort_by: ChannelSortBy::Beacon,
+        });
+        assert!(out.iter().any(|c| c.source=="A" && c.target=="B"));
+        assert!(out.iter().all(|c| !(c.source=="A" && c.target=="C")), "A->C (count 1) must be filtered by min_count=3");
+    }
+
+    #[test]
+    fn rel_type_filter_restricts_channels() {
+        let mut g = GraphHunter::new();
+        // A->B Connect (built-in) and A->D Other("SNAT")
+        let mut snat = Relation::new("A","D",RelationType::Other("SNAT".to_string()),0);
+        snat.metadata = HashMap::new();
+        g.insert_triples(vec![
+            e("A","B",0,None,None), e("A","B",60,None,None),
+            (Entity::new("A",EntityType::IP), snat, Entity::new("D",EntityType::IP)),
+        ], None).unwrap();
+        let out = g.channel_behavior(&ChannelBehaviorOpts {
+            top_n: 10, min_count: None, window_secs: 60, rel_type: Some("SNAT".to_string()), sort_by: ChannelSortBy::Beacon,
+        });
+        assert!(out.iter().all(|c| c.rel_type=="SNAT"), "only SNAT channels");
+        assert!(out.iter().any(|c| c.source=="A" && c.target=="D"), "the SNAT channel is present");
     }
 }
