@@ -162,6 +162,7 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
         .route("/parse_dsl", post(hunt::handler_parse_dsl))
         .route("/events_paginated", get(graph::handler_events_paginated))
         .route("/expand_grouped", get(graph::handler_expand_grouped))
+        .route("/heavy_edges", get(graph::handler_heavy_edges))
         .route("/export_hunt_results", post(export::handler_export_hunt_results))
         .route("/enable_anomaly_scoring", post(anomaly::handler_enable_anomaly_scoring))
         .route("/compute_scores", post(anomaly::handler_compute_scores))

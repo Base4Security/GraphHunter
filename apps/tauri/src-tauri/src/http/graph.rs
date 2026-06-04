@@ -377,6 +377,28 @@ pub(super) async fn handler_events_paginated(
     }
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct HeavyEdgesQuery {
+    #[serde(default)]
+    pub top_n: Option<usize>,
+    #[serde(default)]
+    pub min_count: Option<usize>,
+    #[serde(default)]
+    pub rel_type: Option<String>,
+}
+
+pub(super) async fn handler_heavy_edges(
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<HeavyEdgesQuery>,
+) -> Response {
+    api_response(api.graph_heavy_edges(graph_hunter_api::dto::graph_ops::HeavyEdgesRequest {
+        session: None,
+        top_n: q.top_n,
+        min_count: q.min_count,
+        rel_type: q.rel_type,
+    }))
+}
+
 pub(super) async fn handler_expand_grouped(
     State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<ExpandQuery>,

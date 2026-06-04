@@ -209,3 +209,15 @@ pub struct ComputeScoresRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionHandle>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HeavyEdgesRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_n: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rel_type: Option<String>,
+}

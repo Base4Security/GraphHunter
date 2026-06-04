@@ -11,8 +11,8 @@ use graph_hunter_core::{
 use crate::dto::entity::{NodeScopedRequest, SessionOnly};
 use crate::dto::graph_ops::{
     ComputeScoresRequest, EventsForNodeRequest, EventsPaginatedRequest, ExpandNodeRequest,
-    GraphStats, PaginatedEvents, PreviewFieldsRequest, RuntimeInfo, SearchEntitiesRequest,
-    Subgraph, SubgraphEdge, SubgraphNode, SubgraphRequest,
+    GraphStats, HeavyEdgesRequest, PaginatedEvents, PreviewFieldsRequest, RuntimeInfo,
+    SearchEntitiesRequest, Subgraph, SubgraphEdge, SubgraphNode, SubgraphRequest,
 };
 use crate::util::{parse_entity_type, to_core_filter};
 use crate::{ApiError, ApiResult, GraphHunterApi};
@@ -439,6 +439,20 @@ impl GraphHunterApi {
                 )
                 .ok_or_else(|| ApiError::NotFound(format!("entity: {}", req.node_id)))
         })
+    }
+
+    /// Top-N heaviest (source → target : rel_type) groups ranked by edge
+    /// count. Delegates directly to `GraphHunter::heavy_edges`.
+    pub fn graph_heavy_edges(
+        &self,
+        req: HeavyEdgesRequest,
+    ) -> ApiResult<Vec<graph_hunter_core::analytics::HeavyEdge>> {
+        let opts = graph_hunter_core::analytics::HeavyEdgesOpts {
+            top_n: req.top_n.unwrap_or(50),
+            min_count: req.min_count,
+            rel_type: req.rel_type,
+        };
+        self.with_graph_read(req.session.as_ref(), |graph| Ok(graph.heavy_edges(&opts)))
     }
 
     /// Live-backed expansion (Enfoque A): hydrate the target node from
