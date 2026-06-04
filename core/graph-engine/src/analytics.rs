@@ -397,6 +397,40 @@ fn build_narrative(
     parts.join(" ")
 }
 
+// ── channel_behavior projection ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelSortBy {
+    Beacon,
+    Resets,
+    Volume,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelBehaviorOpts {
+    pub top_n: usize,
+    pub min_count: Option<usize>,
+    pub window_secs: u64,
+    pub rel_type: Option<String>,
+    pub sort_by: ChannelSortBy,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChannelBehavior {
+    pub source: String,
+    pub target: String,
+    pub rel_type: String,
+    pub count: usize,
+    pub first_ts: i64,
+    pub last_ts: i64,
+    pub interval_mean_secs: f64,
+    pub interval_cv: f64,
+    pub beacon_score: f64,
+    pub max_resets_in_window: usize,
+    pub max_bytes_in_window: u64,
+    pub max_count_in_window: usize,
+}
+
 // ── heavy_edges projection ──
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2094,6 +2128,109 @@ impl GraphHunter {
         out.truncate(opts.top_n);
         out
     }
+
+    /// Read-only per-channel temporal behavior: beaconing (inter-arrival CV),
+    /// reset bursts, and volume spikes. Groups by (source, dest, rel_type).
+    /// Does not mutate the graph.
+    pub fn channel_behavior(&self, opts: &ChannelBehaviorOpts) -> Vec<ChannelBehavior> {
+        // NOTE: `meta_store.get` allocates a HashMap per edge — acceptable for an
+        // on-demand analytical query (cf. heavy_edges). And `for_each_edge` is
+        // base-only: tail edges from a post-finalize live graph are excluded
+        // (tracked follow-up).
+        let window = opts.window_secs.max(1) as i64;
+        let mut groups: HashMap<(StrId, StrId, String), Vec<(i64, u64, bool)>> = HashMap::new();
+        self.streaming.for_each_edge(|src, ed| {
+            let md = self.meta_store.get(ed.metadata_offset);
+            let rt = self.resolve_rel_type_name_raw(ed.rel_type_tag, ed.metadata_offset);
+            let bytes = md.get("sentbyte").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let is_reset = matches!(
+                md.get("action").map(|s| s.as_str()),
+                Some("client-rst") | Some("server-rst")
+            );
+            groups.entry((src, ed.dest_sid, rt)).or_default().push((ed.timestamp, bytes, is_reset));
+        });
+
+        let mut out: Vec<ChannelBehavior> = Vec::new();
+        for ((s, d, rt), mut edges) in groups {
+            if let Some(m) = opts.min_count {
+                if edges.len() < m {
+                    continue;
+                }
+            }
+            if let Some(want) = opts.rel_type.as_ref() {
+                if want != &rt {
+                    continue;
+                }
+            }
+            edges.sort_by_key(|x| x.0);
+            let count = edges.len();
+            let first_ts = edges.first().map(|x| x.0).unwrap_or(0);
+            let last_ts = edges.last().map(|x| x.0).unwrap_or(0);
+
+            let mut interval_mean_secs = 0.0_f64;
+            let mut interval_cv = 0.0_f64;
+            let mut beacon_score = 0.0_f64;
+            if count >= 2 {
+                let intervals: Vec<f64> = edges
+                    .windows(2)
+                    .map(|w| (w[1].0 - w[0].0) as f64)
+                    .collect();
+                let mean = intervals.iter().sum::<f64>() / intervals.len() as f64;
+                interval_mean_secs = mean;
+                if count >= 3 && mean > 0.0 {
+                    let var = intervals
+                        .iter()
+                        .map(|x| (x - mean).powi(2))
+                        .sum::<f64>()
+                        / intervals.len() as f64;
+                    interval_cv = var.sqrt() / mean;
+                    beacon_score = 1.0 - interval_cv.min(1.0);
+                }
+            }
+
+            let mut buckets: HashMap<i64, (usize, u64, usize)> = HashMap::new();
+            for (ts, bytes, is_reset) in &edges {
+                let b = buckets.entry(ts / window).or_insert((0, 0, 0));
+                if *is_reset {
+                    b.0 += 1;
+                }
+                b.1 += *bytes;
+                b.2 += 1;
+            }
+            let max_resets_in_window = buckets.values().map(|b| b.0).max().unwrap_or(0);
+            let max_bytes_in_window = buckets.values().map(|b| b.1).max().unwrap_or(0);
+            let max_count_in_window = buckets.values().map(|b| b.2).max().unwrap_or(0);
+
+            out.push(ChannelBehavior {
+                source: self.interner.resolve(s).to_string(),
+                target: self.interner.resolve(d).to_string(),
+                rel_type: rt,
+                count,
+                first_ts,
+                last_ts,
+                interval_mean_secs,
+                interval_cv,
+                beacon_score,
+                max_resets_in_window,
+                max_bytes_in_window,
+                max_count_in_window,
+            });
+        }
+
+        out.sort_by(|x, y| {
+            let primary = match opts.sort_by {
+                ChannelSortBy::Beacon => y
+                    .beacon_score
+                    .partial_cmp(&x.beacon_score)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                ChannelSortBy::Resets => y.max_resets_in_window.cmp(&x.max_resets_in_window),
+                ChannelSortBy::Volume => y.max_bytes_in_window.cmp(&x.max_bytes_in_window),
+            };
+            primary.then(y.count.cmp(&x.count))
+        });
+        out.truncate(opts.top_n);
+        out
+    }
 }
 
 #[cfg(test)]
@@ -2247,5 +2384,123 @@ mod hydration_outcome_tests {
         };
         let json = serde_json::to_string(&o).unwrap();
         assert!(json.contains("\"new_relations\":7"));
+    }
+}
+
+#[cfg(test)]
+mod channel_behavior_tests {
+    use super::*;
+    use crate::GraphHunter;
+    use crate::types::{EntityType, RelationType};
+    use crate::entity::Entity;
+    use crate::relation::Relation;
+    use std::collections::HashMap;
+
+    fn e(s: &str, d: &str, ts: i64, sentbyte: Option<&str>, action: Option<&str>) -> crate::parser::ParsedTriple {
+        let mut md = HashMap::new();
+        if let Some(b) = sentbyte {
+            md.insert("sentbyte".into(), b.into());
+        }
+        if let Some(a) = action {
+            md.insert("action".into(), a.into());
+        }
+        let mut rel = Relation::new(s, d, RelationType::Connect, ts);
+        rel.metadata = md;
+        (Entity::new(s, EntityType::IP), rel, Entity::new(d, EntityType::IP))
+    }
+
+    fn opts(sort_by: ChannelSortBy) -> ChannelBehaviorOpts {
+        ChannelBehaviorOpts {
+            top_n: 10,
+            min_count: None,
+            window_secs: 60,
+            rel_type: None,
+            sort_by,
+        }
+    }
+
+    #[test]
+    fn regular_channel_scores_as_beacon() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![
+                e("A", "B", 0, Some("10"), None),
+                e("A", "B", 60, Some("10"), None),
+                e("A", "B", 120, Some("10"), None),
+                e("A", "B", 180, Some("10"), None),
+            ],
+            None,
+        )
+        .unwrap();
+        let out = g.channel_behavior(&opts(ChannelSortBy::Beacon));
+        let ab = out
+            .iter()
+            .find(|c| c.source == "A" && c.target == "B")
+            .expect("A->B");
+        assert_eq!(ab.count, 4);
+        assert!((ab.interval_mean_secs - 60.0).abs() < 1e-6);
+        assert!(ab.interval_cv < 1e-6, "cv ~0, got {}", ab.interval_cv);
+        assert!(ab.beacon_score > 0.99, "beacon ~1, got {}", ab.beacon_score);
+    }
+
+    #[test]
+    fn irregular_channel_low_beacon() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![
+                e("A", "B", 0, None, None),
+                e("A", "B", 5, None, None),
+                e("A", "B", 200, None, None),
+                e("A", "B", 201, None, None),
+            ],
+            None,
+        )
+        .unwrap();
+        let ab = g
+            .channel_behavior(&opts(ChannelSortBy::Beacon))
+            .into_iter()
+            .find(|c| c.source == "A")
+            .unwrap();
+        assert!(ab.interval_cv > 0.5, "high cv, got {}", ab.interval_cv);
+        assert!(ab.beacon_score < 0.5, "low beacon, got {}", ab.beacon_score);
+    }
+
+    #[test]
+    fn too_few_events_no_beacon() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![e("A", "B", 0, None, None), e("A", "B", 60, None, None)],
+            None,
+        )
+        .unwrap();
+        let ab = g
+            .channel_behavior(&opts(ChannelSortBy::Beacon))
+            .into_iter()
+            .find(|c| c.source == "A")
+            .unwrap();
+        assert_eq!(ab.beacon_score, 0.0);
+    }
+
+    #[test]
+    fn reset_burst_and_volume_window() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![
+                e("A", "B", 1, Some("500"), Some("client-rst")),
+                e("A", "B", 2, Some("500"), Some("server-rst")),
+                e("A", "B", 3, Some("500"), Some("client-rst")),
+                e("A", "B", 1000, Some("10"), Some("close")),
+            ],
+            None,
+        )
+        .unwrap();
+        let ab = g
+            .channel_behavior(&opts(ChannelSortBy::Resets))
+            .into_iter()
+            .find(|c| c.source == "A")
+            .unwrap();
+        assert_eq!(ab.max_resets_in_window, 3);
+        assert_eq!(ab.max_bytes_in_window, 1500);
+        assert_eq!(ab.max_count_in_window, 3);
     }
 }

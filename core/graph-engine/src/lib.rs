@@ -47,10 +47,11 @@ pub mod watermark_store;
 
 // Re-export core types at crate root for ergonomic imports.
 pub use analytics::{
-    AUTO_GROUPED_THRESHOLD, DedupMode, ExplainedPeer, ExplainedScore, GraphSummary,
-    GroupedNeighborEdge, GroupedNeighborhood, HeavyEdge, HeavyEdgesOpts, HuntDiagnostic,
-    HuntDiff, LiveTailCoverage, NeighborEdge, NeighborNode, Neighborhood, NeighborhoodFilter,
-    NodeDetails, RelSchemaEntry, ScoredPath, SearchResult, TopAnomaly, TypeDistribution,
+    AUTO_GROUPED_THRESHOLD, ChannelBehavior, ChannelBehaviorOpts, ChannelSortBy, DedupMode,
+    ExplainedPeer, ExplainedScore, GraphSummary, GroupedNeighborEdge, GroupedNeighborhood,
+    HeavyEdge, HeavyEdgesOpts, HuntDiagnostic, HuntDiff, LiveTailCoverage, NeighborEdge,
+    NeighborNode, Neighborhood, NeighborhoodFilter, NodeDetails, RelSchemaEntry, ScoredPath,
+    SearchResult, TopAnomaly, TypeDistribution,
 };
 pub use anomaly::{AnomalyScorer, ScoreBreakdown, ScoringWeights, ThreatClass};
 pub use catalog::{
