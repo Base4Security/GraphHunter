@@ -42,12 +42,13 @@ fn cat_017_to_021_are_present_in_catalog() {
 }
 
 #[test]
-fn cat_022_to_029_are_present_and_parse_cleanly() {
+fn cat_022_to_030_are_present_and_parse_cleanly() {
     let cat = get_catalog();
     // Post-compromise identity + endpoint modernization — every entry must
     // (a) be present, (b) parse through parse_dsl without errors.
     for id in [
         "cat-022", "cat-023", "cat-024", "cat-025", "cat-026", "cat-027", "cat-028", "cat-029",
+        "cat-030",
     ] {
         let entry = cat
             .iter()

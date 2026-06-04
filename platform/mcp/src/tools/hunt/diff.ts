@@ -12,7 +12,7 @@ const input = z.object({
 });
 
 export const huntDiff = defineTool({
-  name: "hunt.diff",
+  name: "hunt_diff",
   description:
     "Run the same DSL hypothesis at two upper time bounds (baseline_ts, current_ts) and return what was added/removed between them. Killer tool for tracking attack progression: pass a cat-017 pattern with `baseline_ts=<T-6h>` and `current_ts=<now>` — the response tells you exactly which IPs/users were added to the spray in the last 6 hours. Paths compared by node-sequence equality after DedupMode::ByPath. Response shape: {baseline_count, current_count, added: ScoredPath[], removed: ScoredPath[]}.",
   category: "hunt",

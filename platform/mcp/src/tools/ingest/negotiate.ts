@@ -23,7 +23,7 @@ const input = z.object({
 });
 
 export const ingestNegotiate = defineTool({
-  name: "ingest.negotiate",
+  name: "ingest_negotiate",
   description:
     "Propose a FieldConfig for a raw-log sample by running the deterministic preview heuristic first and only falling back to the local LLM when the heuristic yields nothing useful. Returns a draft_id referring to a pending MappingDraft in the session's review queue — approve via review(op=approve) to stamp the FieldConfig onto the target dataset. The LLM NEVER sees production events; only the `raw_sample` block passed here.",
   category: "ingest",

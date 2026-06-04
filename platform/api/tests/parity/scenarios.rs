@@ -305,14 +305,15 @@ fn anomaly_enable_then_config_roundtrips() {
 // ── Catalog YAML loader (P2-C) ──────────────────────────────────────
 
 #[test]
-fn get_catalog_returns_29_builtin_entries() {
+fn get_catalog_returns_30_builtin_entries() {
     let (api, _id) = fresh_api_with_session();
     let cat = api.get_catalog();
-    assert_eq!(cat.len(), 29, "built-in catalog must have 29 entries");
+    assert_eq!(cat.len(), 30, "built-in catalog must have 30 entries");
     // Spot-check a couple of ids across the spectrum of categories.
     assert!(cat.iter().any(|e| e.id == "cat-001"));
     assert!(cat.iter().any(|e| e.id == "cat-017"));
     assert!(cat.iter().any(|e| e.id == "cat-029"));
+    assert!(cat.iter().any(|e| e.id == "cat-030"));
 }
 
 #[test]

@@ -87,6 +87,8 @@ pub(super) struct RunHuntResponse {
     truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostic: Option<graph_hunter_core::HuntDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live_tail_coverage: Option<graph_hunter_core::LiveTailCoverage>,
 }
 
 /// Write-heavy handler: uses spawn_blocking + timeout to avoid holding the async runtime.
@@ -165,6 +167,7 @@ pub(super) async fn handler_run_hunt(
                 path_count: resp.path_count,
                 truncated: resp.truncated,
                 diagnostic: resp.diagnostic,
+                live_tail_coverage: resp.live_tail_coverage,
             })
         }
         Ok(Ok(Err(e))) => {

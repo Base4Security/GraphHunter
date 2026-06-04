@@ -17,4 +17,4 @@ pub use persistence::{
     ensure_session_dir, session_data_dir, session_file_path, validate_session_id,
 };
 pub use session::{Session, SessionHandle, SessionStore};
-pub use session_types::{DatasetInfo, EntityTag, Note, SessionFile};
+pub use session_types::{DatasetInfo, EntityTag, LiveTailStats, Note, SessionFile, SessionPhase};

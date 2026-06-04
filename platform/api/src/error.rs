@@ -38,6 +38,10 @@ pub enum ApiError {
     #[error("invalid state: {0}")]
     InvalidState(String),
 
+    /// Operation conflicts with current session lifecycle (e.g., hunt while finalizing).
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     /// An external service (Sentinel, AI provider, ticketing) returned an
     /// error. Preserves the upstream message verbatim.
     #[error("upstream error ({service}): {message}")]
@@ -63,6 +67,7 @@ impl ApiError {
             ApiError::NoCurrentSession | ApiError::InvalidInput(_) | ApiError::InvalidState(_) => {
                 400
             }
+            ApiError::Conflict(_) => 409,
             ApiError::Upstream { .. } => 502,
             ApiError::Io(_) | ApiError::Internal(_) => 500,
         }
@@ -100,6 +105,7 @@ mod tests {
             502
         );
         assert_eq!(ApiError::Internal("x".into()).status_code(), 500);
+        assert_eq!(ApiError::Conflict("x".into()).status_code(), 409);
     }
 
     #[test]

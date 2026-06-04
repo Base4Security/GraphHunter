@@ -30,9 +30,27 @@ use crate::evtx::{
 };
 use crate::format_registry::{make_parser_for_format, resolve_format, rich_preview_for_format};
 use crate::scoring::{run_full_scoring, run_scoring_adaptive};
-use crate::state::DatasetInfo;
+use crate::state::{DatasetInfo, Session, SessionPhase};
 use crate::util::now_secs;
 use crate::{ApiError, ApiResult, EventEmitter, GraphHunterApi};
+
+/// After a failed streaming ingest, unblock hunts when the graph still has data.
+fn restore_huntable_phase_after_ingest_failure(session: &Session) {
+    let has_graph = session
+        .graph
+        .read()
+        .map(|g| g.entity_count() > 0)
+        .unwrap_or(false);
+    session.set_phase(if has_graph {
+        SessionPhase::Ready
+    } else {
+        SessionPhase::Loading
+    });
+}
+
+fn note_post_finalize_appends(session: &Session, new_relations: usize) {
+    session.note_post_finalize_appends(new_relations as u64, now_secs());
+}
 
 // ── Constants for load_data_streaming (lifted from Tauri commands) ─────
 /// Number of lines per batch during streaming line-based ingestion.
@@ -387,6 +405,9 @@ impl GraphHunterApi {
                 ingest_stats: None,
             });
         }
+        let resume_phase = resume_phase_after_finalize(session.phase());
+        session.set_phase(crate::state::SessionPhase::Finalizing);
+        let _phase_guard = FinalizePhaseGuard { session: Arc::clone(&session), resume: resume_phase };
         let (new_entities, new_relations, ingest_stats, used_auto_config) = {
             let mut graph = session
                 .graph
@@ -421,6 +442,13 @@ impl GraphHunterApi {
             }
             (ne, nr, stats, used_auto)
         };
+        // Record post-finalize appends only after the graph write guard is
+        // released: note_post_finalize_appends re-acquires graph.read(), and
+        // a read-while-write on the same thread self-deadlocks the RwLock.
+        // no-ops here: phase is Finalizing at this point (the FinalizePhaseGuard has
+        // not dropped yet), so the Ready->LiveTail transition is skipped. Sync batch
+        // ingest intentionally never enters LiveTail anyway (Track O owns that).
+        note_post_finalize_appends(&session, new_relations);
         let _ = used_auto_config; // reserved for future telemetry (which path served the ingest)
 
         {
@@ -598,6 +626,9 @@ impl GraphHunterApi {
             });
         }
 
+        let resume_phase = resume_phase_after_finalize(session.phase());
+        session.set_phase(crate::state::SessionPhase::Finalizing);
+        let _phase_guard = FinalizePhaseGuard { session: Arc::clone(&session), resume: resume_phase };
         let (new_entities, new_relations) = {
             let mut graph = session
                 .graph
@@ -612,6 +643,12 @@ impl GraphHunterApi {
             run_full_scoring(&mut graph);
             (e, r)
         };
+        // Record post-finalize appends after the write guard is dropped
+        // (calling while holding the graph write lock self-deadlocks the RwLock).
+        // no-ops here: phase is Finalizing at this point (the FinalizePhaseGuard has
+        // not dropped yet), so the Ready->LiveTail transition is skipped. Sync batch
+        // ingest intentionally never enters LiveTail anyway (Track O owns that).
+        note_post_finalize_appends(&session, new_relations);
 
         {
             let mut datasets = session
@@ -692,6 +729,9 @@ impl GraphHunterApi {
             });
         }
 
+        let resume_phase = resume_phase_after_finalize(session.phase());
+        session.set_phase(crate::state::SessionPhase::Finalizing);
+        let _phase_guard = FinalizePhaseGuard { session: Arc::clone(&session), resume: resume_phase };
         let (new_entities, new_relations, ingest_stats) = {
             let mut graph = session
                 .graph
@@ -714,6 +754,12 @@ impl GraphHunterApi {
             run_full_scoring(&mut graph);
             out
         };
+        // Record post-finalize appends after the write guard is dropped
+        // (calling while holding the graph write lock self-deadlocks the RwLock).
+        // no-ops here: phase is Finalizing at this point (the FinalizePhaseGuard has
+        // not dropped yet), so the Ready->LiveTail transition is skipped. Sync batch
+        // ingest intentionally never enters LiveTail anyway (Track O owns that).
+        note_post_finalize_appends(&session, new_relations);
 
         {
             let mut datasets = session
@@ -863,8 +909,11 @@ impl GraphHunterApi {
             let panic_emitter = Arc::clone(&bg_emitter);
             let panic_job_id = bg_job_id.clone();
             let panic_dataset_id = bg_dataset_id.clone();
+            let panic_session = Arc::clone(&bg_session);
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                bg_session.set_phase(SessionPhase::Loading);
+
                 const MAX_INGEST_LINES: usize = usize::MAX;
 
                 // Date-range filter for line-based formats (IIS, CSV). Lines
@@ -1258,6 +1307,7 @@ impl GraphHunterApi {
                                             .insert_raw_events(events, Some(&bg_dataset_id))
                                             .map_err(|e| e.to_string())?
                                     };
+                                    note_post_finalize_appends(&bg_session, nr);
                                     total_new_entities += ne;
                                     total_new_relations += nr;
 
@@ -1355,6 +1405,7 @@ impl GraphHunterApi {
                                             .insert_raw_events(events, Some(&bg_dataset_id))
                                             .map_err(|e| e.to_string())?
                                     };
+                                    note_post_finalize_appends(&bg_session, nr);
                                     total_new_entities += ne;
                                     total_new_relations += nr;
                                 }
@@ -1390,14 +1441,19 @@ impl GraphHunterApi {
                             let (events, stats) = parser.parse_raw_with_stats(contents);
                             tracing::info!("INGEST: parsed {} events", events.len());
 
-                            let mut graph = bg_session
-                                .graph
-                                .write()
-                                .map_err(|e| format!("Lock poisoned: {}", e))?;
-
-                            let (ne, nr) = graph
-                                .insert_raw_events(events, Some(&bg_dataset_id))
-                                .map_err(|e| e.to_string())?;
+                            let (ne, nr) = {
+                                let mut graph = bg_session
+                                    .graph
+                                    .write()
+                                    .map_err(|e| format!("Lock poisoned: {}", e))?;
+                                graph
+                                    .insert_raw_events(events, Some(&bg_dataset_id))
+                                    .map_err(|e| e.to_string())?
+                            };
+                            // Guard dropped above before noting appends —
+                            // note_post_finalize_appends re-locks graph.read()
+                            // and would self-deadlock under a held write guard.
+                            note_post_finalize_appends(&bg_session, nr);
                             tracing::info!("INGEST: inserted ({}, {})", ne, nr);
                             Ok((ne, nr, stats.drift))
                         }
@@ -1419,10 +1475,13 @@ impl GraphHunterApi {
                             }),
                         );
 
+                        bg_session.set_phase(crate::state::SessionPhase::Finalizing);
+
                         {
                             let mut graph = match bg_session.graph.write() {
                                 Ok(g) => g,
                                 Err(e) => {
+                                    bg_session.set_phase(SessionPhase::Ready);
                                     bg_emitter.emit(
                                         INGEST_ERROR,
                                         serde_json::to_value(&IngestError {
@@ -1456,6 +1515,8 @@ impl GraphHunterApi {
                             })
                             .unwrap_or((0, 0, Vec::new()));
 
+                        bg_session.set_phase(crate::state::SessionPhase::Ready);
+
                         bg_emitter.emit(
                             INGEST_COMPLETE,
                             serde_json::to_value(&IngestComplete {
@@ -1475,6 +1536,7 @@ impl GraphHunterApi {
                         );
                     }
                     Err(e) => {
+                        restore_huntable_phase_after_ingest_failure(&bg_session);
                         bg_emitter.emit(
                             INGEST_ERROR,
                             serde_json::to_value(&IngestError {
@@ -1489,6 +1551,7 @@ impl GraphHunterApi {
             })); // end catch_unwind
 
             if let Err(panic_info) = result {
+                restore_huntable_phase_after_ingest_failure(&panic_session);
                 let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
                     s.to_string()
                 } else if let Some(s) = panic_info.downcast_ref::<String>() {
@@ -1523,6 +1586,100 @@ fn _ensure_logparser_imported() {
 #[allow(dead_code)]
 fn _ensure_arc_imported() -> Option<Arc<u8>> {
     None
+}
+
+/// Determines which phase to restore after a synchronous ingest re-finalizes.
+/// If the session was in LiveTail (live streaming active), we must not clobber
+/// that — restore LiveTail. For any other entry phase, restore Ready.
+fn resume_phase_after_finalize(
+    prior: crate::state::SessionPhase,
+) -> crate::state::SessionPhase {
+    match prior {
+        crate::state::SessionPhase::LiveTail => crate::state::SessionPhase::LiveTail,
+        _ => crate::state::SessionPhase::Ready,
+    }
+}
+
+/// RAII guard that restores the session phase on scope exit (success, `?`-error,
+/// or panic unwind), so a failed or short-circuited sync ingest can never strand
+/// the session in `Finalizing` (which would silently reject all future hunts with
+/// a 409 and leave the session unrecoverable without a restart).
+///
+/// Usage: set the session to `Finalizing` first, then immediately construct this
+/// guard with the phase to resume. On any exit path — normal return, early `?`,
+/// or panic — `Drop` fires and calls `session.set_phase(resume)`.
+///
+/// Stores an `Arc<Session>` rather than a borrow to sidestep lifetime entanglement
+/// with the caller's `Arc<Session>` local and to make the guard `Send`-compatible
+/// for future async use. The clone is a single atomic ref-count bump.
+struct FinalizePhaseGuard {
+    session: Arc<Session>,
+    resume: crate::state::SessionPhase,
+}
+
+impl Drop for FinalizePhaseGuard {
+    fn drop(&mut self) {
+        self.session.set_phase(self.resume);
+    }
+}
+
+#[cfg(test)]
+mod resume_phase_tests {
+    use super::*;
+
+    #[test]
+    fn resume_phase_preserves_live_tail_else_ready() {
+        use crate::state::SessionPhase::*;
+        assert_eq!(resume_phase_after_finalize(LiveTail), LiveTail);
+        assert_eq!(resume_phase_after_finalize(Ready), Ready);
+        assert_eq!(resume_phase_after_finalize(Loading), Ready);
+        assert_eq!(resume_phase_after_finalize(Finalizing), Ready);
+    }
+
+    /// Proves that `FinalizePhaseGuard` restores the session phase on ANY exit
+    /// path — including an early return that bypasses the happy-path tail.
+    ///
+    /// This is the regression guard for the C5 bug: before the RAII fix, an
+    /// early `?`-return between `set_phase(Finalizing)` and the trailing
+    /// `set_phase(resume_phase)` would strand the session in `Finalizing`
+    /// forever, silently rejecting all subsequent hunts with a 409.
+    #[test]
+    fn finalize_guard_restores_phase_on_early_exit() {
+        use crate::state::SessionPhase;
+
+        let session = Arc::new(Session::new("guard-test", "guard-test", GraphHunter::new(), 0));
+        session.set_phase(SessionPhase::Ready);
+
+        // Simulate the ingest preamble: set Finalizing, create the guard.
+        let resume = resume_phase_after_finalize(session.phase());
+        session.set_phase(SessionPhase::Finalizing);
+        assert_eq!(session.phase(), SessionPhase::Finalizing);
+
+        // Enter a block that creates the guard and then "early-exits" without
+        // reaching a normal success path. The closure returns an Err, which
+        // causes the guard to be dropped when the block scope ends.
+        let result: Result<(), &str> = (|| {
+            let _guard = FinalizePhaseGuard { session: Arc::clone(&session), resume };
+            // Simulate a mid-ingest error that would have `?`-returned in
+            // the real load_data / ingest_siem / load_data_with_config.
+            return Err("simulated lock-poisoned error");
+            #[allow(unreachable_code)]
+            Ok(())
+        })();
+
+        assert!(result.is_err(), "closure must return Err to simulate early exit");
+        // The critical assertion: the session must NOT be stranded in Finalizing.
+        assert_ne!(
+            session.phase(),
+            SessionPhase::Finalizing,
+            "session must not be stranded in Finalizing after early exit"
+        );
+        assert_eq!(
+            session.phase(),
+            SessionPhase::Ready,
+            "guard must restore Ready when entry phase was Ready"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ import { defineTool } from "../../lib/types.js";
 import { HEAVY } from "../../lib/api-client.js";
 
 export const graphSubnetAnalysis = defineTool({
-  name: "graph.subnet_analysis",
+  name: "graph_subnet_analysis",
   description:
     "Analyze IP entities by /24 subnet: groups all IPs in the graph by their network segment, shows whether each subnet is internal or external, aggregates byte counts, and lists connected services. Use to identify which network segments are most active, detect lateral movement within subnets, or find unusual external destinations.",
   category: "graph",

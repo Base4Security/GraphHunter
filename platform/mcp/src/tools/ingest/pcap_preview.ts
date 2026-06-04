@@ -32,7 +32,7 @@ const input = z.object({
  * path lives in a separate tool — this one is observability-only.
  */
 export const ingestPcapPreview = defineTool({
-  name: "ingest.pcap_preview",
+  name: "ingest_pcap_preview",
   description:
     "Summarize an offline PCAP / PCAPNG capture: top source / destination IPs, top destination ports (with well-known service tags), protocol mix (TCP / UDP / ICMP / Other), and time span. Reads at most 10K packets so multi-GB captures still return in well under a second. Use to scope a capture before committing it to the graph via the (forthcoming) flow ingest path. The file MUST live on the host's local filesystem — PCAP is binary, so passing content inline is not supported.",
   category: "ingest",

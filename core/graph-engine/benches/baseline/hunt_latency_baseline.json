@@ -1,0 +1,31 @@
+{
+  "baseline_name": "main",
+  "criterion_tree": "benches/baseline/criterion",
+  "host_label": "windows-dev",
+  "captured_at": "2026-05-28",
+  "regression_threshold_pct": 10,
+  "default_tiers_only": true,
+  "note": "Criterion native baseline (main/). Refresh with: cargo bench --manifest-path core/graph-engine/Cargo.toml --bench hunt_latency -- --save-baseline main, then copy target/criterion/{user-auth-ip,user-auth-ip-hub}/**/main into benches/baseline/criterion/.",
+  "benchmarks": [
+    {
+      "group": "User-Auth-IP",
+      "size": 1000,
+      "median_ns": 102114.9325492909
+    },
+    {
+      "group": "User-Auth-IP",
+      "size": 10000,
+      "median_ns": 1028266.0714285714
+    },
+    {
+      "group": "User-Auth-IP",
+      "size": 100000,
+      "median_ns": 17255678.813559324
+    },
+    {
+      "group": "User-Auth-IP-hub",
+      "size": 10000,
+      "median_ns": 2102423.529411765
+    }
+  ]
+}

@@ -191,6 +191,13 @@ impl GraphHunterApi {
             });
         }
 
+        // Connected PAUSED: no live ingest yet, so the session is Ready
+        // (huntable over any seeded data). `sentinel_resume` flips it to
+        // LiveTail when polling actually starts; `sentinel_pause` restores
+        // Ready. (Reconciliation: the pause-by-default model from main now
+        // drives the phase, using set_phase restored from the audit branch.)
+        session.set_phase(crate::state::SessionPhase::Ready);
+
         // Announce on the canonical event channel.
         self.emitter_arc().emit(
             "sentinel-connected",
@@ -215,11 +222,14 @@ impl GraphHunterApi {
         handle.cancel_token.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(10), handle.task_handle).await;
 
-        // Final scoring pass.
+        // Final scoring pass, then restore Ready: live ingest has stopped and
+        // the graph is scored/stable, so the session is huntable again. The
+        // connector left it in LiveTail; without this it would never leave it.
         if let Some(session) = self.sessions().current_session() {
             if let Ok(mut graph) = session.graph.write() {
                 let _ = run_scoring_adaptive(&mut graph);
             }
+            session.set_phase(crate::state::SessionPhase::Ready);
         }
         // Emit status so the UI updates promptly.
         self.emitter_arc().emit(
@@ -701,6 +711,11 @@ impl GraphHunterApi {
             })?;
             let _ = h.pause_tx.send(false);
         }
+        // Live ingest is starting: mark the session LiveTail so hunts are
+        // not 409-blocked while polling.
+        if let Some(session) = self.sessions().current_session() {
+            session.set_phase(crate::state::SessionPhase::LiveTail);
+        }
         self.emitter_arc().emit(
             event_names::SENTINEL_STATUS,
             serde_json::json!({"resumed": true}),
@@ -720,6 +735,10 @@ impl GraphHunterApi {
                 ApiError::InvalidState("No Sentinel connector is running. Connect first.".into())
             })?;
             let _ = h.pause_tx.send(true);
+        }
+        // Polling stopped: no live ingest, so the session is huntable again.
+        if let Some(session) = self.sessions().current_session() {
+            session.set_phase(crate::state::SessionPhase::Ready);
         }
         self.emitter_arc().emit(
             event_names::SENTINEL_STATUS,

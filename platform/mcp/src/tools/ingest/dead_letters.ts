@@ -53,7 +53,7 @@ const input = z.object({
 });
 
 export const ingestDeadLetters = defineTool({
-  name: "ingest.dead_letters",
+  name: "ingest_dead_letters",
   description:
     "Manage the ingest dead-letter queue (parse failure, invariant violation, empty yield). op=list reads with pagination + filters. op=purge bulk-deletes by filter (or all=true). op=retry re-attempts a set of entries against their datasets' *current* FieldConfigs — the canonical recovery flow after fixing a mapping via review(op=approve). The schema carries op-specific optional fields; the runtime rejects mismatched combinations (e.g. op=retry without ids).",
   category: "ingest",

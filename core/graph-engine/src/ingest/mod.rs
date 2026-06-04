@@ -108,5 +108,7 @@ pub use metrics::{
     SourceMetricsSnapshot,
 };
 pub use parser_task::ParserTask;
-pub use source_poller::{DEFAULT_POLL_INTERVAL, PollerConfig, SourcePoller};
+pub use source_poller::{
+    CircuitState, DEFAULT_POLL_INTERVAL, PollerConfig, SourcePoller,
+};
 pub use writer::{GraphWriter, WriterMetrics, WriterMetricsSnapshot};

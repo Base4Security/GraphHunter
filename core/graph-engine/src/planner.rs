@@ -885,6 +885,28 @@ mod tests {
     }
 
     #[test]
+    fn calibration_json_loads_if_present() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/superpowers/calibration/planner-cost-hints.json"
+        );
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let raw = std::fs::read_to_string(path).expect("read calibration");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).expect("parse calibration JSON");
+        let hosts = parsed
+            .get("hosts")
+            .and_then(|h| h.as_array())
+            .expect("hosts array");
+        assert!(
+            hosts.len() >= 1,
+            "calibration must list at least one host"
+        );
+    }
+
+    #[test]
     fn structural_route_rejects_predicate_carrying_step() {
         use crate::hypothesis::Predicate;
         let mut h = Hypothesis::new("h");

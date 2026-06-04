@@ -84,6 +84,8 @@ pub fn fresh_api_with_seeded_session() -> (GraphHunterApi, String) {
         .expect("sort edges after seed");
     drop(graph);
 
+    session.set_phase(graph_hunter_api::state::SessionPhase::Ready);
+
     (api, id)
 }
 

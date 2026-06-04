@@ -25,6 +25,7 @@ impl From<ApiError> for CommandError {
                 CommandError::SessionNotFound("no current session".to_string())
             }
             ApiError::NotFound(m) | ApiError::InvalidState(m) => CommandError::InvalidInput(m),
+            ApiError::Conflict(m) => CommandError::GraphLocked(m),
             ApiError::InvalidInput(m) => CommandError::InvalidInput(m),
             ApiError::Upstream { service, message } => {
                 CommandError::Internal(format!("{service}: {message}"))

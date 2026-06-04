@@ -45,6 +45,7 @@
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::interner::StrId;
 
@@ -430,6 +431,14 @@ impl FrozenSnapshot {
 pub struct InMemoryStreamingBackend {
     vertices: RwLock<ahash::HashMap<StrId, Arc<RwLock<NeighborList>>>>,
 
+    /// Set by [`Self::finalize`] / [`Self::finalize_parallel`]. Post-
+    /// finalize appends land in `tails` instead of mutating the sorted
+    /// base neighbor lists.
+    finalized: AtomicBool,
+    /// Per-vertex unsorted post-finalize edges. Merged at read time by
+    /// [`Self::neighbors_in_window`].
+    tails: RwLock<ahash::HashMap<StrId, SmallVec<[StreamEdge; 4]>>>,
+
     /// L3 D4 stage 2 — budget-triggered auto-spill. `None` keeps the
     /// backend in pure-RAM mode (default; matches the pre-stage-2
     /// behavior). When set, every `append_edge` past the threshold
@@ -448,6 +457,8 @@ struct SpillState {
     /// hits this value, `append_edge` triggers `auto_spill`.
     budget_edges: usize,
     edges_since_last_spill: usize,
+    /// Test hook: `auto_spill` returns an I/O error without touching disk.
+    force_fail: bool,
     /// Directory hosting the auto-spill files. Either an externally-
     /// supplied session-scoped path (`with_spill_dir`) or an internal
     /// `tempfile::TempDir` that auto-deletes on drop.
@@ -470,6 +481,8 @@ impl InMemoryStreamingBackend {
     pub fn new() -> Self {
         Self {
             vertices: RwLock::new(ahash::HashMap::default()),
+            finalized: AtomicBool::new(false),
+            tails: RwLock::new(ahash::HashMap::default()),
             spill_state: parking_lot::Mutex::new(None),
         }
     }
@@ -498,6 +511,7 @@ impl InMemoryStreamingBackend {
             _temp_dir: Some(temp),
             current_path: None,
             spill_round: 0,
+            force_fail: false,
         });
         self
     }
@@ -521,6 +535,28 @@ impl InMemoryStreamingBackend {
             _temp_dir: None,
             current_path: None,
             spill_round: 0,
+            force_fail: false,
+        });
+        self
+    }
+
+    /// Test hook: enable auto-spill with `budget_edges = 1` and force
+    /// the next spill attempt to fail. Used by unit tests that assert
+    /// spill errors propagate through `append_edge_checked`.
+    pub fn with_spill_fail(self, fail: bool) -> Self {
+        if !fail {
+            return self;
+        }
+        let temp = tempfile::tempdir().expect("streaming auto-spill tempdir");
+        let dir = temp.path().to_path_buf();
+        *self.spill_state.lock() = Some(SpillState {
+            budget_edges: 1,
+            edges_since_last_spill: 0,
+            spill_dir: dir,
+            _temp_dir: Some(temp),
+            current_path: None,
+            spill_round: 0,
+            force_fail: true,
         });
         self
     }
@@ -552,13 +588,20 @@ impl InMemoryStreamingBackend {
     /// Total number of outgoing edges from `src`. Direct read
     /// without materializing the full neighbor list.
     pub fn degree_of(&self, src: StrId) -> usize {
-        let outer = self
-            .vertices
-            .read();
-        outer
+        let base = {
+            let outer = self.vertices.read();
+            outer
+                .get(&src)
+                .map(|slot| slot.read().len())
+                .unwrap_or(0)
+        };
+        let tail = self
+            .tails
+            .read()
             .get(&src)
-            .map(|slot| slot.read().len())
-            .unwrap_or(0)
+            .map(SmallVec::len)
+            .unwrap_or(0);
+        base + tail
     }
 
     /// L3 stage 2c part 2 — return the per-vertex `Arc<RwLock<NeighborList>>`
@@ -615,6 +658,55 @@ impl InMemoryStreamingBackend {
         Some(f(&*guard))
     }
 
+    /// Tail-aware companion to [`Self::with_neighbors`]: invoke `f` with
+    /// the base neighbor slice AND the post-finalize tail slice for
+    /// `src`. Either slice may be empty; `f` is called as long as `src`
+    /// has any outgoing edges in either store (returns `None` only when
+    /// the vertex is truly degree-0 in both base and tail).
+    ///
+    /// Use this for read paths that must see the COMPLETE set of
+    /// outgoing edges, including post-finalize appends that landed in
+    /// the per-vertex tail buffer instead of the sorted base list.
+    /// `neighbors_arc` / `with_neighbors` / `neighbors_snapshot` all
+    /// return BASE only and silently drop tail edges — this helper is
+    /// the read-side counterpart to the tail-aware [`Self::degree_of`].
+    ///
+    /// Holds the per-vertex base `RwLock` read guard AND the global
+    /// tails `RwLock` read guard for the duration of `f`. Keep `f`
+    /// short: collect the values you need (or push into a buffer) and
+    /// exit so concurrent post-finalize appenders are not starved.
+    pub fn with_neighbors_and_tail<R, F>(&self, src: StrId, f: F) -> Option<R>
+    where
+        F: FnOnce(&[StreamEdge], &[StreamEdge]) -> R,
+    {
+        let outer = self.vertices.read();
+        let tails = self.tails.read();
+        let base_slot = outer.get(&src);
+        let tail_entry = tails.get(&src);
+
+        // Vertex is degree-0 if both stores are empty/absent.
+        if base_slot.is_none() && tail_entry.is_none() {
+            return None;
+        }
+
+        // Materialize a base read guard if the slot exists; otherwise
+        // provide an empty slice. Same for the tail.
+        let base_guard = base_slot.map(|slot| slot.read());
+        let base_slice: &[StreamEdge] = base_guard
+            .as_deref()
+            .map(|g| g.as_slice())
+            .unwrap_or(&[]);
+        let tail_slice: &[StreamEdge] = tail_entry
+            .map(|t| t.as_slice())
+            .unwrap_or(&[]);
+
+        if base_slice.is_empty() && tail_slice.is_empty() {
+            return None;
+        }
+
+        Some(f(base_slice, tail_slice))
+    }
+
     /// L3 post-2c2 — capture a lock-free point-in-time read view
     /// over the outer vertex table. The matcher hot-path holds the
     /// snapshot for one hunt and per-frame does
@@ -640,14 +732,16 @@ impl InMemoryStreamingBackend {
     /// from RwLock+Arc-deref to a single pointer load).
     pub fn freeze(&self) -> FrozenSnapshot {
         let outer = self.vertices.read();
+        let tails = self.tails.read();
+        let merge_tails = self.finalized.load(Ordering::Acquire);
         let mut frozen: ahash::HashMap<StrId, FrozenNeighborList> =
             ahash::HashMap::with_capacity_and_hasher(
-                outer.len(),
+                outer.len() + if merge_tails { tails.len() } else { 0 },
                 ahash::RandomState::new(),
             );
         for (&sid, slot) in outer.iter() {
             let guard = slot.read();
-            let f = match &*guard {
+            let mut f = match &*guard {
                 NeighborList::Inline(sv) => {
                     FrozenNeighborList::InMemory(Arc::from(sv.as_slice()))
                 }
@@ -664,11 +758,62 @@ impl InMemoryStreamingBackend {
                     len: *len,
                 },
             };
+            if merge_tails {
+                if let Some(tail) = tails.get(&sid) {
+                    f = Self::frozen_neighbor_merging_tail(&f, &guard, tail);
+                }
+            }
             frozen.insert(sid, f);
+        }
+        if merge_tails {
+            for (&sid, tail) in tails.iter() {
+                if tail.is_empty() || frozen.contains_key(&sid) {
+                    continue;
+                }
+                // tail is maintained sorted-on-insert; copy directly.
+                let arc: Arc<[StreamEdge]> = tail.iter().copied().collect();
+                frozen.insert(
+                    sid,
+                    FrozenNeighborList::InMemory(arc),
+                );
+            }
         }
         FrozenSnapshot {
             vertices: Arc::new(frozen),
         }
+    }
+
+    /// Whether post-finalize tail appends are active.
+    pub fn is_finalized(&self) -> bool {
+        self.finalized.load(Ordering::Acquire)
+    }
+
+    /// Total edges in post-finalize tail buffers (not yet merged into base lists).
+    pub fn tail_edge_count(&self) -> u64 {
+        self.tails
+            .read()
+            .values()
+            .map(|t| t.len() as u64)
+            .sum()
+    }
+
+    fn frozen_neighbor_merging_tail(
+        base_frozen: &FrozenNeighborList,
+        base_guard: &NeighborList,
+        tail: &[StreamEdge],
+    ) -> FrozenNeighborList {
+        if tail.is_empty() {
+            return base_frozen.clone();
+        }
+        // tail is maintained sorted-on-insert (see append_edge_inner);
+        // no per-read sort needed — straight two-way merge.
+        let base_slice = base_guard.as_slice();
+        let merged = if base_slice.is_empty() {
+            tail.to_vec()
+        } else {
+            Self::merge_sorted_edge_slices(base_slice, tail)
+        };
+        FrozenNeighborList::InMemory(Arc::from(merged.into_boxed_slice()))
     }
 
     /// L3 stage 2c part 2 final — wipe all in-memory state. Used
@@ -680,6 +825,8 @@ impl InMemoryStreamingBackend {
     pub fn clear(&self) {
         let mut outer = self.vertices.write();
         outer.clear();
+        self.finalized.store(false, Ordering::Release);
+        self.tails.write().clear();
         // Reset auto-spill bookkeeping so the next round starts
         // from spill_round 0 with an empty in-memory budget.
         if let Some(state) = self.spill_state.lock().as_mut() {
@@ -700,25 +847,104 @@ impl InMemoryStreamingBackend {
     /// Hub vertices dominate the cost, but the same hubs are the
     /// ones the matcher would otherwise scan linearly per frame.
     ///
-    /// Constraint: post-finalize `append_edge` calls invalidate the
-    /// sort. Production today writes only during ingest (before
-    /// finalize) so this is fine. A future live-tail use case will
-    /// need a separate "tail buffer" of unsorted post-finalize
-    /// edges merged in at read time.
+    /// Post-finalize appends go to the per-vertex tail buffer (see
+    /// `tails`) and are merged at read time via
+    /// [`Self::neighbors_in_window`].
     pub fn finalize(&self) {
-        let outer = self
-            .vertices
-            .read();
+        let outer = self.vertices.read();
         for slot in outer.values() {
-            let mut guard = slot.write();
-            match &mut *guard {
-                NeighborList::Inline(sv) => sv.sort_unstable_by_key(|e| e.timestamp),
-                NeighborList::Vec(v) => v.sort_unstable_by_key(|e| e.timestamp),
-                // Already spilled; the file is sorted by construction
-                // (consolidate writes runs in their current order, and
-                // production today calls finalize() before consolidate()).
-                NeighborList::Mmap { .. } => {}
+            Self::sort_neighbor_slot(&mut *slot.write());
+        }
+        self.finalized.store(true, Ordering::Release);
+    }
+
+    /// Same semantics as [`Self::finalize`] but sorts per-vertex lists in
+    /// parallel. Hub-heavy graphs benefit; Mmap-backed rows are unchanged.
+    ///
+    /// Slots with fewer than 2 edges are skipped — a 0- or 1-element list is
+    /// already sorted and scheduling a rayon task for it costs more than it
+    /// saves.
+    pub fn finalize_parallel(&self) {
+        use rayon::prelude::*;
+
+        let slots: Vec<_> = {
+            let outer = self.vertices.read();
+            outer.values().cloned().collect()
+        };
+        slots.par_iter().for_each(|slot| {
+            // Skip no-op sorts: a list of 0 or 1 edges needs no ordering.
+            if slot.read().len() < 2 {
+                return;
             }
+            Self::sort_neighbor_slot(&mut *slot.write());
+        });
+        self.finalized.store(true, Ordering::Release);
+    }
+
+    /// Returns outgoing edges from `src` whose timestamps fall in
+    /// `[window.0, window.1]` (inclusive), merging the sorted base
+    /// neighbor list with any post-finalize tail edges.
+    pub fn neighbors_in_window(&self, src: StrId, window: (i64, i64)) -> Vec<StreamEdge> {
+        let (tw_start, tw_end) = window;
+        let base_in_window: Vec<StreamEdge> = {
+            let outer = self.vertices.read();
+            match outer.get(&src) {
+                Some(slot) => {
+                    let guard = slot.read();
+                    let edges = guard.as_slice();
+                    let lo = edges.partition_point(|e| e.timestamp < tw_start);
+                    let hi = edges.partition_point(|e| e.timestamp <= tw_end);
+                    edges[lo..hi].to_vec()
+                }
+                None => Vec::new(),
+            }
+        };
+
+        // tail is maintained sorted-on-insert; filter preserves order
+        // so tail_in_window is already sorted — no per-read sort needed.
+        let tail_in_window: Vec<StreamEdge> = self
+            .tails
+            .read()
+            .get(&src)
+            .map(|tail| {
+                tail.iter()
+                    .copied()
+                    .filter(|e| e.timestamp >= tw_start && e.timestamp <= tw_end)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if tail_in_window.is_empty() {
+            return base_in_window;
+        }
+        Self::merge_sorted_edge_slices(&base_in_window, &tail_in_window)
+    }
+
+    fn merge_sorted_edge_slices(base: &[StreamEdge], tail: &[StreamEdge]) -> Vec<StreamEdge> {
+        let mut out = Vec::with_capacity(base.len() + tail.len());
+        let mut i = 0usize;
+        let mut j = 0usize;
+        while i < base.len() && j < tail.len() {
+            if base[i].timestamp <= tail[j].timestamp {
+                out.push(base[i]);
+                i += 1;
+            } else {
+                out.push(tail[j]);
+                j += 1;
+            }
+        }
+        out.extend_from_slice(&base[i..]);
+        out.extend_from_slice(&tail[j..]);
+        out
+    }
+
+    fn sort_neighbor_slot(guard: &mut NeighborList) {
+        match guard {
+            NeighborList::Inline(sv) => sv.sort_unstable_by_key(|e| e.timestamp),
+            NeighborList::Vec(v) => v.sort_unstable_by_key(|e| e.timestamp),
+            // Already spilled; the file is sorted by construction
+            // (consolidate writes runs in their current order, and
+            // production today calls finalize() before consolidate()).
+            NeighborList::Mmap { .. } => {}
         }
     }
 
@@ -925,6 +1151,17 @@ impl InMemoryStreamingBackend {
     /// state is left consistent (vertices still on the previous
     /// `Mmap` or in-memory variants).
     fn auto_spill(&self) -> std::io::Result<()> {
+        if self
+            .spill_state
+            .lock()
+            .as_ref()
+            .is_some_and(|s| s.force_fail)
+        {
+            return Err(std::io::Error::other(
+                "streaming auto-spill forced failure (test hook)",
+            ));
+        }
+
         use std::io::Write;
         const MAGIC: u32 = 0x47485353;
         const VERSION: u32 = 1;
@@ -1052,10 +1289,48 @@ impl InMemoryStreamingBackend {
 
         Ok(())
     }
-}
 
-impl StreamingGraphBackend for InMemoryStreamingBackend {
-    fn append_edge(&self, src: StrId, edge: StreamEdge) {
+    /// Append one edge and surface auto-spill failures to the caller.
+    pub fn try_append_edge(&self, src: StrId, edge: StreamEdge) -> Result<(), crate::errors::GraphError> {
+        self.append_edge_inner(src, edge);
+        let needs_spill = {
+            let mut state = self.spill_state.lock();
+            match state.as_mut() {
+                Some(s) => {
+                    s.edges_since_last_spill += 1;
+                    s.edges_since_last_spill >= s.budget_edges
+                }
+                None => false,
+            }
+        };
+        if needs_spill {
+            self.auto_spill()
+                .map_err(|e| crate::errors::GraphError::Spill(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Checked append used by the ingest writer path (`push_to_streaming`).
+    pub fn append_edge_checked(
+        &self,
+        src: StrId,
+        edge: StreamEdge,
+    ) -> Result<(), crate::errors::GraphError> {
+        self.try_append_edge(src, edge)
+    }
+
+    fn append_edge_inner(&self, src: StrId, edge: StreamEdge) {
+        if self.finalized.load(Ordering::Acquire) {
+            // Tail is kept sorted by timestamp (same tiebreak as the
+            // sorted base: timestamp only). Insert at the sorted position
+            // so freeze() and neighbors_in_window() can skip the
+            // per-read sort and go straight to two-way merge.
+            let mut tails = self.tails.write();
+            let tail = tails.entry(src).or_default();
+            let pos = tail.partition_point(|e| e.timestamp <= edge.timestamp);
+            tail.insert(pos, edge);
+            return;
+        }
         // Fast path: vertex already exists, take a read lock on
         // the outer table and a write lock on the per-vertex slot.
         {
@@ -1076,31 +1351,18 @@ impl StreamingGraphBackend for InMemoryStreamingBackend {
                 guard.push(edge);
             }
         }
+    }
+}
 
-        // L3 D4 stage 2 — budget-triggered auto-spill. The Mutex
-        // is taken last so the per-vertex critical section is the
-        // smallest possible window; the only contention is between
-        // concurrent appenders crossing the threshold simultaneously
-        // (one wins the spill, the other re-checks and is a no-op).
-        let needs_spill = {
-            let mut state = self.spill_state.lock();
-            match state.as_mut() {
-                Some(s) => {
-                    s.edges_since_last_spill += 1;
-                    s.edges_since_last_spill >= s.budget_edges
-                }
-                None => false,
-            }
-        };
-        if needs_spill {
-            // Best-effort: a failed auto-spill is logged but does not
-            // abort the ingest. The ingest can keep using RAM until
-            // memory pressure forces an OS-level OOM, at which point
-            // the analyst sees a hard failure rather than a silent
-            // data loss.
-            if let Err(e) = self.auto_spill() {
-                eprintln!("streaming auto-spill failed: {e}");
-            }
+impl StreamingGraphBackend for InMemoryStreamingBackend {
+    fn append_edge(&self, src: StrId, edge: StreamEdge) {
+        if let Err(e) = self.try_append_edge(src, edge) {
+            // Trait API stays infallible for legacy/tests; writer path
+            // uses `append_edge_checked` via `push_to_streaming`.
+            #[cfg(debug_assertions)]
+            eprintln!("streaming append_edge spill failure: {e}");
+            #[cfg(not(debug_assertions))]
+            let _ = e;
         }
     }
 
@@ -1122,13 +1384,17 @@ impl StreamingGraphBackend for InMemoryStreamingBackend {
     }
 
     fn edge_count(&self) -> usize {
-        let outer = self
-            .vertices
-            .read();
-        outer
+        let base: usize = {
+            let outer = self.vertices.read();
+            outer.values().map(|slot| slot.read().len()).sum()
+        };
+        let tail: usize = self
+            .tails
+            .read()
             .values()
-            .map(|slot| slot.read().len())
-            .sum()
+            .map(SmallVec::len)
+            .sum();
+        base + tail
     }
 }
 
@@ -1372,6 +1638,16 @@ mod tests {
     }
 
     #[test]
+    fn append_edge_surfaces_spill_failure() {
+        use crate::errors::GraphError;
+
+        let backend = InMemoryStreamingBackend::new().with_spill_fail(true);
+        let src = StrId::from_raw(1);
+        let err = backend.append_edge_checked(src, edge(2, 100, 0));
+        assert!(matches!(err, Err(GraphError::Spill(_))));
+    }
+
+    #[test]
     fn auto_spill_triggers_at_budget_and_swaps_to_mmap() {
         // L3 D4 stage 2 — budget of 5 edges. The 5th push triggers
         // a spill (counter reaches the threshold AT push 5, before
@@ -1599,6 +1875,53 @@ mod tests {
     }
 
     #[test]
+    fn neighbors_merge_base_and_tail_by_timestamp() {
+        let backend = InMemoryStreamingBackend::new();
+        let src = StrId::from_raw(1);
+        backend.append_edge(src, edge(2, 100, 0));
+        backend.append_edge(src, edge(3, 300, 0));
+        backend.finalize();
+        backend.append_edge(src, edge(4, 200, 0));
+
+        let window = (150i64, 250i64);
+        let n = backend.neighbors_in_window(src, window);
+        assert_eq!(n.len(), 1);
+        assert_eq!(n[0].dest_sid, StrId::from_raw(4));
+        assert_eq!(backend.degree_of(src), 3);
+    }
+
+    #[test]
+    fn post_finalize_append_does_not_mutate_sorted_base() {
+        let backend = InMemoryStreamingBackend::new();
+        let src = StrId::from_raw(1);
+        backend.append_edge(src, edge(2, 100, 0));
+        backend.append_edge(src, edge(3, 200, 0));
+        backend.finalize();
+
+        let arc = backend.neighbors_arc(src).expect("vertex");
+        let pre_len = arc.read().len();
+        backend.append_edge(src, edge(4, 150, 0));
+        assert_eq!(arc.read().len(), pre_len);
+        assert_eq!(backend.degree_of(src), pre_len + 1);
+    }
+
+    #[test]
+    fn freeze_includes_post_finalize_tails() {
+        let backend = InMemoryStreamingBackend::new();
+        let src = StrId::from_raw(1);
+        backend.append_edge(src, edge(2, 100, 0));
+        backend.append_edge(src, edge(3, 300, 0));
+        backend.finalize();
+        backend.append_edge(src, edge(4, 200, 0));
+
+        let snap = backend.freeze();
+        let neighbors = snap.neighbors(src).expect("src").as_slice();
+        assert_eq!(neighbors.len(), 3);
+        let timestamps: Vec<i64> = neighbors.iter().map(|e| e.timestamp).collect();
+        assert_eq!(timestamps, vec![100, 200, 300]);
+    }
+
+    #[test]
     fn finalize_sorts_each_vertex_by_timestamp() {
         // L3 stage 2c part 2: post-finalize the streaming slice is
         // sorted by timestamp per-vertex, mirroring edge_store's
@@ -1631,6 +1954,46 @@ mod tests {
         for w in hs.windows(2) {
             assert!(w[0].timestamp <= w[1].timestamp, "hub sorted");
         }
+    }
+
+    #[test]
+    fn finalize_parallel_matches_sequential() {
+        fn seed(backend: &InMemoryStreamingBackend) {
+            for src_raw in 1..=10u32 {
+                let src = StrId::from_raw(src_raw);
+                for i in 0..10u32 {
+                    let ts = ((src_raw * 17 + i * 13) % 1000) as i64;
+                    backend.append_edge(src, edge(src_raw + 100 + i, ts, 0));
+                }
+            }
+        }
+
+        fn neighbor_timestamps(backend: &InMemoryStreamingBackend) -> Vec<(StrId, Vec<i64>)> {
+            let mut out = Vec::new();
+            for src_raw in 1..=10u32 {
+                let src = StrId::from_raw(src_raw);
+                let arc = backend.neighbors_arc(src).expect("vertex");
+                let guard = arc.read();
+                out.push((
+                    src,
+                    guard.as_slice().iter().map(|e| e.timestamp).collect(),
+                ));
+            }
+            out
+        }
+
+        let sequential = InMemoryStreamingBackend::new();
+        seed(&sequential);
+        sequential.finalize();
+
+        let parallel = InMemoryStreamingBackend::new();
+        seed(&parallel);
+        parallel.finalize_parallel();
+
+        assert_eq!(
+            neighbor_timestamps(&sequential),
+            neighbor_timestamps(&parallel)
+        );
     }
 
     #[test]
@@ -1696,5 +2059,78 @@ mod tests {
         assert!(backend
             .with_neighbors(absent, |list| list.len())
             .is_none());
+    }
+
+    // ── H-3 property test ─────────────────────────────────────────────────
+    //
+    // For random append streams split at a random index into pre-finalize
+    // (go to base via append_edge) and post-finalize (go to tail), the
+    // merged read output must equal a full re-sort of all appended edges
+    // by timestamp.
+    //
+    // Uses a deterministic inline LCG (Knuth MMIX) seeded by a constant
+    // so the test is reproducible without a `rand` dev-dependency.
+    #[test]
+    fn tail_merge_matches_full_resort_on_random_streams() {
+        // Knuth MMIX LCG: next state = state * 6364136223846793005 + 1442695040888963407
+        fn lcg_next(state: &mut u64) -> u64 {
+            *state = state.wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            *state
+        }
+
+        let mut rng = 0xDEAD_BEEF_CAFE_BABEu64;
+        let src = StrId::from_raw(1);
+
+        for _iter in 0..200 {
+            // N in [2, 20]
+            let n = (lcg_next(&mut rng) % 19 + 2) as usize;
+
+            // Generate N timestamps in [0, 999]
+            let timestamps: Vec<i64> = (0..n)
+                .map(|_| (lcg_next(&mut rng) % 1000) as i64)
+                .collect();
+
+            // Split index in [1, n) — at least one pre-finalize edge so the
+            // base is non-empty, at least one post-finalize edge in the tail.
+            let split = (lcg_next(&mut rng) % (n as u64 - 1) + 1) as usize;
+
+            let backend = InMemoryStreamingBackend::new();
+
+            // Pre-finalize: edges[0..split] go into the sorted base.
+            for &ts in &timestamps[..split] {
+                backend.append_edge(src, edge(2, ts, 0));
+            }
+            backend.finalize();
+
+            // Post-finalize: edges[split..n] go into the tail.
+            for &ts in &timestamps[split..] {
+                backend.append_edge(src, edge(2, ts, 0));
+            }
+
+            // Expected: full re-sort of all timestamps.
+            let mut expected = timestamps.clone();
+            expected.sort_unstable();
+
+            // --- Check via freeze().neighbors() ---
+            let snap = backend.freeze();
+            let frozen = snap.neighbors(src).expect("src has edges");
+            let got_freeze: Vec<i64> = frozen.as_slice().iter().map(|e| e.timestamp).collect();
+            assert_eq!(
+                got_freeze, expected,
+                "iter={_iter} n={n} split={split}: freeze merge mismatch"
+            );
+
+            // --- Check via neighbors_in_window (full window) ---
+            let got_window: Vec<i64> = backend
+                .neighbors_in_window(src, (i64::MIN, i64::MAX))
+                .iter()
+                .map(|e| e.timestamp)
+                .collect();
+            assert_eq!(
+                got_window, expected,
+                "iter={_iter} n={n} split={split}: neighbors_in_window merge mismatch"
+            );
+        }
     }
 }

@@ -182,6 +182,38 @@ fn relation_type_tag_matches(pattern: &RelationType, tag: u8) -> bool {
     *pattern == RelationType::Any || pattern.to_u8() == tag
 }
 
+// ── Parallel-finalize dispatch ────────────────────────────────────────────────
+
+/// Minimum vertex count above which the parallel sort path is chosen by
+/// default.  Below this the rayon scheduler overhead exceeds sorting gains.
+const PARALLEL_FINALIZE_VERTEX_THRESHOLD: usize = 50_000;
+
+/// Minimum edge count above which the parallel sort path is chosen by default.
+/// A graph with many edges but few vertices (dense hubs) also benefits.
+const PARALLEL_FINALIZE_EDGE_THRESHOLD: usize = 1_000_000;
+
+/// Decides whether `finalize_parallel` should be used for a graph of the
+/// given shape.
+///
+/// * `env_override = Some(true)`  — `GRAPHHUNTER_PARALLEL_FINALIZE=1`; force
+///   parallel regardless of size.
+/// * `env_override = Some(false)` — `GRAPHHUNTER_PARALLEL_FINALIZE=0`; escape
+///   hatch for one release if rayon-scheduler regressions appear.
+/// * `env_override = None`        — size threshold decides.
+pub(crate) fn should_finalize_parallel(
+    vertex_count: usize,
+    edge_count: usize,
+    env_override: Option<bool>,
+) -> bool {
+    match env_override {
+        Some(forced) => forced,
+        None => {
+            vertex_count > PARALLEL_FINALIZE_VERTEX_THRESHOLD
+                || edge_count > PARALLEL_FINALIZE_EDGE_THRESHOLD
+        }
+    }
+}
+
 impl GraphHunter {
     /// Creates a new empty graph.
     pub fn new() -> Self {
@@ -216,6 +248,19 @@ impl GraphHunter {
             streaming_snapshot: std::sync::OnceLock::new(),
             mutation_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Test hook: construct a GraphHunter whose streaming backend is armed with
+    /// `with_spill_fail(true)` — budget_edges=1, force_fail=true.  The first
+    /// `push_to_streaming` call will return `GraphError::Spill(_)`.  Used by
+    /// C3a regression tests only; do not call from production code.
+    #[cfg(test)]
+    fn with_spill_failing_backend() -> Self {
+        let mut g = Self::new();
+        g.streaming = std::sync::Arc::new(
+            crate::streaming::InMemoryStreamingBackend::new().with_spill_fail(true),
+        );
+        g
     }
 
     /// D3 stage 3 — current mutation version. Caller-side caches
@@ -398,6 +443,9 @@ impl GraphHunter {
             scorer.observe_edge(&relation.source_id, &relation.dest_id);
         }
 
+        // meta_store.append precedes the fallible push_to_streaming below; on a
+        // spill failure the offset is orphaned (unreferenced) but harmless — the
+        // store is append-only and non-structural. Intentional C3a trade-off.
         let meta_offset = self.meta_store.append(&relation.metadata);
         let ds_tag = self.intern_dataset_tag(relation.dataset_id.as_deref());
         let compact = CompactRelation {
@@ -410,72 +458,69 @@ impl GraphHunter {
             ingested_at_delta: encode_ingested_at(now_seconds()),
         };
 
+        // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
+        self.push_to_streaming(&compact)?;
         self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-        self.edges_sorted = false;
+        self.on_streaming_edge_appended(src_sid, dst_sid);
+        Ok(())
+    }
 
-        // L3 stage 2c part 2 — single canonical write path. The
-        // dual-write to edge_store is gone; streaming is the sole
-        // store. CompactRelation is constructed only for the NLF /
-        // delta-aware index updates that follow; the streaming
-        // append_edge takes a transmuted StreamEdge directly.
+    /// Shared post-append hook: invalidate cached snapshot, try incremental
+    /// NLF/k-hop updates, bump mutation version. Used by `add_relation` and
+    /// `insert_raw_events` so live-tail appends stay matcher-visible.
+    fn on_streaming_edge_appended(&mut self, src_sid: StrId, dst_sid: StrId) {
+        self.edges_sorted = false;
+        self.streaming_snapshot = std::sync::OnceLock::new();
+
+        // C2 fix: incremental deltas read BASE neighbors only (via
+        // `streaming.with_neighbors` / `neighbors_arc`), which does NOT
+        // include the post-finalize TAIL buffer. Any delta applied after
+        // finalize would silently produce a stale index that misses every
+        // tail edge. The only safe action is a full invalidate-and-rebuild:
+        // drop the OnceLocks so the next hunt pays the O(E) rebuild cost
+        // against the complete base+tail graph.
+        //
+        // Pre-finalize appends still reach the incremental path below because
+        // all edges are in the base at that point and deltas are sound. NOTE:
+        // the lazy NLF/k-hop indexes are only built on the first hunt (which
+        // requires a finalized graph), so the incremental delta path below is
+        // currently dormant in production. Track H revisits it with a
+        // tail-aware delta; until then, do not assume it runs.
+        if self.streaming.is_finalized() {
+            if self.nlf.get().is_some() {
+                self.nlf = std::sync::OnceLock::new();
+            }
+            if self.khop_reach.get().is_some() {
+                self.khop_reach = std::sync::OnceLock::new();
+            }
+            self.bump_mutation_version();
+            return;
+        }
+
         let dst_tag = self
             .entity_type_tags
             .get(dst_sid.index())
             .copied()
             .unwrap_or(crate::nlf::NLF_TYPE_COUNT as u8);
-        self.push_to_streaming(&compact);
-        // The cached streaming-outer snapshot is now stale (the
-        // vertex set may have grown / per-vertex slot layout
-        // changed). Drop it so the next matcher invocation
-        // re-snapshots. Cheap (atomic) when the snapshot wasn't
-        // built yet (the typical path during ingest).
-        self.streaming_snapshot = std::sync::OnceLock::new();
 
-        // L3 stage 2 — incremental NLF update. Try mutating the
-        // existing NlfTable in place; on success the lazy build
-        // doesn't have to re-run on the next query, saving an
-        // O(E) full rebuild per ingest. Falls back to invalidate
-        // when the table is mmap-spilled (read-only) or hasn't
-        // been built yet.
         let mut nlf_invalidate = true;
         if let Some(nlf) = self.nlf.get_mut() {
             if nlf.try_record_edge(src_sid, dst_tag) {
                 nlf_invalidate = false;
             }
         } else if self.nlf.get().is_none() {
-            // NLF was never built — nothing to invalidate either.
             nlf_invalidate = false;
         }
         if nlf_invalidate {
             self.nlf = std::sync::OnceLock::new();
         }
 
-        // L3 stage 2b — incremental khop_reach delta-update. When
-        // the index is built and heap-resident, propagate the new
-        // edge through up to MAX_DEPTH-1 rounds of reverse
-        // adjacency. On hub blowout (>budget visited) or
-        // mmap-spilled backing, fall back to invalidate.
         const KHOP_DELTA_BUDGET: usize = 100_000;
         let mut khop_invalidate = true;
-        // Take a separate handle to the streaming Arc and a borrow
-        // of reverse_adj BEFORE getting the mutable handle to
-        // khop_reach — borrow checker can't split the field
-        // accesses through `self.khop_reach.get_mut()` itself.
         let streaming_handle = self.streaming.clone();
         let reverse_adj_view: &ahash::HashMap<StrId, Vec<StrId>> = &self.reverse_adj;
-        // SAFETY: we promise not to mutate `reverse_adj` during the
-        // delta call. The mutation below is on `self.khop_reach`'s
-        // internals only (bits / rank / temporal arrays), which
-        // are disjoint from `reverse_adj`. Using a raw pointer to
-        // sidestep the borrow checker's coarse view of `self`.
         let reverse_adj_ptr: *const ahash::HashMap<StrId, Vec<StrId>> = reverse_adj_view;
         if let Some(reach) = self.khop_reach.get_mut() {
-            // SAFETY: the pointer was derived from a live borrow of
-            // `self.reverse_adj`; `reach` is a mutable borrow of
-            // `self.khop_reach`. The two fields are disjoint, so
-            // dereferencing `reverse_adj_ptr` while `reach` is
-            // borrowed is sound — we just can't express that
-            // through plain references.
             let reverse_adj_safe: &ahash::HashMap<StrId, Vec<StrId>> =
                 unsafe { &*reverse_adj_ptr };
             if reach.try_record_edge_delta(
@@ -487,14 +532,40 @@ impl GraphHunter {
                 khop_invalidate = false;
             }
         } else if self.khop_reach.get().is_none() {
-            // Never built — nothing to invalidate.
             khop_invalidate = false;
         }
         if khop_invalidate {
             self.khop_reach = std::sync::OnceLock::new();
         }
         self.bump_mutation_version();
-        Ok(())
+    }
+
+    /// Whether the streaming backend has finalized base neighbor lists.
+    pub fn streaming_is_finalized(&self) -> bool {
+        self.streaming.is_finalized()
+    }
+
+    /// Edges appended after finalize (tail buffer only).
+    pub fn streaming_tail_edge_count(&self) -> u64 {
+        self.streaming.tail_edge_count()
+    }
+
+    /// Coverage metadata for hunts during live-tail ingest.
+    pub fn live_tail_coverage(&self, phase: &str) -> Option<crate::analytics::LiveTailCoverage> {
+        if phase != "live_tail" {
+            return None;
+        }
+        let tail = self.streaming.tail_edge_count();
+        if tail == 0 {
+            return None;
+        }
+        let total = self.streaming_edge_count().max(1) as f64;
+        let index_coverage = 1.0 - (tail as f64 / total).min(0.5);
+        Some(crate::analytics::LiveTailCoverage {
+            phase: phase.to_string(),
+            tail_edge_count: tail,
+            index_coverage,
+        })
     }
 
     /// Gets or creates a dataset tag index.
@@ -660,14 +731,14 @@ impl GraphHunter {
     /// `#[repr(C)]` layout-identity between `CompactRelation` and
     /// `StreamEdge` to byte-copy without per-field translation.
     #[inline]
-    fn push_to_streaming(&self, compact: &CompactRelation) {
-        use crate::streaming::StreamingGraphBackend;
+    fn push_to_streaming(&self, compact: &CompactRelation) -> Result<(), GraphError> {
         // SAFETY: CompactRelation and StreamEdge are both
         // #[repr(C)] with identical field order and types.
         let edge: crate::streaming::StreamEdge = unsafe {
             std::ptr::read(compact as *const _ as *const crate::streaming::StreamEdge)
         };
-        self.streaming.append_edge(compact.source_sid, edge);
+        self.streaming
+            .append_edge_checked(compact.source_sid, edge)
     }
 
     /// Internal: get compact relations by StrId and type.
@@ -777,7 +848,31 @@ impl GraphHunter {
         if self.edges_sorted {
             return Ok(());
         }
-        self.streaming.finalize();
+        // Parse the env-var into an explicit opt-in/opt-out (Some(true/false)),
+        // or None meaning "use the size threshold".  Keep =0 as a one-release
+        // escape hatch in case of rayon-scheduler regressions.
+        let env_override: Option<bool> = match std::env::var("GRAPHHUNTER_PARALLEL_FINALIZE") {
+            Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => Some(true),
+            Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => Some(false),
+            Ok(v) => {
+                // Unrecognized value: fall through to the size threshold rather
+                // than silently forcing sequential (which would mask a typo like
+                // `=tru` on a large graph the user meant to parallelize).
+                eprintln!(
+                    "GraphHunter: GRAPHHUNTER_PARALLEL_FINALIZE=\"{v}\" not recognized (expected 1/0/true/false); using size-threshold default"
+                );
+                None
+            }
+            Err(_) => None,
+        };
+        use crate::streaming::StreamingGraphBackend as _;
+        let vcount = self.streaming.vertex_count();
+        let ecount = self.streaming.edge_count();
+        if should_finalize_parallel(vcount, ecount, env_override) {
+            self.streaming.finalize_parallel();
+        } else {
+            self.streaming.finalize();
+        }
         self.edges_sorted = true;
         // Heavy-logs #3.5: index builds (NLF + khop_reach) are
         // *lazy* now. Resetting the OnceLocks here ensures any
@@ -899,8 +994,8 @@ impl GraphHunter {
         // hypotheses (single-step or all-Any). Behind an env gate so
         // it can be A/B'd against the regular path.
         let semijoin_enabled = std::env::var("GRAPHHUNTER_SEMIJOIN")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
         if semijoin_enabled && !crate::semijoin::is_trivial(hypothesis) {
             let mut cands = crate::semijoin::CandidateSets::seed(self, hypothesis);
             crate::semijoin::refine(self, hypothesis, &mut cands);
@@ -944,14 +1039,14 @@ impl GraphHunter {
             }
         };
 
-        // C2 — AMAC interleaved DFS. Default OFF; opt-in via the
-        // `GRAPHHUNTER_AMAC=1` env var. Processes starts in chunks of K
+        // C2 — AMAC interleaved DFS. Default ON; opt-out via
+        // `GRAPHHUNTER_AMAC=0`. Processes starts in chunks of K
         // contexts that round-robin through the inner edge loop, with
         // cross-context prefetch on the next context's pending edge.
         // Result-set parity with the regular DFS is verified by tests.
         let amac_enabled = std::env::var("GRAPHHUNTER_AMAC")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+            .unwrap_or(true);
 
         let results: Vec<HuntResult> = if amac_enabled && start_sids.len() >= 8 {
             let rc = Arc::clone(&result_count);
@@ -2498,8 +2593,9 @@ impl GraphHunter {
             };
 
             // Always insert relation
+            // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
+            self.push_to_streaming(&compact)?;
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-            self.push_to_streaming(&compact);
             new_relations += 1;
         }
 
@@ -2541,7 +2637,7 @@ impl GraphHunter {
 
         self.streaming.clear();
         for c in &kept {
-            self.push_to_streaming(c);
+            self.push_to_streaming(c)?;
         }
         self.streaming.finalize();
 
@@ -2862,8 +2958,9 @@ impl GraphHunter {
                 ingested_at_delta: 0,
             };
 
+            // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
+            self.push_to_streaming(&compact)?;
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-            self.push_to_streaming(&compact);
             new_relations += 1;
 
             if (i + 1) % chunk_size == 0 || i + 1 == total {
@@ -2990,8 +3087,10 @@ impl GraphHunter {
                 ingested_at_delta: 0,
             };
 
+            // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
+            self.push_to_streaming(&compact)?;
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-            self.push_to_streaming(&compact);
+            self.on_streaming_edge_appended(src_sid, dst_sid);
             new_relations += 1;
         }
 
@@ -3077,8 +3176,10 @@ impl GraphHunter {
                 ingested_at_delta: 0,
             };
 
+            // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
+            self.push_to_streaming(&compact)?;
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-            self.push_to_streaming(&compact);
+            self.on_streaming_edge_appended(src_sid, dst_sid);
             new_relations += 1;
         }
 
@@ -3295,8 +3396,9 @@ impl GraphHunter {
                 dataset_tag: ds_tag,
                 ingested_at_delta: 0,
             };
+            // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
+            self.push_to_streaming(&compact)?;
             self.reverse_adj.entry(dst_sid).or_default().push(src_sid);
-            self.push_to_streaming(&compact);
         }
         self.streaming.finalize();
 
@@ -3336,5 +3438,162 @@ pub struct CompactionStats {
 impl Default for GraphHunter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::Entity;
+    use crate::hypothesis::{Hypothesis, HypothesisStep};
+    use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
+
+    /// C2 regression: after indexes are built on a finalized graph, a
+    /// post-finalize `add_relation` must INVALIDATE both `nlf` and
+    /// `khop_reach` so they rebuild tail-inclusively on the next hunt.
+    ///
+    /// Before the fix: `on_streaming_edge_appended` runs the incremental
+    /// delta path which reads BASE neighbors only and silently succeeds,
+    /// leaving both OnceLocks populated with stale (tail-blind) data.
+    ///
+    /// After the fix: the finalized-gate fires, both OnceLocks are reset
+    /// to `OnceLock::new()` (empty), and the function returns early.
+    #[test]
+    fn post_finalize_tail_edge_is_visible_to_khop() {
+        let mut g = GraphHunter::new();
+
+        // Build A(User) --Auth--> B(Host) at t=100
+        g.add_entity(Entity::new("A", EntityType::User)).unwrap();
+        g.add_entity(Entity::new("B", EntityType::Host)).unwrap();
+        g.add_relation(Relation::new("A", "B", RelationType::Auth, 100))
+            .unwrap();
+
+        // Finalize: sorts edges and arms the streaming base.
+        g.sort_edges_by_timestamp().unwrap();
+        assert!(g.streaming.is_finalized(), "should be finalized after sort");
+
+        // Warm-up hunt: use a 2-step hypothesis so both NLF and khop_reach
+        // are built (khop is skipped for single-step hypotheses per
+        // `khop_reach::is_trivial`). Results may be empty — we only care
+        // that the indexes are populated.
+        let warmup = Hypothesis::new("warmup")
+            .add_step(HypothesisStep::new(
+                EntityType::User,
+                RelationType::Auth,
+                EntityType::Host,
+            ))
+            .add_step(HypothesisStep::new(
+                EntityType::Host,
+                RelationType::Auth,
+                EntityType::User,
+            ));
+        let _ = g.search_temporal_pattern(&warmup, None, None);
+
+        // Both indexes must be populated after the hunt.
+        assert!(g.nlf.get().is_some(), "NLF must be built after warm-up hunt");
+        assert!(
+            g.khop_reach.get().is_some(),
+            "khop_reach must be built after warm-up hunt"
+        );
+
+        // Post-finalize append: add new vertex C and edge B --Auth--> C.
+        g.add_entity(Entity::new("C", EntityType::User)).unwrap();
+        g.add_relation(Relation::new("B", "C", RelationType::Auth, 200))
+            .unwrap();
+
+        // After the fix: both OnceLocks must be invalidated (None) so the
+        // next hunt rebuilds them against the full base+tail graph.
+        assert!(
+            g.nlf.get().is_none(),
+            "NLF must be invalidated after post-finalize append (C2 fix)"
+        );
+        assert!(
+            g.khop_reach.get().is_none(),
+            "khop_reach must be invalidated after post-finalize append (C2 fix)"
+        );
+    }
+
+    /// C3a regression: when `push_to_streaming` spills and returns
+    /// `GraphError::Spill`, `add_relation` must propagate the error AND
+    /// leave no dangling reverse edge for the destination entity.
+    ///
+    /// Before the fix: `reverse_adj[dst].push(src)` runs first, then the
+    /// fallible `push_to_streaming` bails — leaving dst with a phantom
+    /// src in its reverse-adjacency list even though the forward edge was
+    /// never written.
+    ///
+    /// After the fix: `push_to_streaming` runs first; on error we return
+    /// immediately before touching `reverse_adj`.
+    #[test]
+    fn spill_failure_leaves_no_dangling_reverse_edge() {
+        use crate::errors::GraphError;
+
+        let mut g = GraphHunter::with_spill_failing_backend();
+
+        // Add source and destination entities.
+        g.add_entity(Entity::new("A", EntityType::User)).unwrap();
+        g.add_entity(Entity::new("B", EntityType::Host)).unwrap();
+
+        // The streaming backend is armed to fail on the first spill.
+        let result = g.add_relation(Relation::new("A", "B", RelationType::Auth, 100));
+
+        // Must surface a Spill error.
+        assert!(
+            matches!(result, Err(GraphError::Spill(_))),
+            "expected Err(GraphError::Spill(_)), got {:?}",
+            result
+        );
+
+        // No dangling reverse edge: B's reverse-adjacency list must NOT
+        // contain A.  Before the C3a fix the reverse push happened before
+        // push_to_streaming, so a spill failure left dst with a phantom src.
+        let b_sid = g.interner.get("B").expect("B was added");
+        let dangling = g
+            .reverse_adj
+            .get(&b_sid)
+            .map(|v| v.iter().any(|&s| s == g.interner.get("A").unwrap()))
+            .unwrap_or(false);
+        assert!(
+            !dangling,
+            "reverse_adj must not contain A->B after a spill failure (C3a)"
+        );
+    }
+
+    /// P-2: the dispatch helper must pick the parallel path above the size
+    /// threshold by default and respect explicit env overrides in both
+    /// directions — all without touching the env var in the test.
+    #[test]
+    fn parallel_finalize_default_above_threshold() {
+        // Large graph → parallel by default.
+        assert!(
+            should_finalize_parallel(60_000, 2_000_000, None),
+            "large graph (vertex+edge both above threshold) should use parallel"
+        );
+        // Large by vertex count alone.
+        assert!(
+            should_finalize_parallel(60_000, 500, None),
+            "high vertex count alone should trigger parallel"
+        );
+        // Large by edge count alone.
+        assert!(
+            should_finalize_parallel(100, 2_000_000, None),
+            "high edge count alone should trigger parallel"
+        );
+        // Small graph → sequential by default.
+        assert!(
+            !should_finalize_parallel(100, 500, None),
+            "small graph should stay sequential"
+        );
+        // Explicit opt-out wins over large graph.
+        assert!(
+            !should_finalize_parallel(60_000, 2_000_000, Some(false)),
+            "GRAPHHUNTER_PARALLEL_FINALIZE=0 must override threshold"
+        );
+        // Explicit opt-in wins over small graph.
+        assert!(
+            should_finalize_parallel(100, 500, Some(true)),
+            "GRAPHHUNTER_PARALLEL_FINALIZE=1 must override threshold"
+        );
     }
 }

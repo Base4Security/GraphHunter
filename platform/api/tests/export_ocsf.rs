@@ -93,7 +93,16 @@ fn ndjson_export_covers_every_shipping_class_and_validates_against_schema() {
         })
         .expect("export_ocsf");
 
-    let lines: Vec<&str> = out.lines().collect();
+    // The ndjson stream leads with a `_meta` pagination envelope line
+    // (added in 6507f11); drop it so the body assertion counts only the
+    // one-event-per-relation projection.
+    let lines: Vec<&str> = out
+        .lines()
+        .filter(|line| {
+            let v: Value = serde_json::from_str(line).expect("each line is JSON");
+            v.get("_meta").is_none()
+        })
+        .collect();
     assert_eq!(lines.len(), 7, "one event per seeded relation");
 
     let schema: Value = serde_json::from_str(OCSF_V1_4_SCHEMA).expect("schema parses");
@@ -154,9 +163,12 @@ fn json_array_format_returns_a_valid_array() {
             offset: None,
         })
         .expect("export_ocsf json");
-    let v: Value = serde_json::from_str(&out).expect("json array parses");
-    let arr = v.as_array().expect("json array");
+    let v: Value = serde_json::from_str(&out).expect("json envelope parses");
+    let arr = v["events"].as_array().expect("events array");
     assert_eq!(arr.len(), 7);
+    assert_eq!(v["_meta"]["returned"].as_u64(), Some(7));
+    assert_eq!(v["_meta"]["total_in_session"].as_u64(), Some(7));
+    assert_eq!(v["_meta"]["has_more"].as_bool(), Some(false));
 }
 
 /// M3.d acceptance: when a dataset has a FieldConfig, the
@@ -238,7 +250,9 @@ fn dataset_with_field_config_stamps_real_vrl_hash() {
         })
         .expect("export_ocsf");
 
-    let line = out.lines().next().expect("at least one event");
+    // The ndjson stream leads with a `_meta` pagination envelope line
+    // (added in 6507f11); the first real event is the second line.
+    let line = out.lines().nth(1).expect("at least one event");
     let v: Value = serde_json::from_str(line).expect("event parses");
     let prov = &v["provenance"];
     let stamped_hash = prov["mapping_hash"].as_str().expect("mapping_hash str");

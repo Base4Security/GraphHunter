@@ -26,6 +26,7 @@
 
 pub mod cognito;
 pub mod forti_analyzer;
+pub mod fortigate;
 pub mod iis_w3c;
 
 pub use cognito::{CognitoParser, looks_like_cognito};
@@ -35,4 +36,5 @@ pub use forti_analyzer::{
     TopApplicationCategoryHandler, TopThreatHandler, TopUserByTrafficHandler,
     TopWebsiteByTrafficHandler,
 };
+pub use fortigate::{FortiGateParser, looks_like_fortigate};
 pub use iis_w3c::{IisW3cParser, extract_fields_header, looks_like_iis_w3c};

@@ -12,7 +12,8 @@ use graph_hunter_core::{
     preview_sysmon,
 };
 use graph_hunter_parsers::{
-    CognitoParser, FortiAnalyzerXmlParser, IisW3cParser, looks_like_cognito, looks_like_iis_w3c,
+    CognitoParser, FortiAnalyzerXmlParser, FortiGateParser, IisW3cParser, looks_like_cognito,
+    looks_like_fortigate, looks_like_iis_w3c,
 };
 use serde_json::Value;
 
@@ -57,6 +58,15 @@ fn detect_iis(contents: &str) -> bool {
     !trimmed.starts_with('[') && !trimmed.starts_with('{') && looks_like_iis_w3c(trimmed)
 }
 
+/// Detects FortiGate firewall KV log lines (and FortiGate CSV exports
+/// whose header carries both `srcip` and `dstip`). The native parser
+/// avoids the generic-CSV heuristic bugs (port→IP, dotted-signature→
+/// Domain, dropped/close→Delete, no-edge-metadata) so FortiGate data
+/// must be routed away from `generic`/`csv` before they swallow it.
+fn detect_fortigate(contents: &str) -> bool {
+    looks_like_fortigate(contents)
+}
+
 fn detect_generic_json(contents: &str) -> bool {
     let trimmed = contents.trim();
     trimmed.starts_with('[') || trimmed.starts_with('{')
@@ -93,6 +103,23 @@ fn preview_cognito(_contents: &str) -> Vec<(String, String)> {
         ("country".into(), "metadata".into()),
         ("deviceName".into(), "metadata".into()),
         ("email".into(), "metadata".into()),
+    ]
+}
+
+fn preview_fortigate(_contents: &str) -> Vec<(String, String)> {
+    vec![
+        ("srcip".into(), "IP".into()),
+        ("dstip".into(), "IP".into()),
+        ("attack".into(), "Other:Signature".into()),
+        ("action".into(), "metadata".into()),
+        ("severity".into(), "metadata".into()),
+        ("service".into(), "metadata".into()),
+        ("dstport".into(), "metadata".into()),
+        ("policyid".into(), "metadata".into()),
+        ("policyname".into(), "metadata".into()),
+        ("sentbyte".into(), "metadata".into()),
+        ("rcvdbyte".into(), "metadata".into()),
+        ("devname".into(), "metadata".into()),
     ]
 }
 
@@ -135,6 +162,13 @@ static FORMAT_REGISTRY: &[FormatDescriptor] = &[
         detect: detect_cognito,
         make_parser: || Box::new(CognitoParser),
         preview: preview_cognito,
+    },
+    FormatDescriptor {
+        name: "fortigate",
+        aliases: &["fgt", "fortios"],
+        detect: detect_fortigate,
+        make_parser: || Box::new(FortiGateParser::new()),
+        preview: preview_fortigate,
     },
     FormatDescriptor {
         name: "iis",
@@ -233,7 +267,7 @@ pub fn make_parser_for_format(
         .map(|desc| (desc.make_parser)())
         .ok_or_else(|| {
             format!(
-                "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', or 'fortianalyzer'.",
+                "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', 'fortianalyzer', or 'fortigate'.",
                 format_name
             )
         })

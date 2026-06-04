@@ -6,7 +6,7 @@ const input = z.object({
 });
 
 export const nodeScoreExplanation = defineTool({
-  name: "node.score_explanation",
+  name: "node_score_explanation",
   description:
     "Explain why a node has the score it has: the four-dimension anomaly breakdown (entity rarity, edge rarity, neighborhood concentration, temporal novelty), composite and degree percentiles against the whole graph, top-5 same-type peers, and a plain-English narrative. Use to distinguish structural centrality (e.g. /usr/bin/grep under MDE) from genuine anomalies before triaging a top_anomalies hit.",
   category: "node",

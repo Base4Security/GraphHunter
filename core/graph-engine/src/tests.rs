@@ -2492,6 +2492,97 @@ fn get_node_details_nonexistent() {
     assert!(g.get_node_details("ghost").is_none());
 }
 
+/// Regression for the FortiGate IPS+traffic ingest pattern: when a
+/// second dataset's edges arrive AFTER the first finalize, those edges
+/// land in the per-vertex tail buffer (not the sorted base list).
+/// `get_node_details` must surface them — both in `out_degree` and in
+/// the `neighbor_types` / `neighbors` lists. Before the fix `out_degree`
+/// read `streaming.neighbors_arc(sid)` (BASE only) and reported the
+/// pre-finalize count, dropping every post-finalize edge.
+///
+/// Symptom seen in production: 10.0.1.31 showed out_degree=1602
+/// (the IPS dataset's contribution) instead of 101,602 (IPS + two
+/// traffic datasets).
+#[test]
+fn get_node_details_includes_post_finalize_tail_edges() {
+    let mut g = GraphHunter::new();
+
+    // Pre-finalize "dataset 1" (mimics IPS): 3 edges src -> 3 distinct hosts.
+    g.add_entity(Entity::new("src-ip", EntityType::IP)).unwrap();
+    g.add_entity(Entity::new("host-a", EntityType::Host)).unwrap();
+    g.add_entity(Entity::new("host-b", EntityType::Host)).unwrap();
+    g.add_entity(Entity::new("host-c", EntityType::Host)).unwrap();
+    g.add_relation(Relation::new("src-ip", "host-a", RelationType::Connect, 100)).unwrap();
+    g.add_relation(Relation::new("src-ip", "host-b", RelationType::Connect, 110)).unwrap();
+    g.add_relation(Relation::new("src-ip", "host-c", RelationType::Connect, 120)).unwrap();
+
+    // Finalize: sorts base, arms the tail buffer for any subsequent appends.
+    g.sort_edges_by_timestamp().unwrap();
+    assert!(g.streaming_is_finalized(), "graph should be finalized");
+
+    // Sanity baseline: pre-tail, src-ip has 3 outgoing edges.
+    let baseline = g.get_node_details("src-ip").unwrap();
+    assert_eq!(baseline.out_degree, 3, "baseline out_degree wrong");
+
+    // Post-finalize "dataset 2" (mimics traffic batch): 5 more edges
+    // src-ip -> host-a (already a neighbor) + 1 new entity. These all
+    // land in the tail buffer because streaming is finalized.
+    g.add_entity(Entity::new("host-d", EntityType::Host)).unwrap();
+    for ts in 200..205 {
+        g.add_relation(Relation::new("src-ip", "host-a", RelationType::Connect, ts)).unwrap();
+    }
+    g.add_relation(Relation::new("src-ip", "host-d", RelationType::Connect, 210)).unwrap();
+
+    let details = g.get_node_details("src-ip").unwrap();
+
+    // Out-degree must reflect base (3) + tail (6) = 9 edges. Before the
+    // fix this was 3 (BASE only — tail-blind via neighbors_arc).
+    assert_eq!(
+        details.out_degree, 9,
+        "out_degree must include post-finalize tail edges (got {}, expected 9)",
+        details.out_degree
+    );
+
+    // src-ip has 4 distinct outgoing neighbors (host-a, b, c, d), all Hosts.
+    // neighbor_types must count UNIQUE neighbors per entity_type, not
+    // per-edge. Before the fix this incremented per edge and would have
+    // reported {"Host": 9}.
+    assert_eq!(
+        details.neighbor_types.get("Host").copied(),
+        Some(4),
+        "neighbor_types[Host] must equal unique neighbor count (got {:?}, expected Some(4))",
+        details.neighbor_types.get("Host")
+    );
+
+    // The neighbors list must be deduped to the 4 distinct hosts.
+    let neighbor_ids: std::collections::HashSet<&str> =
+        details.neighbors.iter().map(|n| n.id.as_str()).collect();
+    assert!(neighbor_ids.contains("host-a"));
+    assert!(neighbor_ids.contains("host-b"));
+    assert!(neighbor_ids.contains("host-c"));
+    assert!(neighbor_ids.contains("host-d"));
+    assert_eq!(neighbor_ids.len(), 4, "neighbors list must be deduped");
+
+    // host-a sees the post-finalize edges as INCOMING. in_degree path
+    // goes through reverse_adj (already tail-aware), so this should
+    // already have been correct — assert it explicitly so future
+    // refactors don't regress.
+    let host_a = g.get_node_details("host-a").unwrap();
+    assert_eq!(
+        host_a.in_degree, 6,
+        "host-a in_degree: 1 (base) + 5 (tail) = 6, got {}",
+        host_a.in_degree
+    );
+    // host-a has exactly 1 distinct incoming neighbor (src-ip, an IP).
+    // Before the neighbor_types fix this would have read {"IP": 6}.
+    assert_eq!(
+        host_a.neighbor_types.get("IP").copied(),
+        Some(1),
+        "host-a neighbor_types[IP] must be 1 (one distinct IP neighbor), got {:?}",
+        host_a.neighbor_types.get("IP")
+    );
+}
+
 #[test]
 fn get_graph_summary_complete() {
     let mut g = build_lateral_movement_graph();

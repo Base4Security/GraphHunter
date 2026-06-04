@@ -12,7 +12,7 @@ const input = z.object({
 });
 
 export const graphEntityTypes = defineTool({
-  name: "graph.entity_types",
+  name: "graph_entity_types",
   description:
     "List entity types present in the current graph (e.g. IP, Host, User, Process). Pass `with_counts=true` to also get per-type cardinality (e.g. 150 IPs, 42 Hosts, 30 Users) — useful for understanding graph composition.",
   category: "graph",

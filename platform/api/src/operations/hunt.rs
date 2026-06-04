@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use graph_hunter_core::{DedupMode, HuntDiff};
+use graph_hunter_core::{DedupMode, HuntDiff, LiveTailCoverage};
 
 use crate::dto::hunt::{
     DiffHuntsRequest, GetHuntPageRequest, GetHuntPageResponse, HuntScoring, RunHuntBatchEntry,
@@ -69,6 +69,28 @@ fn dedup_arc_paths(
 /// UX (small result sets render immediately; larger sets paginate).
 const INLINE_PATH_THRESHOLD: usize = 100;
 
+pub(crate) fn ensure_huntable_phase(phase: crate::state::SessionPhase) -> ApiResult<()> {
+    match phase {
+        crate::state::SessionPhase::Ready | crate::state::SessionPhase::LiveTail => Ok(()),
+        crate::state::SessionPhase::Loading => Err(ApiError::Conflict(
+            "session is still loading; wait for ingest to complete".into(),
+        )),
+        crate::state::SessionPhase::Finalizing => Err(ApiError::Conflict(
+            "session is finalizing; hunt unavailable".into(),
+        )),
+    }
+}
+
+fn live_tail_coverage_for_session(
+    session: &crate::state::Session,
+) -> Option<LiveTailCoverage> {
+    if session.phase() != crate::state::SessionPhase::LiveTail {
+        return None;
+    }
+    let graph = session.graph.read().ok()?;
+    graph.live_tail_coverage("live_tail")
+}
+
 impl GraphHunterApi {
     /// Execute a temporal pattern search. Populates the hunt cache and
     /// returns either the paths inline (when ≤ 100) or just the count
@@ -79,6 +101,7 @@ impl GraphHunterApi {
     pub fn run_hunt(&self, req: RunHuntRequest) -> ApiResult<RunHuntResponse> {
         let max_results = req.max_results.unwrap_or(10_000);
         let session = self.resolve_session(req.session.as_ref())?;
+        ensure_huntable_phase(session.phase())?;
 
         // Per-call scoring override (v2 follow-up). When the caller
         // asks for `Anomaly` or `Gnn`, ensure the per-session scorer
@@ -180,6 +203,7 @@ impl GraphHunterApi {
         } else {
             None
         };
+        let live_tail_coverage = live_tail_coverage_for_session(&session);
 
         // Publish to the shared cache so get_hunt_page can serve it.
         let mut cache = self
@@ -196,6 +220,7 @@ impl GraphHunterApi {
                 path_count,
                 truncated,
                 diagnostic,
+                live_tail_coverage,
             })
         } else {
             *cache = paths;
@@ -204,6 +229,7 @@ impl GraphHunterApi {
                 path_count,
                 truncated,
                 diagnostic,
+                live_tail_coverage,
             })
         }
     }
@@ -289,6 +315,8 @@ impl GraphHunterApi {
         // `khop_is_built` peek. Cheap because OnceLock::get is a
         // single atomic load.
         let session_handle = self.resolve_session(session.as_ref())?;
+        ensure_huntable_phase(session_handle.phase())?;
+        let batch_live_tail_coverage = live_tail_coverage_for_session(&session_handle);
         let indexes_were_warm = {
             let graph = session_handle
                 .graph
@@ -503,6 +531,7 @@ impl GraphHunterApi {
                         path_count,
                         truncated,
                         diagnostic: None,
+                        live_tail_coverage: batch_live_tail_coverage.clone(),
                         error: None,
                     };
                     result_cache.insert(result_cache_key, entry.clone());
@@ -637,6 +666,7 @@ impl GraphHunterApi {
                     path_count,
                     truncated,
                     diagnostic: None,
+                    live_tail_coverage: batch_live_tail_coverage.clone(),
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -888,6 +918,7 @@ impl GraphHunterApi {
                     path_count,
                     truncated,
                     diagnostic: None,
+                    live_tail_coverage: batch_live_tail_coverage.clone(),
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -912,6 +943,7 @@ impl GraphHunterApi {
                         path_count: resp.path_count,
                         truncated: resp.truncated,
                         diagnostic: resp.diagnostic,
+                        live_tail_coverage: resp.live_tail_coverage,
                         error: None,
                     },
                     Err(e) => RunHuntBatchEntry {
@@ -919,6 +951,7 @@ impl GraphHunterApi {
                         path_count: 0,
                         truncated: false,
                         diagnostic: None,
+                        live_tail_coverage: batch_live_tail_coverage.clone(),
                         error: Some(e.to_string()),
                     },
                 };
@@ -1061,9 +1094,38 @@ mod tests {
     fn api() -> GraphHunterApi {
         let api = GraphHunterApi::new_noop();
         let s = Arc::new(Session::new("s1", "t", GraphHunter::new(), 0));
+        s.set_phase(crate::state::SessionPhase::Ready);
         api.sessions().insert(s);
         api.sessions().set_current(Some("s1".into()));
         api
+    }
+
+    #[test]
+    fn hunt_rejected_while_finalizing() {
+        let api = GraphHunterApi::new_noop();
+        let s = Arc::new(Session::new("s1", "t", GraphHunter::new(), 0));
+        s.set_phase(crate::state::SessionPhase::Finalizing);
+        api.sessions().insert(s);
+        api.sessions().set_current(Some("s1".into()));
+
+        let err = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: None,
+                dedup_mode: None,
+            })
+            .unwrap_err();
+
+        match &err {
+            ApiError::Conflict(msg) => {
+                assert!(msg.contains("finalizing"), "unexpected message: {msg}");
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(err.status_code(), 409);
     }
 
     fn hypo(dsl: &str) -> graph_hunter_core::Hypothesis {

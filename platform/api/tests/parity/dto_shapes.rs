@@ -103,6 +103,7 @@ fn run_hunt_response_shape_with_inline_paths() {
         path_count: 1,
         truncated: false,
         diagnostic: None,
+        live_tail_coverage: None,
     };
     assert_keys(&resp, &["paths", "path_count", "truncated"]);
 }

@@ -112,10 +112,11 @@ impl NlfTable {
     /// scratch.
     ///
     /// `dst_tag` values outside `[0, NLF_TYPE_COUNT)` are ignored
-    /// (those entity types don't get an NLF slot). Out-of-range
-    /// `src_sid` is also ignored — it can happen during graph
-    /// rebuilds when the table was sized for an earlier vertex
-    /// count.
+    /// (those entity types don't get an NLF slot) and return `true`.
+    /// An out-of-range `src_sid` (a vertex added after the last NLF
+    /// build) returns `false` to force a full rebuild — a silent no-op
+    /// would leave the new vertex with an all-zero row and prune it
+    /// from every hunt (C4).
     pub fn try_record_edge(&mut self, src_sid: StrId, dst_tag: u8) -> bool {
         let tag = dst_tag as usize;
         if tag >= NLF_TYPE_COUNT {
@@ -127,10 +128,17 @@ impl NlfTable {
             Some(s) => s,
             None => return false,
         };
-        if let Some(row) = counts.get_mut(src_sid.index()) {
-            row[tag] = row[tag].saturating_add(1);
+        // C4 fix: if src_sid is beyond the table's allocated rows the vertex
+        // was added after the last NLF build. A silent no-op would leave
+        // the new start vertex with an all-zero row, causing it to be pruned
+        // on every hunt. Force a full rebuild instead.
+        match counts.get_mut(src_sid.index()) {
+            Some(row) => {
+                row[tag] = row[tag].saturating_add(1);
+                true
+            }
+            None => false,
         }
-        true
     }
 }
 
@@ -250,5 +258,28 @@ mod tests {
         let step = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::Any);
         let req = requirement_from_first_step(&step);
         assert!(is_trivial(&req));
+    }
+
+    /// C4 regression: `try_record_edge` with a `src_sid` whose index is beyond
+    /// the NLF table's allocated rows must return `false` (force rebuild) rather
+    /// than silently succeeding with a no-op. A silent no-op leaves the new
+    /// start vertex with an all-zero NLF row and causes it to be wrongly pruned
+    /// on every subsequent hunt.
+    #[test]
+    fn try_record_edge_out_of_range() {
+        // Build an NLF table for a 1-vertex graph (rows 0..=0 allocated).
+        let g = small_graph();
+        let mut nlf = NlfTable::build(&g);
+
+        // src_sid with index 999 is far beyond the table's size.
+        let oob_sid = crate::interner::StrId::from_raw(999);
+        let in_range_tag = EntityType::Host.to_u8(); // valid tag < NLF_TYPE_COUNT
+
+        // Before the C4 fix this returned `true` (silent no-op).
+        // After the fix it returns `false` so the caller knows to rebuild.
+        assert!(
+            !nlf.try_record_edge(oob_sid, in_range_tag),
+            "try_record_edge with out-of-range src_sid must return false (C4 fix)"
+        );
     }
 }

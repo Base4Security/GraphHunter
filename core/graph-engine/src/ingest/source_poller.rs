@@ -31,17 +31,17 @@
 //!   level so this is safe.
 //! - **Source errors don't advance the watermark.** If `poll_since`
 //!   returns an error or the stream yields `Err`, the watermark stays
-//!   put and the next cycle retries the same range. This means a
-//!   permanently-broken table will loop forever — the upper layer
-//!   (polling loop supervisor, Phase 5 quota limiter) is responsible
-//!   for the circuit breaker.
+//!   put and the next cycle retries the same range. After
+//!   [`PollerConfig::circuit_max_failures`] consecutive failures the
+//!   poller's circuit breaker opens and skips further polls until the
+//!   backoff expires.
 //! - **Cancellation.** Cancel is checked between every table and
 //!   between every sleep. In-flight HTTP requests are cancelled via
 //!   the `cancel` clone handed to `poll_since`.
 
 use futures::StreamExt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -53,6 +53,84 @@ use super::channels::RawSender;
 /// Default interval between polling cycles. Matches the existing
 /// `sentinel_connector.rs` default.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Default consecutive poll failures before the circuit opens.
+pub const DEFAULT_CIRCUIT_MAX_FAILURES: u32 = 5;
+
+/// Default base backoff when the circuit opens.
+pub const DEFAULT_CIRCUIT_BACKOFF_BASE: Duration = Duration::from_secs(1);
+
+/// Maximum circuit-open backoff duration.
+pub const MAX_CIRCUIT_BACKOFF: Duration = Duration::from_secs(5 * 60);
+
+/// Whether the poller circuit breaker is allowing polls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitState {
+    Closed,
+    Open,
+}
+
+/// Per-poller circuit breaker that skips `poll_since` after repeated
+/// failures, with exponential backoff capped at [`MAX_CIRCUIT_BACKOFF`].
+#[derive(Debug)]
+struct CircuitBreaker {
+    max_failures: u32,
+    backoff_base: Duration,
+}
+
+impl CircuitBreaker {
+    fn new(max_failures: u32, backoff_base: Duration) -> Self {
+        Self {
+            max_failures,
+            backoff_base,
+        }
+    }
+
+    fn now_millis() -> i64 {
+        use std::sync::OnceLock;
+        use std::time::Instant;
+        // Monotonic process baseline: immune to wall-clock / NTP steps, which
+        // previously let a SystemTime jump widen or collapse the circuit-breaker
+        // backoff window (C7).
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_millis() as i64
+    }
+
+    fn state(metrics: &PollerMetrics) -> CircuitState {
+        let until = metrics.circuit_open_until.load(Ordering::Relaxed);
+        if until > 0 && Self::now_millis() < until {
+            CircuitState::Open
+        } else {
+            CircuitState::Closed
+        }
+    }
+
+    fn is_open(metrics: &PollerMetrics) -> bool {
+        Self::state(metrics) == CircuitState::Open
+    }
+
+    fn record_success(&self, metrics: &PollerMetrics) {
+        metrics.circuit_consecutive_failures.store(0, Ordering::Relaxed);
+        metrics.circuit_open_until.store(0, Ordering::Relaxed);
+    }
+
+    fn record_failure(&self, metrics: &PollerMetrics) {
+        let failures = metrics
+            .circuit_consecutive_failures
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        if failures >= self.max_failures {
+            let exponent = failures.saturating_sub(self.max_failures);
+            let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
+            let backoff = self
+                .backoff_base
+                .saturating_mul(multiplier as u32)
+                .min(MAX_CIRCUIT_BACKOFF);
+            let until = Self::now_millis() + backoff.as_millis() as i64;
+            metrics.circuit_open_until.store(until, Ordering::Relaxed);
+        }
+    }
+}
 
 /// Configuration for a `SourcePoller` instance.
 #[derive(Debug, Clone)]
@@ -72,6 +150,13 @@ pub struct PollerConfig {
     /// this is the workspace ID; for Defender XDR it's the tenant ID
     /// (same as `tenant_id`); for blob export it's the storage account.
     pub workspace_id: String,
+
+    /// Consecutive poll failures before the circuit opens.
+    pub circuit_max_failures: u32,
+
+    /// Base backoff when the circuit opens; doubles with each extra
+    /// failure beyond `circuit_max_failures`, capped at 5 minutes.
+    pub circuit_backoff_base: Duration,
 }
 
 impl PollerConfig {
@@ -85,11 +170,23 @@ impl PollerConfig {
             tables,
             tenant_id: tenant_id.into(),
             workspace_id: workspace_id.into(),
+            circuit_max_failures: DEFAULT_CIRCUIT_MAX_FAILURES,
+            circuit_backoff_base: DEFAULT_CIRCUIT_BACKOFF_BASE,
         }
     }
 
     pub fn with_poll_interval(mut self, interval: Duration) -> Self {
         self.poll_interval = interval;
+        self
+    }
+
+    pub fn with_circuit_breaker(
+        mut self,
+        max_failures: u32,
+        backoff_base: Duration,
+    ) -> Self {
+        self.circuit_max_failures = max_failures;
+        self.circuit_backoff_base = backoff_base;
         self
     }
 }
@@ -102,6 +199,9 @@ pub struct PollerMetrics {
     pub chunks_forwarded: AtomicU64,
     pub errors: AtomicU64,
     pub watermark_advances: AtomicU64,
+    pub circuit_open_skips: AtomicU64,
+    pub(crate) circuit_consecutive_failures: AtomicU32,
+    pub(crate) circuit_open_until: AtomicI64,
 }
 
 impl PollerMetrics {
@@ -112,6 +212,9 @@ impl PollerMetrics {
             chunks_forwarded: self.chunks_forwarded.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
             watermark_advances: self.watermark_advances.load(Ordering::Relaxed),
+            circuit_open_skips: self.circuit_open_skips.load(Ordering::Relaxed),
+            circuit_state: CircuitBreaker::state(self),
+            consecutive_failures: self.circuit_consecutive_failures.load(Ordering::Relaxed),
         }
     }
 }
@@ -123,6 +226,9 @@ pub struct PollerMetricsSnapshot {
     pub chunks_forwarded: u64,
     pub errors: u64,
     pub watermark_advances: u64,
+    pub circuit_open_skips: u64,
+    pub circuit_state: CircuitState,
+    pub consecutive_failures: u32,
 }
 
 /// A long-lived polling task for one source.
@@ -131,6 +237,7 @@ pub struct SourcePoller {
     config: PollerConfig,
     watermarks: Arc<dyn WatermarkStore>,
     metrics: Arc<PollerMetrics>,
+    circuit: CircuitBreaker,
 }
 
 impl SourcePoller {
@@ -139,16 +246,29 @@ impl SourcePoller {
         config: PollerConfig,
         watermarks: Arc<dyn WatermarkStore>,
     ) -> Self {
+        let circuit = CircuitBreaker::new(
+            config.circuit_max_failures,
+            config.circuit_backoff_base,
+        );
         Self {
             source,
             config,
             watermarks,
             metrics: Arc::new(PollerMetrics::default()),
+            circuit,
         }
     }
 
     pub fn metrics(&self) -> Arc<PollerMetrics> {
         self.metrics.clone()
+    }
+
+    pub fn circuit_state(&self) -> CircuitState {
+        CircuitBreaker::state(&self.metrics)
+    }
+
+    fn snapshot(&self) -> PollerMetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     fn watermark_key(&self, table: &str) -> WatermarkKey {
@@ -174,7 +294,7 @@ impl SourcePoller {
                 self.poll_one_table(&raw_tx, table, &cancel).await;
                 if raw_tx.is_closed() {
                     // Downstream receiver gone — exit cleanly.
-                    return self.metrics.snapshot();
+                    return self.snapshot();
                 }
             }
             // Interruptible sleep between cycles.
@@ -183,10 +303,17 @@ impl SourcePoller {
                 _ = cancel.cancelled() => break,
             }
         }
-        self.metrics.snapshot()
+        self.snapshot()
     }
 
     async fn poll_one_table(&self, raw_tx: &RawSender, table: &str, cancel: &CancellationToken) {
+        if CircuitBreaker::is_open(&self.metrics) {
+            self.metrics
+                .circuit_open_skips
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
         let key = self.watermark_key(table);
         // Load current watermark. If the store fails to read, treat
         // as empty and let `poll_since` decide the lookback default.
@@ -204,6 +331,7 @@ impl SourcePoller {
             Ok(s) => s,
             Err(err) => {
                 self.metrics.errors.fetch_add(1, Ordering::Relaxed);
+                self.circuit.record_failure(&self.metrics);
                 // Forward the error so the parser task can count it in
                 // per-source metrics too.
                 let _ = raw_tx.send(Err(err)).await;
@@ -211,6 +339,7 @@ impl SourcePoller {
             }
         };
 
+        let mut saw_success = false;
         // Drain the stream.
         while let Some(item) = stream.next().await {
             if cancel.is_cancelled() {
@@ -218,6 +347,7 @@ impl SourcePoller {
             }
             match item {
                 Ok((chunk, new_wm)) => {
+                    saw_success = true;
                     // Forward the chunk; if send fails the receiver is
                     // gone and we bail out of the cycle entirely.
                     if raw_tx.send(Ok(chunk)).await.is_err() {
@@ -241,12 +371,16 @@ impl SourcePoller {
                 }
                 Err(err) => {
                     self.metrics.errors.fetch_add(1, Ordering::Relaxed);
+                    self.circuit.record_failure(&self.metrics);
                     let _ = raw_tx.send(Err(err)).await;
                     // Per the "source errors don't advance watermark"
                     // contract, we don't persist anything here.
                     break;
                 }
             }
+        }
+        if saw_success {
+            self.circuit.record_success(&self.metrics);
         }
     }
 }
@@ -578,5 +712,126 @@ mod tests {
 
         // Mock should have been called more than once for SecurityEvent.
         assert!(mock.call_count_for("SecurityEvent") >= 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn poller_opens_circuit_after_n_failures() {
+        struct FailingMockSource {
+            call_count: Mutex<u32>,
+        }
+
+        impl FailingMockSource {
+            fn new() -> Self {
+                Self {
+                    call_count: Mutex::new(0),
+                }
+            }
+
+            fn call_count(&self) -> u32 {
+                *self.call_count.lock().unwrap()
+            }
+        }
+
+        #[async_trait]
+        impl LogSource for FailingMockSource {
+            fn source_id(&self) -> &str {
+                "la:fail"
+            }
+            fn kind(&self) -> SourceKind {
+                SourceKind::LogAnalytics
+            }
+            fn available_tables(&self) -> &[&'static str] {
+                &["SecurityEvent"]
+            }
+            async fn check_auth(&self) -> Result<(), SourceError> {
+                Ok(())
+            }
+            async fn query_scoped(
+                &self,
+                _scope: QueryScope,
+                _cancel: CancellationToken,
+            ) -> Result<ChunkStream, SourceError> {
+                Ok(stream::iter(vec![]).boxed())
+            }
+            async fn poll_since(
+                &self,
+                _table: &str,
+                _watermark: Watermark,
+                _cancel: CancellationToken,
+            ) -> Result<PollStream, SourceError> {
+                *self.call_count.lock().unwrap() += 1;
+                Err(SourceError::Auth)
+            }
+        }
+
+        let failing = Arc::new(FailingMockSource::new());
+        let source: Arc<dyn LogSource> = failing.clone();
+        let watermarks: Arc<dyn WatermarkStore> =
+            Arc::new(SqliteWatermarkStore::open_in_memory().await.unwrap());
+        let config = PollerConfig::new("tenant-a", "ws-1", vec!["SecurityEvent".to_string()])
+            .with_poll_interval(Duration::from_millis(5))
+            .with_circuit_breaker(3, Duration::from_millis(500));
+
+        let poller = SourcePoller::new(source, config, watermarks);
+        let metrics = poller.metrics();
+        let (raw_tx, mut raw_rx) = raw_channel(4);
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+        let handle = tokio::spawn(async move { poller.run(raw_tx, cancel2).await });
+
+        // Drain error messages until the circuit opens.
+        for _ in 0..50 {
+            if metrics.snapshot().circuit_state == CircuitState::Open {
+                break;
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(20), raw_rx.recv()).await;
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(metrics.snapshot().circuit_state, CircuitState::Open);
+        assert!(metrics.snapshot().consecutive_failures >= 3);
+
+        let calls_when_open = failing.call_count();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let calls_after_wait = failing.call_count();
+        assert_eq!(
+            calls_when_open, calls_after_wait,
+            "poll_since should be skipped while circuit is open"
+        );
+        assert!(metrics.snapshot().circuit_open_skips >= 1);
+
+        cancel.cancel();
+        drop(raw_rx);
+        let snapshot = handle.await.unwrap();
+        assert_eq!(snapshot.circuit_state, CircuitState::Open);
+        assert!(snapshot.errors >= 3);
+    }
+
+    /// Open→success→Closed: after the circuit opens it must fully reset when
+    /// record_success is called (consecutive_failures → 0, open_until → 0).
+    /// This is clock-independent so it also validates the monotonic-clock fix
+    /// doesn't break the reset path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn circuit_recovers_after_success() {
+        let metrics = PollerMetrics::default();
+        let breaker = CircuitBreaker::new(3, std::time::Duration::from_millis(10));
+
+        // Drive the circuit open.
+        for _ in 0..3 {
+            breaker.record_failure(&metrics);
+        }
+        assert!(CircuitBreaker::is_open(&metrics), "circuit must be open after max failures");
+
+        // A single success resets everything.
+        breaker.record_success(&metrics);
+        assert!(
+            !CircuitBreaker::is_open(&metrics),
+            "circuit must be closed after record_success"
+        );
+        assert_eq!(
+            metrics.circuit_consecutive_failures.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "consecutive_failures must be zero after recovery"
+        );
     }
 }

@@ -750,77 +750,88 @@ mod tests {
 
     #[test]
     fn delta_update_after_new_edge_matches_full_rebuild() {
-        // Build a 3-hop chain index, then add a new edge and apply
-        // the delta. Compare bits / temporal_bounds for every
-        // vertex against a fresh rebuild from scratch.
+        // C2 fix: after finalization, a post-finalize append INVALIDATES the
+        // khop_reach index instead of applying an incremental delta (which
+        // would read BASE neighbors only and miss the tail). The index is then
+        // rebuilt tail-inclusively on the next ensure_khop_reach call.
         let mut g = three_hop_chain();
         // Force an eager build via ensure_khop_reach.
         let _ = g.ensure_khop_reach();
         assert!(g.khop_reach_is_built());
 
         // Add a new edge u1 -> ip1 directly (skipping the chain).
-        // It changes u1's bits + temporal because now u1 reaches
-        // IP in 1 hop with a new timestamp.
+        // three_hop_chain() called sort_edges_by_timestamp() → finalized.
+        // After the C2 fix, on_streaming_edge_appended fires the finalized-gate
+        // and invalidates khop_reach instead of applying a delta.
         g.add_relation(Relation::new("u1", "ip1", RelationType::Connect, 50))
             .unwrap();
 
-        // The delta must keep the index built (heap path, no
-        // budget blowout).
+        // Post-finalize append must INVALIDATE the index.
         assert!(
-            g.khop_reach_is_built(),
-            "delta-update must keep the heap-backed khop_reach alive"
+            !g.khop_reach_is_built(),
+            "post-finalize append must invalidate khop_reach (C2 fix)"
         );
 
-        // Compare against a from-scratch rebuild.
-        let delta_view = g.ensure_khop_reach().clone();
+        // After invalidation, ensure_khop_reach rebuilds against the full
+        // base+tail graph and the rebuilt index must be correct.
+        let rebuilt = g.ensure_khop_reach().clone();
         let fresh = KHopReach::build(&g);
 
         for sid_str in ["u1", "h1", "p1", "ip1"] {
             let sid = g.interner.get(sid_str).unwrap();
-            let delta_bits =
-                delta_view.bits.get(sid.index()).copied().unwrap_or(0);
+            let rebuilt_bits =
+                rebuilt.bits.get(sid.index()).copied().unwrap_or(0);
             let fresh_bits = fresh.bits.get(sid.index()).copied().unwrap_or(0);
-            // Delta is sound (over-approximation): every bit set in
-            // fresh must also be set in delta.
+            // Rebuilt index must be bit-equivalent to a fresh build.
             assert_eq!(
-                delta_bits & fresh_bits,
+                rebuilt_bits,
                 fresh_bits,
-                "{sid_str}: delta bits 0x{delta_bits:x} must contain fresh bits 0x{fresh_bits:x}",
+                "{sid_str}: rebuilt bits 0x{rebuilt_bits:x} must equal fresh bits 0x{fresh_bits:x}",
             );
         }
 
-        // Specifically, u1 should reach IP after the delta.
+        // Specifically, u1 should reach IP in the rebuilt index.
         let u_sid = g.interner.get("u1").unwrap();
         let ip_mask = 1u16 << EntityType::IP.to_u8();
-        assert!(delta_view.can_reach_in_window(u_sid, ip_mask, None));
+        assert!(rebuilt.can_reach_in_window(u_sid, ip_mask, None));
     }
 
     #[test]
     fn delta_update_returns_true_on_redundant_edge() {
-        // Adding an edge whose contribution is already reflected
-        // in the index (same source, dest, timestamp) should
-        // converge in round 0 and return true without touching
-        // any predecessor.
+        // C2 fix: after finalization, even a "redundant" post-finalize append
+        // INVALIDATES the index. The pre-fix behaviour (delta returns true →
+        // index stays live) was unsound for finalized graphs because the delta
+        // read BASE neighbors only and could miss tail edges.
         let mut g = three_hop_chain();
         let _ = g.ensure_khop_reach();
-        // Add a "duplicate" edge (different timestamp but same
-        // structural reach).
+        // Add a "duplicate" edge (different timestamp but same structural reach).
+        // three_hop_chain() is finalized, so on_streaming_edge_appended fires
+        // the finalized-gate → invalidation.
         g.add_relation(Relation::new("u1", "h1", RelationType::Auth, 100))
             .unwrap();
-        assert!(g.khop_reach_is_built(), "redundant edge stays heap-live");
+        assert!(
+            !g.khop_reach_is_built(),
+            "post-finalize append must invalidate khop_reach even for redundant edges (C2 fix)"
+        );
     }
 
     #[test]
-    fn delta_update_invalidates_when_budget_exceeded() {
-        // Build a graph where adding one edge would force the
-        // cascade to visit > BUDGET predecessors. Setting a
-        // tiny budget exposes the fallback-to-invalidate path.
+    fn post_finalize_append_on_high_fanin_vertex_invalidates_khop() {
+        // Repurposed from the old `delta_update_invalidates_when_budget_exceeded`
+        // test which exercised `try_record_edge_delta` directly — a path that is
+        // no longer reached in production after the C2 fix.
+        //
+        // Production path (post-C2): `add_relation` → `on_streaming_edge_appended`
+        // → sees `streaming.is_finalized()` → drops the khop_reach OnceLock
+        // unconditionally, regardless of fan-in. The budget fallback inside
+        // `try_record_edge_delta` is therefore never reached on a finalized graph.
+        //
+        // This test verifies the REAL production behaviour: a post-finalize append
+        // on a high-fan-in vertex (200 predecessors) must invalidate the khop
+        // index via the finalized-gate, not via a budget check.
         let mut g = GraphHunter::new();
-        // Star: 200 hosts all pointing at the same IP, plus the
-        // IP eventually reaching a Process via a single edge.
-        // After we add IP→Process, the cascade revisits all 200
-        // hosts as predecessors of IP. With budget = 50 it must
-        // bail.
+        // Star: 200 hosts all pointing at the same IP, plus a Process node that
+        // will be wired in post-finalize.
         for i in 0..200 {
             g.add_entity(Entity::new(
                 &format!("h{i}"),
@@ -839,38 +850,19 @@ mod tests {
             ))
             .unwrap();
         }
+        // Finalize (sort) and build the k-hop index.
         g.sort_edges_by_timestamp().unwrap();
         let _ = g.ensure_khop_reach();
-        assert!(g.khop_reach_is_built());
+        assert!(g.khop_reach_is_built(), "khop_reach must be built after ensure_khop_reach");
 
-        // Manually call try_record_edge_delta with a tiny budget.
-        // First push the new edge through the normal path (which
-        // will trigger an invalidate because of the budget…).
-        // Instead, exercise the function directly with budget=10.
-        let reach = g.khop_reach.get_mut().unwrap();
-        let ip_sid = g.interner.get("ip1").unwrap();
-        let streaming = g.streaming.clone();
-        // Append the new edge directly into streaming so the
-        // delta can see it.
-        use crate::streaming::StreamingGraphBackend;
-        streaming.append_edge(
-            ip_sid,
-            crate::streaming::StreamEdge {
-                timestamp: 999,
-                metadata_offset: 0,
-                source_sid: ip_sid,
-                dest_sid: g.interner.get("p1").unwrap(),
-                ingested_at_delta: 0,
-                dataset_tag: 0,
-                rel_type_tag: RelationType::Auth.to_u8(),
-            },
+        // Post-finalize append via the production path: add_relation fires
+        // on_streaming_edge_appended → finalized-gate → OnceLock reset.
+        g.add_relation(Relation::new("ip1", "p1", RelationType::Auth, 999))
+            .unwrap();
+
+        assert!(
+            !g.khop_reach_is_built(),
+            "post-finalize append on high-fan-in vertex must invalidate khop_reach (C2 finalized-gate)"
         );
-        let ok = reach.try_record_edge_delta(
-            ip_sid,
-            &streaming,
-            &g.reverse_adj,
-            10, // tiny budget
-        );
-        assert!(!ok, "tight budget must force fallback");
     }
 }
