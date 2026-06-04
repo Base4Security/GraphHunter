@@ -397,6 +397,28 @@ fn build_narrative(
     parts.join(" ")
 }
 
+// ── heavy_edges projection ──
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HeavyEdge {
+    pub source: String,
+    pub target: String,
+    pub rel_type: String,
+    pub count: usize,
+    pub total_bytes: u64,
+    pub total_duration_secs: u64,
+    pub reset_pct: f64,
+    pub first_ts: i64,
+    pub last_ts: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct HeavyEdgesOpts {
+    pub top_n: usize,
+    pub min_count: Option<usize>,
+    pub rel_type: Option<String>,
+}
+
 // ── Implementations on GraphHunter ──
 
 impl GraphHunter {
@@ -1983,6 +2005,167 @@ impl GraphHunter {
             ),
             first_step_matches: first_matches,
         }
+    }
+
+    /// Read-only projection: group stored edges by (source, dest, rel_type)
+    /// with volume metrics, ranked by count desc (bytes desc tiebreak). Does
+    /// not mutate the graph. Recovers custom rel-type names from `_rel_type`.
+    pub fn heavy_edges(&self, opts: &HeavyEdgesOpts) -> Vec<HeavyEdge> {
+        #[derive(Default)]
+        struct Agg {
+            count: usize,
+            bytes: u64,
+            dur: u64,
+            resets: usize,
+            first_ts: i64,
+            last_ts: i64,
+        }
+        let mut groups: HashMap<(StrId, StrId, String), Agg> = HashMap::new();
+        self.streaming.for_each_edge(|src, e| {
+            let md = self.meta_store.get(e.metadata_offset);
+            let rt = md.get("_rel_type").cloned()
+                .unwrap_or_else(|| format!("{}", crate::types::RelationType::from_u8(e.rel_type_tag)));
+            let entry = groups.entry((src, e.dest_sid, rt)).or_insert_with(|| Agg {
+                count: 0,
+                bytes: 0,
+                dur: 0,
+                resets: 0,
+                first_ts: i64::MAX,
+                last_ts: i64::MIN,
+            });
+            entry.count += 1;
+            if let Some(b) = md.get("sentbyte").and_then(|s| s.parse::<u64>().ok()) {
+                entry.bytes += b;
+            }
+            if let Some(d) = md.get("duration").and_then(|s| s.parse::<u64>().ok()) {
+                entry.dur += d;
+            }
+            if matches!(
+                md.get("action").map(|s| s.as_str()),
+                Some("client-rst") | Some("server-rst")
+            ) {
+                entry.resets += 1;
+            }
+            if e.timestamp < entry.first_ts {
+                entry.first_ts = e.timestamp;
+            }
+            if e.timestamp > entry.last_ts {
+                entry.last_ts = e.timestamp;
+            }
+        });
+        let mut out: Vec<HeavyEdge> = groups
+            .into_iter()
+            .filter(|((_, _, rt), _)| opts.rel_type.as_ref().map_or(true, |w| w == rt))
+            .filter(|(_, a)| opts.min_count.map_or(true, |m| a.count >= m))
+            .map(|((s, d, rt), a)| HeavyEdge {
+                source: self.interner.resolve(s).to_string(),
+                target: self.interner.resolve(d).to_string(),
+                rel_type: rt,
+                count: a.count,
+                total_bytes: a.bytes,
+                total_duration_secs: a.dur,
+                reset_pct: if a.count > 0 {
+                    100.0 * a.resets as f64 / a.count as f64
+                } else {
+                    0.0
+                },
+                first_ts: a.first_ts,
+                last_ts: a.last_ts,
+            })
+            .collect();
+        out.sort_by(|x, y| y.count.cmp(&x.count).then(y.total_bytes.cmp(&x.total_bytes)));
+        out.truncate(opts.top_n);
+        out
+    }
+}
+
+#[cfg(test)]
+mod heavy_edges_tests {
+    use super::*;
+    use crate::GraphHunter;
+    use crate::types::{EntityType, RelationType};
+    use crate::entity::Entity;
+    use crate::relation::Relation;
+    use std::collections::HashMap;
+
+    fn edge(
+        s: &str,
+        d: &str,
+        rt: RelationType,
+        ts: i64,
+        sentbyte: Option<&str>,
+        action: Option<&str>,
+    ) -> crate::parser::ParsedTriple {
+        let mut md = HashMap::new();
+        if let Some(b) = sentbyte {
+            md.insert("sentbyte".into(), b.into());
+        }
+        if let Some(a) = action {
+            md.insert("action".into(), a.into());
+        }
+        let mut rel = Relation::new(s, d, rt, ts);
+        rel.metadata = md;
+        (Entity::new(s, EntityType::IP), rel, Entity::new(d, EntityType::IP))
+    }
+
+    #[test]
+    fn heavy_edges_groups_and_ranks() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![
+                edge("A", "B", RelationType::Connect, 10, Some("100"), Some("close")),
+                edge("A", "B", RelationType::Connect, 20, Some("200"), Some("close")),
+                edge("A", "B", RelationType::Connect, 30, Some("300"), Some("close")),
+                edge("A", "B", RelationType::Connect, 40, Some("400"), Some("client-rst")),
+                edge("A", "C", RelationType::Connect, 50, Some("999"), Some("close")),
+            ],
+            None,
+        )
+        .unwrap();
+        let out = g.heavy_edges(&HeavyEdgesOpts { top_n: 10, min_count: None, rel_type: None });
+        let ab = out
+            .iter()
+            .find(|e| e.source == "A" && e.target == "B")
+            .expect("A->B group");
+        assert_eq!(ab.count, 4);
+        assert_eq!(ab.total_bytes, 1000);
+        assert_eq!(ab.rel_type, "Connect");
+        assert!((ab.reset_pct - 25.0).abs() < 1e-9);
+        assert_eq!(ab.first_ts, 10);
+        assert_eq!(ab.last_ts, 40);
+        // count 4 ranks first
+        assert_eq!(out[0].source, "A");
+        assert_eq!(out[0].target, "B");
+        let filtered =
+            g.heavy_edges(&HeavyEdgesOpts { top_n: 10, min_count: Some(2), rel_type: None });
+        assert!(filtered.iter().all(|e| e.count >= 2));
+        assert!(filtered.iter().all(|e| !(e.source == "A" && e.target == "C")));
+    }
+
+    #[test]
+    fn heavy_edges_custom_rel_type_labeled() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![edge(
+                "X",
+                "Y",
+                RelationType::Other("SNAT".to_string()),
+                1,
+                None,
+                None,
+            )],
+            None,
+        )
+        .unwrap();
+        let out = g.heavy_edges(&HeavyEdgesOpts {
+            top_n: 10,
+            min_count: None,
+            rel_type: Some("SNAT".to_string()),
+        });
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].rel_type, "SNAT");
+        assert_eq!(out[0].count, 1);
+        assert_eq!(out[0].total_bytes, 0);
     }
 }
 
