@@ -40,7 +40,30 @@ storage ni el DSL.
 | Exposición | tool analítico dedicado (API op + MCP `graph_heavy_edges` + ruta HTTP) |
 | Agrupación | por `(source, dest, rel_type)` graph-wide |
 | Orden default | `count` desc, `total_bytes` como desempate |
-| Storage | sin cambios (`CompactRelation` intacto) |
+| Storage | `CompactRelation` intacto; +1 fix de metadata (ver §4.0) |
+| Rel-type Other names | preservar en metadata (`_rel_type`) — fix prerequisito |
+
+## 4.0 Prerequisito: preservar el nombre de rel-type `Other(_)` (arregla gap de SP-A)
+
+**Hallazgo:** el storage colapsa todo `RelationType::Other(name)` al tag `254`
+y `from_u8(254) → Other(String::new())` — el nombre custom se pierde. (Las
+entity `Other(_)` SÍ se preservan vía el side-table `other_type_names`; las
+relation `Other(_)` NO tienen equivalente.) Consecuencia: las aristas
+SNAT/Exposes/MatchedPolicy de SP-A quedan **sin etiqueta en el grafo**
+(latente), y SP-B no podría rotularlas.
+
+**Fix (mínimo, precedente claro):**
+- En el/los path(s) de inserción (`insert_triples`, `insert_raw_events`,
+  `add_relation`), cuando `rel_type` es `Other(name)` con `name` no vacío,
+  inyectar `metadata["_rel_type"] = name` antes de `meta_store.append`.
+- En `materialize_relation` (y en `heavy_edges`), recuperar: si la metadata
+  tiene `_rel_type`, el rel-type es `Other(ese nombre)`; si no, `compact.rel_type()`
+  (que cubre los built-in con tag propio: Connect, Auth, etc.).
+- Key con prefijo `_` = reservada/interna. Los built-in (Connect…) no inyectan
+  nada (su tag ya los identifica).
+
+Esto arregla SP-A in-graph (todos los lectores via `materialize_relation` ven
+el nombre real) y habilita el label correcto en SP-B.
 
 ## 4. Arquitectura
 
@@ -82,8 +105,9 @@ Iterando las aristas del grafo, agrupadas por `(source_sid, dest_sid, rel_type_t
 | `first_ts` / `last_ts` | min / max `timestamp` |
 
 Genérico: cualquier arista con esa metadata contribuye; sin metadata suma solo
-`count` (bytes/duration 0, no cuenta como reset). El `rel_type` string sale del
-`rel_type_tag` (mismo mapeo que usa el grouping existente).
+`count` (bytes/duration 0, no cuenta como reset). El `rel_type` string sale de
+la metadata `_rel_type` si está (custom, §4.0) o del `rel_type_tag` vía
+`from_u8` (built-in: Connect, Auth, …).
 
 ### 4.3 Opciones de query (`HeavyEdgesOpts`)
 - `top_n: usize` (default 50) — máximo de grupos devueltos tras ordenar.
@@ -94,6 +118,7 @@ Genérico: cualquier arista con esa metadata contribuye; sin metadata suma solo
 ## 5. Componentes
 | Pieza | Archivo | Responsabilidad |
 |---|---|---|
+| rel-type `Other` name preservation (§4.0) | `core/graph-engine/src/graph.rs` (insert paths + `materialize_relation`) | inyectar/recuperar `_rel_type` en metadata |
 | `heavy_edges` + `HeavyEdge` + `HeavyEdgesOpts` | `core/graph-engine/src/analytics.rs` | proyección read-only + struct |
 | `graph_heavy_edges` op | `platform/api/src/operations/graph_ops.rs` | wrapper que resuelve sesión y llama al core |
 | DTO request/result | `platform/api/src/dto/v1/graph_ops.rs` | `HeavyEdgesRequest` (top_n/min_count/rel_type) |
@@ -108,6 +133,9 @@ Genérico: cualquier arista con esa metadata contribuye; sin metadata suma solo
   graph-wide. Aceptable para un query analítico explícito.
 
 ## 7. Testing
+- **Rel-type preservation (§4.0):** insertar una arista `Other("SNAT")`,
+  `materialize_relation` de vuelta → `rel_type == Other("SNAT")` (no `Other("")`);
+  un built-in `Connect` sigue dando `Connect` sin `_rel_type` en metadata.
 - **Core (`heavy_edges`):** grafo con un grupo repetido (ej. 4× `A→B Connect`
   con `sentbyte`/`duration`, una con `action=client-rst`) + un grupo menor
   (`A→C` ×1) → assert: grupo A→B tiene `count=4`, `total_bytes=Σ`,
