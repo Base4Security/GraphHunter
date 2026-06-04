@@ -641,15 +641,22 @@ impl GraphHunter {
     /// This is the DRY helper for all export/display paths that need the
     /// human-readable rel-type string — use it instead of `format!("{}", compact.rel_type())`.
     pub fn resolve_rel_type_name(&self, compact: &CompactRelation) -> String {
-        if compact.rel_type_tag == crate::types::RelationType::Other(String::new()).to_u8() {
-            let meta = self.meta_store.get(compact.metadata_offset);
+        self.resolve_rel_type_name_raw(compact.rel_type_tag, compact.metadata_offset)
+    }
+
+    /// Same recovery logic as [`resolve_rel_type_name`] but accepts raw tag +
+    /// metadata offset. Used by read paths that hold a `StreamEdge` rather than
+    /// a `CompactRelation` (both carry the same two fields).
+    pub fn resolve_rel_type_name_raw(&self, rel_type_tag: u8, metadata_offset: u64) -> String {
+        if rel_type_tag == crate::types::RelationType::Other(String::new()).to_u8() {
+            let meta = self.meta_store.get(metadata_offset);
             if let Some(name) = meta.get("_rel_type") {
                 if !name.is_empty() {
                     return name.clone();
                 }
             }
         }
-        format!("{}", compact.rel_type())
+        format!("{}", crate::types::RelationType::from_u8(rel_type_tag))
     }
 
     /// Retrieves an entity by its ID.

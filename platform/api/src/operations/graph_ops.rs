@@ -388,12 +388,14 @@ impl GraphHunterApi {
             for compact in graph.get_compact_relations(&path_id) {
                 let dest_str = graph.interner.resolve(compact.dest_sid);
                 if in_hood.contains(dest_str) {
+                    let mut meta = graph.meta_store.get(compact.metadata_offset);
+                    meta.remove("_rel_type");
                     hood.edges.push(NeighborEdge {
                         source: graph.interner.resolve(compact.source_sid).to_string(),
                         target: dest_str.to_string(),
-                        rel_type: format!("{}", compact.rel_type()),
+                        rel_type: graph.resolve_rel_type_name(&compact),
                         timestamp: compact.timestamp,
-                        metadata: graph.meta_store.get(compact.metadata_offset),
+                        metadata: meta,
                     });
                 }
             }
@@ -405,12 +407,14 @@ impl GraphHunterApi {
                 }
                 for compact in graph.get_relations_by_sid(source_sid) {
                     if Some(compact.dest_sid) == target_sid {
+                        let mut meta = graph.meta_store.get(compact.metadata_offset);
+                        meta.remove("_rel_type");
                         hood.edges.push(NeighborEdge {
                             source: graph.interner.resolve(compact.source_sid).to_string(),
                             target: graph.interner.resolve(compact.dest_sid).to_string(),
-                            rel_type: format!("{}", compact.rel_type()),
+                            rel_type: graph.resolve_rel_type_name(&compact),
                             timestamp: compact.timestamp,
-                            metadata: graph.meta_store.get(compact.metadata_offset),
+                            metadata: meta,
                         });
                         break;
                     }
@@ -548,12 +552,14 @@ fn subgraph_edge_from_compact(
     graph: &graph_hunter_core::GraphHunter,
     compact: &graph_hunter_core::CompactRelation,
 ) -> SubgraphEdge {
+    let mut metadata = graph.meta_store.get(compact.metadata_offset);
+    metadata.remove("_rel_type");
     SubgraphEdge {
         source: graph.interner.resolve(compact.source_sid).to_string(),
         target: graph.interner.resolve(compact.dest_sid).to_string(),
-        rel_type: format!("{}", compact.rel_type()),
+        rel_type: graph.resolve_rel_type_name(compact),
         timestamp: compact.timestamp,
-        metadata: graph.meta_store.get(compact.metadata_offset),
+        metadata,
         dataset_id: graph
             .resolve_dataset_tag(compact.dataset_tag)
             .map(|s| s.to_string()),

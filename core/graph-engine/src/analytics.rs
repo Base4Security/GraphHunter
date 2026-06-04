@@ -573,12 +573,17 @@ impl GraphHunter {
                     }
 
                     if visited.contains(&dest_sid) {
+                        let mut meta = self.meta_store.get(edge.metadata_offset);
+                        meta.remove("_rel_type");
                         edges.push(NeighborEdge {
                             source: self.interner.resolve(edge.source_sid).to_string(),
                             target: dest_id_str.to_string(),
-                            rel_type: format!("{}", edge.rel_type()),
+                            rel_type: self.resolve_rel_type_name_raw(
+                                edge.rel_type_tag,
+                                edge.metadata_offset,
+                            ),
                             timestamp: edge.timestamp,
-                            metadata: self.meta_store.get(edge.metadata_offset),
+                            metadata: meta,
                         });
                     }
                 }
@@ -615,12 +620,17 @@ impl GraphHunter {
                             }
 
                             if visited.contains(&source_sid) {
+                                let mut meta = self.meta_store.get(edge.metadata_offset);
+                                meta.remove("_rel_type");
                                 edges.push(NeighborEdge {
                                     source: self.interner.resolve(edge.source_sid).to_string(),
                                     target: self.interner.resolve(edge.dest_sid).to_string(),
-                                    rel_type: format!("{}", edge.rel_type()),
+                                    rel_type: self.resolve_rel_type_name_raw(
+                                        edge.rel_type_tag,
+                                        edge.metadata_offset,
+                                    ),
                                     timestamp: edge.timestamp,
-                                    metadata: self.meta_store.get(edge.metadata_offset),
+                                    metadata: meta,
                                 });
                             }
                         }
@@ -2173,6 +2183,36 @@ mod heavy_edges_tests {
         assert_eq!(out[0].rel_type, "SNAT");
         assert_eq!(out[0].count, 1);
         assert_eq!(out[0].total_bytes, 0);
+    }
+
+    #[test]
+    fn neighborhood_recovers_custom_rel_type_and_strips_reserved_key() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![edge(
+                "a",
+                "b",
+                RelationType::Other("SNAT".to_string()),
+                1,
+                None,
+                None,
+            )],
+            None,
+        )
+        .unwrap();
+        let hood = g
+            .get_neighborhood("a", 1, 50, None)
+            .expect("neighborhood");
+        let e = hood
+            .edges
+            .iter()
+            .find(|e| e.source == "a" && e.target == "b")
+            .expect("edge a->b");
+        assert_eq!(e.rel_type, "SNAT", "rel_type should be recovered custom name");
+        assert!(
+            !e.metadata.contains_key("_rel_type"),
+            "_rel_type must not leak into public edge metadata"
+        );
     }
 }
 
