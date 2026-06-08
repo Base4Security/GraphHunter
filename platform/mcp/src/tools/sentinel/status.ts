@@ -13,6 +13,6 @@ export const sentinelStatus = defineTool({
   inputSchema: input,
   outputSchema: z.unknown(),
   async execute(ctx) {
-    return ctx.api.get("/sentinel_status", {});
+    return ctx.api.get("/sentinel_status");
   },
 });

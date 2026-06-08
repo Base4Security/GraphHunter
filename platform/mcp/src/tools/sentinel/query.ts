@@ -7,7 +7,7 @@ const input = z.object({
   lookback: z
     .enum(["1h", "6h", "24h", "7d", "30d"])
     .optional()
-    .describe("Soft-sugar time window; ignored if your query already filters TimeGenerated."),
+    .describe("Optional time window shorthand; ignored if your KQL already filters TimeGenerated."),
   ingest: z
     .boolean()
     .optional()

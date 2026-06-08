@@ -25,7 +25,7 @@ const input = z.object({
 export const nodeEnrich = defineTool({
   name: "node_enrich",
   description:
-    "Pull a specific slice of an existing node's Sentinel events into the graph on demand (no polling). Use when you need a particular data point to enrich the graph — e.g. just this user's SigninLogs for the last 7d. Narrower than node_expand(live), which hydrates everything. Returns what was added (new entities/relations, tables hit).",
+    "Pull a specific slice of an existing node's Sentinel events into the graph on demand. Use when you need a particular data point to enrich the graph — e.g. just this user's SigninLogs for the last 7d. Narrower than node_expand(live), which hydrates everything. Returns what was added (new entities/relations, tables hit).",
   category: "node",
   version: 1,
   stability: "stable",
