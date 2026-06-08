@@ -100,7 +100,7 @@ pub(super) async fn handler_seed_from_ioc(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub(super) struct NodeEnrichBody {
     pub node_id: String,
     #[serde(default)]
@@ -135,7 +135,7 @@ pub(super) async fn handler_node_enrich(
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
-        Err(_) => err_json("node enrich timed out (120s)"),
+        Err(_) => err_json("Node enrich timed out (120s)"),
     }
 }
 
