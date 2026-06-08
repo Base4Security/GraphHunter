@@ -76,6 +76,19 @@ fn resolve_batch_size(explicit: u32) -> u32 {
         .unwrap_or(10000)
 }
 
+/// Read the four `AZURE_*` env vars; returns `(workspace_id, auth)` when
+/// all are present, else `None`. Shared by seed + enrich.
+fn resolve_azure_creds() -> Option<(String, SentinelAuth)> {
+    let ws = std::env::var("AZURE_WORKSPACE_ID").ok()?;
+    let tenant = std::env::var("AZURE_TENANT_ID").ok()?;
+    let client = std::env::var("AZURE_CLIENT_ID").ok()?;
+    let secret = std::env::var("AZURE_CLIENT_SECRET").ok()?;
+    Some((
+        ws,
+        SentinelAuth { tenant_id: tenant, client_id: client, client_secret: secret },
+    ))
+}
+
 fn resolve_tables(explicit: &[String]) -> Vec<String> {
     if !explicit.is_empty() {
         return explicit.to_vec();
@@ -676,25 +689,14 @@ impl GraphHunterApi {
             .map(|w| w.kql_filter())
             .unwrap_or_else(|| "where TimeGenerated > ago(24h)".to_string());
 
-        let creds = (
-            std::env::var("AZURE_WORKSPACE_ID").ok(),
-            std::env::var("AZURE_TENANT_ID").ok(),
-            std::env::var("AZURE_CLIENT_ID").ok(),
-            std::env::var("AZURE_CLIENT_SECRET").ok(),
-        );
-        match creds {
-            (Some(ws), Some(tenant), Some(client), Some(secret)) => {
+        match resolve_azure_creds() {
+            Some((ws, auth)) => {
                 let transport = HttpSentinelTransport::new();
                 let cache = SentinelTokenCache::new();
-                let auth = SentinelAuth {
-                    tenant_id: tenant,
-                    client_id: client,
-                    client_secret: secret,
-                };
                 self.seed_from_ioc_with(&transport, &cache, &req.value, &ty, &time_filter, &ws, &auth)
                     .await
             }
-            _ => self.build_seed_result(&req.value, HydrationOutcome {
+            None => self.build_seed_result(&req.value, HydrationOutcome {
                 skipped: true,
                 reason: Some("Azure credentials not configured (set AZURE_* or connect Sentinel)".into()),
                 new_entities: 0,
@@ -754,26 +756,17 @@ impl GraphHunterApi {
             .map(|w| w.kql_filter())
             .unwrap_or_else(|| "where TimeGenerated > ago(24h)".to_string());
 
+        // On-demand enrichment is intentionally bounded to 1000 rows/table
+        // by default (seed/full hydration default is 5000).
         let filter = HydrationFilter {
-            tables: req.tables.clone(),
-            max_rows: Some(req.max_rows.unwrap_or(1000)),
+            tables: req.tables,
+            max_rows: req.max_rows.or(Some(1000)),
         };
 
-        let creds = (
-            std::env::var("AZURE_WORKSPACE_ID").ok(),
-            std::env::var("AZURE_TENANT_ID").ok(),
-            std::env::var("AZURE_CLIENT_ID").ok(),
-            std::env::var("AZURE_CLIENT_SECRET").ok(),
-        );
-        match creds {
-            (Some(ws), Some(tenant), Some(client), Some(secret)) => {
+        match resolve_azure_creds() {
+            Some((ws, auth)) => {
                 let transport = HttpSentinelTransport::new();
                 let cache = SentinelTokenCache::new();
-                let auth = SentinelAuth {
-                    tenant_id: tenant,
-                    client_id: client,
-                    client_secret: secret,
-                };
                 self.hydrate_node_filtered_with(
                     &transport,
                     &cache,
@@ -787,7 +780,7 @@ impl GraphHunterApi {
                 )
                 .await
             }
-            _ => Ok(HydrationOutcome {
+            None => Ok(HydrationOutcome {
                 skipped: true,
                 reason: Some(
                     "Azure credentials not configured (set AZURE_* or connect Sentinel)".into(),
@@ -1485,6 +1478,7 @@ mod node_enrich_tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ApiError::InvalidInput(_)));
+        assert!(err.to_string().contains("does-not-exist"), "error should name the missing node: {err}");
     }
 
     #[tokio::test]

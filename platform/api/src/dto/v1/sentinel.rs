@@ -263,6 +263,9 @@ pub struct SeedFromIocRequest {
 /// session graph; its entity type selects the Sentinel tables to query.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NodeEnrichRequest {
+    /// Reserved for DTO symmetry with the other request types. The
+    /// on-demand enrichment path is session-agnostic: `node_enrich` operates
+    /// on the current session and does not consult this field today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionHandle>,
     /// Existing node id (also the value searched in Sentinel, e.g. an IP
