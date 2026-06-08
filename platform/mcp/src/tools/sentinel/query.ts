@@ -11,7 +11,7 @@ const input = z.object({
   ingest: z
     .boolean()
     .optional()
-    .describe("false (default): return rows for inspection without touching the graph. true: parse + ingest into the graph."),
+    .describe("false (default): inspect rows only — does NOT add anything to the graph. true: parse the results and ADD them to the graph. Set true whenever the user wants the data IN the graph (to hunt/expand on it), not just to read it."),
   max_rows: z
     .number()
     .int()
@@ -24,7 +24,7 @@ const input = z.object({
 export const sentinelQuery = defineTool({
   name: "sentinel_query",
   description:
-    "Run a free-form KQL query against the connected Sentinel workspace. Dual mode: ingest=false (default) returns rows so you can inspect/verify a hypothesis without polluting the graph; ingest=true parses and ingests the results. Use node_enrich for targeted per-node pulls; use this for arbitrary KQL.",
+    "Run a free-form KQL query against the connected Sentinel workspace. Dual mode: ingest=false (default) returns rows to inspect/verify a hypothesis WITHOUT changing the graph; ingest=true parses the results and adds them to the graph. IMPORTANT: inspect mode does NOT populate the graph — if the user wants the data in the graph (to hunt or expand on it), you MUST re-run with ingest=true. Typical flow: inspect once to confirm the query is right, then run again with ingest=true to load it. Use node_enrich for targeted per-node pulls; use this for arbitrary KQL.",
   category: "sentinel",
   version: 1,
   stability: "stable",
