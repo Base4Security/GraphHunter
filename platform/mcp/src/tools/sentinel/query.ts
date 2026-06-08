@@ -24,7 +24,7 @@ const input = z.object({
 export const sentinelQuery = defineTool({
   name: "sentinel_query",
   description:
-    "Run a free-form KQL query against the connected Sentinel workspace. Dual mode: ingest=false (default) returns rows to inspect/verify a hypothesis WITHOUT changing the graph; ingest=true parses the results and adds them to the graph. IMPORTANT: inspect mode does NOT populate the graph — if the user wants the data in the graph (to hunt or expand on it), you MUST re-run with ingest=true. Typical flow: inspect once to confirm the query is right, then run again with ingest=true to load it. Use node_enrich for targeted per-node pulls; use this for arbitrary KQL.",
+    "ADVANCED escape hatch for raw KQL. For normal hunting prefer the graph-building flow — sentinel_seed (cold-start from an IoC), then node_enrich (pull a node's events) and node_expand / hunt_run plus graph analytics (heavy_edges, channel_behavior). GraphHunter's value is the correlated, persistent graph (cross-source entity unification, multi-hop paths, anomaly scoring), NOT the raw query — so reach for the graph tools first. Use sentinel_query only for arbitrary KQL those tools can't express, or to verify a hypothesis before committing data. Dual mode: ingest=false (default) returns rows to inspect WITHOUT changing the graph; ingest=true parses the results and ADDS them to the graph. Inspect mode does NOT populate the graph — to put data in the graph you MUST run with ingest=true (typical flow: inspect once to confirm the query, then re-run with ingest=true).",
   category: "sentinel",
   version: 1,
   stability: "stable",
