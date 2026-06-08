@@ -357,14 +357,15 @@ impl GraphHunterApi {
         // (ingest absent or true) falls through to the ingest path below.
         if req.ingest == Some(false) {
             let cap = req.max_rows.unwrap_or(200) as usize;
-            let rows = cap_kql_rows(&res.data, cap);
+            let (rows, total) = cap_kql_rows(&res.data, cap);
+            let inspect_truncated = truncated || total > cap;
             self.emitter_arc().emit(
                 "kql-executed",
                 serde_json::json!({
                     "kql": kql,
                     "source": "adhoc",
                     "target": "inspect",
-                    "row_count": row_count,
+                    "row_count": total,
                     "entities_created": 0,
                     "relations_created": 0,
                 }),
@@ -375,10 +376,10 @@ impl GraphHunterApi {
                 total_entities: 0,
                 total_relations: 0,
                 kql_executed: kql,
-                row_count,
+                row_count: total,
                 took_ms,
                 take_limit,
-                truncated,
+                truncated: inspect_truncated,
                 rows: Some(rows),
             });
         }
@@ -931,15 +932,17 @@ impl GraphHunterApi {
 }
 
 /// Parse a normalized KQL response (a JSON array of row objects) and
-/// return at most `max_rows` rows. Non-array or malformed input yields
-/// an empty vec rather than erroring — inspect mode is best-effort.
-fn cap_kql_rows(data: &str, max_rows: usize) -> Vec<serde_json::Value> {
+/// return at most `max_rows` rows together with the pre-truncation total.
+/// Non-array or malformed input yields `(vec![], 0)` rather than erroring
+/// — inspect mode is best-effort.
+fn cap_kql_rows(data: &str, max_rows: usize) -> (Vec<serde_json::Value>, usize) {
     match serde_json::from_str::<Vec<serde_json::Value>>(data) {
         Ok(mut rows) => {
+            let total = rows.len();
             rows.truncate(max_rows);
-            rows
+            (rows, total)
         }
-        Err(_) => Vec::new(),
+        Err(_) => (Vec::new(), 0),
     }
 }
 
@@ -1079,16 +1082,31 @@ mod cap_kql_rows_tests {
     #[test]
     fn cap_kql_rows_parses_and_truncates() {
         let data = r#"[{"a":1},{"a":2},{"a":3}]"#;
-        let rows = cap_kql_rows(data, 2);
+        let (rows, total) = cap_kql_rows(data, 2);
         assert_eq!(rows.len(), 2, "must truncate to max_rows");
+        assert_eq!(total, 3, "total reflects pre-truncation length");
         assert_eq!(rows[0]["a"], serde_json::json!(1));
     }
 
     #[test]
     fn cap_kql_rows_handles_non_array() {
-        // Malformed / non-array data yields an empty vec, never panics.
-        assert!(cap_kql_rows("not json", 10).is_empty());
-        assert!(cap_kql_rows("{}", 10).is_empty());
+        // Malformed / non-array data yields an empty vec + zero total, never panics.
+        assert_eq!(cap_kql_rows("not json", 10), (vec![], 0));
+        assert_eq!(cap_kql_rows("{}", 10), (vec![], 0));
+    }
+
+    #[test]
+    fn cap_kql_rows_zero_cap_returns_empty_with_total() {
+        let (rows, total) = cap_kql_rows(r#"[{"a":1},{"a":2}]"#, 0);
+        assert!(rows.is_empty());
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn cap_kql_rows_empty_array() {
+        let (rows, total) = cap_kql_rows("[]", 10);
+        assert!(rows.is_empty());
+        assert_eq!(total, 0);
     }
 }
 

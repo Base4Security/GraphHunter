@@ -150,6 +150,7 @@ pub struct RunKqlRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingest: Option<bool>,
     /// Cap on rows returned in inspect mode (`ingest=false`). Default 200.
+    /// Ignored when ingesting (`ingest` absent or true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rows: Option<u32>,
 }
@@ -202,7 +203,9 @@ pub struct KqlResult {
     #[serde(default)]
     pub truncated: bool,
     /// Populated only in inspect mode (`ingest=false`): the (capped) raw
-    /// rows. `None` when the query was ingested.
+    /// rows. `None` when the query was ingested. When `Some` (inspect mode),
+    /// `total_entities` and `total_relations` are always 0 — the graph was
+    /// not read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<Vec<serde_json::Value>>,
 }
