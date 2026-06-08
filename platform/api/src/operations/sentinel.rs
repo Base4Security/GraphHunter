@@ -32,6 +32,20 @@ use crate::{ApiError, ApiResult, GraphHunterApi};
 // LogParser is pulled in transitively via `make_parser_for_format`,
 // no direct import needed here.
 
+/// Narrows a node hydration to a subset of its mapped Sentinel tables
+/// and caps the rows pulled per table. `None` fields mean "no
+/// restriction" — a fully-`None` filter behaves exactly like the
+/// unfiltered hydration.
+#[derive(Debug, Clone, Default)]
+pub struct HydrationFilter {
+    /// Restrict to these tables (case-insensitive match against the
+    /// type's mapped tables). `None` = all mapped tables.
+    pub tables: Option<Vec<String>>,
+    /// Cap rows per table (`| take N`). `None` = the default
+    /// `HYDRATION_TAKE`.
+    pub max_rows: Option<u32>,
+}
+
 fn env_or(explicit: &str, env_key: &str) -> ApiResult<String> {
     if !explicit.is_empty() {
         return Ok(explicit.to_string());
@@ -448,6 +462,9 @@ impl GraphHunterApi {
     /// where its type can appear, run an entity-scoped KQL, parse, and
     /// ingest into the current session graph. Generic over transport for
     /// mockability; the live-expand path builds the real HTTP transport.
+    ///
+    /// Delegates to [`Self::hydrate_node_filtered_with`] with no filter,
+    /// preserving the exact prior behavior.
     #[allow(clippy::too_many_arguments)]
     pub async fn hydrate_node_with<T: SentinelTransport>(
         &self,
@@ -460,10 +477,33 @@ impl GraphHunterApi {
         auth: &SentinelAuth,
         dataset_tag: &str,
     ) -> ApiResult<graph_hunter_core::analytics::HydrationOutcome> {
+        self.hydrate_node_filtered_with(
+            transport, token_cache, value, entity_type, time_filter, workspace_id, auth,
+            dataset_tag, None,
+        )
+        .await
+    }
+
+    /// Node hydration with an optional [`HydrationFilter`] that narrows
+    /// the tables queried and caps rows per table. `filter = None` is
+    /// identical to the unfiltered path.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn hydrate_node_filtered_with<T: SentinelTransport>(
+        &self,
+        transport: &T,
+        token_cache: &SentinelTokenCache,
+        value: &str,
+        entity_type: &EntityType,
+        time_filter: &str,
+        workspace_id: &str,
+        auth: &SentinelAuth,
+        dataset_tag: &str,
+        filter: Option<&HydrationFilter>,
+    ) -> ApiResult<graph_hunter_core::analytics::HydrationOutcome> {
         use graph_hunter_core::analytics::HydrationOutcome;
 
-        let targets = sentinel_entity_targets(entity_type);
-        if targets.is_empty() {
+        let all_targets = sentinel_entity_targets(entity_type);
+        if all_targets.is_empty() {
             return Ok(HydrationOutcome {
                 skipped: true,
                 reason: Some(format!("no Sentinel column mapping for type {entity_type}")),
@@ -474,6 +514,20 @@ impl GraphHunterApi {
             });
         }
 
+        // Apply the table filter (case-insensitive). Requested tables that
+        // aren't mapped for this type are simply not queried (no error).
+        let requested: Option<Vec<String>> = filter.and_then(|f| f.tables.clone());
+        let targets: Vec<(&'static str, &'static [&'static str])> = all_targets
+            .iter()
+            .copied()
+            .filter(|(table, _)| match &requested {
+                Some(list) => list.iter().any(|t| t.eq_ignore_ascii_case(table)),
+                None => true,
+            })
+            .collect();
+
+        let take: u32 = filter.and_then(|f| f.max_rows).unwrap_or(5000);
+
         let token = token_cache
             .get_or_refresh(transport, auth)
             .await
@@ -482,20 +536,19 @@ impl GraphHunterApi {
                 message: e,
             })?;
 
-        const HYDRATION_TAKE: u32 = 5000;
-
         let parser = make_parser_for_format("sentinel").map_err(ApiError::InvalidInput)?;
-        let session = self.sessions().current_session().ok_or_else(|| {
-            ApiError::InvalidState("No current session.".into())
-        })?;
+        let session = self
+            .sessions()
+            .current_session()
+            .ok_or_else(|| ApiError::InvalidState("No current session.".into()))?;
 
         let mut tables_hit = 0usize;
         let mut new_e = 0usize;
         let mut new_r = 0usize;
         let tables_attempted = targets.len();
 
-        for (table, columns) in targets {
-            let kql = build_hydration_kql(table, columns, value, time_filter, HYDRATION_TAKE);
+        for (table, columns) in &targets {
+            let kql = build_hydration_kql(table, columns, value, time_filter, take);
             match transport.execute_query(workspace_id, &kql, &token).await {
                 Ok(raw) => match normalize_response(&raw) {
                     // `normalize_response` serializes rows as a JSON array, so the
@@ -505,23 +558,15 @@ impl GraphHunterApi {
                         let triples = parser.parse(&result.data);
                         if !triples.is_empty() {
                             match session.graph.write() {
-                                Ok(mut graph) => {
-                                    match graph.insert_triples(triples, Some(dataset_tag)) {
-                                        Ok((e, r)) => {
-                                            new_e += e;
-                                            new_r += r;
-                                            tables_hit += 1;
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("hydration insert {table}: {e}");
-                                        }
+                                Ok(mut graph) => match graph.insert_triples(triples, Some(dataset_tag)) {
+                                    Ok((e, r)) => {
+                                        new_e += e;
+                                        new_r += r;
+                                        tables_hit += 1;
                                     }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "hydration graph lock poisoned {table}: {e}"
-                                    );
-                                }
+                                    Err(e) => tracing::warn!("hydration insert {table}: {e}"),
+                                },
+                                Err(e) => tracing::warn!("hydration graph lock poisoned {table}: {e}"),
                             }
                         }
                     }
@@ -1036,6 +1081,50 @@ mod hydrate_tests {
             "expected ingested relations, got {}",
             outcome.new_relations
         );
+    }
+
+    #[tokio::test]
+    async fn hydrate_filter_restricts_tables_and_caps_rows() {
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("enrich-test".into()),
+        })
+        .expect("create_session");
+        let transport = MockTransport {
+            queries: Mutex::new(vec![]),
+            response: one_signin_row(),
+        };
+        let cache = graph_hunter_siem::SentinelTokenCache::new();
+
+        let filter = HydrationFilter {
+            tables: Some(vec!["SigninLogs".to_string()]),
+            max_rows: Some(100),
+        };
+        let outcome = api
+            .hydrate_node_filtered_with(
+                &transport,
+                &cache,
+                "10.0.0.9",
+                &graph_hunter_core::types::EntityType::IP,
+                "where TimeGenerated > ago(24h)",
+                "ws-1",
+                &SentinelAuth {
+                    tenant_id: "t".into(),
+                    client_id: "c".into(),
+                    client_secret: "s".into(),
+                },
+                "Sentinel Enrich",
+                Some(&filter),
+            )
+            .await
+            .expect("hydrate filtered");
+
+        let queries = transport.queries.lock().unwrap();
+        // IP maps to 3 tables; the filter narrows to SigninLogs only -> 1 query.
+        assert_eq!(queries.len(), 1, "filter must restrict to one table");
+        assert!(queries[0].contains("SigninLogs"), "query: {}", queries[0]);
+        assert!(queries[0].contains("take 100"), "max_rows must cap take: {}", queries[0]);
+        assert_eq!(outcome.tables_attempted, 1);
     }
 
     #[tokio::test]
