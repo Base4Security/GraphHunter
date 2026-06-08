@@ -358,7 +358,11 @@ impl GraphHunterApi {
         if req.ingest == Some(false) {
             let cap = req.max_rows.unwrap_or(200) as usize;
             let (rows, total) = cap_kql_rows(&res.data, cap);
-            let inspect_truncated = truncated || total > cap;
+            // Use the accurate parsed `total` (not the `{`-heuristic
+            // `row_count`) for the LLM-facing truncated flag: true when the
+            // KQL `take` saturated OR the display cap dropped rows.
+            let take_saturated = take_limit.is_some_and(|t| total >= t as usize);
+            let inspect_truncated = take_saturated || total > cap;
             self.emitter_arc().emit(
                 "kql-executed",
                 serde_json::json!({
