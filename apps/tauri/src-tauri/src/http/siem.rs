@@ -25,6 +25,12 @@ pub(super) struct RunKqlBody {
     azure_client_id: Option<String>,
     #[serde(default)]
     azure_client_secret: Option<String>,
+    #[serde(default)]
+    pub ingest: Option<bool>,
+    #[serde(default)]
+    pub max_rows: Option<u32>,
+    #[serde(default)]
+    pub lookback: Option<String>,
 }
 
 /// Execute an ad-hoc KQL query against Azure Log Analytics. Delegates
@@ -41,12 +47,9 @@ pub(super) async fn handler_run_kql(
             azure_tenant_id: body.azure_tenant_id.unwrap_or_default(),
             azure_client_id: body.azure_client_id.unwrap_or_default(),
             azure_client_secret: body.azure_client_secret.unwrap_or_default(),
-            // HTTP transport doesn't currently expose a time window
-            // picker — the analyst supplies the `where TimeGenerated`
-            // filter in their KQL when they hit this route directly.
-            time_window: None,
-            ingest: None,
-            max_rows: None,
+            time_window: super::graph::lookback_to_window(body.lookback.as_deref()),
+            ingest: body.ingest,
+            max_rows: body.max_rows,
         }),
     )
     .await;
@@ -94,6 +97,45 @@ pub(super) async fn handler_seed_from_ioc(
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("Sentinel seed timed out (120s)"),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct NodeEnrichBody {
+    pub node_id: String,
+    #[serde(default)]
+    pub tables: Option<Vec<String>>,
+    #[serde(default)]
+    pub lookback: Option<String>,
+    #[serde(default)]
+    pub max_rows: Option<u32>,
+}
+
+/// Enrich an existing graph node on demand by pulling its Sentinel events.
+pub(super) async fn handler_node_enrich(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<NodeEnrichBody>,
+) -> Response {
+    let time_window = super::graph::lookback_to_window(body.lookback.as_deref());
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        api.node_enrich(graph_hunter_api::dto::sentinel::NodeEnrichRequest {
+            session: None,
+            node_id: body.node_id,
+            tables: body.tables,
+            time_window,
+            max_rows: body.max_rows,
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(v)) => ok_json(v),
+        Ok(Err(e)) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Err(_) => err_json("node enrich timed out (120s)"),
     }
 }
 
