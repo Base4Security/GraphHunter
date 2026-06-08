@@ -353,6 +353,36 @@ impl GraphHunterApi {
         let take_limit = extract_take_limit(&kql);
         let truncated = take_limit.is_some_and(|cap| row_count >= cap as usize);
 
+        // Inspect mode: return rows without touching the graph. Default
+        // (ingest absent or true) falls through to the ingest path below.
+        if req.ingest == Some(false) {
+            let cap = req.max_rows.unwrap_or(200) as usize;
+            let rows = cap_kql_rows(&res.data, cap);
+            self.emitter_arc().emit(
+                "kql-executed",
+                serde_json::json!({
+                    "kql": kql,
+                    "source": "adhoc",
+                    "target": "inspect",
+                    "row_count": row_count,
+                    "entities_created": 0,
+                    "relations_created": 0,
+                }),
+            );
+            return Ok(KqlResult {
+                new_entities: 0,
+                new_relations: 0,
+                total_entities: 0,
+                total_relations: 0,
+                kql_executed: kql,
+                row_count,
+                took_ms,
+                take_limit,
+                truncated,
+                rows: Some(rows),
+            });
+        }
+
         let session = self.sessions().current_session().ok_or_else(|| {
             ApiError::InvalidState("No current session. Create or load a session first.".into())
         })?;
@@ -434,6 +464,7 @@ impl GraphHunterApi {
             took_ms,
             take_limit,
             truncated,
+            rows: None,
         })
     }
 
@@ -466,6 +497,8 @@ impl GraphHunterApi {
             azure_client_id: req.azure_client_id,
             azure_client_secret: req.azure_client_secret,
             time_window: None,
+            ingest: None,
+            max_rows: None,
         })
         .await
     }
@@ -897,6 +930,19 @@ impl GraphHunterApi {
     }
 }
 
+/// Parse a normalized KQL response (a JSON array of row objects) and
+/// return at most `max_rows` rows. Non-array or malformed input yields
+/// an empty vec rather than erroring — inspect mode is best-effort.
+fn cap_kql_rows(data: &str, max_rows: usize) -> Vec<serde_json::Value> {
+    match serde_json::from_str::<Vec<serde_json::Value>>(data) {
+        Ok(mut rows) => {
+            rows.truncate(max_rows);
+            rows
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Phase L: prepend `where TimeGenerated > ...` to the analyst's
 /// KQL when (a) the form supplied a time window AND (b) the query
 /// doesn't already have a `TimeGenerated` filter. Idempotent — calling
@@ -1024,6 +1070,26 @@ fn render_hunting_template(template: HuntingTemplateId, window: &TimeWindow) -> 
 /// run.
 pub fn preview_hunting_template(template: HuntingTemplateId, window: &TimeWindow) -> String {
     render_hunting_template(template, window)
+}
+
+#[cfg(test)]
+mod cap_kql_rows_tests {
+    use super::*;
+
+    #[test]
+    fn cap_kql_rows_parses_and_truncates() {
+        let data = r#"[{"a":1},{"a":2},{"a":3}]"#;
+        let rows = cap_kql_rows(data, 2);
+        assert_eq!(rows.len(), 2, "must truncate to max_rows");
+        assert_eq!(rows[0]["a"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn cap_kql_rows_handles_non_array() {
+        // Malformed / non-array data yields an empty vec, never panics.
+        assert!(cap_kql_rows("not json", 10).is_empty());
+        assert!(cap_kql_rows("{}", 10).is_empty());
+    }
 }
 
 #[cfg(test)]

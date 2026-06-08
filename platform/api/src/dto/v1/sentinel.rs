@@ -144,6 +144,14 @@ pub struct RunKqlRequest {
     /// `where TimeGenerated ...` clause derived from this window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_window: Option<TimeWindow>,
+    /// When `Some(false)`, the query runs but results are NOT ingested
+    /// into the graph — rows are returned for inspection instead. `None`
+    /// is treated as `true` (ingest), preserving the legacy behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest: Option<bool>,
+    /// Cap on rows returned in inspect mode (`ingest=false`). Default 200.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rows: Option<u32>,
 }
 
 /// One-click hunting template (Phase M). The body is a KQL string
@@ -193,6 +201,10 @@ pub struct KqlResult {
     /// your window" warning instead of a clean success log entry.
     #[serde(default)]
     pub truncated: bool,
+    /// Populated only in inspect mode (`ingest=false`): the (capped) raw
+    /// rows. `None` when the query was ingested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<Vec<serde_json::Value>>,
 }
 
 // ── Env probe ──────────────────────────────────────────────────────────

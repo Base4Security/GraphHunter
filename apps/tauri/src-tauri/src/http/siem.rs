@@ -45,6 +45,8 @@ pub(super) async fn handler_run_kql(
             // picker — the analyst supplies the `where TimeGenerated`
             // filter in their KQL when they hit this route directly.
             time_window: None,
+            ingest: None,
+            max_rows: None,
         }),
     )
     .await;
