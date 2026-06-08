@@ -14,9 +14,9 @@ use graph_hunter_siem::{
 use uuid::Uuid;
 
 use crate::dto::sentinel::{
-    ConnectorStatusResponse, HuntingTemplateId, KqlResult, RunHuntingTemplateRequest,
-    RunKqlRequest, SeedFromIocRequest, SeedResult, SentinelConnectRequest, SentinelConnectedEvent,
-    SentinelEnvStatus, TimeWindow,
+    ConnectorStatusResponse, HuntingTemplateId, KqlResult, NodeEnrichRequest,
+    RunHuntingTemplateRequest, RunKqlRequest, SeedFromIocRequest, SeedResult,
+    SentinelConnectRequest, SentinelConnectedEvent, SentinelEnvStatus, TimeWindow,
 };
 use crate::util::parse_entity_type;
 use crate::events::events as event_names;
@@ -705,6 +705,101 @@ impl GraphHunterApi {
         }
     }
 
+    /// Enrich an existing node by pulling a chosen slice of its Sentinel
+    /// events into the current session graph. Returns the
+    /// `HydrationOutcome` describing what was added.
+    pub async fn node_enrich(
+        &self,
+        req: NodeEnrichRequest,
+    ) -> ApiResult<graph_hunter_core::analytics::HydrationOutcome> {
+        use graph_hunter_core::analytics::HydrationOutcome;
+
+        let session = self.sessions().current_session().ok_or_else(|| {
+            ApiError::InvalidState("No current session. Seed or load a session first.".into())
+        })?;
+
+        // Resolve the node's entity type from the graph.
+        let entity_type = {
+            let graph = session
+                .graph
+                .read()
+                .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+            graph
+                .get_entity(&req.node_id)
+                .map(|e| e.entity_type.clone())
+                .ok_or_else(|| {
+                    ApiError::InvalidInput(format!(
+                        "node '{}' not found in the current session graph",
+                        req.node_id
+                    ))
+                })?
+        };
+
+        if sentinel_entity_targets(&entity_type).is_empty() {
+            return Ok(HydrationOutcome {
+                skipped: true,
+                reason: Some(format!(
+                    "node type {entity_type} has no Sentinel table mapping; nothing to enrich"
+                )),
+                new_entities: 0,
+                new_relations: 0,
+                tables_hit: 0,
+                tables_attempted: 0,
+            });
+        }
+
+        let time_filter = req
+            .time_window
+            .as_ref()
+            .map(|w| w.kql_filter())
+            .unwrap_or_else(|| "where TimeGenerated > ago(24h)".to_string());
+
+        let filter = HydrationFilter {
+            tables: req.tables.clone(),
+            max_rows: Some(req.max_rows.unwrap_or(1000)),
+        };
+
+        let creds = (
+            std::env::var("AZURE_WORKSPACE_ID").ok(),
+            std::env::var("AZURE_TENANT_ID").ok(),
+            std::env::var("AZURE_CLIENT_ID").ok(),
+            std::env::var("AZURE_CLIENT_SECRET").ok(),
+        );
+        match creds {
+            (Some(ws), Some(tenant), Some(client), Some(secret)) => {
+                let transport = HttpSentinelTransport::new();
+                let cache = SentinelTokenCache::new();
+                let auth = SentinelAuth {
+                    tenant_id: tenant,
+                    client_id: client,
+                    client_secret: secret,
+                };
+                self.hydrate_node_filtered_with(
+                    &transport,
+                    &cache,
+                    &req.node_id,
+                    &entity_type,
+                    &time_filter,
+                    &ws,
+                    &auth,
+                    "Sentinel Enrich (node)",
+                    Some(&filter),
+                )
+                .await
+            }
+            _ => Ok(HydrationOutcome {
+                skipped: true,
+                reason: Some(
+                    "Azure credentials not configured (set AZURE_* or connect Sentinel)".into(),
+                ),
+                new_entities: 0,
+                new_relations: 0,
+                tables_hit: 0,
+                tables_attempted: 0,
+            }),
+        }
+    }
+
     /// Build the neighborhood of the seeded node, or an empty centered
     /// neighborhood if the node was not created (empty/failed hydration).
     fn seeded_neighborhood(
@@ -1363,5 +1458,48 @@ mod seed_tests {
             ApiError::InvalidInput(_) => {}
             other => panic!("expected InvalidInput, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod node_enrich_tests {
+    use super::*;
+    use crate::dto::session::CreateSessionRequest;
+    use crate::dto::v1::sentinel::NodeEnrichRequest;
+
+    #[tokio::test]
+    async fn node_enrich_errors_when_node_absent() {
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("enrich-absent".into()),
+        })
+        .unwrap();
+        let err = api
+            .node_enrich(NodeEnrichRequest {
+                session: None,
+                node_id: "does-not-exist".into(),
+                tables: None,
+                time_window: None,
+                max_rows: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    async fn node_enrich_errors_without_session() {
+        let api = GraphHunterApi::new_noop();
+        let err = api
+            .node_enrich(NodeEnrichRequest {
+                session: None,
+                node_id: "10.0.0.9".into(),
+                tables: None,
+                time_window: None,
+                max_rows: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::InvalidState(_)));
     }
 }

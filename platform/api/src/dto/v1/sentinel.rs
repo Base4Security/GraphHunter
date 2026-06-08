@@ -258,6 +258,28 @@ pub struct SeedFromIocRequest {
     pub time_window: Option<TimeWindow>,
 }
 
+/// Pull a specific slice of a node's Sentinel events into the graph on
+/// demand (no polling). The node must already exist in the current
+/// session graph; its entity type selects the Sentinel tables to query.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NodeEnrichRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    /// Existing node id (also the value searched in Sentinel, e.g. an IP
+    /// or UPN).
+    pub node_id: String,
+    /// Restrict to these Sentinel tables (default: all tables mapped for
+    /// the node's type).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tables: Option<Vec<String>>,
+    /// Time window (soft-sugar). Default `ago(24h)` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<TimeWindow>,
+    /// Cap rows pulled per table. Default 1000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rows: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SeedResult {
     pub hydration: graph_hunter_core::analytics::HydrationOutcome,
