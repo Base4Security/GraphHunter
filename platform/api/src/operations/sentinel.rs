@@ -41,8 +41,7 @@ pub struct HydrationFilter {
     /// Restrict to these tables (case-insensitive match against the
     /// type's mapped tables). `None` = all mapped tables.
     pub tables: Option<Vec<String>>,
-    /// Cap rows per table (`| take N`). `None` = the default
-    /// `HYDRATION_TAKE`.
+    /// Cap rows per table (`| take N`). `None` = 5000 (the built-in default).
     pub max_rows: Option<u32>,
 }
 
@@ -526,7 +525,24 @@ impl GraphHunterApi {
             })
             .collect();
 
-        let take: u32 = filter.and_then(|f| f.max_rows).unwrap_or(5000);
+        // When a non-empty `tables` filter excludes all mapped tables for this
+        // type, return early so callers can distinguish "skipped by filter"
+        // from "queried but found nothing".
+        if targets.is_empty() {
+            return Ok(HydrationOutcome {
+                skipped: true,
+                reason: Some(format!(
+                    "none of the requested tables are mapped for type {entity_type}"
+                )),
+                new_entities: 0,
+                new_relations: 0,
+                tables_hit: 0,
+                tables_attempted: 0,
+            });
+        }
+
+        const HYDRATION_TAKE: u32 = 5000;
+        let take: u32 = filter.and_then(|f| f.max_rows).unwrap_or(HYDRATION_TAKE);
 
         let token = token_cache
             .get_or_refresh(transport, auth)
@@ -1125,6 +1141,47 @@ mod hydrate_tests {
         assert!(queries[0].contains("SigninLogs"), "query: {}", queries[0]);
         assert!(queries[0].contains("take 100"), "max_rows must cap take: {}", queries[0]);
         assert_eq!(outcome.tables_attempted, 1);
+    }
+
+    #[tokio::test]
+    async fn hydrate_filter_unknown_table_is_skipped() {
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("enrich-unknown".into()),
+        })
+        .expect("create_session");
+        let transport = MockTransport {
+            queries: Mutex::new(vec![]),
+            response: one_signin_row(),
+        };
+        let cache = graph_hunter_siem::SentinelTokenCache::new();
+
+        let filter = HydrationFilter {
+            tables: Some(vec!["NoSuchTable".to_string()]),
+            max_rows: None,
+        };
+        let outcome = api
+            .hydrate_node_filtered_with(
+                &transport,
+                &cache,
+                "10.0.0.9",
+                &graph_hunter_core::types::EntityType::IP,
+                "where TimeGenerated > ago(24h)",
+                "ws-1",
+                &SentinelAuth {
+                    tenant_id: "t".into(),
+                    client_id: "c".into(),
+                    client_secret: "s".into(),
+                },
+                "Sentinel Enrich",
+                Some(&filter),
+            )
+            .await
+            .expect("hydrate filtered");
+
+        assert!(outcome.skipped, "unknown-table filter must be skipped");
+        assert_eq!(outcome.tables_attempted, 0);
+        assert_eq!(transport.queries.lock().unwrap().len(), 0, "no queries issued");
     }
 
     #[tokio::test]
