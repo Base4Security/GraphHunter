@@ -91,26 +91,16 @@ impl GraphHunterApi {
                     if path.extension().and_then(|e| e.to_str()) != Some("json") {
                         continue;
                     }
-                    let Ok(file) = fs::File::open(&path) else {
-                        continue;
-                    };
-                    use std::io::Read;
-                    let mut buf = vec![0u8; 4096];
-                    let mut reader = std::io::BufReader::new(file);
-                    let n = reader.read(&mut buf).unwrap_or(0);
-                    let prefix = String::from_utf8_lossy(&buf[..n]);
-                    if let (Some(id), Some(name), Some(created_at)) = (
-                        extract_json_string(&prefix, "id"),
-                        extract_json_string(&prefix, "name"),
-                        extract_json_i64(&prefix, "created_at"),
-                    ) {
-                        if !seen.contains(&id) {
-                            seen.insert(id.clone());
-                            list.push(SessionInfo {
-                                id,
-                                name,
-                                created_at,
-                            });
+                    // Format-aware: handles BOTH the binary GHS1 format
+                    // (current) and the legacy JSON format. A previous
+                    // version of this scan only parsed JSON prefixes, so
+                    // binary sessions were silently skipped — they existed
+                    // on disk but never showed up in the picker, appearing
+                    // "lost" after a save+reopen.
+                    if let Some(info) = read_session_info(&path) {
+                        if !seen.contains(&info.id) {
+                            seen.insert(info.id.clone());
+                            list.push(info);
                         }
                     }
                 }
@@ -409,9 +399,14 @@ impl GraphHunterApi {
     /// pointer if it referenced the deleted id.
     pub fn delete_session(&self, req: DeleteSessionRequest) -> ApiResult<()> {
         self.sessions().remove(&req.session_id);
-        if let Ok(path) = session_file_path(&req.session_id) {
-            let _ = fs::remove_file(&path);
-        }
+        // `session_file_path` validates the id (rejects path traversal) and
+        // resolves `{dir}/{id}.json`. Remove that file AND any legacy
+        // `{id}/` sidecar dir, propagating real I/O errors instead of
+        // swallowing them: a silently-failing delete looks successful in
+        // the UI but the session reappears on the next disk scan.
+        let path = session_file_path(&req.session_id).map_err(ApiError::Io)?;
+        remove_session_files(&path)
+            .map_err(|e| ApiError::Io(format!("delete session {}: {e}", req.session_id)))?;
         if self.sessions().current_id().as_deref() == Some(req.session_id.as_str()) {
             self.sessions().set_current(None);
         }
@@ -612,6 +607,76 @@ fn extract_json_i64(text: &str, key: &str) -> Option<i64> {
     after_colon[..end].parse().ok()
 }
 
+/// Build a [`SessionInfo`] from a session file on disk, transparently
+/// handling BOTH on-disk formats: the binary `GHS1` format (current) and
+/// the legacy JSON format. Reads only the header, so it stays cheap even
+/// for multi-gigabyte sessions. Returns `None` if the file can't be
+/// opened or its header can't be parsed in either format.
+///
+/// This is the single format-detection point shared by the session list
+/// scan; keeping it next to the JSON extractors prevents the format skew
+/// that caused binary sessions to vanish from the picker.
+fn read_session_info(path: &std::path::Path) -> Option<SessionInfo> {
+    use std::io::{BufRead, Read};
+    let file = fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+
+    // Peek the leading bytes without consuming so either branch can read
+    // from offset 0.
+    let is_binary = {
+        let buf = reader.fill_buf().ok()?;
+        crate::state::session_binary::is_binary_session(buf)
+    };
+
+    if is_binary {
+        let header = crate::state::session_binary::read_header(&mut reader).ok()?;
+        Some(SessionInfo {
+            id: header.id,
+            name: header.name,
+            created_at: header.created_at,
+        })
+    } else {
+        let mut buf = vec![0u8; 4096];
+        let n = reader.read(&mut buf).unwrap_or(0);
+        let prefix = String::from_utf8_lossy(&buf[..n]);
+        match (
+            extract_json_string(&prefix, "id"),
+            extract_json_string(&prefix, "name"),
+            extract_json_i64(&prefix, "created_at"),
+        ) {
+            (Some(id), Some(name), Some(created_at)) => Some(SessionInfo {
+                id,
+                name,
+                created_at,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Treat a `NotFound` I/O result as success (idempotent delete); pass any
+/// other result through unchanged.
+fn ignore_not_found(r: std::io::Result<()>) -> std::io::Result<()> {
+    match r {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+/// Remove a session's on-disk artifacts given the path to its
+/// `{id}.json` file: the file itself plus any legacy `{id}/` sidecar
+/// directory (old Sentinel watermark store). `NotFound` is success;
+/// every other I/O error propagates so callers can surface a failed
+/// delete instead of reporting a false success.
+fn remove_session_files(file_path: &std::path::Path) -> std::io::Result<()> {
+    ignore_not_found(fs::remove_file(file_path))?;
+    let sidecar = file_path.with_extension("");
+    if sidecar.is_dir() {
+        ignore_not_found(fs::remove_dir_all(&sidecar))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,5 +728,105 @@ mod tests {
         assert_eq!(extract_json_string(text, "name").as_deref(), Some("test"));
         assert_eq!(extract_json_i64(text, "created_at"), Some(1_700_000_000));
         assert!(extract_json_string(text, "missing").is_none());
+    }
+
+    /// Per-test scratch directory under the OS temp dir. Cleaned at start
+    /// so reruns are deterministic; tagged by test so parallel tests
+    /// don't collide.
+    fn temp_test_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("gh_sess_test_{tag}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn read_session_info_parses_binary_header() {
+        use crate::state::session_binary::{SessionHeader, write_header};
+        let dir = temp_test_dir("read_binary");
+        let path = dir.join("bin.json");
+        let header = SessionHeader {
+            id: "bin-id-123".into(),
+            name: "Binary Session".into(),
+            created_at: 1_700_000_111,
+            path_node_ids: vec![],
+            notes: vec![],
+            datasets: vec![],
+            tags: vec![],
+        };
+        {
+            let mut w = fs::File::create(&path).unwrap();
+            write_header(&mut w, &header).unwrap();
+        }
+        // This is the regression: a GHS1 binary file must yield a
+        // SessionInfo (the old JSON-only scan returned None here).
+        let info = read_session_info(&path).expect("binary session must be parsed");
+        assert_eq!(info.id, "bin-id-123");
+        assert_eq!(info.name, "Binary Session");
+        assert_eq!(info.created_at, 1_700_000_111);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_session_info_parses_legacy_json() {
+        let dir = temp_test_dir("read_json");
+        let path = dir.join("legacy.json");
+        fs::write(
+            &path,
+            br#"{"id":"json-id","name":"Legacy","created_at":1700000222,"entities":[]}"#,
+        )
+        .unwrap();
+        let info = read_session_info(&path).expect("json session must be parsed");
+        assert_eq!(info.id, "json-id");
+        assert_eq!(info.name, "Legacy");
+        assert_eq!(info.created_at, 1_700_000_222);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_session_info_rejects_garbage() {
+        let dir = temp_test_dir("read_garbage");
+        let path = dir.join("garbage.json");
+        fs::write(&path, b"not a session at all").unwrap();
+        assert!(read_session_info(&path).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_session_files_removes_file_and_sidecar() {
+        let dir = temp_test_dir("remove_both");
+        let file = dir.join("sess.json");
+        let sidecar = dir.join("sess"); // legacy `{id}/` watermark dir
+        fs::write(&file, b"x").unwrap();
+        fs::create_dir_all(&sidecar).unwrap();
+        fs::write(sidecar.join("sentinel_watermarks.json"), b"{}").unwrap();
+        remove_session_files(&file).unwrap();
+        assert!(!file.exists(), "session file must be gone");
+        assert!(!sidecar.exists(), "legacy sidecar dir must be gone");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_session_files_idempotent_when_missing() {
+        let dir = temp_test_dir("remove_missing");
+        // Neither the file nor a sidecar exists -> NotFound == success.
+        remove_session_files(&dir.join("nope.json")).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_session_files_propagates_real_errors() {
+        // A directory sitting where the `{id}.json` file should be makes
+        // `remove_file` fail with a non-NotFound error, which MUST
+        // propagate — this is exactly the silent failure that made the
+        // old delete report a false success.
+        let dir = temp_test_dir("remove_err");
+        let bogus = dir.join("isdir.json");
+        fs::create_dir_all(&bogus).unwrap();
+        assert!(
+            remove_session_files(&bogus).is_err(),
+            "remove_file on a directory must surface an error, not be swallowed"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
