@@ -5,6 +5,7 @@ import { nodeSearch } from "./search.js";
 import { nodeExpand } from "./expand.js";
 import { nodeEvents } from "./events.js";
 import { nodeSubgraph } from "./subgraph.js";
+import { nodeEnrich } from "./enrich.js";
 
 export const nodeTools: Tool[] = [
   nodeGet,
@@ -13,4 +14,5 @@ export const nodeTools: Tool[] = [
   nodeExpand,
   nodeEvents,
   nodeSubgraph,
+  nodeEnrich,
 ];
