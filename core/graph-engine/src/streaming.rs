@@ -986,10 +986,25 @@ impl InMemoryStreamingBackend {
     where
         F: FnMut(StrId, &StreamEdge),
     {
-        let outer = self.vertices.read();
-        for (&src, slot) in outer.iter() {
-            let guard = slot.read();
-            for edge in guard.as_slice() {
+        {
+            let outer = self.vertices.read();
+            for (&src, slot) in outer.iter() {
+                let guard = slot.read();
+                for edge in guard.as_slice() {
+                    f(src, edge);
+                }
+            }
+        }
+        // Post-finalize tail buffers hold edges not present in the base
+        // lists (base and tails are disjoint: pre-finalize all edges land
+        // in base with tails empty; post-finalize NEW edges go only to
+        // tails and base is untouched). Iterating both is correct and
+        // double-count-free. Without this, consumers (save_session,
+        // heavy_edges, channel_behavior, remove_*_by_dataset) silently
+        // drop tail edges on finalized graphs.
+        let tails = self.tails.read();
+        for (&src, tail) in tails.iter() {
+            for edge in tail.iter() {
                 f(src, edge);
             }
         }
@@ -2132,5 +2147,43 @@ mod tests {
                 "iter={_iter} n={n} split={split}: neighbors_in_window merge mismatch"
             );
         }
+    }
+
+    /// Task 0 (snapshot-ingest prerequisite): `for_each_edge` must visit
+    /// post-finalize tail edges, not only the sorted base neighbor lists.
+    ///
+    /// Before the fix, the function iterated `self.vertices` (base) only and
+    /// skipped `self.tails`, so any edge appended after `finalize()` was
+    /// invisible to every consumer (save_session, heavy_edges,
+    /// channel_behavior, remove_*_by_dataset).
+    ///
+    /// After the fix, it iterates base then tails.  Because the two sets are
+    /// disjoint, the total visit count must equal `edge_count()`.
+    #[test]
+    fn for_each_edge_includes_post_finalize_tail_edges() {
+        let backend = InMemoryStreamingBackend::new();
+
+        let src1 = StrId::from_raw(1);
+        let src2 = StrId::from_raw(2);
+
+        // Pre-finalize: one edge from src1 → lands in the sorted base.
+        backend.append_edge(src1, edge(10, 100, 0));
+        backend.finalize();
+
+        // Post-finalize: one edge from src2 → lands in tails.
+        backend.append_edge(src2, edge(20, 200, 0));
+
+        let mut counted = 0usize;
+        backend.for_each_edge(|_src, _e| counted += 1);
+
+        assert_eq!(
+            counted, 2,
+            "for_each_edge must count both the base edge and the tail edge"
+        );
+        assert_eq!(
+            counted,
+            backend.edge_count(),
+            "for_each_edge visit count must match edge_count()"
+        );
     }
 }

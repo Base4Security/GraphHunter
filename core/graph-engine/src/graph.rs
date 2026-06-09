@@ -3677,6 +3677,89 @@ mod tests {
         );
     }
 
+    /// Task 0 (snapshot-ingest prerequisite): `remove_entities_and_relations_by_dataset`
+    /// uses `for_each_edge` to rebuild the streaming graph after removal.
+    /// Before the `for_each_edge` tail fix, post-finalize tail edges were
+    /// invisible: a remove-by-dataset call on a finalized graph silently lost
+    /// every tail edge, even for datasets that were NOT being removed.
+    ///
+    /// This test asserts the "replace dataset" invariant: after calling
+    /// `remove_entities_and_relations_by_dataset("ds-a")` on a finalized graph
+    /// that also has post-finalize tail edges for "ds-b", the ds-b edges are
+    /// fully preserved.
+    #[test]
+    fn snapshot_replace_by_dataset_is_idempotent() {
+        let mut g = GraphHunter::new();
+
+        // Dataset A: two entities + one edge inserted before finalize.
+        g.insert_triples(
+            vec![(
+                Entity::new("a1", EntityType::User),
+                Relation::new("a1", "a2", RelationType::Auth, 100),
+                Entity::new("a2", EntityType::Host),
+            )],
+            Some("ds-a"),
+        )
+        .unwrap();
+
+        // Dataset B: two entities + one edge inserted before finalize.
+        g.insert_triples(
+            vec![(
+                Entity::new("b1", EntityType::User),
+                Relation::new("b1", "b2", RelationType::Auth, 200),
+                Entity::new("b2", EntityType::Host),
+            )],
+            Some("ds-b"),
+        )
+        .unwrap();
+
+        // Finalize: sorts edges, arms streaming base.
+        g.sort_edges_by_timestamp().unwrap();
+        assert!(g.streaming.is_finalized());
+
+        // Post-finalize: add a second ds-b edge — this lands in tails.
+        g.insert_triples(
+            vec![(
+                Entity::new("b1", EntityType::User),
+                Relation::new("b1", "b3", RelationType::Connect, 300),
+                Entity::new("b3", EntityType::IP),
+            )],
+            Some("ds-b"),
+        )
+        .unwrap();
+
+        // Sanity: 3 total edges (1 ds-a base + 2 ds-b: 1 base + 1 tail).
+        assert_eq!(
+            g.streaming_edge_count(),
+            3,
+            "should have 3 edges before removal"
+        );
+
+        // Remove ds-a. Before the fix, for_each_edge skipped tails so the
+        // ds-b tail edge was silently dropped in the rebuild.
+        let (entities_removed, relations_removed) =
+            g.remove_entities_and_relations_by_dataset("ds-a").unwrap();
+        assert_eq!(relations_removed, 1, "should remove exactly the 1 ds-a edge");
+        assert!(entities_removed >= 1, "at least one ds-a entity removed");
+
+        // After removal, ds-b edges must be intact (both base + tail).
+        assert_eq!(
+            g.streaming_edge_count(),
+            2,
+            "ds-b edges (base + tail) must survive remove of ds-a"
+        );
+
+        // Calling remove again is idempotent — no error, no further loss.
+        let (e2, r2) = g.remove_entities_and_relations_by_dataset("ds-a").unwrap();
+        assert_eq!(r2, 0, "second remove of ds-a is a no-op");
+        assert_eq!(e2, 0, "no more ds-a entities");
+        assert_eq!(
+            g.streaming_edge_count(),
+            2,
+            "ds-b edges must still be intact after idempotent remove"
+        );
+    }
+
     /// P-2: the dispatch helper must pick the parallel path above the size
     /// threshold by default and respect explicit env overrides in both
     /// directions — all without touching the env var in the test.
