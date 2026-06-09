@@ -31,6 +31,8 @@ pub(super) struct RunKqlBody {
     pub max_rows: Option<u32>,
     #[serde(default)]
     pub lookback: Option<String>,
+    #[serde(default)]
+    pub dataset: Option<String>,
 }
 
 /// Execute an ad-hoc KQL query against Azure Log Analytics. Delegates
@@ -50,6 +52,7 @@ pub(super) async fn handler_run_kql(
             time_window: super::graph::lookback_to_window(body.lookback.as_deref()),
             ingest: body.ingest,
             max_rows: body.max_rows,
+            dataset: body.dataset,
         }),
     )
     .await;
