@@ -21,6 +21,7 @@ const input = z.object({
     .describe("Cap rows returned in inspect mode (default 200)."),
   dataset: z
     .string()
+    .min(1)
     .max(200)
     .optional()
     .describe("Only with ingest=true: name this ingest as a refreshable layer — re-running with the same dataset name REPLACES it instead of duplicating (snapshot). Omit for a one-off append."),

@@ -22,6 +22,7 @@ const input = z.object({
     .describe("Cap rows pulled per table (default 1000)."),
   dataset: z
     .string()
+    .min(1)
     .max(200)
     .optional()
     .describe("Name this enrichment as a refreshable layer — re-enriching with the same dataset name REPLACES it instead of duplicating (snapshot). Omit for a one-off append. Use a stable per-scenario/hypothesis name."),

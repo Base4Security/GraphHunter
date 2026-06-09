@@ -404,6 +404,11 @@ impl GraphHunterApi {
                 .datasets
                 .write()
                 .map_err(|e| ApiError::Internal(format!("datasets lock poisoned: {e}")))?;
+            // Snapshot replace: drop any prior audit entry for this named
+            // layer so refreshing a layer doesn't accumulate duplicates.
+            if req.dataset.is_some() {
+                datasets.retain(|d| d.id != dataset_id);
+            }
             datasets.push(DatasetInfo {
                 id: dataset_id.clone(),
                 name: format!("KQL: {}", if kql.len() > 40 { &kql[..40] } else { &kql }),
