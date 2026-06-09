@@ -9,11 +9,11 @@
 //! (~100M entities, ~200M relations) those two vectors alone allocate
 //! ~10 GB transient at load time on top of the graph's own footprint.
 //!
-//! This module defines a binary format (magic `b"GHS1"`) where every
-//! record is bincode-encoded and lengths are explicit, so both save
-//! and load are streaming: peak memory during persistence is bounded
-//! by the writer/reader buffers (a few MB), independent of session
-//! size.
+//! This module defines a binary format (magic `b"GHS1"`) where the
+//! header is JSON-encoded (schema-tolerant) and entity/relation records
+//! are bincode-encoded with explicit lengths, so both save and load are
+//! streaming: peak memory during persistence is bounded by the
+//! writer/reader buffers (a few MB), independent of session size.
 //!
 //! Backward compatibility. The save path always writes the new
 //! binary format. The load path peeks the first 4 bytes of the file:
@@ -26,9 +26,9 @@
 //!
 //! ```text
 //! [magic       u32 = 0x31534847 ("GHS1")]
-//! [version     u32 = FORMAT_VERSION]
+//! [version     u32 = FORMAT_VERSION]     (2 = JSON header)
 //! [hdr_len     u32]
-//! [hdr_bytes   bincode(SessionHeader)]
+//! [hdr_bytes   serde_json(SessionHeader)]   ← schema-tolerant (v2)
 //! [n_entities  u64]
 //! repeated n_entities times:
 //!   [rec_len   u32]
@@ -38,6 +38,10 @@
 //!   [rec_len   u32]
 //!   [rec_bytes bincode(Relation)]
 //! ```
+//!
+//! Version history:
+//!   v1 — header was bincode(SessionHeader); breaks on any struct change.
+//!   v2 — header is serde_json(SessionHeader); tolerates field add/remove.
 //!
 //! Each record is length-prefixed so a corrupted/truncated middle
 //! record is detectable rather than mis-aligning the whole stream.
@@ -53,22 +57,30 @@ use crate::state::session_types::{DatasetInfo, EntityTag, Note};
 /// Magic bytes identifying a binary session file. ASCII "GHS1".
 pub const MAGIC: [u8; 4] = *b"GHS1";
 
-/// Current binary format version. Bump on any breaking change to
-/// the layout below; keep readers on older versions for backward
-/// compat when feasible.
-pub const FORMAT_VERSION: u32 = 1;
+/// Current binary format version.
+///   1 = bincode header (legacy; breaks on struct change)
+///   2 = JSON header (schema-tolerant; field add/remove safe)
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Serializable header — everything *except* the streaming entity /
 /// relation arrays. Small, lives entirely in memory at save and
 /// load time.
+///
+/// `#[serde(default)]` on collection fields ensures that a header
+/// written by a future version that omits a field (e.g. a new optional
+/// collection that wasn't present) still deserializes cleanly.
 #[derive(Serialize, Deserialize)]
 pub struct SessionHeader {
     pub id: String,
     pub name: String,
     pub created_at: i64,
+    #[serde(default)]
     pub path_node_ids: Vec<String>,
+    #[serde(default)]
     pub notes: Vec<Note>,
+    #[serde(default)]
     pub datasets: Vec<DatasetInfo>,
+    #[serde(default)]
     pub tags: Vec<EntityTag>,
 }
 
@@ -86,6 +98,7 @@ pub fn is_binary_session(prefix: &[u8]) -> bool {
 pub enum BinaryError {
     Io(std::io::Error),
     Bincode(bincode::Error),
+    Json(serde_json::Error),
     BadMagic,
     UnsupportedVersion(u32),
     Truncated(&'static str),
@@ -96,6 +109,7 @@ impl std::fmt::Display for BinaryError {
         match self {
             Self::Io(e) => write!(f, "io: {e}"),
             Self::Bincode(e) => write!(f, "bincode: {e}"),
+            Self::Json(e) => write!(f, "json: {e}"),
             Self::BadMagic => write!(f, "bad session magic (file is not a GHS1 binary session)"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported binary session version: {v}"),
             Self::Truncated(stage) => write!(f, "truncated session file at stage: {stage}"),
@@ -112,6 +126,12 @@ impl From<std::io::Error> for BinaryError {
 impl From<bincode::Error> for BinaryError {
     fn from(e: bincode::Error) -> Self {
         Self::Bincode(e)
+    }
+}
+
+impl From<serde_json::Error> for BinaryError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(e)
     }
 }
 
@@ -137,12 +157,16 @@ fn read_u64<R: Read>(r: &mut R) -> Result<u64, BinaryError> {
     Ok(u64::from_le_bytes(buf))
 }
 
-/// Write the magic, version, and serialized header. Caller follows
-/// up with `write_entities` and `write_relations`.
+/// Write the magic, version, and JSON-serialized header. Caller
+/// follows up with `write_entities` and `write_relations`.
+///
+/// The header is written as JSON (format version 2) so that future
+/// struct changes (field additions, removals) do not corrupt existing
+/// session files. Entity/relation records remain bincode for efficiency.
 pub fn write_header<W: Write>(w: &mut W, header: &SessionHeader) -> Result<(), BinaryError> {
     w.write_all(&MAGIC)?;
-    write_u32(w, FORMAT_VERSION)?;
-    let hdr_bytes = bincode::serialize(header)?;
+    write_u32(w, FORMAT_VERSION)?; // 2 = JSON header
+    let hdr_bytes = serde_json::to_vec(header)?;
     write_u32(w, u32::try_from(hdr_bytes.len()).expect("header < 4 GiB"))?;
     w.write_all(&hdr_bytes)?;
     Ok(())
@@ -181,6 +205,12 @@ where
 
 /// Read the magic + version + header. Returns the parsed header;
 /// `r` is left positioned at the start of the entity-count u64.
+///
+/// Version dispatch:
+///   2 — header is JSON; tolerant to field additions and removals.
+///   1 — legacy bincode header (best-effort; fails if the struct drifted
+///        since the file was written — those sessions are not recoverable
+///        via this path, by design).
 pub fn read_header<R: Read>(r: &mut R) -> Result<SessionHeader, BinaryError> {
     let mut magic = [0u8; 4];
     r.read_exact(&mut magic)?;
@@ -188,14 +218,17 @@ pub fn read_header<R: Read>(r: &mut R) -> Result<SessionHeader, BinaryError> {
         return Err(BinaryError::BadMagic);
     }
     let version = read_u32(r)?;
-    if version != FORMAT_VERSION {
-        return Err(BinaryError::UnsupportedVersion(version));
-    }
     let hdr_len = read_u32(r)? as usize;
     let mut hdr_bytes = vec![0u8; hdr_len];
     r.read_exact(&mut hdr_bytes)?;
-    let header: SessionHeader = bincode::deserialize(&hdr_bytes)?;
-    Ok(header)
+    match version {
+        2 => Ok(serde_json::from_slice(&hdr_bytes)?),
+        // Legacy bincode header (best-effort; fails if the struct drifted
+        // since the file was written — those sessions are not recoverable
+        // via this path, by design).
+        1 => Ok(bincode::deserialize(&hdr_bytes)?),
+        v => Err(BinaryError::UnsupportedVersion(v)),
+    }
 }
 
 /// Reads the entity count and returns an iterator-like struct that
@@ -339,5 +372,26 @@ mod tests {
             Err(BinaryError::BadMagic) => {}
             other => panic!("expected BadMagic, got {:?}", other.err()),
         }
+    }
+
+    #[test]
+    fn json_header_tolerates_schema_drift() {
+        // Simulate a header written by a DIFFERENT struct version:
+        // (a) it has an EXTRA unknown field, and (b) it omits `tags`.
+        // A schema-tolerant reader must still recover id/name/created_at.
+        let future_json = br#"{"id":"sess-x","name":"niubiz","created_at":1780667944,"path_node_ids":[],"notes":[],"datasets":[],"future_field":{"whatever":true}}"#;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MAGIC);
+        buf.extend_from_slice(&2u32.to_le_bytes());                 // version 2 = JSON header
+        buf.extend_from_slice(&(future_json.len() as u32).to_le_bytes());
+        buf.extend_from_slice(future_json);
+        // (no entity/relation bytes needed — read_header stops after the header)
+
+        let mut cur = Cursor::new(&buf);
+        let h = read_header(&mut cur).expect("v2 JSON header must parse despite drift");
+        assert_eq!(h.id, "sess-x");
+        assert_eq!(h.name, "niubiz");
+        assert_eq!(h.created_at, 1780667944);
+        assert!(h.tags.is_empty(), "missing tags must default to empty");
     }
 }
