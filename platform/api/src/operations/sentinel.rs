@@ -392,8 +392,13 @@ impl GraphHunterApi {
             ApiError::InvalidState("No current session. Create or load a session first.".into())
         })?;
 
-        // Register a dataset for audit.
-        let dataset_id = Uuid::new_v4().to_string();
+        // Register a dataset for audit. A supplied `dataset` name is a
+        // stable layer (enables snapshot replace); otherwise a random id
+        // (one-off append, legacy behavior).
+        let dataset_id = match &req.dataset {
+            Some(name) => name.clone(),
+            None => Uuid::new_v4().to_string(),
+        };
         {
             let mut datasets = session
                 .datasets
@@ -417,6 +422,12 @@ impl GraphHunterApi {
                 .graph
                 .write()
                 .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+            // Snapshot replace: refresh a named layer instead of appending.
+            if req.dataset.is_some() {
+                graph
+                    .remove_entities_and_relations_by_dataset(&dataset_id)
+                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+            }
             let parser = make_parser_for_format("sentinel").map_err(ApiError::InvalidInput)?;
             let triples = parser.parse(&res.data);
             let (e, r) = graph
@@ -504,6 +515,7 @@ impl GraphHunterApi {
             time_window: None,
             ingest: None,
             max_rows: None,
+            dataset: None,
         })
         .await
     }

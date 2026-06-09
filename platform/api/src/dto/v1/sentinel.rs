@@ -153,6 +153,12 @@ pub struct RunKqlRequest {
     /// Ignored when ingesting (`ingest` absent or true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rows: Option<u32>,
+    /// Optional layer name. When set (and `ingest != false`), this query's
+    /// results REPLACE the existing layer with this name (snapshot) instead
+    /// of appending — re-running the same query refreshes it rather than
+    /// duplicating. Omit for a one-off append (random dataset id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
 }
 
 /// One-click hunting template (Phase M). The body is a KQL string
