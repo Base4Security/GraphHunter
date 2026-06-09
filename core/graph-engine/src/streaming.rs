@@ -123,6 +123,16 @@ pub struct StreamEdge {
     pub rel_type_tag: u8,
 }
 
+// SAFETY invariant: StreamEdge is transmuted to CompactRelation in several
+// hot paths (save_session, remove_*_by_dataset, matcher slices) via
+// `ptr::read(edge as *const _ as *const CompactRelation)`. Both are
+// `#[repr(C)]` with identical field order; they MUST stay layout-identical.
+// This compile-time assert fails the build if either struct's size drifts —
+// turning a silent UB regression into a hard compile error.
+const _: () = assert!(
+    core::mem::size_of::<StreamEdge>() == core::mem::size_of::<crate::relation::CompactRelation>()
+);
+
 impl StreamEdge {
     /// Decode `rel_type_tag` to `RelationType`. Mirrors the
     /// equivalent method on `CompactRelation` so consumers that

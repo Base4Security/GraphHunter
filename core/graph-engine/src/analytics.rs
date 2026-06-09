@@ -2103,10 +2103,8 @@ impl GraphHunter {
                 entry.last_ts = e.timestamp;
             }
         });
-        // NOTE: `for_each_edge` walks base edges only — edges appended after a
-        // graph finalize() (e.g. live Sentinel tail) are NOT visited. Correct
-        // for forensic analysis of ingested data; tail coverage is a tracked
-        // follow-up if heavy_edges is ever run against a live finalized graph.
+        // `for_each_edge` visits base AND post-finalize tail edges (tail
+        // completeness fix), so heavy_edges covers live Sentinel tail data.
         let mut out: Vec<HeavyEdge> = groups
             .into_iter()
             .filter(|((_, _, rt), _)| opts.rel_type.as_ref().map_or(true, |w| w == rt))
@@ -2137,9 +2135,8 @@ impl GraphHunter {
     /// Does not mutate the graph.
     pub fn channel_behavior(&self, opts: &ChannelBehaviorOpts) -> Vec<ChannelBehavior> {
         // NOTE: `meta_store.get` allocates a HashMap per edge — acceptable for an
-        // on-demand analytical query (cf. heavy_edges). And `for_each_edge` is
-        // base-only: tail edges from a post-finalize live graph are excluded
-        // (tracked follow-up).
+        // on-demand analytical query (cf. heavy_edges). `for_each_edge` visits
+        // base AND post-finalize tail edges, so live finalized graphs are covered.
         let window = opts.window_secs.max(1) as i64;
         let mut groups: HashMap<(StrId, StrId, String), Vec<(i64, u64, bool)>> = HashMap::new();
         self.streaming.for_each_edge(|src, ed| {
