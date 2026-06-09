@@ -813,6 +813,21 @@ impl GraphHunterApi {
             max_rows: req.max_rows.or(Some(1000)),
         };
 
+        // Snapshot replace: a named layer is refreshed (remove then insert);
+        // omitted -> the default append tag (legacy behavior).
+        let dataset_tag = req.dataset.as_deref().unwrap_or("Sentinel Enrich (node)");
+        {
+            if req.dataset.is_some() {
+                let mut graph = session
+                    .graph
+                    .write()
+                    .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+                graph
+                    .remove_entities_and_relations_by_dataset(dataset_tag)
+                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+            }
+        } // write guard dropped here, before any .await
+
         match resolve_azure_creds() {
             Some((ws, auth)) => {
                 let transport = HttpSentinelTransport::new();
@@ -825,7 +840,7 @@ impl GraphHunterApi {
                     &time_filter,
                     &ws,
                     &auth,
-                    "Sentinel Enrich (node)",
+                    dataset_tag,
                     Some(&filter),
                 )
                 .await
@@ -1574,6 +1589,7 @@ mod node_enrich_tests {
                 tables: None,
                 time_window: None,
                 max_rows: None,
+                dataset: None,
             })
             .await
             .unwrap_err();
@@ -1591,6 +1607,7 @@ mod node_enrich_tests {
                 tables: None,
                 time_window: None,
                 max_rows: None,
+                dataset: None,
             })
             .await
             .unwrap_err();

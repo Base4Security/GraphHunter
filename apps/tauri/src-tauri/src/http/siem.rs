@@ -112,6 +112,8 @@ pub(super) struct NodeEnrichBody {
     pub lookback: Option<String>,
     #[serde(default)]
     pub max_rows: Option<u32>,
+    #[serde(default)]
+    pub dataset: Option<String>,
 }
 
 /// Enrich an existing graph node on demand by pulling its Sentinel events.
@@ -128,6 +130,7 @@ pub(super) async fn handler_node_enrich(
             tables: body.tables,
             time_window,
             max_rows: body.max_rows,
+            dataset: body.dataset,
         }),
     )
     .await;

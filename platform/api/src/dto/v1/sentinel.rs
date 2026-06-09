@@ -302,6 +302,12 @@ pub struct NodeEnrichRequest {
     /// Cap rows pulled per table. Default 1000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rows: Option<u32>,
+    /// Optional layer name. When set, this enrichment REPLACES the existing
+    /// layer with this name (snapshot) instead of appending — re-enriching
+    /// the same node into the same layer refreshes it rather than
+    /// duplicating. Omit to append under the default enrich tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
