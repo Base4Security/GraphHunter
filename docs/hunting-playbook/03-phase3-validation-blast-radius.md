@@ -1,3 +1,10 @@
+# Phase 3 — Adversarial Validation & Blast-Radius Scoping
+
+> Paste this prompt into the GraphHunter MCP session for Step 3 of the weekly hunting
+> cycle. It red-teams the Phase 2 findings: cross-examines each suspicious entity against
+> the graph, scopes blast radius via graph traversal, and adjudicates a final verdict
+> before the Phase 4 report. The Tooling Doctrine below is graph-first — follow it.
+
 ## Tooling Doctrine (graph-first)
 
 **Principle:** GraphHunter's value is the correlated, persistent graph — cross-source
