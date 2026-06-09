@@ -20,6 +20,11 @@ const input = z.object({
     .max(5000)
     .optional()
     .describe("Cap rows pulled per table (default 1000)."),
+  dataset: z
+    .string()
+    .max(200)
+    .optional()
+    .describe("Name this enrichment as a refreshable layer — re-enriching with the same dataset name REPLACES it instead of duplicating (snapshot). Omit for a one-off append. Use a stable per-scenario/hypothesis name."),
 });
 
 export const nodeEnrich = defineTool({
@@ -31,11 +36,12 @@ export const nodeEnrich = defineTool({
   stability: "stable",
   inputSchema: input,
   outputSchema: z.unknown(),
-  async execute(ctx, { node_id, tables, lookback, max_rows }) {
+  async execute(ctx, { node_id, tables, lookback, max_rows, dataset }) {
     const body: Record<string, unknown> = { node_id };
     if (tables) body.tables = tables;
     if (lookback) body.lookback = lookback;
     if (max_rows != null) body.max_rows = max_rows;
+    if (dataset) body.dataset = dataset;
     return ctx.api.post("/node/enrich", body, HEAVY);
   },
 });

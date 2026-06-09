@@ -19,6 +19,11 @@ const input = z.object({
     .max(1000)
     .optional()
     .describe("Cap rows returned in inspect mode (default 200)."),
+  dataset: z
+    .string()
+    .max(200)
+    .optional()
+    .describe("Only with ingest=true: name this ingest as a refreshable layer — re-running with the same dataset name REPLACES it instead of duplicating (snapshot). Omit for a one-off append."),
 });
 
 export const sentinelQuery = defineTool({
@@ -30,10 +35,11 @@ export const sentinelQuery = defineTool({
   stability: "stable",
   inputSchema: input,
   outputSchema: z.unknown(),
-  async execute(ctx, { query, lookback, ingest, max_rows }) {
+  async execute(ctx, { query, lookback, ingest, max_rows, dataset }) {
     const body: Record<string, unknown> = { kql: query, ingest: ingest ?? false };
     if (lookback) body.lookback = lookback;
     if (max_rows != null) body.max_rows = max_rows;
+    if (dataset) body.dataset = dataset;
     return ctx.api.post("/kql", body, HEAVY);
   },
 });
