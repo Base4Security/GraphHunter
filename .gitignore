@@ -27,6 +27,9 @@ demo_data/mega_dataset_1gb.json
 
 # Other artifacts
 **/target/
+# Stray per-crate build dirs from custom CARGO_TARGET_DIR runs (e.g. target-alt,
+# target-tauri-check, target-test-live-tail) — never commit these.
+**/target-*/
 **/node_modules/
 apps/tauri/dist/
 app/dist/
