@@ -27,14 +27,20 @@ so it REPLACES instead of duplicating.
 | I need to… | Tool |
 |---|---|
 | Start a hunt from an IoC (IP/User/Host/Process/File) | `sentinel_seed` |
+| Find nodes by property/value when you have no direct IoC to seed | `node_search` |
+| Orient — current graph summary (counts, top entities) | `graph_summary` |
+| Inspect available entity types / edge (relation) types | `graph_entity_types`, `graph_relation_schema` |
 | Pull a specific slice of one node's events | `node_enrich` |
 | Expand a node's neighborhood / hydrate it | `node_expand` (`live=true` to hydrate) |
 | Get a k-hop subgraph around a node (blast radius / attack path) | `node_subgraph` |
 | Detect beaconing / periodicity | `graph_channel_behavior` |
+| See temporal concentration / off-hours / bursts across the graph | `graph_temporal_heatmap` |
 | Find heavy channels / exfil volume | `graph_heavy_edges` |
 | Understand why a node is anomalous | `node_score_explanation` |
 | Analyze a subnet / neighbors by range | `graph_subnet_analysis` |
 | Hunt a structural pattern | `hunt_run` |
+| Retrieve the results of a hunt run | `hunt_results` |
+| Re-score after a large manual expansion | `scores_recompute` |
 | List a node's raw events | `node_events` |
 | Check the SIEM connection state | `sentinel_status` |
 | De-conflict against existing SOC detections | `catalog_get` |
@@ -70,6 +76,8 @@ Each hypothesis must state two things explicitly:
 - **The expected technical behavior** — what the adversary or misconfigured system is doing at the protocol, process, or identity level, including the MITRE ATT&CK sub-technique it maps to (e.g., T1071.001 — Application Layer Protocol: Web Protocols).
 - **The graph signal that would confirm it** — phrased as a conditional: "If this behavior is occurring, then running `graph_channel_behavior` on the channel between [source entity] and [destination entity] will produce a `beacon_score` above X," or "running `node_subgraph` at depth 2 from [host] will expose a lateral-movement path to [target tier]," or "`graph_heavy_edges` will surface a channel whose byte volume exceeds the 99th-percentile baseline for this entity type in this time window."
 
+Do not frame the graph signal as a Sentinel table query or event-ID pattern (e.g. "we should see event ID 4625 in SigninLogs") — that is KQL-think. The graph signal must name a graph tool and a measurable graph output (a score, a path, a channel metric).
+
 Hypotheses should reflect the long-tail orientation of mature threat hunting: prefer low-frequency, high-specificity behaviors over high-volume patterns that existing rules already cover. Think about what a disciplined adversary would do to stay inside normal operational thresholds while still achieving their objective — and design hypotheses that surface exactly those margins.
 
 Write out all three hypotheses in full before beginning any execution. This is not bureaucracy; it prevents the common failure mode of tool-driven fishing where the analyst chases whatever the graph happens to surface without a prior theory of harm.
@@ -88,6 +96,7 @@ Run `node_enrich` to pull targeted event slices for the seeded node (authenticat
 Choose from the following tools based on what the hypothesis predicts; use as many as are relevant, and record what each one returns:
 
 - `graph_channel_behavior` to detect beaconing, periodic callouts, or anomalous communication cadence between two entities.
+- `graph_temporal_heatmap` to surface temporal concentration, off-hours activity, or burst patterns across the graph.
 - `graph_heavy_edges` to identify high-volume or statistically anomalous channels consistent with data staging or exfiltration.
 - `node_score_explanation` to interrogate why the anomaly scorer flagged a specific entity — understand which features drove the score.
 - `node_subgraph` to trace the blast radius around a suspicious node, explore multi-hop attack paths, or verify lateral movement hypotheses.
@@ -97,7 +106,7 @@ Choose from the following tools based on what the hypothesis predicts; use as ma
 The output of these tools — the entities added, the relations uncovered, the scores returned, the paths traced — constitutes the primary evidence for or against the hypothesis. Treat it as you would physical evidence at a crime scene: describe it exactly, note its provenance, and resist the urge to interpret before you have documented.
 
 **Step d — Escape hatch only if necessary.**
-If and only if the hypothesis requires testing a condition that cannot be expressed by any of the graph analytics tools above, use `sentinel_query` to run a raw KQL query. This is a last resort. Every use of the escape hatch must be accompanied by a one-line justification of why no graph tool could express the test. Do not use `sentinel_query` for convenience, for speed, or because you are more comfortable with KQL; use it only when the graph genuinely lacks the capability. Record the full KQL and the justification in the Escape-Hatch Log section of the report.
+If and only if the hypothesis requires testing a condition that cannot be expressed by any of the graph analytics tools above, use `sentinel_query` to run a raw KQL query. This is a last resort. Every use of the escape hatch must be accompanied by an explicit justification (one sentence minimum) of why no graph tool could express the test. Do not use `sentinel_query` for convenience, for speed, or because you are more comfortable with KQL; use it only when the graph genuinely lacks the capability. Record the full KQL and the justification in the Escape-Hatch Log section of the report.
 
 ### 3. Result Triaging
 
@@ -141,7 +150,7 @@ Create a `Hunting-Phase2-<timestamp>` markdown report. For EACH hypothesis inclu
   of `graph_channel_behavior` / `graph_heavy_edges` where applicable. THIS is the primary
   evidence — not a KQL query.
 - **Pivot History:** secondary `node_expand` / `node_enrich` steps used to validate a lead.
-- **Escape-Hatch Log (only if used):** the raw `sentinel_query` KQL you ran AND a one-line
-  justification of why no graph tool could express the test.
+- **Escape-Hatch Log (only if used):** the raw `sentinel_query` KQL you ran AND an explicit
+  justification (one sentence minimum) of why no graph tool could express the test.
 - **Current Risk Status:** Clean / Suspicious / Needs Escalation, + a Reliability metric
   (how certain the activity is malicious).

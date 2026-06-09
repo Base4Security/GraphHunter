@@ -23,14 +23,20 @@ so it REPLACES instead of duplicating.
 | I need to… | Tool |
 |---|---|
 | Start a hunt from an IoC (IP/User/Host/Process/File) | `sentinel_seed` |
+| Find nodes by property/value when you have no direct IoC to seed | `node_search` |
+| Orient — current graph summary (counts, top entities) | `graph_summary` |
+| Inspect available entity types / edge (relation) types | `graph_entity_types`, `graph_relation_schema` |
 | Pull a specific slice of one node's events | `node_enrich` |
 | Expand a node's neighborhood / hydrate it | `node_expand` (`live=true` to hydrate) |
 | Get a k-hop subgraph around a node (blast radius / attack path) | `node_subgraph` |
 | Detect beaconing / periodicity | `graph_channel_behavior` |
+| See temporal concentration / off-hours / bursts across the graph | `graph_temporal_heatmap` |
 | Find heavy channels / exfil volume | `graph_heavy_edges` |
 | Understand why a node is anomalous | `node_score_explanation` |
 | Analyze a subnet / neighbors by range | `graph_subnet_analysis` |
 | Hunt a structural pattern | `hunt_run` |
+| Retrieve the results of a hunt run | `hunt_results` |
+| Re-score after a large manual expansion | `scores_recompute` |
 | List a node's raw events | `node_events` |
 | Check the SIEM connection state | `sentinel_status` |
 | De-conflict against existing SOC detections | `catalog_get` |
