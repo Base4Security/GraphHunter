@@ -8,9 +8,13 @@
   <i>Graph-based & Hypothesis-driven threat hunting</i>
 </p>
 
-<p align="center">
-  Ingest security logs, build an entity-relationship graph with causal ordering, and hunt for attack paths using pattern matching with optional MITRE ATT&CK–aligned detection templates. Integrates GNN-based threat classification via ONNX models with optional NPU/GPU acceleration.
-</p>
+<div align="center">
+
+[![Status](https://img.shields.io/badge/status-active-success.svg)]()
+[![Documentation Status](https://readthedocs.org/projects/graphhunter/badge/?version=latest)](https://graphhunter.readthedocs.io/en/latest/?badge=latest)
+[![DOI:10.13140/RG.2.2.22035.54564](https://img.shields.io/badge/DOI-10.13140/RG.2.2.22035.54564-0D72C2.svg)](https://doi.org/10.13140/RG.2.2.22035.54564)
+
+</div>
 
 <div align="center">
 
@@ -20,6 +24,11 @@
 [![License](https://img.shields.io/badge/License-GPLv3-green)](LICENSE)
 
 </div>
+
+<p align="center">
+  Ingest security logs, build an entity-relationship graph with causal ordering, and hunt for attack paths using pattern matching with optional MITRE ATT&CK–aligned detection templates. Integrates GNN-based threat classification via ONNX models with optional NPU/GPU acceleration.
+</p>
+
 
 ---
 
@@ -36,8 +45,6 @@
 - [Architecture](#architecture)
 - [HTTP API & MCP (AI integration)](#http-api--mcp-ai-integration)
 - [Installation](#installation)
-- [Local LLM (optional, agentic ingest)](#local-llm-optional-agentic-ingest)
-- [Docker (reproducible Linux build)](#docker-reproducible-linux-build)
 - [SIMD acceleration](#simd-acceleration)
 - [Usage](#usage)
 - [Demo Data & Try It](#demo-data--try-it)
@@ -142,13 +149,17 @@ Process -[DNS]-> Domain -[Connect]-> IP
 
 Graph Hunter can use **GNN-based threat classification** via ONNX models (e.g. from GraphOS-APT): the engine extracts k-hop subgraphs, runs inference (DirectML/GPU or CPU), and injects a 5-class threat score (Benign, Exfiltration, C2 Beacon, Lateral Movement, Privilege Escalation) into the anomaly scorer as weight **W5**. Hunt results are then ranked by the composite score so high-threat paths appear first. GNN scoring is optional and off by default; load a model and click **Compute Scores** in the GNN Threat Model panel to enable it.
 
+**Pre-trained ONNX model:** Download from [Hugging Face](https://huggingface.co/base4security/gnn-threat-scoring).
+
 **Full details** (pipeline, threat classes, UI workflow, training): [GNN Threat Scoring](https://graphhunter.readthedocs.io/en/latest/user-guide/gnn-threat-scoring.html) in the documentation.
 
 ---
 
 ## Architecture
 
-Graph Hunter is split into a **Rust core** (domain logic, parsing, graph, search), a **Tauri + React** desktop app (UI and persistence), and the optional **`@graphhunter/mcp`** server (under `platform/mcp/`) for AI assistants. The core holds all business logic; the app exposes commands, session state, and an HTTP API.
+Graph Hunter is split into a **Rust core** (domain logic, parsing, graph, search), a **Tauri + React** desktop app (UI and persistence), and optional **graph-hunter-mcp** for AI assistants. The core holds all business logic; the app exposes commands, session state, and an HTTP API.
+
+**Full details** (directory layout, core modules, app structure, data flow): [Architecture](https://graphhunter.readthedocs.io/en/latest/reference/architecture.html) in the documentation.
 
 ---
 
@@ -165,7 +176,7 @@ You need Rust, Node.js, and the [Tauri v2 prerequisites](https://v2.tauri.app/st
 2. **Clone and run in development:**
 
    ```bash
-   cd apps/tauri
+   cd app
    npm install
    npm run tauri dev
    ```
@@ -175,67 +186,22 @@ You need Rust, Node.js, and the [Tauri v2 prerequisites](https://v2.tauri.app/st
 **Run tests:**
 
 ```bash
-cd core/graph-engine
+cd graph_hunter_core
 cargo test
 ```
 
 **Build for production:**
 
 ```bash
-cd apps/tauri
+cd app
 npm run tauri build
 ```
 
 ---
 
-## Local LLM (optional, agentic ingest)
-
-Graph Hunter ships an optional **on-device LLM** for the agentic ingest path: when the deterministic field-mapping heuristic can't decide how to map a column (ambiguous names, mixed types, vendor-specific formats), the system falls back to a **local Phi-3-mini Q4** model running via [`candle`](https://github.com/huggingface/candle). The model output is constrained at decode time against the VRL subset grammar so what comes out parses by construction. **No data leaves your machine** — there's no API key, no remote endpoint.
-
-The default build ships the **mock backend**, which is enough for the demos. To enable the real model:
-
-1. **Download weights & tokenizer** (~2.2 GB, one-time):
-
-   ```bash
-   bash scripts/download-model.sh
-   ```
-
-2. **Build with the candle feature:**
-
-   ```bash
-   export GRAPHHUNTER_LOCAL_MODEL_PATH="$PWD/target/models/Phi-3-mini-4k-instruct-q4.gguf"
-   cd platform/api && cargo build --features local-llm-candle
-   ```
-
-3. The first inference call loads the model into RAM (~5 s once); subsequent calls run CPU-only at roughly 6–15 tokens/sec. If `GRAPHHUNTER_LOCAL_MODEL_PATH` is unset or invalid, the system silently falls back to the mock backend — the agentic loop keeps working.
-
-The candle backend is **off by default** so the headline binary stays small and the supply chain stays minimal.
-
-### Constrained decoding (`xgrammar` feature)
-
-When the `xgrammar` feature on `graph_hunter_constrained_decode` is on, the agentic ingest path masks decoder logits against a Lark grammar at `platform/constrained-decode/grammars/vrl_subset.lark` so the LLM emits VRL that parses by construction — no retry loops, no malformed code. The grammar, the post-hoc `VrlSubsetValidator`, and the deterministic `field_config_to_vrl` compiler form a tested triangle (see `tests/grammar_roundtrip.rs`). Spec: [`docs/spec/vrl-subset-grammar.md`](docs/spec/vrl-subset-grammar.md).
-
----
-
-## Docker (reproducible Linux build)
-
-A minimal `Dockerfile` at the repo root builds the cross-platform `platform/*` crates against `rust:1.88-slim-bookworm` (1.88+ is required by `time@0.3.47` pulled transitively by `evtx`; llguidance / toktrie demand 1.87 when the `xgrammar` feature is on; edition 2024 needs 1.85+). No Tauri, no AVX2/x86 SIMD, no GNN model — just the auditable agentic core.
-
-```bash
-docker build -t graphhunter:dev .
-docker run --rm graphhunter:dev cargo test \
-    --manifest-path platform/constrained-decode/Cargo.toml --features xgrammar
-docker run --rm graphhunter:dev cargo test \
-    --manifest-path platform/api/Cargo.toml --test agentic_ambiguous_fields
-```
-
-CI runs the same crates on a `[ubuntu-latest, macos-latest]` matrix (see `.github/workflows/ci.yml`'s `platform-matrix` job) so a regression on either platform fails before merge.
-
----
-
 ## SIMD acceleration
 
-Graph Hunter includes **libgraphmatch**, an optional C++20 / AVX2 SIMD graph-matching engine at [`libgraphmatch/`](libgraphmatch/). It ports the DFS hot path of Graph Hunter's pattern matcher to C++ with sorted-set intersection vectorized via AVX2, and is integrated into the Rust core over a C ABI (see `core/graph-engine/src/simd_matcher.rs`). It is **off by default**; the pure-Rust matcher remains the baseline.
+Graph Hunter includes **libgraphmatch**, an optional C++20 / AVX2 SIMD graph-matching engine at [`libgraphmatch/`](libgraphmatch/). It ports the DFS hot path of Graph Hunter's pattern matcher to C++ with sorted-set intersection vectorized via AVX2, and is integrated into the Rust core over a C ABI (see `graph_hunter_core/src/simd_matcher.rs`). It is **off by default**; the pure-Rust matcher remains the baseline.
 
 **How to enable** — build with the `simd` Cargo feature on each crate that consumes it:
 
@@ -245,7 +211,7 @@ cargo build --release --features simd -p graph-hunter-app
 cargo build --release --features simd -p graph_hunter_cli
 ```
 
-When the feature is enabled, `core/graph-engine/build.rs` compiles `libgraphmatch` via the `cc` crate and links it into the core.
+When the feature is enabled, `graph_hunter_core/build.rs` compiles `libgraphmatch` via the `cc` crate and links it into the core.
 
 **Runtime behavior** — `libgraphmatch` detects AVX2 support at runtime via `cpuid`. On hosts without AVX2 (or if SIMD dispatch fails for any reason), the wrapper transparently falls back to the pure-Rust DFS path, so the same binary runs on both vectorized and scalar CPUs. Current ISA selection can be queried from the app via the `cmd_get_simd_isa` Tauri command.
 
@@ -270,14 +236,10 @@ See [`libgraphmatch/README.md`](libgraphmatch/README.md) for architecture detail
 Minimal run: start the app, load a log file, and hunt.
 
 ```bash
-cd apps/tauri && npm run tauri dev
+cd app && npm run tauri dev
 ```
 
 Then in the UI: create or select a session → **Select Log File** → choose a file from `demo_data/` (or your own) → **Auto-detect** → load. Switch to **Hunt Mode**, build a hypothesis (or pick one from the ATT&CK catalog), and click **Run**. Results appear in the graph and in the hunt table when there are many paths.
-
-![Main window after loading demo data and running a hunt](docs/images/screenshot-main.png)
-
-*Screenshot: main window with session loaded and hunt results (add `docs/images/screenshot-main.png`).*
 
 ---
 
@@ -293,7 +255,7 @@ Three attack simulation datasets are included in `demo_data/`:
 
 **Quick run:**
 
-1. Start the app: `npm run tauri dev` (from `apps/tauri/`).
+1. Start the app: `npm run tauri dev` (from `app/`).
 2. Create or select a session; choose **Auto-detect** (or a specific format), then load a demo file.
 3. Open **Hunt Mode** and build a hypothesis, e.g.:
    - `User →[Execute]→ Process →[Write]→ File` (malware drop)
@@ -318,20 +280,6 @@ All processing is **local**. Logs are read from files you select; no data is sen
 
 ---
 
-## Screenshots
-
-| Description | Placeholder |
-|-------------|-------------|
-| **Hunt mode** — Hypothesis builder, DSL, and hunt results with graph and path table | ![Hunt mode](docs/images/screenshot-hunt.png) |
-| **Explorer + graph** — IOC search, neighborhood expansion, and graph canvas | ![Explorer and graph](docs/images/screenshot-explorer.png) |
-| **Hypothesis & ATT&CK catalog** — Step builder and one-click catalog templates | ![Hypothesis and catalog](docs/images/screenshot-catalog.png) |
-| **Events, Heatmap, Timeline** — Event list, entity/relation heatmap, temporal view | ![Events, Heatmap, Timeline](docs/images/screenshot-views.png) |
-| **GNN Threat Model** — ONNX model load, k-hop config, Compute Scores (optional) | ![GNN Threat Model](docs/images/screenshot-gnn.png) |
-
-*Add the actual image files under `docs/images/` (e.g. `screenshot-hunt.png`, `screenshot-explorer.png`, etc.) or replace with a short [demo video](docs/images/) link.*
-
----
-
 ## Core Engine Details
 
 The engine provides temporal pattern matching (DFS with causal monotonicity), time-window filtering, 5-component endogenous anomaly scoring (optional GNN), k-simplicity for path constraints, parallel parsing (Rayon), and entity/relation deduplication. Entity and relation types, and full module descriptions, are in the documentation.
@@ -344,15 +292,38 @@ The engine provides temporal pattern matching (DFS with causal monotonicity), ti
 
 When the desktop app is running with a session loaded, it exposes an **HTTP API** on **127.0.0.1:37891** (configurable via `GRAPHHUNTER_API_PORT`). This allows external tools to query the graph (entity types, search, expand nodes, run hunts, create notes) without using the UI. The API is protected by **token authentication**: at startup the app prints `GRAPHHUNTER_API_TOKEN=<uuid>` to the console; clients (e.g. the MCP server) must send this token (e.g. via `Authorization: Bearer <token>` or the `GRAPHHUNTER_API_TOKEN` env var) or requests return **401 Unauthorized**.
 
-The **`@graphhunter/mcp`** package (under [`platform/mcp/`](platform/mcp/)) is an **MCP (Model Context Protocol) server** that turns these operations into tools for AI assistants (e.g. Claude Code). You can ask the AI to hunt for malicious paths, expand nodes, or summarize findings while the app holds the session and graph.
+The **graph-hunter-mcp** package is an **MCP (Model Context Protocol) server** that turns these operations into tools for AI assistants (e.g. Claude Code). You can ask the AI to hunt for malicious paths, expand nodes, or summarize findings while the app holds the session and graph.
 
 | Prerequisite | Description |
 |--------------|-------------|
 | App running | Start the Tauri app and load or create a session with data. |
 | API token | Copy `GRAPHHUNTER_API_TOKEN` from the app startup log into your MCP config `env` so the MCP can authenticate. |
-| MCP config | Add the `graph-hunter-mcp` binary (shipped by `@graphhunter/mcp`) to your MCP client pointing at the app’s API URL. |
+| MCP config | Add the `graph-hunter-mcp` server to your MCP client pointing at the app’s API URL. |
 
-**Quick setup:** See **[platform/mcp/README.md](platform/mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required).
+**Usage sample** — Once the MCP is connected, you can ask the AI assistant in natural language to run hunts and explore the graph. For example:
+
+- *"Use Graph Hunter to find any user who logged into a Host and then ran a suspicious process that wrote to the System32 folder."*
+
+The assistant will translate your request into different searchs, the appropriate hypothesis (e.g. `User -[Auth]-> Host -[Execute]-> Process -[Write]-> File` with filters) and run the hunt.
+
+**Demo**
+
+![Graph Hunter + MCP demo](docs/images/graphhuntergifdemo.gif)
+
+**Quick setup:** See **[graph-hunter-mcp/README.md](graph-hunter-mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required).
+
+---
+
+## Screenshots
+
+| Description | Link |
+|-------------|-------------|
+| **Hunt mode** — Hypothesis builder, DSL, and hunt results with graph and path table | ![Hunt mode](docs/images/screenshot-hunt.png) |
+| **Explorer + graph** — IOC search, neighborhood expansion, and graph canvas | ![Explorer and graph](docs/images/screenshot-explorer.png) |
+| **Hypothesis & ATT&CK catalog** — Step builder and one-click catalog templates | ![Hypothesis and catalog](docs/images/screenshot-catalog.png) |
+| **Events, Heatmap, Timeline** — Event list, entity/relation heatmap, temporal view | ![Events, Heatmap, Timeline](docs/images/screenshot-views.png) |
+| **GNN Threat Model** — ONNX model load, k-hop config, Compute Scores (optional) | ![GNN Threat Model](docs/images/screenshot-gnn.png) |
+| **AI Analysis** — AI-assisted threat hunting; natural-language hunts | ![AI Analysis](docs/images/screenshot-aianalysis.png) |
 
 ---
 
