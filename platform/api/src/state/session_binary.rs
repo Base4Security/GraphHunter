@@ -62,6 +62,21 @@ pub const MAGIC: [u8; 4] = *b"GHS1";
 ///   2 = JSON header (schema-tolerant; field add/remove safe)
 pub const FORMAT_VERSION: u32 = 2;
 
+/// Layout version of the binary BODY (entity/relation bincode arrays).
+/// Bump when Entity / Relation / CompactRelation (or anything they
+/// serialize) changes in a way that breaks bincode round-trip.
+pub const BODY_FORMAT_VERSION: u32 = 1;
+
+/// Oldest body version this build can still deserialize. Raise this when
+/// a body change drops backward compatibility with older saved sessions.
+pub const MIN_SUPPORTED_BODY_VERSION: u32 = 1;
+
+fn default_body_format_version() -> u32 {
+    // Files written before body versioning have no field; their body is
+    // the original (v1) layout.
+    1
+}
+
 /// Serializable header — everything *except* the streaming entity /
 /// relation arrays. Small, lives entirely in memory at save and
 /// load time.
@@ -82,6 +97,10 @@ pub struct SessionHeader {
     pub datasets: Vec<DatasetInfo>,
     #[serde(default)]
     pub tags: Vec<EntityTag>,
+    /// Layout version of the entity/relation body that follows the header.
+    /// Absent in pre-versioning files → defaults to 1.
+    #[serde(default = "default_body_format_version")]
+    pub body_format_version: u32,
 }
 
 /// Read the magic bytes and return whether this looks like a
@@ -102,6 +121,7 @@ pub enum BinaryError {
     BadMagic,
     UnsupportedVersion(u32),
     Truncated(&'static str),
+    IncompatibleBody { found: u32, min: u32, max: u32 },
 }
 
 impl std::fmt::Display for BinaryError {
@@ -113,6 +133,21 @@ impl std::fmt::Display for BinaryError {
             Self::BadMagic => write!(f, "bad session magic (file is not a GHS1 binary session)"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported binary session version: {v}"),
             Self::Truncated(stage) => write!(f, "truncated session file at stage: {stage}"),
+            Self::IncompatibleBody { found, min, max } => {
+                if found > max {
+                    write!(
+                        f,
+                        "session was saved by a newer GraphHunter build (body format v{found}; \
+                         this build supports up to v{max}) — update GraphHunter to open it"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "session was saved with an incompatible older data format \
+                         (body v{found}; minimum supported v{min}) — it cannot be loaded"
+                    )
+                }
+            }
         }
     }
 }
@@ -155,6 +190,19 @@ fn read_u64<R: Read>(r: &mut R) -> Result<u64, BinaryError> {
     let mut buf = [0u8; 8];
     r.read_exact(&mut buf)?;
     Ok(u64::from_le_bytes(buf))
+}
+
+/// Returns Ok if a body declaring `version` can be read by this build,
+/// else an `IncompatibleBody` error carrying the actionable bounds.
+pub fn check_body_compatible(version: u32) -> Result<(), BinaryError> {
+    if version > BODY_FORMAT_VERSION || version < MIN_SUPPORTED_BODY_VERSION {
+        return Err(BinaryError::IncompatibleBody {
+            found: version,
+            min: MIN_SUPPORTED_BODY_VERSION,
+            max: BODY_FORMAT_VERSION,
+        });
+    }
+    Ok(())
 }
 
 /// Write the magic, version, and JSON-serialized header. Caller
@@ -312,6 +360,7 @@ mod tests {
             notes: vec![],
             datasets: vec![],
             tags: vec![],
+            body_format_version: 1,
         };
         let mut buf = Vec::new();
         write_header(&mut buf, &header).unwrap();
@@ -334,6 +383,7 @@ mod tests {
             notes: vec![],
             datasets: vec![],
             tags: vec![],
+            body_format_version: 1,
         };
         let entities = vec![
             Entity::new("a", EntityType::User),
@@ -372,6 +422,24 @@ mod tests {
             Err(BinaryError::BadMagic) => {}
             other => panic!("expected BadMagic, got {:?}", other.err()),
         }
+    }
+
+    #[test]
+    fn check_body_compatible_accepts_current_rejects_out_of_range() {
+        assert!(check_body_compatible(BODY_FORMAT_VERSION).is_ok());
+        let too_new = check_body_compatible(BODY_FORMAT_VERSION + 1).unwrap_err();
+        assert!(matches!(too_new, BinaryError::IncompatibleBody { .. }));
+        assert!(too_new.to_string().contains("newer"));
+        let too_old = check_body_compatible(0).unwrap_err();
+        assert!(matches!(too_old, BinaryError::IncompatibleBody { .. }));
+        assert!(too_old.to_string().contains("older") || too_old.to_string().contains("incompatible"));
+    }
+
+    #[test]
+    fn header_without_body_version_defaults_to_one() {
+        let json = br#"{"id":"s","name":"n","created_at":0,"path_node_ids":[],"notes":[],"datasets":[],"tags":[]}"#;
+        let h: SessionHeader = serde_json::from_slice(json).unwrap();
+        assert_eq!(h.body_format_version, 1);
     }
 
     #[test]

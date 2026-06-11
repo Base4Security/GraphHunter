@@ -302,6 +302,7 @@ impl GraphHunterApi {
             notes,
             datasets,
             tags,
+            body_format_version: crate::state::session_binary::BODY_FORMAT_VERSION,
         };
         crate::state::session_binary::write_header(&mut w, &header)
             .map_err(|e| ApiError::Io(e.to_string()))?;
@@ -753,6 +754,7 @@ mod tests {
             notes: vec![],
             datasets: vec![],
             tags: vec![],
+            body_format_version: 1,
         };
         {
             let mut w = fs::File::create(&path).unwrap();
