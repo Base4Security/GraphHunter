@@ -24,6 +24,7 @@ mod catalog;
 mod dlq;
 mod export;
 mod graph;
+mod graph_meta;
 mod helpers;
 mod hunt;
 mod ingest;
@@ -125,6 +126,7 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
         .route("/notes/list", get(notes::handler_list_notes))
         .route("/notes/:id", get(notes::handler_get_note_by_id))
         .route("/graph_summary", get(graph::handler_graph_summary))
+        .route("/graph/summary", get(graph_meta::handler_graph_summary))
         .route("/entity_type_counts", get(graph::handler_entity_type_counts))
         .route("/temporal_heatmap", get(anomaly::handler_temporal_heatmap))
         .route("/subnet_analysis", get(anomaly::handler_subnet_analysis))

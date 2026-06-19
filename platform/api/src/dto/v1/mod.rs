@@ -17,6 +17,7 @@ pub mod enrichment;
 pub mod entity;
 pub mod export;
 pub mod geoip;
+pub mod graph_meta;
 pub mod graph_ops;
 pub mod health;
 pub mod hunt;
