@@ -1,6 +1,6 @@
 //! HTTP handlers for `/graph/summary` (and future `/graph/overlap`).
 //!
-//! Thin delegates to [`graph_hunter_api::GraphHunterApi::get_graph_summary`];
+//! Thin delegates to [`graph_hunter_api::GraphHunterApi::get_graph_meta_summary`];
 //! no business logic here. Follows the same pattern as the other domain
 //! routers in this module.
 
