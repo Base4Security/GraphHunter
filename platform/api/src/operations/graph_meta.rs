@@ -24,12 +24,25 @@
 //!                       `entity_type_counts()`. Zero when no session is
 //!                       loaded (graceful degradation).
 //!
-//! `recent_pivots` remains `vec![]` — that ring buffer lands in Task 6.
+//! Task 4: 30s TTL cache on `get_graph_meta_summary`. The public method is
+//! now a cache-or-compute facade; the computation lives in the private
+//! `compute_graph_meta_summary`. A `_flush_summary_cache_for_test()` helper
+//! keeps tests hermetic.
+//!
+//! Task 5: `RecentPivotsBuffer` — a process-global ring buffer (size 20)
+//! that holds the most-recently-seeded/expanded pivot entities, newest-first.
+//! `get_graph_meta_summary` includes a snapshot of the buffer.
+//!
+//! Task 6: `RECENT_PIVOTS.push(...)` is wired into `sentinel.rs` (seed) and
+//! `sentinel.rs` / graph_ops (expand). See those modules for call sites.
 
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::dto::v1::graph_meta::{
-    ActiveHunt, GraphSummary, GraphTotals, SourceState, GRAPH_META_SCHEMA_VERSION,
+    ActiveHunt, GraphSummary, GraphTotals, RecentPivot, SourceState, GRAPH_META_SCHEMA_VERSION,
 };
 use crate::{ApiResult, GraphHunterApi};
 
@@ -55,6 +68,111 @@ const REGISTERED_SOURCE_NAMES: &[&str] = &[
     "csv",
 ];
 
+// ── Task 4: 30s TTL summary cache ───────────────────────────────────────────
+
+const SUMMARY_TTL: Duration = Duration::from_secs(30);
+
+static SUMMARY_CACHE: LazyLock<Mutex<Option<(Instant, GraphSummary)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+// ── Task 5: recent-pivots ring buffer ───────────────────────────────────────
+
+/// An in-memory ring buffer of the most recently seeded/expanded pivot
+/// entities, capped at `capacity` entries and ordered newest-first.
+///
+/// Thread-safe: all access is guarded by an internal `Mutex`. The buffer
+/// is backed by a `VecDeque` so both push-to-front and pop-from-back are
+/// O(1).
+pub struct RecentPivotsBuffer {
+    inner: Mutex<VecDeque<RecentPivot>>,
+    capacity: usize,
+}
+
+impl RecentPivotsBuffer {
+    /// Create a new buffer capped at `cap` entries.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            inner: Mutex::new(VecDeque::with_capacity(cap)),
+            capacity: cap,
+        }
+    }
+
+    /// Push a new pivot to the front (newest-first). Drops the oldest
+    /// entry when the buffer is already at capacity.
+    pub fn push(&self, p: RecentPivot) {
+        let mut q = self.inner.lock().unwrap();
+        if q.len() == self.capacity {
+            q.pop_back();
+        }
+        q.push_front(p);
+    }
+
+    /// Return a cloned snapshot of the buffer, newest-first.
+    pub fn snapshot(&self) -> Vec<RecentPivot> {
+        self.inner.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Mark an existing pivot entry as expanded and record the hop degree.
+    /// Looks up the entry by `entity` value; no-op if the entity is not
+    /// currently in the buffer (e.g. it was evicted).
+    pub fn mark_expanded(&self, entity: &str, degree: u32) {
+        let mut q = self.inner.lock().unwrap();
+        if let Some(p) = q.iter_mut().find(|p| p.entity == entity) {
+            p.expanded = true;
+            p.degree = degree;
+        }
+    }
+}
+
+/// Process-global ring buffer for the 20 most recent pivots.
+/// Populated by `sentinel.rs` (`seed_from_ioc_with`) and by the expand
+/// path in `graph_ops.rs` / `sentinel.rs`.
+pub static RECENT_PIVOTS: LazyLock<RecentPivotsBuffer> =
+    LazyLock::new(|| RecentPivotsBuffer::with_capacity(20));
+
+// ── Test-only flush helpers ──────────────────────────────────────────────────
+
+/// A process-global mutex used by tests that need to flush the summary
+/// cache and pivot buffer atomically — without a race window between the
+/// flush and the subsequent `get_graph_meta_summary` call. Tests that
+/// call `get_graph_meta_summary` and depend on specific cached state must
+/// hold this lock for the entire flush-call sequence.
+///
+/// Example usage in tests that need isolation:
+/// ```rust
+/// let _guard = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+/// _flush_summary_cache_for_test();
+/// _flush_recent_pivots_for_test();
+/// // ... call get_graph_meta_summary here ...
+/// ```
+///
+/// Note: this serialises only the tests that hold the guard. Tests that
+/// do NOT call `get_graph_meta_summary` (or do not care about cache state)
+/// do not need to acquire it.
+#[cfg(test)]
+pub(crate) static _GRAPH_META_TEST_MUTEX: LazyLock<Mutex<()>> =
+    LazyLock::new(|| Mutex::new(()));
+
+/// Flush the `SUMMARY_CACHE` so that the next call to
+/// `get_graph_meta_summary` recomputes from scratch. Only compiled in
+/// test builds. Hold `_GRAPH_META_TEST_MUTEX` for the duration when
+/// you need to prevent cross-test cache pollution.
+#[cfg(test)]
+pub(crate) fn _flush_summary_cache_for_test() {
+    *SUMMARY_CACHE.lock().unwrap() = None;
+}
+
+/// Flush the `RECENT_PIVOTS` ring buffer. Only compiled in test builds.
+/// Hold `_GRAPH_META_TEST_MUTEX` for the duration when you need to
+/// prevent cross-test pivot-list pollution.
+#[cfg(test)]
+pub(crate) fn _flush_recent_pivots_for_test() {
+    let mut q = RECENT_PIVOTS.inner.lock().unwrap();
+    q.clear();
+}
+
+// ── API implementation ───────────────────────────────────────────────────────
+
 impl GraphHunterApi {
     /// Returns a `GraphSummary` snapshot for the `/graph/summary` endpoint.
     ///
@@ -69,7 +187,30 @@ impl GraphHunterApi {
     /// tests that don't create a session), the session-bound fields
     /// (`active_datasets`, `totals`) are empty/zero rather than an error.
     /// `sources` is always populated from the static format registry.
+    ///
+    /// Task 4: wraps `compute_graph_meta_summary` in a 30-second TTL cache.
+    /// The cache is process-global (`SUMMARY_CACHE`). Use
+    /// `_flush_summary_cache_for_test()` in tests to avoid cross-test
+    /// pollution.
     pub fn get_graph_meta_summary(&self) -> ApiResult<GraphSummary> {
+        // ── Consult cache ───────────────────────────────────────────────
+        {
+            let guard = SUMMARY_CACHE.lock().unwrap();
+            if let Some((t, cached)) = guard.as_ref() {
+                if t.elapsed() < SUMMARY_TTL {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+        // ── Cache miss: compute and store ───────────────────────────────
+        let fresh = self.compute_graph_meta_summary()?;
+        *SUMMARY_CACHE.lock().unwrap() = Some((Instant::now(), fresh.clone()));
+        Ok(fresh)
+    }
+
+    /// Inner computation for `get_graph_meta_summary`. Never reads the
+    /// cache — always produces a fresh snapshot from current state.
+    fn compute_graph_meta_summary(&self) -> ApiResult<GraphSummary> {
         // ── Sources (from registered format names) ─────────────────────
         // NOTE(Task 3): per-source last_ingest timestamps and row counts
         // require a session-level ingest audit log that doesn't exist yet.
@@ -125,6 +266,19 @@ impl GraphHunterApi {
         //
         // NOTE(Task 3): replace this block with real per-entry iteration
         // once `HuntCacheEntry { params, computed_at, paths, ttl }` lands.
+        //
+        // NOTE on `computed_at`: this field currently reflects the READ
+        // time (i.e. when `/graph/summary` is computed), NOT the time the
+        // hunt was actually computed. When per-hunt cache entries land
+        // (Task 3+), `computed_at` should be sourced from the cache entry's
+        // own timestamp so the analyst sees when the hunt ran, not when the
+        // summary was polled.
+        //
+        // NOTE on `result_size` semantics: currently records the total path
+        // count across the single collapsed cache entry. When the cache
+        // evolves to per-key entries (Task 3+), `result_size` will need
+        // recalibration — each entry will report its own path count rather
+        // than an aggregate across all hunts.
         let active_hunts: Vec<ActiveHunt> = {
             let cache = self
                 .inner
@@ -145,6 +299,9 @@ impl GraphHunterApi {
             }
         };
 
+        // ── Recent pivots (Task 5: ring buffer snapshot) ────────────────
+        let recent_pivots = RECENT_PIVOTS.snapshot();
+
         Ok(GraphSummary {
             schema_version: GRAPH_META_SCHEMA_VERSION,
             as_of: chrono::Utc::now().to_rfc3339(),
@@ -152,7 +309,7 @@ impl GraphHunterApi {
             sources,
             active_datasets,
             active_hunts,
-            recent_pivots: vec![], // NOTE(Task 6): pivot ring buffer
+            recent_pivots,
             graph_empty: nodes == 0,
         })
     }
@@ -192,8 +349,16 @@ mod tests {
         api
     }
 
+    // ── Task 1/2 tests (unchanged assertions, now with cache flush) ──────
+    // NOTE: tests that call `get_graph_meta_summary` acquire
+    // `_GRAPH_META_TEST_MUTEX` to serialise the flush+call pair and prevent
+    // concurrent tests from polluting the process-global SUMMARY_CACHE.
+
     #[test]
     fn get_graph_meta_summary_returns_schema_version_1() {
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        _flush_recent_pivots_for_test();
         let api = GraphHunterApi::new_noop();
         let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
         assert_eq!(summary.schema_version, GRAPH_META_SCHEMA_VERSION);
@@ -201,6 +366,9 @@ mod tests {
 
     #[test]
     fn get_graph_meta_summary_as_of_is_non_empty_rfc3339() {
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        _flush_recent_pivots_for_test();
         let api = GraphHunterApi::new_noop();
         let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
         assert!(
@@ -214,6 +382,9 @@ mod tests {
 
     #[test]
     fn get_graph_meta_summary_no_session_has_zero_totals_and_empty_datasets() {
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        _flush_recent_pivots_for_test();
         // Fresh API with no session — graceful degradation path.
         let api = GraphHunterApi::new_noop();
         let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
@@ -228,6 +399,9 @@ mod tests {
 
     #[test]
     fn get_graph_meta_summary_serializes_stable_shape() {
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        _flush_recent_pivots_for_test();
         let api = GraphHunterApi::new_noop();
         let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
         let v = serde_json::to_value(&summary).expect("serialize");
@@ -245,6 +419,9 @@ mod tests {
 
     #[test]
     fn get_graph_meta_summary_sources_include_format_registry_names() {
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        _flush_recent_pivots_for_test();
         let api = GraphHunterApi::new_noop();
         let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
         // The static FORMAT_REGISTRY is always present regardless of session state.
@@ -257,6 +434,9 @@ mod tests {
 
     #[test]
     fn get_graph_meta_summary_lists_active_datasets() {
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        _flush_recent_pivots_for_test();
         let api = api_with_dataset("s1", "ator-evtx-snapshot");
         let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
         assert!(
@@ -267,6 +447,9 @@ mod tests {
 
     #[test]
     fn get_graph_meta_summary_hunt_cache_non_empty_yields_active_hunt() {
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        _flush_recent_pivots_for_test();
         let api = GraphHunterApi::new_noop();
         // Seed the hunt cache with a few fake paths.
         {
@@ -291,11 +474,116 @@ mod tests {
 
     #[test]
     fn get_graph_meta_summary_empty_hunt_cache_yields_no_active_hunts() {
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        _flush_recent_pivots_for_test();
         let api = GraphHunterApi::new_noop();
         let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
         assert!(
             summary.active_hunts.is_empty(),
             "empty hunt cache must produce empty active_hunts"
         );
+    }
+
+    // ── Task 4: cache tests ──────────────────────────────────────────────
+
+    #[test]
+    fn graph_summary_caches_within_30s_window() {
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        _flush_recent_pivots_for_test();
+
+        let api = GraphHunterApi::new_noop();
+        let t1 = api.get_graph_meta_summary().expect("first call");
+
+        // Mutate state that would change the next computation: insert a
+        // session with a dataset. While holding the global mutex no other
+        // test can flush the cache between these two calls.
+        let session = Arc::new(Session::new("s1", "test", GraphHunter::new(), 0));
+        session.datasets.write().unwrap().push(DatasetInfo {
+            id: "ds1".into(),
+            name: "ds1".into(),
+            path: None,
+            created_at: 0,
+            entity_count: 0,
+            relation_count: 0,
+            field_config: None,
+            ingest_stats: None,
+        });
+        api.sessions().insert(session);
+        api.sessions().set_current(Some("s1".into()));
+
+        let t2 = api.get_graph_meta_summary().expect("second call");
+
+        assert_eq!(t1.as_of, t2.as_of, "cached responses must share as_of");
+        assert!(
+            t2.active_datasets.is_empty(),
+            "cached response should still show empty active_datasets even though state changed; got {:?}",
+            t2.active_datasets
+        );
+    }
+
+    // ── Task 5: ring buffer tests ────────────────────────────────────────
+
+    #[test]
+    fn recent_pivots_ring_drops_oldest_at_capacity() {
+        // Local buffer — no global state involved, no mutex needed.
+        let buf = RecentPivotsBuffer::with_capacity(3);
+        for i in 0..5 {
+            buf.push(RecentPivot {
+                entity: format!("ip-{}", i),
+                kind: "IP".into(),
+                added_at: chrono::Utc::now().to_rfc3339(),
+                expanded: false,
+                degree: 0,
+            });
+        }
+        let snap = buf.snapshot();
+        assert_eq!(snap.len(), 3, "capacity must cap the buffer");
+        assert_eq!(snap[0].entity, "ip-4", "newest-first ordering");
+        assert_eq!(snap[2].entity, "ip-2", "oldest in window is at the tail");
+    }
+
+    #[test]
+    fn recent_pivots_mark_expanded_updates_entry() {
+        let buf = RecentPivotsBuffer::with_capacity(5);
+        buf.push(RecentPivot {
+            entity: "10.0.0.1".into(),
+            kind: "IP".into(),
+            added_at: chrono::Utc::now().to_rfc3339(),
+            expanded: false,
+            degree: 0,
+        });
+        buf.mark_expanded("10.0.0.1", 7);
+        let snap = buf.snapshot();
+        assert!(snap[0].expanded, "mark_expanded must set expanded=true");
+        assert_eq!(snap[0].degree, 7, "mark_expanded must record degree");
+    }
+
+    #[test]
+    fn recent_pivots_mark_expanded_noop_for_unknown_entity() {
+        let buf = RecentPivotsBuffer::with_capacity(5);
+        // Should not panic even when the entity is absent.
+        buf.mark_expanded("unknown", 3);
+    }
+
+    #[test]
+    fn summary_includes_recent_pivots_snapshot() {
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        _flush_recent_pivots_for_test();
+
+        RECENT_PIVOTS.push(RecentPivot {
+            entity: "192.168.1.1".into(),
+            kind: "IP".into(),
+            added_at: chrono::Utc::now().to_rfc3339(),
+            expanded: false,
+            degree: 0,
+        });
+
+        let api = GraphHunterApi::new_noop();
+        let summary = api.get_graph_meta_summary().expect("summary");
+        let found = summary.recent_pivots.iter().any(|p| p.entity == "192.168.1.1");
+        assert!(found, "summary.recent_pivots must include the pushed pivot");
     }
 }
