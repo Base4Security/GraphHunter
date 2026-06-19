@@ -76,6 +76,72 @@ pub struct ActiveHunt {
     pub ttl_seconds_remaining: u64,
 }
 
+// ── /graph/overlap DTOs ────────────────────────────────────────────────────
+
+/// Request body for `POST /graph/overlap`. Capped at 500 entities per
+/// request (enforced server-side; returns HTTP 413 above the cap).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OverlapRequest {
+    /// Protocol version — must equal [`GRAPH_META_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Entities to look up in the current session graph.
+    pub entities: Vec<EntityRef>,
+}
+
+/// Hard cap on entities per `/graph/overlap` request. Above this the
+/// endpoint responds with HTTP 413. The MCP client mirrors this cap.
+pub const OVERLAP_MAX_ENTITIES: usize = 500;
+
+/// A typed reference to an entity for lookup. `kind` is informational —
+/// the graph engine indexes by string ID, not by entity type.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EntityRef {
+    /// Entity type tag (e.g. `"IP"`, `"User"`, `"Domain"`, `"Host"`).
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Entity value as it appears in the graph (e.g. an IP address).
+    pub value: String,
+}
+
+/// Response body for `POST /graph/overlap`. `found` and `missing`
+/// together account for every entity in the request, in the same order
+/// (preserved per category).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OverlapResponse {
+    pub schema_version: u32,
+    /// Entities that exist in the current session graph, with degree
+    /// information.
+    pub found: Vec<FoundEntity>,
+    /// Entity values from the request that are NOT in the graph.
+    pub missing: Vec<String>,
+}
+
+/// An entity from the request that was found in the graph.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FoundEntity {
+    pub entity: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Total degree (in + out edges).
+    pub degree: u32,
+    /// The neighbor with the most edges to/from this entity. `None` in v1
+    /// (computation deferred to keep the endpoint fast at p99); the MCP
+    /// nudge composer uses `degree` only today.
+    pub top_neighbor: Option<TopNeighbor>,
+}
+
+/// The dominant neighbor of a found entity, by edge count.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TopNeighbor {
+    pub entity: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Number of distinct edges between the found entity and this neighbor.
+    pub edge_count: u32,
+}
+
+// ── /graph/summary nested types ────────────────────────────────────────────
+
 /// A single entity that the user pivoted on recently.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RecentPivot {

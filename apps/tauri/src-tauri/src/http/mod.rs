@@ -127,6 +127,7 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
         .route("/notes/:id", get(notes::handler_get_note_by_id))
         .route("/graph_summary", get(graph::handler_graph_summary))
         .route("/graph/summary", get(graph_meta::handler_graph_summary))
+        .route("/graph/overlap", post(graph_meta::handler_graph_overlap))
         .route("/entity_type_counts", get(graph::handler_entity_type_counts))
         .route("/temporal_heatmap", get(anomaly::handler_temporal_heatmap))
         .route("/subnet_analysis", get(anomaly::handler_subnet_analysis))

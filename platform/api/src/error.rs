@@ -51,6 +51,11 @@ pub enum ApiError {
     #[error("i/o error: {0}")]
     Io(String),
 
+    /// Request body exceeded a documented per-endpoint cap (e.g.
+    /// `/graph/overlap` rejects > 500 entities). Maps to HTTP 413.
+    #[error("payload too large: {0}")]
+    PayloadTooLarge(String),
+
     /// Unexpected internal failure. Should map to 500 at HTTP. Log with
     /// tracing BEFORE returning so the payload alone is enough context for
     /// the caller.
@@ -68,6 +73,7 @@ impl ApiError {
                 400
             }
             ApiError::Conflict(_) => 409,
+            ApiError::PayloadTooLarge(_) => 413,
             ApiError::Upstream { .. } => 502,
             ApiError::Io(_) | ApiError::Internal(_) => 500,
         }
@@ -106,6 +112,7 @@ mod tests {
         );
         assert_eq!(ApiError::Internal("x".into()).status_code(), 500);
         assert_eq!(ApiError::Conflict("x".into()).status_code(), 409);
+        assert_eq!(ApiError::PayloadTooLarge("x".into()).status_code(), 413);
     }
 
     #[test]

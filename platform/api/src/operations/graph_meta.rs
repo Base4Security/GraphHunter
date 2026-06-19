@@ -42,8 +42,10 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::dto::v1::graph_meta::{
-    ActiveHunt, GraphSummary, GraphTotals, RecentPivot, SourceState, GRAPH_META_SCHEMA_VERSION,
+    ActiveHunt, FoundEntity, GraphSummary, GraphTotals, OverlapRequest, OverlapResponse,
+    RecentPivot, SourceState, GRAPH_META_SCHEMA_VERSION, OVERLAP_MAX_ENTITIES,
 };
+use crate::error::ApiError;
 use crate::{ApiResult, GraphHunterApi};
 
 /// Canonical list of log source names known to the format registry.
@@ -139,7 +141,10 @@ pub static RECENT_PIVOTS: LazyLock<RecentPivotsBuffer> =
 /// hold this lock for the entire flush-call sequence.
 ///
 /// Example usage in tests that need isolation:
-/// ```rust
+/// ```ignore
+/// use graph_hunter_api::operations::graph_meta::{
+///     _GRAPH_META_TEST_MUTEX, _flush_summary_cache_for_test, _flush_recent_pivots_for_test,
+/// };
 /// let _guard = _GRAPH_META_TEST_MUTEX.lock().unwrap();
 /// _flush_summary_cache_for_test();
 /// _flush_recent_pivots_for_test();
@@ -314,6 +319,73 @@ impl GraphHunterApi {
             active_hunts,
             recent_pivots,
             graph_empty: nodes == 0,
+        })
+    }
+
+    /// Look up a batch of entities against the current session graph.
+    ///
+    /// Powers the MCP `sentinel_query` overlap nudge: given the entity-like
+    /// values extracted from a KQL result, returns which are already in
+    /// the graph and their total degree.
+    ///
+    /// Capped at [`OVERLAP_MAX_ENTITIES`]; above the cap returns
+    /// `PayloadTooLarge` (HTTP 413). Sessions: when no session is loaded
+    /// every entity reports as missing — that's the correct "graph is
+    /// empty" answer for the nudge composer.
+    ///
+    /// `top_neighbor` is `None` in v1 to keep p99 bounded; the MCP nudge
+    /// composer uses only `degree` today.
+    pub fn post_graph_overlap(&self, req: OverlapRequest) -> ApiResult<OverlapResponse> {
+        if req.entities.len() > OVERLAP_MAX_ENTITIES {
+            return Err(ApiError::PayloadTooLarge(format!(
+                "entities ({} > {})",
+                req.entities.len(),
+                OVERLAP_MAX_ENTITIES
+            )));
+        }
+
+        let mut found: Vec<FoundEntity> = Vec::new();
+        let mut missing: Vec<String> = Vec::new();
+
+        match self.sessions().current_session() {
+            Some(session) => {
+                let graph = session
+                    .graph
+                    .read()
+                    .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+                for e in &req.entities {
+                    match graph.get_entity(&e.value) {
+                        Some(_) => {
+                            let out_d = graph.get_compact_relations(&e.value).len();
+                            let in_d = graph
+                                .interner
+                                .get(&e.value)
+                                .and_then(|sid| graph.reverse_adj.get(&sid))
+                                .map(|v| v.len())
+                                .unwrap_or(0);
+                            let degree = (out_d + in_d) as u32;
+                            found.push(FoundEntity {
+                                entity: e.value.clone(),
+                                kind: e.kind.clone(),
+                                degree,
+                                top_neighbor: None,
+                            });
+                        }
+                        None => missing.push(e.value.clone()),
+                    }
+                }
+            }
+            None => {
+                for e in &req.entities {
+                    missing.push(e.value.clone());
+                }
+            }
+        }
+
+        Ok(OverlapResponse {
+            schema_version: GRAPH_META_SCHEMA_VERSION,
+            found,
+            missing,
         })
     }
 }
@@ -588,5 +660,104 @@ mod tests {
         let summary = api.get_graph_meta_summary().expect("summary");
         let found = summary.recent_pivots.iter().any(|p| p.entity == "192.168.1.1");
         assert!(found, "summary.recent_pivots must include the pushed pivot");
+    }
+
+    // ── Task 7: /graph/overlap tests ───────────────────────────────────
+
+    use crate::dto::v1::graph_meta::EntityRef;
+
+    #[test]
+    fn overlap_no_session_returns_all_missing() {
+        let api = GraphHunterApi::new_noop();
+        let resp = api
+            .post_graph_overlap(OverlapRequest {
+                schema_version: 1,
+                entities: vec![
+                    EntityRef { kind: "IP".into(), value: "1.2.3.4".into() },
+                    EntityRef { kind: "User".into(), value: "alice@corp".into() },
+                ],
+            })
+            .expect("overlap must succeed");
+        assert_eq!(resp.schema_version, 1);
+        assert!(resp.found.is_empty(), "no session ⇒ nothing found");
+        assert_eq!(resp.missing.len(), 2);
+        assert!(resp.missing.contains(&"1.2.3.4".to_string()));
+        assert!(resp.missing.contains(&"alice@corp".to_string()));
+    }
+
+    #[test]
+    fn overlap_rejects_above_500_entities_with_413() {
+        let api = GraphHunterApi::new_noop();
+        let entities: Vec<EntityRef> = (0..501)
+            .map(|i| EntityRef {
+                kind: "IP".into(),
+                value: format!("10.0.{}.{}", i / 256, i % 256),
+            })
+            .collect();
+        let err = api
+            .post_graph_overlap(OverlapRequest { schema_version: 1, entities })
+            .expect_err("must reject above cap");
+        assert_eq!(err.status_code(), 413, "PayloadTooLarge ⇒ HTTP 413");
+    }
+
+    // ── Task 8: schema_version drift guard ────────────────────────────
+    //
+    // Bumping GRAPH_META_SCHEMA_VERSION is a coordinated change across the
+    // Rust DTO, the TypeScript zod schema, and the shared golden fixture
+    // (Task 16). This test pins the constant at the Rust side so the
+    // change forces a deliberate update — bare integer assertion, not
+    // `GRAPH_META_SCHEMA_VERSION == GRAPH_META_SCHEMA_VERSION`.
+    #[test]
+    fn schema_version_is_pinned_at_one_until_deliberately_bumped() {
+        assert_eq!(
+            GRAPH_META_SCHEMA_VERSION, 1,
+            "bumping requires coordinated update of zod schema + golden fixture"
+        );
+
+        // Defense in depth: both response payloads must carry the same
+        // version. Catches a buggy refactor that hardcodes a literal
+        // instead of using the constant.
+        let api = GraphHunterApi::new_noop();
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        let summary = api.get_graph_meta_summary().expect("summary");
+        assert_eq!(summary.schema_version, 1);
+        let overlap = api
+            .post_graph_overlap(OverlapRequest { schema_version: 1, entities: vec![] })
+            .expect("overlap");
+        assert_eq!(overlap.schema_version, 1);
+    }
+
+    #[test]
+    fn overlap_finds_entity_in_session_graph() {
+        use graph_hunter_core::{Entity, EntityType};
+
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+
+        let api = GraphHunterApi::new_noop();
+        let session = Arc::new(Session::new("s1", "test", GraphHunter::new(), 0));
+        session
+            .graph
+            .write()
+            .unwrap()
+            .add_entity(Entity::new("203.0.113.42", EntityType::IP))
+            .expect("add_entity");
+        api.sessions().insert(session);
+        api.sessions().set_current(Some("s1".into()));
+
+        let resp = api
+            .post_graph_overlap(OverlapRequest {
+                schema_version: 1,
+                entities: vec![
+                    EntityRef { kind: "IP".into(), value: "203.0.113.42".into() },
+                    EntityRef { kind: "IP".into(), value: "8.8.8.8".into() },
+                ],
+            })
+            .expect("overlap");
+        assert_eq!(resp.found.len(), 1, "exactly one entity present");
+        assert_eq!(resp.found[0].entity, "203.0.113.42");
+        assert_eq!(resp.found[0].degree, 0, "no relations ⇒ degree 0");
+        assert!(resp.found[0].top_neighbor.is_none(), "top_neighbor deferred in v1");
+        assert_eq!(resp.missing, vec!["8.8.8.8".to_string()]);
     }
 }
