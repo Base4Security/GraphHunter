@@ -13,10 +13,10 @@ pub const GRAPH_META_SCHEMA_VERSION: u32 = 1;
 
 /// Top-level response for `GET /graph/summary`.
 ///
-/// Returned by [`crate::GraphHunterApi::get_graph_summary`]. Designed to be
+/// Returned by [`crate::GraphHunterApi::get_graph_meta_summary`]. Designed to be
 /// cheap to compute: totals come from in-memory counters, not a full graph
 /// scan.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GraphSummary {
     /// Protocol version — always [`GRAPH_META_SCHEMA_VERSION`] (currently 1).
     pub schema_version: u32,
@@ -37,7 +37,7 @@ pub struct GraphSummary {
 }
 
 /// Aggregate node + edge counts for the current session graph.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GraphTotals {
     /// Total node count across all entity types.
     pub nodes: u64,
@@ -49,7 +49,7 @@ pub struct GraphTotals {
 }
 
 /// State for a single named data source (log format / ingest channel).
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SourceState {
     /// Human-readable name for the source (e.g. `"Sentinel"`, `"EVTX"`).
     pub name: String,
@@ -62,7 +62,7 @@ pub struct SourceState {
 }
 
 /// A hunt result that is still resident in the cache.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ActiveHunt {
     /// Cache key used by `get_hunt_page` to paginate this result.
     pub cache_key: String,
@@ -77,7 +77,7 @@ pub struct ActiveHunt {
 }
 
 /// A single entity that the user pivoted on recently.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RecentPivot {
     /// The entity identifier (e.g. an IP address, a username).
     pub entity: String,

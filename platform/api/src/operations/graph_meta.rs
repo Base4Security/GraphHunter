@@ -53,7 +53,6 @@ mod tests {
         let api = GraphHunterApi::new_noop();
         let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
         assert_eq!(summary.schema_version, GRAPH_META_SCHEMA_VERSION);
-        assert_eq!(summary.schema_version, 1);
     }
 
     #[test]
@@ -95,6 +94,8 @@ mod tests {
         assert!(v["totals"]["by_type"].is_object());
         assert!(v["sources"].is_array());
         assert!(v["active_datasets"].is_array());
+        assert!(v["active_hunts"].is_array());
+        assert!(v["recent_pivots"].is_array());
         assert!(v["graph_empty"].is_boolean());
     }
 }

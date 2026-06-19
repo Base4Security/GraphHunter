@@ -44,6 +44,14 @@ fn graph_summary_returns_schema_v1_shape() {
         "active_datasets must be an array"
     );
     assert!(
+        resp["active_hunts"].is_array(),
+        "active_hunts must be an array"
+    );
+    assert!(
+        resp["recent_pivots"].is_array(),
+        "recent_pivots must be an array"
+    );
+    assert!(
         resp["graph_empty"].is_boolean(),
         "graph_empty must be a boolean"
     );
