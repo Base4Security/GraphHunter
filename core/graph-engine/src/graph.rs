@@ -3796,4 +3796,52 @@ mod tests {
             "GRAPHHUNTER_PARALLEL_FINALIZE=1 must override threshold"
         );
     }
+
+    /// Task 3 — pin the incremental behaviour of `entity_type_counts()`.
+    ///
+    /// `type_index` is a `HashMap<EntityType, HashSet<StrId>>` maintained by
+    /// every node-insertion site in `add_entity` (and the bulk helpers that
+    /// call it).  `entity_type_counts()` reads `HashSet::len()` per entry, so
+    /// reads are O(distinct types), not O(total nodes).  This test verifies
+    /// that the per-type counts and the grand total returned by
+    /// `entity_count()` are correct immediately after insertion — no
+    /// finalize / compute_scores required.
+    #[test]
+    fn entity_type_counts_reflects_inserts_incrementally() {
+        let mut g = GraphHunter::new();
+
+        // Three IPs, two Hosts, one User.
+        for i in 0..3u32 {
+            g.add_entity(Entity::new(&format!("ip-{}", i), EntityType::IP))
+                .expect("ip insert");
+        }
+        for i in 0..2u32 {
+            g.add_entity(Entity::new(&format!("host-{}", i), EntityType::Host))
+                .expect("host insert");
+        }
+        g.add_entity(Entity::new("user-0", EntityType::User))
+            .expect("user insert");
+
+        // Grand-total node counter must equal 6.
+        assert_eq!(g.entity_count(), 6, "entity_count() must equal total inserted");
+
+        // Collect the per-type map (sorted by name, so deterministic).
+        let counts: std::collections::HashMap<String, usize> =
+            g.entity_type_counts().into_iter().collect();
+
+        assert_eq!(counts.get("IP").copied().unwrap_or(0), 3, "IP count");
+        assert_eq!(counts.get("Host").copied().unwrap_or(0), 2, "Host count");
+        assert_eq!(counts.get("User").copied().unwrap_or(0), 1, "User count");
+
+        // No phantom types must appear.
+        assert_eq!(counts.len(), 3, "exactly 3 entity types in graph");
+
+        // Add one more IP and verify the counter updates immediately (O(1) path).
+        g.add_entity(Entity::new("ip-99", EntityType::IP))
+            .expect("late ip insert");
+        let counts2: std::collections::HashMap<String, usize> =
+            g.entity_type_counts().into_iter().collect();
+        assert_eq!(counts2.get("IP").copied().unwrap_or(0), 4, "IP count after late insert");
+        assert_eq!(g.entity_count(), 7, "entity_count() after late insert");
+    }
 }
