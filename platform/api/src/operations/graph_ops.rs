@@ -422,6 +422,12 @@ impl GraphHunterApi {
             }
         }
 
+        // No-op if the entity was never seeded; lets the MCP graph://recent-pivots
+        // resource flip expanded=true so the nudge stops suggesting node_expand
+        // on something the user just explored.
+        crate::operations::graph_meta::RECENT_PIVOTS
+            .mark_expanded(&req.node_id, hood.nodes.len() as u32);
+
         Ok(hood)
     }
 

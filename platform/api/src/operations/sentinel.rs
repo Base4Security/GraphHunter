@@ -744,7 +744,7 @@ impl GraphHunterApi {
             .map(|w| w.kql_filter())
             .unwrap_or_else(|| "where TimeGenerated > ago(24h)".to_string());
 
-        match resolve_azure_creds() {
+        let result = match resolve_azure_creds() {
             Some((ws, auth)) => {
                 let transport = HttpSentinelTransport::new();
                 let cache = SentinelTokenCache::new();
@@ -759,7 +759,24 @@ impl GraphHunterApi {
                 tables_hit: 0,
                 tables_attempted: 0,
             }),
+        };
+
+        // Record the pivot intent regardless of hydration outcome: even the
+        // creds-skipped branch returns Ok, and the user expressed intent to
+        // pivot on this entity. The MCP graph://recent-pivots resource uses
+        // this to surface "unexpanded pivot, consider node_expand" nudges.
+        if result.is_ok() {
+            crate::operations::graph_meta::RECENT_PIVOTS.push(
+                crate::dto::v1::graph_meta::RecentPivot {
+                    entity: req.value.clone(),
+                    kind: ty.to_string(),
+                    added_at: chrono::Utc::now().to_rfc3339(),
+                    expanded: false,
+                    degree: 0,
+                },
+            );
         }
+        result
     }
 
     /// Enrich an existing node by pulling a chosen slice of its Sentinel

@@ -149,24 +149,27 @@ pub static RECENT_PIVOTS: LazyLock<RecentPivotsBuffer> =
 /// Note: this serialises only the tests that hold the guard. Tests that
 /// do NOT call `get_graph_meta_summary` (or do not care about cache state)
 /// do not need to acquire it.
-#[cfg(test)]
-pub(crate) static _GRAPH_META_TEST_MUTEX: LazyLock<Mutex<()>> =
+// Exposed `pub` (not gated on `#[cfg(test)]`) so that integration tests
+// living in `tests/` — which compile against the public crate — can
+// serialise themselves against the global SUMMARY_CACHE / RECENT_PIVOTS.
+// The leading underscore in the names is the convention for "test-only,
+// do not call from production paths". The cost of carrying these in
+// release builds is a few hundred bytes for a no-op-in-production helper.
+pub static _GRAPH_META_TEST_MUTEX: LazyLock<Mutex<()>> =
     LazyLock::new(|| Mutex::new(()));
 
 /// Flush the `SUMMARY_CACHE` so that the next call to
-/// `get_graph_meta_summary` recomputes from scratch. Only compiled in
-/// test builds. Hold `_GRAPH_META_TEST_MUTEX` for the duration when
-/// you need to prevent cross-test cache pollution.
-#[cfg(test)]
-pub(crate) fn _flush_summary_cache_for_test() {
+/// `get_graph_meta_summary` recomputes from scratch. Test-only by
+/// convention. Hold `_GRAPH_META_TEST_MUTEX` for the duration when you
+/// need to prevent cross-test cache pollution.
+pub fn _flush_summary_cache_for_test() {
     *SUMMARY_CACHE.lock().unwrap() = None;
 }
 
-/// Flush the `RECENT_PIVOTS` ring buffer. Only compiled in test builds.
+/// Flush the `RECENT_PIVOTS` ring buffer. Test-only by convention.
 /// Hold `_GRAPH_META_TEST_MUTEX` for the duration when you need to
 /// prevent cross-test pivot-list pollution.
-#[cfg(test)]
-pub(crate) fn _flush_recent_pivots_for_test() {
+pub fn _flush_recent_pivots_for_test() {
     let mut q = RECENT_PIVOTS.inner.lock().unwrap();
     q.clear();
 }
