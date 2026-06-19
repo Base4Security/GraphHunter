@@ -62,6 +62,9 @@ test("sentinel_seed always suggests next step", () => {
 });
 
 test("node_expand with neighbors > 0 suggests channel_behavior", () => {
+  // neighbors_found is injected into args by ContextEnricher.countNeighbors,
+  // which parses the result Neighborhood.nodes.length. The nudge sees an
+  // augmented args object, not the raw tool input.
   const n = composeNudge("node_expand", { neighbors_found: 47 }, null);
   assert.ok(n);
   assert.match(n, /channel_behavior/);

@@ -46,8 +46,17 @@ export class ContextEnricher {
       wantsOverlap ? this.runOverlap(original) : Promise.resolve(null),
     ]);
 
+    // For node_expand the nudge wants the neighbor count, but that lives
+    // in the *result* (Neighborhood.nodes.length) not the *input args*.
+    // Inject it into the args view the nudge composer sees so the rule
+    // table stays a pure function.
+    const augmented =
+      tool === "node_expand"
+        ? { ...args, neighbors_found: this.countNeighbors(original) }
+        : args;
+
     const footer = composeFooter(summary);
-    const nudge = composeNudge(tool, args, overlap);
+    const nudge = composeNudge(tool, augmented, overlap);
     const text = nudge ? `${footer}\n${nudge}` : footer;
     const appended: TextContent = { type: "text", text };
     return {
@@ -69,6 +78,28 @@ export class ContextEnricher {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Extracts the neighborhood node count from a node_expand result.
+   * Looks for `nodes.length` first (Neighborhood shape) and falls back
+   * to top-level array length. Returns 0 on any parse failure so the
+   * nudge composer treats it as "no neighbors, no nudge".
+   */
+  private countNeighbors(content: TextContent[]): number {
+    const first = content[0]?.text;
+    if (!first) return 0;
+    try {
+      const parsed: unknown = JSON.parse(first);
+      if (parsed && typeof parsed === "object") {
+        const nodes = (parsed as { nodes?: unknown }).nodes;
+        if (Array.isArray(nodes)) return nodes.length;
+      }
+      if (Array.isArray(parsed)) return parsed.length;
+    } catch {
+      /* fall through to 0 */
+    }
+    return 0;
   }
 
   /** Best-effort JSON parse of the first text block. */
