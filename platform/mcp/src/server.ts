@@ -7,6 +7,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { ContextEnricher } from "./lib/context-enricher.js";
 import type { Tool, ToolContext } from "./lib/types.js";
 import { safeJsonContent, textContent } from "./lib/content.js";
 import { truncate } from "./lib/log.js";
@@ -30,6 +31,7 @@ export function registerTools(
   server: McpServer,
   tools: Tool[],
   makeContext: (requestId: string) => ToolContext,
+  enricher?: ContextEnricher,
 ): void {
   for (const tool of tools) {
     const handler = async (rawInput: unknown) => {
@@ -48,14 +50,24 @@ export function registerTools(
         );
       }
 
+      let parsedInput: Record<string, unknown> = {};
       try {
         const parsed = tool.inputSchema.parse(rawInput ?? {});
+        parsedInput = (parsed ?? {}) as Record<string, unknown>;
         const result = await tool.execute(ctx, parsed);
         ctx.logger.tool(tool.name + " done", { duration_ms: Date.now() - start });
-        if (tool.resultFormat === "text") {
-          return textContent(typeof result === "string" ? result : String(result));
-        }
-        return safeJsonContent(result);
+        const raw =
+          tool.resultFormat === "text"
+            ? textContent(typeof result === "string" ? result : String(result))
+            : safeJsonContent(result);
+
+        if (!enricher) return raw;
+        const outcome = await enricher.enrich(
+          tool.name,
+          parsedInput,
+          raw.content as Array<{ type: "text"; text: string }>,
+        );
+        return { ...raw, content: outcome.content };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         ctx.logger.tool(tool.name + " error", {
