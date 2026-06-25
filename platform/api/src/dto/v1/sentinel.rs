@@ -290,9 +290,11 @@ pub struct SchemaField {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaTable {
     pub name: String,
-    /// Billable ingestion in the window (MB), from the `Usage` table.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ingestion_mb: Option<f64>,
+    /// Billable ingestion in the sampling window (MB), from the `Usage` table.
+    /// Named per design doc §4.1; reflects the request `lookback` window
+    /// (default 24h).
+    #[serde(rename = "ingestion_24h_mb", skip_serializing_if = "Option::is_none")]
+    pub ingestion_24h_mb: Option<f64>,
     /// Most recent ingestion timestamp in the window (ISO-8601).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_ingested: Option<String>,
@@ -309,6 +311,24 @@ pub struct SchemaDiscoverResult {
     /// — surfaced so the cap is never silent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// Aggregate Sentinel query cost for this discovery (usage probe + per-table
+    /// samples). Lets analysts measure SIEM usage. `None` when the service
+    /// returned no statistics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<QueryCost>,
+}
+
+/// Serializable Sentinel query cost surfaced in tool responses. `wall_ms` is
+/// measured locally; the other two come from the Log Analytics `statistics`
+/// object (see `graph_hunter_siem::QueryStats`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QueryCost {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_scanned: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_duration_ms: Option<u64>,
+    /// Wall-clock time spent in Sentinel round-trips for this tool call.
+    pub wall_ms: u64,
 }
 
 // ── Graph cycle: proposals (§4.2) + build records (§4.3 / §5) ──────────

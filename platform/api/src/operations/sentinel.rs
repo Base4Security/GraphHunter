@@ -8,7 +8,7 @@ use std::time::Duration;
 use graph_hunter_core::sentinel::{build_hydration_kql, sentinel_entity_targets};
 use graph_hunter_core::types::EntityType;
 use graph_hunter_siem::{
-    HttpSentinelTransport, SentinelAuth, SentinelPollingConfig, SentinelTokenCache,
+    HttpSentinelTransport, QueryStats, SentinelAuth, SentinelPollingConfig, SentinelTokenCache,
     SentinelTransport, normalize_response, run_sentinel_query,
 };
 use uuid::Uuid;
@@ -522,13 +522,17 @@ impl GraphHunterApi {
         let max_tables = req.max_tables.unwrap_or(25) as usize;
         let sample_rows = req.sample_rows.unwrap_or(200).clamp(1, 1000);
 
+        let started = std::time::Instant::now();
+        let mut cost = CostAccumulator::default();
+
         // Stage 1: active tables + ingestion volume from the Usage table.
         let usage_kql = format!(
             "Usage | {time_filter} | summarize IngestionMB = sum(Quantity), \
              LastIngested = max(TimeGenerated) by DataType | where IngestionMB >= {min_mb} \
              | order by IngestionMB desc"
         );
-        let usage_rows = run_kql_rows(&workspace_id, usage_kql, auth.clone()).await?;
+        let (usage_rows, usage_stats) = run_kql_rows(&workspace_id, usage_kql, auth.clone()).await?;
+        cost.add(&usage_stats);
 
         // Apply the (case-insensitive) table filter.
         let mut discovered: Vec<(String, Option<f64>, Option<String>)> = usage_rows
@@ -560,22 +564,24 @@ impl GraphHunterApi {
 
         // Stage 2: sample + classify each selected table.
         let mut tables = Vec::with_capacity(discovered.len());
-        for (name, ingestion_mb, last_ingested) in discovered {
+        for (name, ingestion_24h_mb, last_ingested) in discovered {
             let sample_kql = format!("{name} | {time_filter} | take {sample_rows}");
             // A single table's sample failing (e.g. a deprecated column) must
             // not abort the whole discovery — degrade to an empty field list.
-            let rows = run_kql_rows(&workspace_id, sample_kql, auth.clone())
+            let (rows, sample_stats) = run_kql_rows(&workspace_id, sample_kql, auth.clone())
                 .await
                 .unwrap_or_default();
+            cost.add(&sample_stats);
             tables.push(SchemaTable {
                 name,
-                ingestion_mb,
+                ingestion_24h_mb,
                 last_ingested,
                 fields: classify_table_fields(&rows),
             });
         }
 
-        Ok(SchemaDiscoverResult { tables, total_tables, note })
+        let cost = cost.finish(started.elapsed().as_millis() as u64);
+        Ok(SchemaDiscoverResult { tables, total_tables, note, cost })
     }
 
     /// Phase M: run a pre-built hunting KQL template against Sentinel.
@@ -1120,20 +1126,61 @@ fn extract_take_limit(kql: &str) -> Option<u32> {
 }
 
 /// Run one KQL query against Log Analytics and return the rows as parsed JSON
-/// objects. `run_sentinel_query` already normalizes the response to a JSON
-/// array of row objects (the same shape `cap_kql_rows` consumes), so a
-/// non-array / malformed body degrades to an empty vec rather than erroring.
+/// objects plus the query cost. `run_sentinel_query` already normalizes the
+/// response to a JSON array of row objects (the same shape `cap_kql_rows`
+/// consumes), so a non-array / malformed body degrades to an empty vec rather
+/// than erroring.
 async fn run_kql_rows(
     workspace_id: &str,
     kql: String,
     auth: SentinelAuth,
-) -> ApiResult<Vec<serde_json::Value>> {
+) -> ApiResult<(Vec<serde_json::Value>, Option<QueryStats>)> {
     let ws = workspace_id.to_string();
     let res = tokio::task::spawn_blocking(move || run_sentinel_query(&ws, &kql, Some(auth)))
         .await
         .map_err(|e| ApiError::Internal(format!("task join error: {e}")))?
         .map_err(|e| ApiError::Upstream { service: "sentinel-kql".into(), message: e })?;
-    Ok(serde_json::from_str::<Vec<serde_json::Value>>(&res.data).unwrap_or_default())
+    let rows = serde_json::from_str::<Vec<serde_json::Value>>(&res.data).unwrap_or_default();
+    Ok((rows, res.stats))
+}
+
+/// Accumulates Sentinel query cost across the multiple round-trips a single
+/// tool call makes (e.g. discovery's usage probe + per-table samples).
+#[derive(Default)]
+struct CostAccumulator {
+    bytes_scanned: u64,
+    server_duration_ms: u64,
+    /// True once any query reported a `statistics` object — distinguishes
+    /// "no cost" from "cost not reported".
+    saw_stats: bool,
+}
+
+impl CostAccumulator {
+    fn add(&mut self, stats: &Option<QueryStats>) {
+        if let Some(s) = stats {
+            self.saw_stats = true;
+            if let Some(b) = s.bytes_scanned {
+                self.bytes_scanned += b;
+            }
+            if let Some(d) = s.server_duration_ms {
+                self.server_duration_ms += d;
+            }
+        }
+    }
+
+    /// Finalize into the serializable DTO. `wall_ms` is the locally-measured
+    /// total round-trip time. Returns `None` only when no stats were seen AND
+    /// no wall time elapsed (degenerate / no queries ran).
+    fn finish(self, wall_ms: u64) -> Option<crate::dto::sentinel::QueryCost> {
+        if !self.saw_stats && wall_ms == 0 {
+            return None;
+        }
+        Some(crate::dto::sentinel::QueryCost {
+            bytes_scanned: self.saw_stats.then_some(self.bytes_scanned),
+            server_duration_ms: self.saw_stats.then_some(self.server_duration_ms),
+            wall_ms,
+        })
+    }
 }
 
 /// Node-affinity entity classes — fields resolving to one of these become
@@ -1146,12 +1193,14 @@ fn is_node_class(class: &str) -> bool {
     )
 }
 
-/// Enrichments that apply to a given node class. Only IP is enrichable today
-/// (GeoIP + ASN, both backed by the same MaxMind path); `threat_intel` is
-/// intentionally omitted until a real feed is wired.
+/// Enrichments that *apply to* a given node class (design doc §4.1). IP nodes
+/// advertise geoip+asn+threat_intel. Note this is the applicability hint shown
+/// in discovery — at build time geoip/asn are real while threat_intel is an
+/// honest stub (no feed wired yet), reflected in graph_build's
+/// `enrichment_applied` and the `capabilities` flag.
 fn enrichable_for(class: &str) -> Vec<String> {
     match class {
-        "IP" => vec!["geoip".to_string(), "asn".to_string()],
+        "IP" => vec!["geoip".to_string(), "asn".to_string(), "threat_intel".to_string()],
         _ => Vec::new(),
     }
 }
@@ -1496,7 +1545,10 @@ mod schema_discover_tests {
         let ip = fields.iter().find(|f| f.name == "IPAddress").expect("IPAddress field");
         assert_eq!(ip.graph_affinity, "node");
         assert_eq!(ip.node_class.as_deref(), Some("IP"));
-        assert_eq!(ip.enrichable, vec!["geoip".to_string(), "asn".to_string()]);
+        assert_eq!(
+            ip.enrichable,
+            vec!["geoip".to_string(), "asn".to_string(), "threat_intel".to_string()]
+        );
         assert_eq!(ip.cardinality, "high");
     }
 

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineTool } from "../../lib/types.js";
+import { defineTool, type ToolContext } from "../../lib/types.js";
 import { HEAVY } from "../../lib/api-client.js";
 
 const input = z.object({
@@ -32,22 +32,42 @@ const input = z.object({
     .describe("Rows sampled per table for field classification (default 200)."),
 });
 
-export const sentinelSchema = defineTool({
-  name: "sentinel_schema",
-  description:
-    "DISCOVERY / cold-start orientation: list the active Sentinel tables (by ingestion volume) and classify each field for graph construction. For every field it reports graph_affinity (node | edge | attribute), the node_class for identifiers (IP, User, Host, …), which enrichments apply (geoip/asn for IPs), cardinality, and sample values. Call this FIRST when the graph is empty to decide which tables/fields are worth materializing — then sentinel_seed / node_enrich to build, not raw KQL. Read-only: it samples Sentinel and never modifies the graph.",
+const DESCRIPTION =
+  "PHASE 1 / DISCOVERY (design doc §4.1): list the active Sentinel tables (by ingestion volume) and classify each field for graph construction. Per field it reports graph_affinity (node | edge | attribute), node_class for identifiers (IP, User, Host, …), enrichable tags (geoip/asn/threat_intel for IPs), cardinality, and sample_values; per table ingestion_24h_mb + last_ingested; plus query cost. Call this FIRST when the graph is empty to decide which tables/fields are worth materializing, then graph_propose → graph_build. Read-only: samples Sentinel, never modifies the graph. Degrades cleanly when AZURE_WORKSPACE_ID is unset (clear error).";
+
+async function execute(
+  ctx: ToolContext,
+  { lookback, table_filter, min_ingestion_mb, max_tables, sample_rows }: z.infer<typeof input>,
+) {
+  const body: Record<string, unknown> = {};
+  if (lookback) body.lookback = lookback;
+  if (table_filter) body.table_filter = table_filter;
+  if (min_ingestion_mb != null) body.min_ingestion_mb = min_ingestion_mb;
+  if (max_tables != null) body.max_tables = max_tables;
+  if (sample_rows != null) body.sample_rows = sample_rows;
+  return ctx.api.post("/sentinel/schema", body, HEAVY);
+}
+
+export const schemaDiscover = defineTool({
+  name: "schema_discover",
+  description: DESCRIPTION,
   category: "sentinel",
   version: 1,
   stability: "experimental",
   inputSchema: input,
   outputSchema: z.unknown(),
-  async execute(ctx, { lookback, table_filter, min_ingestion_mb, max_tables, sample_rows }) {
-    const body: Record<string, unknown> = {};
-    if (lookback) body.lookback = lookback;
-    if (table_filter) body.table_filter = table_filter;
-    if (min_ingestion_mb != null) body.min_ingestion_mb = min_ingestion_mb;
-    if (max_tables != null) body.max_tables = max_tables;
-    if (sample_rows != null) body.sample_rows = sample_rows;
-    return ctx.api.post("/sentinel/schema", body, HEAVY);
-  },
+  execute,
+});
+
+/** Deprecated alias for the pre-rename name. Forwards to the same endpoint so
+ * existing callers keep working; prefer `schema_discover`. */
+export const sentinelSchema = defineTool({
+  name: "sentinel_schema",
+  description: `DEPRECATED alias for schema_discover. ${DESCRIPTION}`,
+  category: "sentinel",
+  version: 1,
+  stability: "deprecated",
+  inputSchema: input,
+  outputSchema: z.unknown(),
+  execute,
 });

@@ -7,7 +7,7 @@ pub mod sentinel;
 pub mod sentinel_streaming;
 pub mod elastic;
 
-pub use sentinel::{run_sentinel_query, SentinelAuth};
+pub use sentinel::{parse_query_stats, run_sentinel_query, QueryStats, SentinelAuth};
 pub use sentinel_streaming::{
     HttpSentinelTransport, KqlQueryBuilder, SentinelPollingConfig, SentinelTokenCache,
     SentinelTransport, SentinelWatermarkStore, TokenResponse, normalize_response,
