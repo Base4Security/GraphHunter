@@ -171,6 +171,7 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
         .route("/kql/", post(siem::handler_run_kql))
         .route("/node/enrich", post(siem::handler_node_enrich))
         .route("/sentinel/seed", post(siem::handler_seed_from_ioc))
+        .route("/sentinel/schema", post(siem::handler_discover_schema))
         .route("/sentinel/resume", post(siem::handler_sentinel_resume))
         .route("/sentinel/pause", post(siem::handler_sentinel_pause))
         .route("/sentinel_status", get(siem::handler_sentinel_status))

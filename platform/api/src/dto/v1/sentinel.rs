@@ -214,6 +214,101 @@ pub struct KqlResult {
     /// not read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<Vec<serde_json::Value>>,
+    /// Graph-first nudge: set in inspect mode (`ingest=false`) when the query
+    /// touches identity/IP-like columns that could be materialized as graph
+    /// entities. Steers the analyst toward `sentinel_seed` / `sentinel_schema`
+    /// for recurring pivots instead of repeated raw KQL. `None` when ingesting
+    /// or when the query is graph-irrelevant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_advisory: Option<String>,
+}
+
+// ── Schema discovery (Phase 1 / cold-start orientation) ───────────────
+
+/// Discover the active Sentinel tables and, per table, the fields worth
+/// building a graph from. Reuses the same field classifier the ingest
+/// preview uses, then annotates each field with its `graph_affinity`
+/// (node | edge | attribute) and which enrichments apply. The default
+/// "what's in this workspace?" call before materializing a graph.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SchemaDiscoverRequest {
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub azure_tenant_id: String,
+    #[serde(default)]
+    pub azure_client_id: String,
+    #[serde(default)]
+    pub azure_client_secret: String,
+    /// Sampling/aggregation window. Default `ago(24h)` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<TimeWindow>,
+    /// Restrict discovery to these tables (case-insensitive). Empty = all
+    /// active tables in the window.
+    #[serde(default)]
+    pub table_filter: Vec<String>,
+    /// Exclude tables whose billable ingestion in the window is below this
+    /// many MB. `None` = no floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_ingestion_mb: Option<f64>,
+    /// Cap on the number of tables sampled + classified (most-ingested
+    /// first). Protects against one sample query per table on large
+    /// workspaces. Default 25.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tables: Option<u32>,
+    /// Rows sampled per table for field classification. Default 200.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rows: Option<u32>,
+}
+
+/// One field within a discovered table, annotated for graph construction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaField {
+    pub name: String,
+    /// Coarse JSON type inferred from sample values: `string` | `number`
+    /// | `bool`.
+    pub r#type: String,
+    /// `high` | `low` — distinctness in the sample. High-cardinality
+    /// identifier-like fields make the best graph nodes.
+    pub cardinality: String,
+    /// `node` | `edge` | `attribute` — the field's role in the graph.
+    pub graph_affinity: String,
+    /// Canonical entity class when `graph_affinity == "node"` (IP, User,
+    /// Host, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_class: Option<String>,
+    /// Enrichments that apply to this field's entity type (e.g. `geoip`,
+    /// `asn` for IPs). Empty when none apply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enrichable: Vec<String>,
+    /// Up to 5 distinct sample values, for orientation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sample_values: Vec<String>,
+}
+
+/// A discovered Sentinel table with its classified fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaTable {
+    pub name: String,
+    /// Billable ingestion in the window (MB), from the `Usage` table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ingestion_mb: Option<f64>,
+    /// Most recent ingestion timestamp in the window (ISO-8601).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_ingested: Option<String>,
+    pub fields: Vec<SchemaField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaDiscoverResult {
+    pub tables: Vec<SchemaTable>,
+    /// Total active tables discovered (after filtering, before the
+    /// `max_tables` cap).
+    pub total_tables: usize,
+    /// Set when fewer tables were introspected than discovered (cap hit)
+    /// — surfaced so the cap is never silent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 // ── Env probe ──────────────────────────────────────────────────────────

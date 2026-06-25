@@ -67,6 +67,60 @@ pub(super) async fn handler_run_kql(
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct SchemaDiscoverBody {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    azure_tenant_id: Option<String>,
+    #[serde(default)]
+    azure_client_id: Option<String>,
+    #[serde(default)]
+    azure_client_secret: Option<String>,
+    #[serde(default)]
+    lookback: Option<String>,
+    #[serde(default)]
+    table_filter: Option<Vec<String>>,
+    #[serde(default)]
+    min_ingestion_mb: Option<f64>,
+    #[serde(default)]
+    max_tables: Option<u32>,
+    #[serde(default)]
+    sample_rows: Option<u32>,
+}
+
+/// Discover active Sentinel tables + classify their fields for graph
+/// construction. Read-only; delegates to the canonical API.
+pub(super) async fn handler_discover_schema(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<SchemaDiscoverBody>,
+) -> Response {
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        api.discover_schema(graph_hunter_api::dto::sentinel::SchemaDiscoverRequest {
+            workspace_id: body.workspace_id.unwrap_or_default(),
+            azure_tenant_id: body.azure_tenant_id.unwrap_or_default(),
+            azure_client_id: body.azure_client_id.unwrap_or_default(),
+            azure_client_secret: body.azure_client_secret.unwrap_or_default(),
+            time_window: super::graph::lookback_to_window(body.lookback.as_deref()),
+            table_filter: body.table_filter.unwrap_or_default(),
+            min_ingestion_mb: body.min_ingestion_mb,
+            max_tables: body.max_tables,
+            sample_rows: body.sample_rows,
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(v)) => ok_json(v),
+        Ok(Err(e)) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Err(_) => err_json("Schema discovery timed out (120s)"),
+    }
+}
+
 #[derive(Deserialize)]
 pub(super) struct SeedBody {
     pub entity_type: String,

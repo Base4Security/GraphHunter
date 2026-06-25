@@ -7,8 +7,8 @@
 //! include the enrichment data.
 
 use crate::dto::geoip::{
-    ApiTestResult, Capabilities, EnrichIpRequest, EnrichIpResponse, GraphSummaryRequest,
-    GraphSummaryWithCapabilities,
+    ApiTestResult, Capabilities, EnrichIpRequest, EnrichIpResponse, GraphState,
+    GraphSummaryRequest, GraphSummaryWithCapabilities,
 };
 use crate::util::resolve_api_port;
 use crate::{ApiError, ApiResult, GraphHunterApi};
@@ -232,6 +232,16 @@ impl GraphHunterApi {
         result
     }
 
+    /// Lightweight `(entity_count, relation_count)` for the current session,
+    /// or `None` when no session is loaded (or the lock is momentarily
+    /// contended). Lets `/health` report `graph_state` without paying for the
+    /// full `get_graph_summary` (type distribution + top anomalies).
+    pub fn current_graph_counts(&self) -> Option<(usize, usize)> {
+        let session = self.sessions().current_session()?;
+        let graph = session.graph.read().ok()?;
+        Some((graph.entity_count(), graph.relation_count()))
+    }
+
     /// Graph summary + runtime capabilities in one shot. Frontend uses
     /// this to build its "at-a-glance" banner; MCP tools use it to
     /// decide whether to call `enrich_ip` at all.
@@ -240,9 +250,13 @@ impl GraphHunterApi {
         req: GraphSummaryRequest,
     ) -> ApiResult<GraphSummaryWithCapabilities> {
         let summary = self.with_graph_read(req.session.as_ref(), |g| Ok(g.get_graph_summary()))?;
+        let (graph_state, advisory) =
+            GraphState::classify(summary.entity_count, summary.relation_count);
         Ok(GraphSummaryWithCapabilities {
             summary,
             capabilities: self.capabilities(),
+            graph_state,
+            advisory,
         })
     }
 }
@@ -250,6 +264,28 @@ impl GraphHunterApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_state_classify_thresholds() {
+        // Empty: zero entities → advisory points at seed/schema.
+        let (state, advisory) = GraphState::classify(0, 0);
+        assert_eq!(state, GraphState::Empty);
+        assert!(advisory.unwrap().contains("sentinel_seed"));
+
+        // Partial: a seed-sized graph (few entities) → expand advisory.
+        let (state, advisory) = GraphState::classify(3, 2);
+        assert_eq!(state, GraphState::Partial);
+        assert!(advisory.unwrap().contains("node_expand"));
+
+        // Partial: entities but no edges is still not worth traversing.
+        let (state, _) = GraphState::classify(50, 0);
+        assert_eq!(state, GraphState::Partial);
+
+        // Populated: enough entities and edges → no advisory.
+        let (state, advisory) = GraphState::classify(50, 120);
+        assert_eq!(state, GraphState::Populated);
+        assert!(advisory.is_none());
+    }
 
     #[test]
     fn capabilities_default_is_all_false() {

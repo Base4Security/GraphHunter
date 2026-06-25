@@ -30,14 +30,32 @@ pub(super) async fn handler_health(State(api): State<Arc<GraphHunterApi>>) -> Re
     tracing::debug!("HTTP API: /health request received");
     // Short timeout so /health never blocks on a contended session
     // store (the canonical API uses the same std RwLock internally).
+    // Returns `(session_loaded, Option<(entities, relations)>)` so we can
+    // surface the active graph_state without a second blocking hop.
     let api = api.clone();
-    let session_loaded = tokio::time::timeout(
+    let (session_loaded, counts) = tokio::time::timeout(
         Duration::from_millis(500),
-        tokio::task::spawn_blocking(move || api.sessions().current_id().is_some()),
+        tokio::task::spawn_blocking(move || {
+            let loaded = api.sessions().current_id().is_some();
+            (loaded, api.current_graph_counts())
+        }),
     )
     .await
-    .unwrap_or(Ok(false))
-    .unwrap_or(false);
+    .unwrap_or(Ok((false, None)))
+    .unwrap_or((false, None));
+
+    // graph_state/advisory only when a session is loaded; an empty/partial
+    // graph actively says so (and how to populate it). Same thresholds as
+    // `/graph_summary` via the shared classifier.
+    let (graph_state, advisory) = match counts {
+        Some((entities, relations)) => {
+            let (state, advisory) =
+                graph_hunter_api::dto::geoip::GraphState::classify(entities, relations);
+            (Some(state), advisory)
+        }
+        None => (None, None),
+    };
+
     ok_json(serde_json::json!({
         "ok": true,
         "session_loaded": session_loaded,
@@ -45,7 +63,9 @@ pub(super) async fn handler_health(State(api): State<Arc<GraphHunterApi>>) -> Re
             "GraphHunter app running with a session loaded."
         } else {
             "GraphHunter app running. No session loaded — create or load a session in the app."
-        }
+        },
+        "graph_state": graph_state,
+        "advisory": advisory,
     }))
 }
 

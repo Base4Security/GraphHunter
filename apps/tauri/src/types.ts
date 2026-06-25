@@ -456,6 +456,10 @@ export interface GraphSummary {
   type_distribution: TypeDistribution[];
   time_range: [number, number] | null;
   top_anomalies: TopAnomaly[];
+  /** Active graph state derived from the counts (empty/partial/populated). */
+  graph_state?: "empty" | "partial" | "populated";
+  /** Advisory nudge for empty/partial graphs; omitted when populated. */
+  advisory?: string;
 }
 
 export interface ExpandFilter {
@@ -725,6 +729,8 @@ export interface KqlResult {
   take_limit?: number | null;
   /** Phase N: true when row_count saturates take_limit. */
   truncated?: boolean;
+  /** Graph-first nudge: set in inspect mode when the query touches identity/IP-like columns. */
+  graph_advisory?: string | null;
 }
 
 // ── Temporal heatmap ──

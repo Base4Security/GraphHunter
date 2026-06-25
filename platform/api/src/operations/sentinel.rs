@@ -15,8 +15,9 @@ use uuid::Uuid;
 
 use crate::dto::sentinel::{
     ConnectorStatusResponse, HuntingTemplateId, KqlResult, NodeEnrichRequest,
-    RunHuntingTemplateRequest, RunKqlRequest, SeedFromIocRequest, SeedResult,
-    SentinelConnectRequest, SentinelConnectedEvent, SentinelEnvStatus, TimeWindow,
+    RunHuntingTemplateRequest, RunKqlRequest, SchemaDiscoverRequest, SchemaDiscoverResult,
+    SchemaField, SchemaTable, SeedFromIocRequest, SeedResult, SentinelConnectRequest,
+    SentinelConnectedEvent, SentinelEnvStatus, TimeWindow,
 };
 use crate::util::parse_entity_type;
 use crate::events::events as event_names;
@@ -374,6 +375,7 @@ impl GraphHunterApi {
                     "relations_created": 0,
                 }),
             );
+            let graph_advisory = kql_graph_advisory(&kql);
             return Ok(KqlResult {
                 new_entities: 0,
                 new_relations: 0,
@@ -385,6 +387,7 @@ impl GraphHunterApi {
                 take_limit,
                 truncated: inspect_truncated,
                 rows: Some(rows),
+                graph_advisory,
             });
         }
 
@@ -486,7 +489,93 @@ impl GraphHunterApi {
             take_limit,
             truncated,
             rows: None,
+            // No advisory on the ingest path — the data is already in the
+            // graph, which is exactly the behavior the advisory steers toward.
+            graph_advisory: None,
         })
+    }
+
+    /// Discover the active Sentinel tables and classify each table's fields
+    /// for graph construction. Two-stage: (1) the `Usage` table gives the
+    /// active tables + billable ingestion in the window (cheap, no `union *`);
+    /// (2) for the most-ingested tables, a small `take N` sample feeds the
+    /// shared field classifier, annotated with `graph_affinity` + `enrichable`.
+    ///
+    /// Read-only — never touches the session graph. The intended Phase 1
+    /// "what's in this workspace, what's worth building?" call.
+    pub async fn discover_schema(
+        &self,
+        req: SchemaDiscoverRequest,
+    ) -> ApiResult<SchemaDiscoverResult> {
+        let workspace_id = env_or(&req.workspace_id, "AZURE_WORKSPACE_ID")?;
+        let tenant_id = env_or(&req.azure_tenant_id, "AZURE_TENANT_ID")?;
+        let client_id = env_or(&req.azure_client_id, "AZURE_CLIENT_ID")?;
+        let client_secret = env_or(&req.azure_client_secret, "AZURE_CLIENT_SECRET")?;
+        let auth = SentinelAuth { tenant_id, client_id, client_secret };
+
+        let time_filter = req
+            .time_window
+            .as_ref()
+            .map(|w| w.kql_filter())
+            .unwrap_or_else(|| "where TimeGenerated > ago(24h)".to_string());
+        let min_mb = req.min_ingestion_mb.unwrap_or(0.0);
+        let max_tables = req.max_tables.unwrap_or(25) as usize;
+        let sample_rows = req.sample_rows.unwrap_or(200).clamp(1, 1000);
+
+        // Stage 1: active tables + ingestion volume from the Usage table.
+        let usage_kql = format!(
+            "Usage | {time_filter} | summarize IngestionMB = sum(Quantity), \
+             LastIngested = max(TimeGenerated) by DataType | where IngestionMB >= {min_mb} \
+             | order by IngestionMB desc"
+        );
+        let usage_rows = run_kql_rows(&workspace_id, usage_kql, auth.clone()).await?;
+
+        // Apply the (case-insensitive) table filter.
+        let mut discovered: Vec<(String, Option<f64>, Option<String>)> = usage_rows
+            .iter()
+            .filter_map(|row| {
+                let name = row.get("DataType").and_then(|v| v.as_str())?.to_string();
+                if !req.table_filter.is_empty()
+                    && !req.table_filter.iter().any(|t| t.eq_ignore_ascii_case(&name))
+                {
+                    return None;
+                }
+                let mb = row.get("IngestionMB").and_then(|v| v.as_f64());
+                let last = row
+                    .get("LastIngested")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                Some((name, mb, last))
+            })
+            .collect();
+
+        let total_tables = discovered.len();
+        let note = (total_tables > max_tables).then(|| {
+            format!(
+                "Introspected the top {max_tables} of {total_tables} tables by ingestion. \
+                 Raise max_tables or pass table_filter to inspect the rest."
+            )
+        });
+        discovered.truncate(max_tables);
+
+        // Stage 2: sample + classify each selected table.
+        let mut tables = Vec::with_capacity(discovered.len());
+        for (name, ingestion_mb, last_ingested) in discovered {
+            let sample_kql = format!("{name} | {time_filter} | take {sample_rows}");
+            // A single table's sample failing (e.g. a deprecated column) must
+            // not abort the whole discovery — degrade to an empty field list.
+            let rows = run_kql_rows(&workspace_id, sample_kql, auth.clone())
+                .await
+                .unwrap_or_default();
+            tables.push(SchemaTable {
+                name,
+                ingestion_mb,
+                last_ingested,
+                fields: classify_table_fields(&rows),
+            });
+        }
+
+        Ok(SchemaDiscoverResult { tables, total_tables, note })
     }
 
     /// Phase M: run a pre-built hunting KQL template against Sentinel.
@@ -1030,6 +1119,164 @@ fn extract_take_limit(kql: &str) -> Option<u32> {
     last
 }
 
+/// Run one KQL query against Log Analytics and return the rows as parsed JSON
+/// objects. `run_sentinel_query` already normalizes the response to a JSON
+/// array of row objects (the same shape `cap_kql_rows` consumes), so a
+/// non-array / malformed body degrades to an empty vec rather than erroring.
+async fn run_kql_rows(
+    workspace_id: &str,
+    kql: String,
+    auth: SentinelAuth,
+) -> ApiResult<Vec<serde_json::Value>> {
+    let ws = workspace_id.to_string();
+    let res = tokio::task::spawn_blocking(move || run_sentinel_query(&ws, &kql, Some(auth)))
+        .await
+        .map_err(|e| ApiError::Internal(format!("task join error: {e}")))?
+        .map_err(|e| ApiError::Upstream { service: "sentinel-kql".into(), message: e })?;
+    Ok(serde_json::from_str::<Vec<serde_json::Value>>(&res.data).unwrap_or_default())
+}
+
+/// Node-affinity entity classes — fields resolving to one of these become
+/// graph nodes; everything else is an attribute. Mirrors the seedable/graph
+/// entity types the SentinelJsonParser produces.
+fn is_node_class(class: &str) -> bool {
+    matches!(
+        class,
+        "IP" | "User" | "Host" | "Process" | "File" | "Domain" | "URL" | "Registry" | "Service"
+    )
+}
+
+/// Enrichments that apply to a given node class. Only IP is enrichable today
+/// (GeoIP + ASN, both backed by the same MaxMind path); `threat_intel` is
+/// intentionally omitted until a real feed is wired.
+fn enrichable_for(class: &str) -> Vec<String> {
+    match class {
+        "IP" => vec!["geoip".to_string(), "asn".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+/// Classify the fields of one sampled table for graph construction. Reuses the
+/// ingest preview classifier for role/canonical/sample-value detection, then
+/// layers on graph_affinity + enrichable + a sample-based cardinality estimate.
+fn classify_table_fields(rows: &[serde_json::Value]) -> Vec<SchemaField> {
+    use graph_hunter_core::field_preview::{preview_fields_from_events_with_classifier, FieldRole};
+    use graph_hunter_core::generic::GenericParser;
+
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    // Independent pass over the rows for full distinct counts + coarse JSON
+    // type (the preview only keeps 5 sample values, too few for cardinality).
+    let mut stats: std::collections::HashMap<String, (usize, std::collections::HashSet<String>, &'static str)> =
+        std::collections::HashMap::new();
+    for row in rows {
+        if let Some(obj) = row.as_object() {
+            for (key, value) in obj {
+                let (val_str, ty) = match value {
+                    serde_json::Value::String(s) if !s.is_empty() => (s.clone(), "string"),
+                    serde_json::Value::Number(n) => (n.to_string(), "number"),
+                    serde_json::Value::Bool(b) => (b.to_string(), "bool"),
+                    _ => continue,
+                };
+                let entry = stats.entry(key.clone()).or_insert((0, std::collections::HashSet::new(), ty));
+                entry.0 += 1;
+                entry.1.insert(val_str);
+            }
+        }
+    }
+
+    let infos = preview_fields_from_events_with_classifier(rows, None);
+    infos
+        .into_iter()
+        .map(|fi| {
+            // Prefer the canonical mapping for the node class (UserPrincipalName
+            // -> User); fall back to the name/value suggestion.
+            let class = fi
+                .canonical_target
+                .as_deref()
+                .map(GenericParser::canonical_to_entity_type)
+                .filter(|s| *s != "Skip")
+                .map(str::to_string)
+                .or_else(|| fi.suggested_entity_type.clone());
+
+            let is_node = matches!(fi.current_role, FieldRole::Node)
+                && class.as_deref().map(is_node_class).unwrap_or(false);
+
+            let (graph_affinity, node_class, enrichable) = if is_node {
+                let c = class.unwrap();
+                let enrich = enrichable_for(&c);
+                ("node".to_string(), Some(c), enrich)
+            } else {
+                ("attribute".to_string(), None, Vec::new())
+            };
+
+            let (ty, cardinality) = match stats.get(&fi.raw_name) {
+                Some((occ, distinct, ty)) => (ty.to_string(), cardinality_label(distinct.len(), *occ)),
+                None => ("string".to_string(), "low".to_string()),
+            };
+
+            SchemaField {
+                name: fi.raw_name,
+                r#type: ty,
+                cardinality,
+                graph_affinity,
+                node_class,
+                enrichable,
+                sample_values: fi.sample_values,
+            }
+        })
+        .collect()
+}
+
+/// Sample-based cardinality label. Mirrors the categorical-label heuristic in
+/// `field_preview`: ≤4 distinct values or a distinct/total ratio ≤ 0.25 reads
+/// as a low-cardinality attribute (status/severity/result), otherwise high.
+fn cardinality_label(distinct: usize, occurrences: usize) -> String {
+    let ratio = distinct as f64 / occurrences.max(1) as f64;
+    if distinct <= 4 || ratio <= 0.25 {
+        "low".to_string()
+    } else {
+        "high".to_string()
+    }
+}
+
+/// Graph-first nudge for inspect-mode KQL: return an advisory when the query
+/// references identity/IP-like columns that GraphHunter could materialize as
+/// graph entities. Case-insensitive substring scan over a small set of the
+/// canonical identifier columns the `SentinelJsonParser` turns into nodes
+/// (IP / user / host / account). Returns `None` for graph-irrelevant queries
+/// (pure aggregates, lookups over non-entity columns) so the nudge stays
+/// signal, not noise.
+fn kql_graph_advisory(kql: &str) -> Option<String> {
+    // Lowercased needles matched against the lowercased query. Kept tight:
+    // these are the column tokens that map to node-affinity entity types.
+    const ENTITY_COLUMNS: &[&str] = &[
+        "ipaddress",
+        "remoteip",
+        "sourceip",
+        "destinationip",
+        "userprincipalname",
+        "accountname",
+        "targetusername",
+        "computer",
+        "devicename",
+    ];
+    let lower = kql.to_ascii_lowercase();
+    if ENTITY_COLUMNS.iter().any(|c| lower.contains(c)) {
+        Some(
+            "This query touches IPs/identities that GraphHunter can materialize as graph \
+             entities. For recurring pivots, prefer sentinel_seed (cold-start from an IoC) or \
+             sentinel_schema (discover which tables/fields are worth building) over repeated raw \
+             KQL — the graph persists what the query cannot."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 /// Phase M (revised): ingest-scope templates — pull RAW events in a
 /// thematic category so the analyst can hunt over them inside
 /// GraphHunter (DSL, temporal heatmap, graph traversal, scoring).
@@ -1208,6 +1455,75 @@ mod sugar_tests {
     fn take_limit_none_when_no_take() {
         let kql = "SigninLogs | summarize by Account";
         assert_eq!(extract_take_limit(kql), None);
+    }
+
+    #[test]
+    fn graph_advisory_set_for_identity_ip_query() {
+        let kql = "SigninLogs | project IPAddress, UserPrincipalName | take 50";
+        assert!(super::kql_graph_advisory(kql).is_some());
+    }
+
+    #[test]
+    fn graph_advisory_none_for_non_entity_query() {
+        // Pure aggregate over a non-entity column — no node-affinity tokens.
+        let kql = "Usage | summarize total = sum(Quantity) by DataType";
+        assert!(super::kql_graph_advisory(kql).is_none());
+    }
+}
+
+#[cfg(test)]
+mod schema_discover_tests {
+    use super::*;
+
+    fn signin_rows() -> Vec<serde_json::Value> {
+        // 6 rows: IPAddress + UserPrincipalName are high-cardinality identifiers;
+        // ResultType is a low-cardinality categorical attribute.
+        (0..6)
+            .map(|i| {
+                serde_json::json!({
+                    "TimeGenerated": "2026-06-01T10:00:00Z",
+                    "UserPrincipalName": format!("user{i}@corp.com"),
+                    "IPAddress": format!("203.0.113.{i}"),
+                    "ResultType": "0",
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn classify_marks_ip_as_node_with_enrichment() {
+        let fields = classify_table_fields(&signin_rows());
+        let ip = fields.iter().find(|f| f.name == "IPAddress").expect("IPAddress field");
+        assert_eq!(ip.graph_affinity, "node");
+        assert_eq!(ip.node_class.as_deref(), Some("IP"));
+        assert_eq!(ip.enrichable, vec!["geoip".to_string(), "asn".to_string()]);
+        assert_eq!(ip.cardinality, "high");
+    }
+
+    #[test]
+    fn classify_marks_identity_as_node_no_enrichment() {
+        let fields = classify_table_fields(&signin_rows());
+        let upn = fields
+            .iter()
+            .find(|f| f.name == "UserPrincipalName")
+            .expect("UPN field");
+        assert_eq!(upn.graph_affinity, "node");
+        assert_eq!(upn.node_class.as_deref(), Some("User"));
+        assert!(upn.enrichable.is_empty(), "User has no enrichment today");
+    }
+
+    #[test]
+    fn classify_marks_categorical_as_attribute() {
+        let fields = classify_table_fields(&signin_rows());
+        let rt = fields.iter().find(|f| f.name == "ResultType").expect("ResultType field");
+        assert_eq!(rt.graph_affinity, "attribute");
+        assert_eq!(rt.cardinality, "low");
+        assert!(rt.node_class.is_none());
+    }
+
+    #[test]
+    fn classify_empty_rows_is_empty() {
+        assert!(classify_table_fields(&[]).is_empty());
     }
 }
 
