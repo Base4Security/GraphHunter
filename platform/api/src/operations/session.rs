@@ -200,6 +200,8 @@ impl GraphHunterApi {
                 yannakakis_cache: std::sync::RwLock::new(None),
                 phase: std::sync::RwLock::new(crate::state::SessionPhase::Ready),
                 live_tail_stats: std::sync::RwLock::new(crate::state::LiveTailStats::default()),
+                proposals: std::sync::RwLock::new(std::collections::HashMap::new()),
+                last_build: std::sync::RwLock::new(None),
             });
             self.sessions().insert(session);
         }

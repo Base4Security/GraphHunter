@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value};
 use tokio::sync::RwLock;
 
-use super::sentinel::{SentinelAuth, SentinelQueryResult};
+use super::sentinel::{parse_query_stats, SentinelAuth, SentinelQueryResult};
 
 // ── Token response ──
 
@@ -136,6 +136,9 @@ impl SentinelTransport for HttpSentinelTransport {
             .post(&url)
             .header("Authorization", format!("Bearer {}", bearer))
             .header("Content-Type", "application/json")
+            // Mirror the sync runner: request the `statistics` object so query
+            // cost can be surfaced to callers.
+            .header("Prefer", "include-statistics")
             .json(&body)
             .send()
             .await
@@ -331,6 +334,7 @@ pub fn normalize_response(raw: &Value) -> Result<SentinelQueryResult, String> {
     Ok(SentinelQueryResult {
         data,
         next_query_start: last_time,
+        stats: parse_query_stats(raw),
     })
 }
 

@@ -311,6 +311,62 @@ pub struct SchemaDiscoverResult {
     pub note: Option<String>,
 }
 
+// ── Graph cycle: proposals (§4.2) + build records (§4.3 / §5) ──────────
+
+/// A node in a proposed graph schema: an entity class sourced from a
+/// `Table.Field` column, optionally enriched at build time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalNode {
+    /// Entity class (engine `EntityType` name: IP, User, Host, …).
+    pub class: String,
+    /// `Table.Field` the node value is drawn from.
+    pub source: String,
+    /// Enrichments to apply to this node's entities at build (e.g. geoip, asn).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enrich: Vec<String>,
+}
+
+/// An edge in a proposed graph schema, connecting two node classes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalEdge {
+    /// Relation type label (e.g. `authenticated_from`).
+    pub r#type: String,
+    pub from: String,
+    pub to: String,
+    /// Result columns carried onto the edge as metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<String>,
+}
+
+/// A candidate graph schema (§4.2). Emitted by `graph_propose`, persisted in
+/// the session, and executed by `graph_build` via `materialization_kql`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphProposal {
+    pub proposal_id: String,
+    pub description: String,
+    pub nodes: Vec<ProposalNode>,
+    pub edges: Vec<ProposalEdge>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_entities: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_relations: Option<u64>,
+    /// Exact KQL `graph_build` runs to materialize this schema.
+    pub materialization_kql: String,
+}
+
+/// Record of the most recent `graph_build`, surfaced in §5 status (`last_build`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildRecord {
+    pub build_id: String,
+    pub proposal_id: String,
+    /// Unix seconds when the build completed.
+    pub at: i64,
+    pub entities_created: usize,
+    pub relations_created: usize,
+    /// `append` | `replace`.
+    pub merge_mode: String,
+}
+
 // ── Env probe ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
