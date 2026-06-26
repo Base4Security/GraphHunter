@@ -159,6 +159,24 @@ pub struct RunKqlRequest {
     /// duplicating. Omit for a one-off append (random dataset id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset: Option<String>,
+    /// §4.7 fallback gate. An inspect-mode (`ingest != true`) query whose
+    /// projection touches entity-class columns is NOT executed unless this is
+    /// `true` — instead a ready-to-run `graph_propose` payload is returned to
+    /// steer the analyst onto the graph path. Set `true` to acknowledge the
+    /// raw-KQL escape hatch and run anyway (logged). Ignored on the ingest path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledge_fallback: Option<bool>,
+}
+
+/// A ready-to-run `graph_propose` payload (§4.7): the table + entity-class
+/// fields extracted from a raw KQL projection, so the analyst can pivot to the
+/// graph path in one call instead of reading rows out via raw KQL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphProposePayload {
+    /// The tool to call next.
+    pub next_tool: String,
+    pub table: String,
+    pub selected_fields: Vec<SelectedField>,
 }
 
 /// One-click hunting template (Phase M). The body is a KQL string
@@ -221,6 +239,16 @@ pub struct KqlResult {
     /// or when the query is graph-irrelevant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_advisory: Option<String>,
+    /// §4.7: ready-to-run `graph_propose` arguments derived from the query's
+    /// entity-class columns. Present whenever the query is graph-relevant
+    /// (both when gated and when an acknowledged fallback runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_propose: Option<GraphProposePayload>,
+    /// §4.7: `true` when the query was NOT executed because it is an
+    /// unacknowledged entity-class raw-KQL fallback. Re-run with
+    /// `acknowledge_fallback=true`, or follow `graph_propose`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fallback_gated: bool,
 }
 
 // ── Schema discovery (Phase 1 / cold-start orientation) ───────────────

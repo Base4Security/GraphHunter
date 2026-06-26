@@ -33,6 +33,8 @@ pub(super) struct RunKqlBody {
     pub lookback: Option<String>,
     #[serde(default)]
     pub dataset: Option<String>,
+    #[serde(default)]
+    pub acknowledge_fallback: Option<bool>,
 }
 
 /// Execute an ad-hoc KQL query against Azure Log Analytics. Delegates
@@ -53,6 +55,7 @@ pub(super) async fn handler_run_kql(
             ingest: body.ingest,
             max_rows: body.max_rows,
             dataset: body.dataset,
+            acknowledge_fallback: body.acknowledge_fallback,
         }),
     )
     .await;

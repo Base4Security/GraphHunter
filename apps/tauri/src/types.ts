@@ -731,6 +731,14 @@ export interface KqlResult {
   truncated?: boolean;
   /** Graph-first nudge: set in inspect mode when the query touches identity/IP-like columns. */
   graph_advisory?: string | null;
+  /** §4.7: ready-to-run graph_propose args derived from the query's entity columns. */
+  graph_propose?: {
+    next_tool: string;
+    table: string;
+    selected_fields: { table: string; field: string }[];
+  } | null;
+  /** §4.7: true when an unacknowledged entity-class raw-KQL query was NOT executed. */
+  fallback_gated?: boolean;
 }
 
 // ── Temporal heatmap ──

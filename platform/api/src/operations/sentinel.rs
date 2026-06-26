@@ -15,7 +15,8 @@ use uuid::Uuid;
 
 use crate::dto::sentinel::{
     BuildRecord, ConnectorStatusResponse, EnrichmentApplied, GraphBuildRequest, GraphBuildResult,
-    GraphProposal, GraphProposeRequest, GraphProposeResult, HuntingTemplateId, KqlResult,
+    GraphProposal, GraphProposePayload, GraphProposeRequest, GraphProposeResult, HuntingTemplateId,
+    KqlResult,
     NodeEnrichRequest, ProposalEdge, ProposalNode, RunHuntingTemplateRequest, RunKqlRequest,
     SchemaDiscoverRequest, SchemaDiscoverResult, SchemaField, SchemaTable, SeedFromIocRequest,
     SeedResult, SelectedField, SentinelConnectRequest, SentinelConnectedEvent, SentinelEnvStatus,
@@ -328,6 +329,46 @@ impl GraphHunterApi {
         // explicit always wins over inferred.
         let kql = apply_time_window_sugar(&raw_kql, req.time_window.as_ref());
 
+        // §4.7 fallback gate. Reading entity-class rows out via raw KQL bypasses
+        // the graph. On the inspect path, refuse such a query unless the analyst
+        // explicitly acknowledges the fallback — and hand back a ready-to-run
+        // graph_propose payload so the graph path is the easy next step.
+        // Inspect is exactly `ingest == Some(false)` (the rows-only branch
+        // below); `None`/`Some(true)` ingest and are never gated.
+        let is_inspect = req.ingest == Some(false);
+        let propose_payload = extract_propose_payload(&kql);
+        let acknowledged = req.acknowledge_fallback == Some(true);
+        if is_inspect && propose_payload.is_some() && !acknowledged {
+            return Ok(KqlResult {
+                new_entities: 0,
+                new_relations: 0,
+                total_entities: 0,
+                total_relations: 0,
+                kql_executed: kql,
+                row_count: 0,
+                took_ms: 0,
+                take_limit: None,
+                truncated: false,
+                rows: None,
+                graph_advisory: Some(
+                    "Not executed: this raw KQL projects IPs/identities, which GraphHunter \
+                     materializes as a graph rather than reading out row-by-row. Call \
+                     graph_propose with the suggested fields (then graph_build), or re-run with \
+                     acknowledge_fallback=true to run the raw query as a one-off."
+                        .to_string(),
+                ),
+                graph_propose: propose_payload,
+                fallback_gated: true,
+            });
+        }
+        if is_inspect && propose_payload.is_some() && acknowledged {
+            tracing::warn!(
+                target: "graphhunter::fallback",
+                "sentinel_query raw-KQL fallback executed (acknowledged): {}",
+                kql.lines().next().unwrap_or("").trim()
+            );
+        }
+
         let workspace_id = env_or(&req.workspace_id, "AZURE_WORKSPACE_ID")?;
         let tenant_id = env_or(&req.azure_tenant_id, "AZURE_TENANT_ID")?;
         let client_id = env_or(&req.azure_client_id, "AZURE_CLIENT_ID")?;
@@ -390,6 +431,9 @@ impl GraphHunterApi {
                 truncated: inspect_truncated,
                 rows: Some(rows),
                 graph_advisory,
+                // Acknowledged-fallback inspect still surfaces the graph path.
+                graph_propose: propose_payload,
+                fallback_gated: false,
             });
         }
 
@@ -491,9 +535,11 @@ impl GraphHunterApi {
             take_limit,
             truncated,
             rows: None,
-            // No advisory on the ingest path — the data is already in the
-            // graph, which is exactly the behavior the advisory steers toward.
+            // No advisory/gate on the ingest path — the data is already in the
+            // graph, which is exactly the behavior the gate steers toward.
             graph_advisory: None,
+            graph_propose: None,
+            fallback_gated: false,
         })
     }
 
@@ -862,6 +908,7 @@ impl GraphHunterApi {
             ingest: None,
             max_rows: None,
             dataset: None,
+            acknowledge_fallback: None,
         })
         .await
     }
@@ -1909,22 +1956,24 @@ fn map_rows_to_graph(p: &GraphProposal, rows: &[serde_json::Value]) -> MappedGra
 /// (IP / user / host / account). Returns `None` for graph-irrelevant queries
 /// (pure aggregates, lookups over non-entity columns) so the nudge stays
 /// signal, not noise.
+/// Entity-class column tokens (lowercased needle → canonical column name) that
+/// map to node-affinity entity types. Shared by the graph-advisory nudge and
+/// the §4.7 fallback gate's `graph_propose` payload so the two never drift.
+const ENTITY_COLUMNS: &[(&str, &str)] = &[
+    ("ipaddress", "IPAddress"),
+    ("remoteip", "RemoteIP"),
+    ("sourceip", "SourceIP"),
+    ("destinationip", "DestinationIP"),
+    ("userprincipalname", "UserPrincipalName"),
+    ("accountname", "AccountName"),
+    ("targetusername", "TargetUserName"),
+    ("computer", "Computer"),
+    ("devicename", "DeviceName"),
+];
+
 fn kql_graph_advisory(kql: &str) -> Option<String> {
-    // Lowercased needles matched against the lowercased query. Kept tight:
-    // these are the column tokens that map to node-affinity entity types.
-    const ENTITY_COLUMNS: &[&str] = &[
-        "ipaddress",
-        "remoteip",
-        "sourceip",
-        "destinationip",
-        "userprincipalname",
-        "accountname",
-        "targetusername",
-        "computer",
-        "devicename",
-    ];
     let lower = kql.to_ascii_lowercase();
-    if ENTITY_COLUMNS.iter().any(|c| lower.contains(c)) {
+    if ENTITY_COLUMNS.iter().any(|(needle, _)| lower.contains(needle)) {
         Some(
             "This query touches IPs/identities that GraphHunter can materialize as graph \
              entities. For recurring pivots, prefer sentinel_seed (cold-start from an IoC) or \
@@ -1935,6 +1984,31 @@ fn kql_graph_advisory(kql: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// §4.7: build a ready-to-run `graph_propose` payload from a raw KQL query's
+/// entity-class columns. `None` when the query is graph-irrelevant (then the
+/// fallback gate does not fire). The table is the first identifier in the query.
+fn extract_propose_payload(kql: &str) -> Option<GraphProposePayload> {
+    let lower = kql.to_ascii_lowercase();
+    let mut selected_fields: Vec<SelectedField> = ENTITY_COLUMNS
+        .iter()
+        .filter(|(needle, _)| lower.contains(needle))
+        .map(|(_, name)| SelectedField { table: String::new(), field: (*name).to_string() })
+        .collect();
+    if selected_fields.is_empty() {
+        return None;
+    }
+    let table = kql
+        .trim_start()
+        .split(|c: char| c == '|' || c == '\n' || c.is_whitespace())
+        .find(|t| !t.is_empty())
+        .unwrap_or("")
+        .to_string();
+    for f in &mut selected_fields {
+        f.table = table.clone();
+    }
+    Some(GraphProposePayload { next_tool: "graph_propose".to_string(), table, selected_fields })
 }
 
 /// Phase M (revised): ingest-scope templates — pull RAW events in a
@@ -2128,6 +2202,70 @@ mod sugar_tests {
         // Pure aggregate over a non-entity column — no node-affinity tokens.
         let kql = "Usage | summarize total = sum(Quantity) by DataType";
         assert!(super::kql_graph_advisory(kql).is_none());
+    }
+}
+
+#[cfg(test)]
+mod fallback_gate_tests {
+    use super::*;
+
+    #[test]
+    fn propose_payload_extracts_table_and_entity_fields() {
+        let p = extract_propose_payload(
+            "SigninLogs | where ResultType == 0 | project IPAddress, UserPrincipalName, ResultType",
+        )
+        .expect("payload for entity query");
+        assert_eq!(p.next_tool, "graph_propose");
+        assert_eq!(p.table, "SigninLogs");
+        let fields: Vec<&str> = p.selected_fields.iter().map(|f| f.field.as_str()).collect();
+        assert!(fields.contains(&"IPAddress"));
+        assert!(fields.contains(&"UserPrincipalName"));
+        assert!(p.selected_fields.iter().all(|f| f.table == "SigninLogs"));
+    }
+
+    #[test]
+    fn non_entity_query_has_no_payload() {
+        assert!(extract_propose_payload("Usage | summarize sum(Quantity) by DataType").is_none());
+    }
+
+    #[tokio::test]
+    async fn inspect_entity_query_is_gated_without_ack() {
+        let api = GraphHunterApi::new_noop();
+        let res = api
+            .run_kql(RunKqlRequest {
+                kql: "SigninLogs | project IPAddress, UserPrincipalName".into(),
+                ingest: Some(false),
+                ..Default::default()
+            })
+            .await
+            .expect("gated path returns Ok without executing");
+        assert!(res.fallback_gated, "entity-class inspect query must be gated");
+        assert!(res.rows.is_none(), "gated query is not executed");
+        let gp = res.graph_propose.expect("ready-to-run propose payload");
+        assert_eq!(gp.table, "SigninLogs");
+        assert!(!gp.selected_fields.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ack_lets_entity_query_through_the_gate() {
+        // With acknowledge_fallback the gate does not fire; the call then
+        // proceeds to credential resolution (which fails here with no AZURE_*),
+        // proving it was NOT short-circuited as gated.
+        for k in ["AZURE_WORKSPACE_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"] {
+            // SAFETY: see other AZURE_* tests in this file — no concurrent reader.
+            unsafe { std::env::remove_var(k) };
+        }
+        let api = GraphHunterApi::new_noop();
+        let err = api
+            .run_kql(RunKqlRequest {
+                kql: "SigninLogs | project IPAddress".into(),
+                ingest: Some(false),
+                acknowledge_fallback: Some(true),
+                ..Default::default()
+            })
+            .await
+            .expect_err("no creds → proceeds past gate, then errors resolving AZURE_*");
+        assert!(matches!(err, ApiError::InvalidInput(_)));
     }
 }
 
