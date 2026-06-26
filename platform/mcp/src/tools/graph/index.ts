@@ -8,6 +8,7 @@ import { graphDatasets } from "./datasets.js";
 import { graphPathNodes } from "./path_nodes.js";
 import { graphHeavyEdges } from "./heavy_edges.js";
 import { graphChannelBehavior } from "./channel_behavior.js";
+import { graphPropose } from "./propose.js";
 
 export const graphTools: Tool[] = [
   graphSummary,
@@ -19,4 +20,5 @@ export const graphTools: Tool[] = [
   graphPathNodes,
   graphHeavyEdges,
   graphChannelBehavior,
+  graphPropose,
 ];

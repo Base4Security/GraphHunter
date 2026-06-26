@@ -14,10 +14,11 @@ use graph_hunter_siem::{
 use uuid::Uuid;
 
 use crate::dto::sentinel::{
-    ConnectorStatusResponse, HuntingTemplateId, KqlResult, NodeEnrichRequest,
+    ConnectorStatusResponse, GraphProposal, GraphProposeRequest, GraphProposeResult,
+    HuntingTemplateId, KqlResult, NodeEnrichRequest, ProposalEdge, ProposalNode,
     RunHuntingTemplateRequest, RunKqlRequest, SchemaDiscoverRequest, SchemaDiscoverResult,
-    SchemaField, SchemaTable, SeedFromIocRequest, SeedResult, SentinelConnectRequest,
-    SentinelConnectedEvent, SentinelEnvStatus, TimeWindow,
+    SchemaField, SchemaTable, SeedFromIocRequest, SeedResult, SelectedField,
+    SentinelConnectRequest, SentinelConnectedEvent, SentinelEnvStatus, TimeWindow,
 };
 use crate::util::parse_entity_type;
 use crate::events::events as event_names;
@@ -582,6 +583,81 @@ impl GraphHunterApi {
 
         let cost = cost.finish(started.elapsed().as_millis() as u64);
         Ok(SchemaDiscoverResult { tables, total_tables, note, cost })
+    }
+
+    /// Phase 2 / MAPPING (§4.2): from analyst-selected `{table, field}` pairs,
+    /// emit candidate graph schemas — nodes, edges, and the exact
+    /// `materialization_kql` `graph_build` will run. Proposals are persisted in
+    /// the session (keyed by `proposal_id`) so `graph_build` can retrieve one by
+    /// id. `estimated_entities/relations` are a best-effort probe: when Azure
+    /// creds resolve, one cheap `summarize` per table; otherwise omitted.
+    /// Proposal generation itself is offline (no SIEM round-trip required).
+    pub async fn graph_propose(&self, req: GraphProposeRequest) -> ApiResult<GraphProposeResult> {
+        if req.selected_fields.is_empty() {
+            return Err(ApiError::InvalidInput(
+                "selected_fields is empty — pick fields from schema_discover first".into(),
+            ));
+        }
+        let time_filter = req
+            .time_window
+            .as_ref()
+            .map(|w| w.kql_filter())
+            .unwrap_or_else(|| "where TimeGenerated > ago(24h)".to_string());
+        let max_proposals = req.max_proposals.unwrap_or(3).max(1) as usize;
+
+        let mut proposals =
+            build_proposals(&req.selected_fields, req.hypothesis_context.as_deref(), &time_filter);
+        proposals.truncate(max_proposals);
+
+        // Best-effort estimate probe: one `summarize` per proposal when creds
+        // resolve. Failures degrade to `None` estimates — never abort propose.
+        let mut cost = CostAccumulator::default();
+        let started = std::time::Instant::now();
+        let creds = explicit_or_env_creds(
+            &req.workspace_id,
+            &req.azure_tenant_id,
+            &req.azure_client_id,
+            &req.azure_client_secret,
+        );
+        if let Some((ws, auth)) = creds {
+            for p in &mut proposals {
+                if let Some(probe_kql) = estimate_probe_kql(p) {
+                    if let Ok((rows, stats)) =
+                        run_kql_rows(&ws, probe_kql, auth.clone()).await
+                    {
+                        cost.add(&stats);
+                        if let Some(row) = rows.first() {
+                            p.estimated_relations =
+                                row.get("Rows").and_then(|v| v.as_u64());
+                            p.estimated_entities =
+                                row.get("Entities").and_then(|v| v.as_u64());
+                        }
+                    }
+                }
+            }
+        }
+        let cost = cost.finish(started.elapsed().as_millis() as u64);
+
+        // Persist for graph_build. Auto-create a session if none is current so
+        // the discover→propose→build cycle works from a cold start.
+        if !proposals.is_empty() {
+            if self.sessions().current_session().is_none() {
+                self.create_session(crate::dto::session::CreateSessionRequest {
+                    name: Some("Graph Propose".into()),
+                })?;
+            }
+            if let Some(session) = self.sessions().current_session() {
+                let mut store = session
+                    .proposals
+                    .write()
+                    .map_err(|e| ApiError::Internal(format!("proposals lock poisoned: {e}")))?;
+                for p in &proposals {
+                    store.insert(p.proposal_id.clone(), p.clone());
+                }
+            }
+        }
+
+        Ok(GraphProposeResult { proposals, cost })
     }
 
     /// Phase M: run a pre-built hunting KQL template against Sentinel.
@@ -1291,6 +1367,273 @@ fn cardinality_label(distinct: usize, occurrences: usize) -> String {
     }
 }
 
+// ── graph_propose helpers (§4.2) — pure, unit-testable ─────────────────
+
+/// Resolve Azure creds from explicit request fields, falling back to env per
+/// field. Returns `None` (not an error) when any of the four is missing — used
+/// by best-effort paths like the graph_propose estimate probe.
+fn explicit_or_env_creds(
+    ws: &str,
+    tenant: &str,
+    client: &str,
+    secret: &str,
+) -> Option<(String, SentinelAuth)> {
+    let pick = |explicit: &str, key: &str| -> Option<String> {
+        if !explicit.is_empty() {
+            Some(explicit.to_string())
+        } else {
+            std::env::var(key).ok()
+        }
+    };
+    Some((
+        pick(ws, "AZURE_WORKSPACE_ID")?,
+        SentinelAuth {
+            tenant_id: pick(tenant, "AZURE_TENANT_ID")?,
+            client_id: pick(client, "AZURE_CLIENT_ID")?,
+            client_secret: pick(secret, "AZURE_CLIENT_SECRET")?,
+        },
+    ))
+}
+
+/// Classify a selected field by NAME only (no sample values) into a node class:
+/// the canonical alias table first (precise), then a curated name map. `None`
+/// means the field should be an edge attribute, not a node.
+fn classify_field_name(field: &str) -> Option<String> {
+    use graph_hunter_core::generic::GenericParser;
+    // Nested dynamic paths (RequestParameters.foo) classify on the leaf.
+    let leaf = field.rsplit('.').next().unwrap_or(field);
+    if let Some(canon) = GenericParser::canonical_field(leaf) {
+        let c = GenericParser::canonical_to_entity_type(canon);
+        if c != "Skip" && is_node_class(c) {
+            return Some(c.to_string());
+        }
+    }
+    name_to_class(&leaf.to_ascii_lowercase()).map(str::to_string)
+}
+
+/// Curated, precise name→class map for graph_propose (name-only, no sample
+/// values). Distinct multi-char tokens deliberately avoid the substring traps
+/// of the ingest-time heuristic — e.g. "ResultDescription" contains "ip" but is
+/// not an IP. Used only after the canonical alias table misses.
+fn name_to_class(leaf_lower: &str) -> Option<&'static str> {
+    const RULES: &[(&str, &str)] = &[
+        // IP
+        ("ipaddress", "IP"), ("ipaddr", "IP"), ("remoteip", "IP"), ("sourceip", "IP"),
+        ("destinationip", "IP"), ("clientip", "IP"), ("callerip", "IP"), ("publicip", "IP"),
+        ("privateip", "IP"),
+        // User / identity
+        ("userprincipalname", "User"), ("useridentityarn", "User"), ("useridentity", "User"),
+        ("username", "User"), ("samaccountname", "User"), ("accountname", "User"),
+        ("subjectusername", "User"), ("targetusername", "User"), ("principalid", "User"),
+        // Host
+        ("hostname", "Host"), ("devicename", "Host"), ("machinename", "Host"),
+        ("workstation", "Host"), ("computer", "Host"),
+        // Process / file
+        ("newprocessname", "Process"), ("parentprocessname", "Process"),
+        ("initiatingprocessfilename", "Process"), ("processname", "Process"),
+        ("filename", "File"), ("filepath", "File"),
+        // Domain / URL
+        ("fqdn", "Domain"), ("dnsname", "Domain"), ("domainname", "Domain"),
+    ];
+    for (needle, class) in RULES {
+        if leaf_lower.contains(needle) {
+            return Some(class);
+        }
+    }
+    match leaf_lower {
+        "ip" => Some("IP"),
+        "url" | "uri" => Some("URL"),
+        "domain" => Some("Domain"),
+        "host" => Some("Host"),
+        _ => None,
+    }
+}
+
+/// Sanitize a field (possibly a `Root.path`) into a valid KQL identifier used
+/// as the projected column alias and the suffix of a node `source`.
+fn sanitize_alias(field: &str) -> String {
+    field
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+/// KQL `project` term for a selected field. Guards missing columns with
+/// `columnifexists` (the prior `UserIdentitySessionContext` semantic error) and
+/// extracts nested dynamic paths via `parse_json` (AWSCloudTrail
+/// RequestParameters / AdditionalEventData). All values coerced to string so
+/// node ids are stable.
+fn project_expr_for_field(field: &str) -> String {
+    let alias = sanitize_alias(field);
+    if let Some((root, path)) = field.split_once('.') {
+        format!("{alias} = tostring(parse_json(columnifexists(\"{root}\", \"\")).{path})")
+    } else {
+        format!("{alias} = tostring(columnifexists(\"{field}\", \"\"))")
+    }
+}
+
+/// Engine `RelationType` name for an edge into `to_class`, so `graph_build` can
+/// parse it back. Mirrors the engine's entity→relation defaults.
+fn rel_name_for(to_class: &str) -> &'static str {
+    match to_class {
+        "User" => "Auth",
+        "Process" => "Execute",
+        "File" => "Write",
+        "Domain" => "DNS",
+        "Registry" => "Modify",
+        _ => "Connect", // IP, Host, URL, Service, …
+    }
+}
+
+fn slugify(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Pick the anchor node (the `from` side of every edge) by class priority,
+/// falling back to the first node.
+fn pick_anchor(nodes: &[(String, String)]) -> usize {
+    const PRIORITY: &[&str] = &["User", "Host", "IP", "Process", "Domain", "URL", "File"];
+    for want in PRIORITY {
+        if let Some(i) = nodes.iter().position(|(_, c)| c == want) {
+            return i;
+        }
+    }
+    0
+}
+
+/// Ensure proposal ids are unique (append an index on collision).
+fn dedupe_ids(proposals: &mut [GraphProposal]) {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for p in proposals.iter_mut() {
+        let n = *seen.get(&p.proposal_id).unwrap_or(&0);
+        if n > 0 {
+            let base = p.proposal_id.clone();
+            p.proposal_id = format!("{base}-{n}");
+            *seen.entry(base).or_insert(0) += 1;
+        } else {
+            *seen.entry(p.proposal_id.clone()).or_insert(0) += 1;
+        }
+    }
+}
+
+/// Best-effort estimate query for a proposal: wraps its `materialization_kql`
+/// (which already carries the time filter) and summarizes row + distinct-anchor
+/// counts. Counts distinct values of the anchor node's projected column.
+fn estimate_probe_kql(p: &GraphProposal) -> Option<String> {
+    let anchor_alias = p
+        .edges
+        .first()
+        .map(|e| e.from.as_str())
+        .and_then(|fc| p.nodes.iter().find(|n| n.class == fc))
+        .or_else(|| p.nodes.first())?
+        .source
+        .rsplit('.')
+        .next()?
+        .to_string();
+    Some(format!(
+        "{}\n| summarize Rows = count(), Entities = dcount({anchor_alias})",
+        p.materialization_kql
+    ))
+}
+
+/// Build candidate graph schemas from selected fields — one proposal per table
+/// that has ≥1 node field. Pure (no I/O) so KQL generation is unit-testable;
+/// the op layers on the optional estimate probe and session persistence.
+fn build_proposals(
+    selected: &[SelectedField],
+    hypothesis_context: Option<&str>,
+    time_filter: &str,
+) -> Vec<GraphProposal> {
+    // Group fields by table, preserving first-seen table order.
+    let mut order: Vec<String> = Vec::new();
+    let mut by_table: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for sf in selected {
+        if !by_table.contains_key(&sf.table) {
+            order.push(sf.table.clone());
+        }
+        by_table.entry(sf.table.clone()).or_default().push(sf.field.clone());
+    }
+
+    let mut proposals = Vec::new();
+    for table in order {
+        let fields = &by_table[&table];
+        let mut node_fields: Vec<(String, String)> = Vec::new(); // (field, class)
+        let mut attr_fields: Vec<String> = Vec::new();
+        for f in fields {
+            match classify_field_name(f) {
+                Some(class) => node_fields.push((f.clone(), class)),
+                None => attr_fields.push(f.clone()),
+            }
+        }
+        if node_fields.is_empty() {
+            continue;
+        }
+
+        let anchor_idx = pick_anchor(&node_fields);
+        let anchor_class = node_fields[anchor_idx].1.clone();
+
+        let nodes: Vec<ProposalNode> = node_fields
+            .iter()
+            .map(|(f, class)| ProposalNode {
+                class: class.clone(),
+                source: format!("{table}.{}", sanitize_alias(f)),
+                enrich: enrichable_for(class),
+            })
+            .collect();
+
+        let mut edge_attrs = vec!["TimeGenerated".to_string()];
+        edge_attrs.extend(attr_fields.iter().map(|f| sanitize_alias(f)));
+        let edges: Vec<ProposalEdge> = node_fields
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != anchor_idx)
+            .map(|(_, (_, to_class))| ProposalEdge {
+                r#type: rel_name_for(to_class).to_string(),
+                from: anchor_class.clone(),
+                to: to_class.clone(),
+                attributes: edge_attrs.clone(),
+            })
+            .collect();
+
+        let mut proj: Vec<String> =
+            node_fields.iter().map(|(f, _)| project_expr_for_field(f)).collect();
+        proj.extend(attr_fields.iter().map(|f| project_expr_for_field(f)));
+        proj.push("TimeGenerated".to_string());
+        let materialization_kql =
+            format!("{table}\n| {time_filter}\n| project {}", proj.join(", "));
+
+        let classes: Vec<String> =
+            node_fields.iter().map(|(_, c)| c.clone()).collect();
+        let proposal_id =
+            format!("{}-{}", slugify(&table), classes.join("-").to_ascii_lowercase());
+        let description = match hypothesis_context {
+            Some(ctx) if !ctx.trim().is_empty() => {
+                format!("{} graph from {} ({})", classes.join("→"), table, ctx.trim())
+            }
+            _ => format!("{} graph from {}", classes.join("→"), table),
+        };
+
+        proposals.push(GraphProposal {
+            proposal_id,
+            description,
+            nodes,
+            edges,
+            estimated_entities: None,
+            estimated_relations: None,
+            materialization_kql,
+        });
+    }
+    dedupe_ids(&mut proposals);
+    proposals
+}
+
 /// Graph-first nudge for inspect-mode KQL: return an advisory when the query
 /// references identity/IP-like columns that GraphHunter could materialize as
 /// graph entities. Case-insensitive substring scan over a small set of the
@@ -1576,6 +1919,100 @@ mod schema_discover_tests {
     #[test]
     fn classify_empty_rows_is_empty() {
         assert!(classify_table_fields(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod graph_propose_tests {
+    use super::*;
+
+    fn sf(table: &str, field: &str) -> SelectedField {
+        SelectedField { table: table.into(), field: field.into() }
+    }
+
+    #[test]
+    fn proposes_identity_ip_graph_from_signinlogs() {
+        let selected = vec![
+            sf("SigninLogs", "UserPrincipalName"),
+            sf("SigninLogs", "IPAddress"),
+            sf("SigninLogs", "ResultType"),
+        ];
+        let props = build_proposals(&selected, Some("auth pivot"), "where TimeGenerated > ago(24h)");
+        assert_eq!(props.len(), 1);
+        let p = &props[0];
+        // UserPrincipalName + IPAddress are nodes; ResultType is an attribute.
+        assert_eq!(p.nodes.len(), 2, "two node fields");
+        assert!(p.nodes.iter().any(|n| n.class == "User"));
+        let ip = p.nodes.iter().find(|n| n.class == "IP").expect("IP node");
+        assert_eq!(ip.source, "SigninLogs.IPAddress");
+        assert_eq!(ip.enrich, vec!["geoip", "asn", "threat_intel"]);
+        // Anchor is User (priority), one edge User -> IP, rel type Connect.
+        assert_eq!(p.edges.len(), 1);
+        assert_eq!(p.edges[0].from, "User");
+        assert_eq!(p.edges[0].to, "IP");
+        assert_eq!(p.edges[0].r#type, "Connect");
+        // ResultType rides the edge as an attribute, alongside TimeGenerated.
+        assert!(p.edges[0].attributes.contains(&"TimeGenerated".to_string()));
+        assert!(p.edges[0].attributes.contains(&"ResultType".to_string()));
+    }
+
+    #[test]
+    fn materialization_kql_guards_columns_and_projects_time() {
+        let selected = vec![sf("SigninLogs", "UserPrincipalName"), sf("SigninLogs", "IPAddress")];
+        let p = &build_proposals(&selected, None, "where TimeGenerated > ago(7d)")[0];
+        let kql = &p.materialization_kql;
+        assert!(kql.starts_with("SigninLogs\n| where TimeGenerated > ago(7d)\n| project "));
+        // columnifexists guard on each projected source column.
+        assert!(kql.contains("UserPrincipalName = tostring(columnifexists(\"UserPrincipalName\", \"\"))"));
+        assert!(kql.contains("IPAddress = tostring(columnifexists(\"IPAddress\", \"\"))"));
+        assert!(kql.trim_end().ends_with("TimeGenerated"));
+    }
+
+    #[test]
+    fn nested_aws_field_uses_parse_json() {
+        // AWSCloudTrail dynamic column path → parse_json with a guarded root.
+        let selected = vec![
+            sf("AWSCloudTrail", "UserIdentityArn"),
+            sf("AWSCloudTrail", "RequestParameters.instanceType"),
+        ];
+        let p = &build_proposals(&selected, None, "where TimeGenerated > ago(24h)")[0];
+        let kql = &p.materialization_kql;
+        assert!(
+            kql.contains(
+                "RequestParameters_instanceType = tostring(parse_json(columnifexists(\"RequestParameters\", \"\")).instanceType)"
+            ),
+            "nested field must parse_json the guarded root: {kql}"
+        );
+    }
+
+    #[test]
+    fn table_with_no_node_fields_is_skipped() {
+        // ResultType / ResultDescription are categorical attributes, no nodes.
+        let selected = vec![sf("SigninLogs", "ResultType"), sf("SigninLogs", "ResultDescription")];
+        assert!(build_proposals(&selected, None, "where TimeGenerated > ago(24h)").is_empty());
+    }
+
+    #[test]
+    fn one_proposal_per_table_with_unique_ids() {
+        let selected = vec![
+            sf("SigninLogs", "UserPrincipalName"),
+            sf("SigninLogs", "IPAddress"),
+            sf("DeviceNetworkEvents", "DeviceName"),
+            sf("DeviceNetworkEvents", "RemoteIP"),
+        ];
+        let props = build_proposals(&selected, None, "where TimeGenerated > ago(24h)");
+        assert_eq!(props.len(), 2);
+        let ids: std::collections::HashSet<_> = props.iter().map(|p| &p.proposal_id).collect();
+        assert_eq!(ids.len(), 2, "proposal ids unique");
+    }
+
+    #[test]
+    fn estimate_probe_wraps_materialization() {
+        let selected = vec![sf("SigninLogs", "UserPrincipalName"), sf("SigninLogs", "IPAddress")];
+        let p = &build_proposals(&selected, None, "where TimeGenerated > ago(24h)")[0];
+        let probe = estimate_probe_kql(p).expect("probe");
+        assert!(probe.contains("summarize Rows = count(), Entities = dcount(UserPrincipalName)"));
+        assert!(probe.starts_with("SigninLogs\n"));
     }
 }
 

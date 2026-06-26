@@ -374,6 +374,49 @@ pub struct GraphProposal {
     pub materialization_kql: String,
 }
 
+/// A `{table, field}` the analyst picked from `schema_discover` to build a
+/// graph from. Input to `graph_propose`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SelectedField {
+    pub table: String,
+    pub field: String,
+}
+
+/// `graph_propose` input (§4.2): selected fields + optional hunt context.
+/// Azure creds are optional — they're only used for a best-effort
+/// `estimated_entities/relations` probe; proposal generation itself is offline.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GraphProposeRequest {
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub azure_tenant_id: String,
+    #[serde(default)]
+    pub azure_client_id: String,
+    #[serde(default)]
+    pub azure_client_secret: String,
+    pub selected_fields: Vec<SelectedField>,
+    /// Free-text hunt description to orient the proposal's `description`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hypothesis_context: Option<String>,
+    /// Max candidate schemas to return (default 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_proposals: Option<u32>,
+    /// Window spliced into `materialization_kql` and the estimate probe
+    /// (default `ago(24h)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<TimeWindow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphProposeResult {
+    pub proposals: Vec<GraphProposal>,
+    /// Cost of the best-effort estimate probes; absent when no probe ran
+    /// (e.g. no Azure creds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<QueryCost>,
+}
+
 /// Record of the most recent `graph_build`, surfaced in §5 status (`last_build`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildRecord {

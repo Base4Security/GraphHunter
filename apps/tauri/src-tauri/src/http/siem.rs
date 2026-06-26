@@ -121,6 +121,57 @@ pub(super) async fn handler_discover_schema(
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct GraphProposeBody {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    azure_tenant_id: Option<String>,
+    #[serde(default)]
+    azure_client_id: Option<String>,
+    #[serde(default)]
+    azure_client_secret: Option<String>,
+    #[serde(default)]
+    selected_fields: Vec<graph_hunter_api::dto::sentinel::SelectedField>,
+    #[serde(default)]
+    hypothesis_context: Option<String>,
+    #[serde(default)]
+    max_proposals: Option<u32>,
+    #[serde(default)]
+    lookback: Option<String>,
+}
+
+/// Propose candidate graph schemas (§4.2) from analyst-selected fields,
+/// including the materialization KQL. Delegates to the canonical API.
+pub(super) async fn handler_graph_propose(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<GraphProposeBody>,
+) -> Response {
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        api.graph_propose(graph_hunter_api::dto::sentinel::GraphProposeRequest {
+            workspace_id: body.workspace_id.unwrap_or_default(),
+            azure_tenant_id: body.azure_tenant_id.unwrap_or_default(),
+            azure_client_id: body.azure_client_id.unwrap_or_default(),
+            azure_client_secret: body.azure_client_secret.unwrap_or_default(),
+            selected_fields: body.selected_fields,
+            hypothesis_context: body.hypothesis_context,
+            max_proposals: body.max_proposals,
+            time_window: super::graph::lookback_to_window(body.lookback.as_deref()),
+        }),
+    )
+    .await;
+    match result {
+        Ok(Ok(v)) => ok_json(v),
+        Ok(Err(e)) => {
+            let code = StatusCode::from_u16(e.status_code())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
+        }
+        Err(_) => err_json("graph_propose timed out (120s)"),
+    }
+}
+
 #[derive(Deserialize)]
 pub(super) struct SeedBody {
     pub entity_type: String,
