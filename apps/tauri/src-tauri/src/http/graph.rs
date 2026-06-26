@@ -203,6 +203,15 @@ pub(super) async fn handler_graph_neighbors(
     api_response(api.graph_neighbors(req))
 }
 
+/// §4.4 graph_path — paths between two entities (or all outbound paths).
+/// Read-only graph traversal; no SIEM round-trip.
+pub(super) async fn handler_graph_path(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(req): Json<graph_hunter_api::dto::graph_ops::GraphPathRequest>,
+) -> Response {
+    api_response(api.graph_path(req))
+}
+
 pub(super) async fn handler_node_details(
     State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<NodeDetailsQuery>,

@@ -15,6 +15,17 @@ use crate::types::{EntityType, RelationType};
 /// and flag the response.
 pub const AUTO_GROUPED_THRESHOLD: usize = 50;
 
+/// One hop in a path returned by [`GraphHunter::find_paths`]. `edge` is the
+/// relation type taken INTO this node; the first hop of a path (the origin)
+/// has `edge: None`.
+#[derive(Serialize, Clone, Debug)]
+pub struct PathHop {
+    pub node_id: String,
+    pub node_class: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge: Option<String>,
+}
+
 // ── Serializable structs ──
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2232,6 +2243,126 @@ impl GraphHunter {
         out.truncate(opts.top_n);
         out
     }
+
+    /// Entity-class (EntityType display) for a node, or "" when unknown.
+    fn class_of(&self, sid: StrId) -> String {
+        self.entities
+            .get(&sid)
+            .map(|e| format!("{}", e.entity_type))
+            .unwrap_or_default()
+    }
+
+    /// Find simple paths from `from_id` following outgoing edges. When `to_id`
+    /// is `Some`, returns paths that terminate at it; when `None`, returns every
+    /// outbound path up to `max_depth` hops. `rel_filter` restricts which edge
+    /// (relation) types may be traversed. Capped at `max_paths` results. Each
+    /// path is a node→edge→node→… sequence (the origin hop has `edge: None`).
+    ///
+    /// This is the traversal `graph_path` (design doc §4.4) exposes — chains
+    /// that in KQL would need repeated joins are one precomputed walk here.
+    pub fn find_paths(
+        &self,
+        from_id: &str,
+        to_id: Option<&str>,
+        max_depth: usize,
+        rel_filter: Option<&[RelationType]>,
+        max_paths: usize,
+    ) -> Vec<Vec<PathHop>> {
+        let Some(from_sid) = self.interner.get(from_id) else {
+            return Vec::new();
+        };
+        if !self.entities.contains_key(&from_sid) {
+            return Vec::new();
+        }
+        let to_sid = match to_id {
+            Some(t) => match self.interner.get(t) {
+                Some(s) if self.entities.contains_key(&s) => Some(s),
+                // Target named but absent → no paths.
+                _ => return Vec::new(),
+            },
+            None => None,
+        };
+
+        let mut out: Vec<Vec<PathHop>> = Vec::new();
+        let mut on_path: HashSet<StrId> = HashSet::new();
+        on_path.insert(from_sid);
+        let mut path = vec![PathHop {
+            node_id: from_id.to_string(),
+            node_class: self.class_of(from_sid),
+            edge: None,
+        }];
+        self.dfs_paths(
+            from_sid, to_sid, max_depth, rel_filter, &mut path, &mut on_path, &mut out, max_paths,
+        );
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dfs_paths(
+        &self,
+        current: StrId,
+        to_sid: Option<StrId>,
+        max_depth: usize,
+        rel_filter: Option<&[RelationType]>,
+        path: &mut Vec<PathHop>,
+        on_path: &mut HashSet<StrId>,
+        out: &mut Vec<Vec<PathHop>>,
+        max_paths: usize,
+    ) {
+        if out.len() >= max_paths {
+            return;
+        }
+        let edges_so_far = path.len() - 1;
+        if path.len() > 1 {
+            match to_sid {
+                // Stop at the target — don't traverse through it.
+                Some(t) => {
+                    if current == t {
+                        out.push(path.clone());
+                        return;
+                    }
+                }
+                None => out.push(path.clone()),
+            }
+        }
+        if edges_so_far >= max_depth {
+            return;
+        }
+
+        // Snapshot this node's outgoing edges, then drop the per-node read lock
+        // before recursing so we never hold nested per-node locks.
+        let children: Vec<(StrId, u8, u64)> = match self.streaming.neighbors_arc(current) {
+            Some(arc) => {
+                let g = arc.read();
+                g.as_slice()
+                    .iter()
+                    .filter(|e| {
+                        rel_filter.is_none_or(|rf| rf.iter().any(|rt| rt.to_u8() == e.rel_type_tag))
+                    })
+                    .map(|e| (e.dest_sid, e.rel_type_tag, e.metadata_offset))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+
+        for (dest, tag, off) in children {
+            if out.len() >= max_paths {
+                break;
+            }
+            if on_path.contains(&dest) {
+                continue; // simple paths only
+            }
+            path.push(PathHop {
+                node_id: self.interner.resolve(dest).to_string(),
+                node_class: self.class_of(dest),
+                edge: Some(self.resolve_rel_type_name_raw(tag, off)),
+            });
+            on_path.insert(dest);
+            self.dfs_paths(dest, to_sid, max_depth, rel_filter, path, on_path, out, max_paths);
+            on_path.remove(&dest);
+            path.pop();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2534,5 +2665,93 @@ mod channel_behavior_tests {
         });
         assert!(out.iter().all(|c| c.rel_type=="SNAT"), "only SNAT channels");
         assert!(out.iter().any(|c| c.source=="A" && c.target=="D"), "the SNAT channel is present");
+    }
+}
+
+#[cfg(test)]
+mod find_paths_tests {
+    use super::*;
+    use crate::GraphHunter;
+    use crate::entity::Entity;
+    use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
+
+    // Chain: alice -Auth-> IP -Connect-> ROLE -Connect-> ACCT, plus a side edge
+    // alice -Connect-> HOST to exercise edge_filter and branching.
+    fn chain_graph() -> GraphHunter {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![
+                (
+                    Entity::new("alice", EntityType::User),
+                    Relation::new("alice", "1.1.1.1", RelationType::Auth, 1),
+                    Entity::new("1.1.1.1", EntityType::IP),
+                ),
+                (
+                    Entity::new("1.1.1.1", EntityType::IP),
+                    Relation::new("1.1.1.1", "ROLE", RelationType::Connect, 2),
+                    Entity::new("ROLE", EntityType::Other("Role".into())),
+                ),
+                (
+                    Entity::new("ROLE", EntityType::Other("Role".into())),
+                    Relation::new("ROLE", "ACCT", RelationType::Connect, 3),
+                    Entity::new("ACCT", EntityType::Other("Account".into())),
+                ),
+                (
+                    Entity::new("alice", EntityType::User),
+                    Relation::new("alice", "HOST", RelationType::Connect, 4),
+                    Entity::new("HOST", EntityType::Host),
+                ),
+            ],
+            None,
+        )
+        .unwrap();
+        g
+    }
+
+    #[test]
+    fn finds_path_between_two_entities() {
+        let g = chain_graph();
+        let paths = g.find_paths("alice", Some("ACCT"), 4, None, 50);
+        assert_eq!(paths.len(), 1, "one simple path alice→ACCT");
+        let p = &paths[0];
+        // hops: alice, IP, ROLE, ACCT  → length 3
+        assert_eq!(p.len(), 4);
+        assert_eq!(p[0].node_id, "alice");
+        assert!(p[0].edge.is_none(), "origin hop carries no edge");
+        assert_eq!(p[1].edge.as_deref(), Some("Auth"));
+        assert_eq!(p[3].node_id, "ACCT");
+        assert_eq!(p[3].node_class, "Account");
+    }
+
+    #[test]
+    fn max_depth_bounds_traversal() {
+        let g = chain_graph();
+        // ACCT is 3 hops away; depth 2 can't reach it.
+        assert!(g.find_paths("alice", Some("ACCT"), 2, None, 50).is_empty());
+    }
+
+    #[test]
+    fn edge_filter_restricts_traversal() {
+        let g = chain_graph();
+        // Only Auth edges: alice→IP is the single reachable path.
+        let paths = g.find_paths("alice", None, 4, Some(&[RelationType::Auth]), 50);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].last().unwrap().node_id, "1.1.1.1");
+    }
+
+    #[test]
+    fn all_outbound_paths_when_no_target() {
+        let g = chain_graph();
+        let paths = g.find_paths("alice", None, 4, None, 50);
+        // alice→IP, alice→IP→ROLE, alice→IP→ROLE→ACCT, alice→HOST = 4 paths.
+        assert_eq!(paths.len(), 4);
+    }
+
+    #[test]
+    fn unknown_origin_or_target_yields_no_paths() {
+        let g = chain_graph();
+        assert!(g.find_paths("nope", Some("ACCT"), 4, None, 50).is_empty());
+        assert!(g.find_paths("alice", Some("nope"), 4, None, 50).is_empty());
     }
 }

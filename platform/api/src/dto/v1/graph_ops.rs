@@ -243,6 +243,56 @@ pub struct GraphNeighborsResult {
     pub neighbors: Vec<NeighborItem>,
 }
 
+/// `graph_path` input (§4.4).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GraphPathRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    pub from_entity: EntityRef,
+    /// Destination; when omitted, returns all outbound paths up to `max_depth`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_entity: Option<EntityRef>,
+    /// Maximum hop depth (default 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<usize>,
+    /// Restrict traversal to these edge (relation) types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_filter: Option<Vec<String>>,
+    /// Cap on paths returned (default 50).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_paths: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PathNode {
+    pub class: String,
+    pub value: String,
+    /// Country (or country code) when the node carries geoip enrichment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geoip: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PathHopDto {
+    /// Relation type taken into `node`; absent on the origin hop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge: Option<String>,
+    pub node: PathNode,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PathDto {
+    /// Hop count (edges) — `hops.len() - 1`.
+    pub length: usize,
+    pub hops: Vec<PathHopDto>,
+}
+
+/// `graph_path` output (§4.4).
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphPathResult {
+    pub paths: Vec<PathDto>,
+}
+
 /// Node and edge counts for the resolved session's graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphStats {

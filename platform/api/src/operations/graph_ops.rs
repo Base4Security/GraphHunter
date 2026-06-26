@@ -11,12 +11,12 @@ use graph_hunter_core::{
 use crate::dto::entity::{NodeScopedRequest, SessionOnly};
 use crate::dto::graph_ops::{
     ChannelBehaviorRequest, ComputeScoresRequest, EventsForNodeRequest, EventsPaginatedRequest,
-    ExpandFilter, ExpandNodeRequest, GraphNeighborsRequest, GraphNeighborsResult, GraphStats,
-    HeavyEdgesRequest, NeighborItem, NeighborRef, NeighborsCenter, PaginatedEvents,
-    PreviewFieldsRequest, RuntimeInfo, SearchEntitiesRequest, Subgraph, SubgraphEdge, SubgraphNode,
-    SubgraphRequest,
+    ExpandFilter, ExpandNodeRequest, GraphNeighborsRequest, GraphNeighborsResult, GraphPathRequest,
+    GraphPathResult, GraphStats, HeavyEdgesRequest, NeighborItem, NeighborRef, NeighborsCenter,
+    PaginatedEvents, PathDto, PathHopDto, PathNode, PreviewFieldsRequest, RuntimeInfo,
+    SearchEntitiesRequest, Subgraph, SubgraphEdge, SubgraphNode, SubgraphRequest,
 };
-use crate::util::{parse_entity_type, to_core_filter};
+use crate::util::{parse_entity_type, parse_relation_type, to_core_filter};
 use crate::{ApiError, ApiResult, GraphHunterApi};
 
 impl GraphHunterApi {
@@ -517,6 +517,55 @@ impl GraphHunterApi {
             entity: NeighborsCenter { class: center_class, value: center, label },
             attributes,
             neighbors,
+        })
+    }
+
+    /// Phase 4 / ANALYSIS (§4.4): paths between two entities (or all outbound
+    /// paths up to `max_depth` when `to_entity` is omitted). Pure graph
+    /// traversal — chains that KQL would resolve with repeated joins are one
+    /// precomputed walk here. IP nodes carry their geoip enrichment inline.
+    pub fn graph_path(&self, req: GraphPathRequest) -> ApiResult<GraphPathResult> {
+        let rel_filter: Option<Vec<graph_hunter_core::RelationType>> = req
+            .edge_filter
+            .as_ref()
+            .map(|v| v.iter().filter_map(|s| parse_relation_type(s)).collect());
+        // An all-unknown filter would silently match nothing; treat empty as "no filter".
+        let rel_filter = rel_filter.filter(|v| !v.is_empty());
+        let max_depth = req.max_depth.unwrap_or(4).clamp(1, 8);
+        let max_paths = req.max_paths.unwrap_or(50).clamp(1, 500);
+        let to_value = req.to_entity.as_ref().map(|e| e.value.clone());
+
+        self.with_graph_read(req.session.as_ref(), |g| {
+            let paths = g.find_paths(
+                &req.from_entity.value,
+                to_value.as_deref(),
+                max_depth,
+                rel_filter.as_deref(),
+                max_paths,
+            );
+            let paths = paths
+                .into_iter()
+                .map(|hops| {
+                    let length = hops.len().saturating_sub(1);
+                    let hops = hops
+                        .into_iter()
+                        .map(|h| {
+                            let geoip = g.get_entity(&h.node_id).and_then(|e| {
+                                e.metadata
+                                    .get("geo_country")
+                                    .or_else(|| e.metadata.get("geo_country_code"))
+                                    .cloned()
+                            });
+                            PathHopDto {
+                                edge: h.edge,
+                                node: PathNode { class: h.node_class, value: h.node_id, geoip },
+                            }
+                        })
+                        .collect();
+                    PathDto { length, hops }
+                })
+                .collect();
+            Ok(GraphPathResult { paths })
         })
     }
 
