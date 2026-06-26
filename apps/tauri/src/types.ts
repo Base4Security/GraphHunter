@@ -460,6 +460,15 @@ export interface GraphSummary {
   graph_state?: "empty" | "partial" | "populated";
   /** Advisory nudge for empty/partial graphs; omitted when populated. */
   advisory?: string;
+  /** §5: most recent graph_build for the session, or absent if never built. */
+  last_build?: {
+    build_id: string;
+    proposal_id: string;
+    at: number;
+    entities_created: number;
+    relations_created: number;
+    merge_mode: string;
+  };
 }
 
 export interface ExpandFilter {

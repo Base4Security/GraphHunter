@@ -33,16 +33,16 @@ pub(super) async fn handler_health(State(api): State<Arc<GraphHunterApi>>) -> Re
     // Returns `(session_loaded, Option<(entities, relations)>)` so we can
     // surface the active graph_state without a second blocking hop.
     let api = api.clone();
-    let (session_loaded, counts) = tokio::time::timeout(
+    let (session_loaded, counts, last_build) = tokio::time::timeout(
         Duration::from_millis(500),
         tokio::task::spawn_blocking(move || {
             let loaded = api.sessions().current_id().is_some();
-            (loaded, api.current_graph_counts())
+            (loaded, api.current_graph_counts(), api.current_last_build())
         }),
     )
     .await
-    .unwrap_or(Ok((false, None)))
-    .unwrap_or((false, None));
+    .unwrap_or(Ok((false, None, None)))
+    .unwrap_or((false, None, None));
 
     // graph_state/advisory only when a session is loaded; an empty/partial
     // graph actively says so (and how to populate it). Same thresholds as
@@ -66,6 +66,7 @@ pub(super) async fn handler_health(State(api): State<Arc<GraphHunterApi>>) -> Re
         },
         "graph_state": graph_state,
         "advisory": advisory,
+        "last_build": last_build,
     }))
 }
 

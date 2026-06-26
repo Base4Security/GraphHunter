@@ -242,6 +242,13 @@ impl GraphHunterApi {
         Some((graph.entity_count(), graph.relation_count()))
     }
 
+    /// The most recent `graph_build` record for the current session (§5
+    /// `last_build`), or `None` when nothing has been materialized.
+    pub fn current_last_build(&self) -> Option<crate::dto::sentinel::BuildRecord> {
+        let session = self.sessions().current_session()?;
+        session.last_build.read().ok()?.clone()
+    }
+
     /// Graph summary + runtime capabilities in one shot. Frontend uses
     /// this to build its "at-a-glance" banner; MCP tools use it to
     /// decide whether to call `enrich_ip` at all.
@@ -252,11 +259,17 @@ impl GraphHunterApi {
         let summary = self.with_graph_read(req.session.as_ref(), |g| Ok(g.get_graph_summary()))?;
         let (graph_state, advisory) =
             GraphState::classify(summary.entity_count, summary.relation_count);
+        // §5: surface the session's most recent build alongside the counts.
+        let last_build = self
+            .resolve_session(req.session.as_ref())
+            .ok()
+            .and_then(|s| s.last_build.read().ok().and_then(|b| b.clone()));
         Ok(GraphSummaryWithCapabilities {
             summary,
             capabilities: self.capabilities(),
             graph_state,
             advisory,
+            last_build,
         })
     }
 }
@@ -294,6 +307,34 @@ mod tests {
         assert!(!caps.geoip);
         assert!(!caps.asn);
         assert!(!caps.threat_intel);
+    }
+
+    #[test]
+    fn graph_summary_surfaces_last_build() {
+        use crate::dto::session::CreateSessionRequest;
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest { name: Some("lb-test".into()) }).unwrap();
+        // No build yet → last_build absent.
+        let before = api.get_graph_summary(GraphSummaryRequest::default()).unwrap();
+        assert!(before.last_build.is_none());
+
+        // Record a build, then it must surface in the summary (§5).
+        {
+            let session = api.resolve_session(None).unwrap();
+            *session.last_build.write().unwrap() =
+                Some(crate::dto::sentinel::BuildRecord {
+                    build_id: "build-abc123".into(),
+                    proposal_id: "signinlogs-user-ip".into(),
+                    at: 1_700_000_000,
+                    entities_created: 1238,
+                    relations_created: 4791,
+                    merge_mode: "append".into(),
+                });
+        }
+        let after = api.get_graph_summary(GraphSummaryRequest::default()).unwrap();
+        let lb = after.last_build.expect("last_build surfaced");
+        assert_eq!(lb.build_id, "build-abc123");
+        assert_eq!(lb.relations_created, 4791);
     }
 
     #[tokio::test]

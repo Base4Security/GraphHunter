@@ -108,4 +108,8 @@ pub struct GraphSummaryWithCapabilities {
     /// Advisory nudge for empty/partial graphs; omitted when populated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub advisory: Option<String>,
+    /// The most recent `graph_build` for this session (§5), or `null` when the
+    /// graph has not been materialized via a proposal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_build: Option<crate::dto::sentinel::BuildRecord>,
 }
