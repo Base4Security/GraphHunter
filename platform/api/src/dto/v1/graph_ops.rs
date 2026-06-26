@@ -293,6 +293,36 @@ pub struct GraphPathResult {
     pub paths: Vec<PathDto>,
 }
 
+/// `graph_anomaly` input (§4.6).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GraphAnomalyRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    /// `degree` | `betweenness` | `isolation` | `all` (default `all`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<String>,
+    /// Restrict analysis to one node class (also scopes the z-score baseline).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_class: Option<String>,
+    /// Number of anomalies to return (default 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_n: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AnomalyItem {
+    pub entity: NeighborRef,
+    pub metric: String,
+    pub observation: String,
+    pub z_score: f64,
+}
+
+/// `graph_anomaly` output (§4.6).
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphAnomalyResult {
+    pub anomalies: Vec<AnomalyItem>,
+}
+
 /// Node and edge counts for the resolved session's graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphStats {

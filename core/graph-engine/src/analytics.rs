@@ -26,6 +26,20 @@ pub struct PathHop {
     pub edge: Option<String>,
 }
 
+/// A structurally anomalous entity surfaced by [`GraphHunter::structural_anomalies`].
+#[derive(Serialize, Clone, Debug)]
+pub struct AnomalyHit {
+    pub node_id: String,
+    pub node_class: String,
+    /// `degree` | `betweenness` | `isolation`.
+    pub metric: String,
+    /// Raw metric value (the per-entity score the z-score is computed from).
+    pub value: f64,
+    /// Standard scores above the population (optionally class-scoped) mean.
+    pub z_score: f64,
+    pub observation: String,
+}
+
 // ── Serializable structs ──
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2363,6 +2377,87 @@ impl GraphHunter {
             path.pop();
         }
     }
+
+    /// Structural anomalies (design doc §4.6): entities whose graph metric is
+    /// atypical for their population. `metric` is `degree`, `betweenness`,
+    /// `isolation`, or `all`. `node_class` scopes both the candidates and the
+    /// mean/stddev baseline. Returns the `top_n` by z-score (above-mean only),
+    /// each with a human-readable observation. Reuses the per-entity centrality
+    /// computed by the scoring pass (`isolation` derives from `rarity_score`,
+    /// the inverted-degree signal — high = weakly connected / rare).
+    pub fn structural_anomalies(
+        &self,
+        metric: &str,
+        node_class: Option<&str>,
+        top_n: usize,
+    ) -> Vec<AnomalyHit> {
+        // Candidate entities, optionally scoped to one class.
+        let candidates: Vec<&crate::entity::Entity> = self
+            .entities
+            .values()
+            .filter(|e| node_class.is_none_or(|c| format!("{}", e.entity_type) == c))
+            .collect();
+        if candidates.len() < 2 {
+            return Vec::new(); // no meaningful distribution
+        }
+
+        let metrics: Vec<&str> = match metric {
+            "all" => vec!["degree", "betweenness", "isolation"],
+            m => vec![m],
+        };
+
+        let mut hits: Vec<AnomalyHit> = Vec::new();
+        for m in metrics {
+            if !matches!(m, "degree" | "betweenness" | "isolation") {
+                continue; // unknown metric name — nothing to score
+            }
+            let value_of = |e: &crate::entity::Entity| -> f64 {
+                match m {
+                    "betweenness" => e.betweenness,
+                    "isolation" => e.rarity_score,
+                    _ => e.degree_score, // "degree" + unknown fall back to degree
+                }
+            };
+            let vals: Vec<f64> = candidates.iter().map(|e| value_of(e)).collect();
+            let n = vals.len() as f64;
+            let mean = vals.iter().sum::<f64>() / n;
+            let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+            let std = var.sqrt();
+            if std < f64::EPSILON {
+                continue; // flat distribution — nothing stands out
+            }
+            for e in &candidates {
+                let v = value_of(e);
+                let z = (v - mean) / std;
+                if z <= 0.0 {
+                    continue; // only above-mean values are "anomalous"
+                }
+                let class = format!("{}", e.entity_type);
+                let observation = match m {
+                    "betweenness" => format!(
+                        "betweenness {v:.1} vs {class} mean {mean:.1} (z {z:.1}) — bridges otherwise-separate clusters"
+                    ),
+                    "isolation" => format!(
+                        "isolation {v:.1} vs {class} mean {mean:.1} (z {z:.1}) — weakly connected / rare for its class"
+                    ),
+                    _ => format!(
+                        "degree {v:.1} vs {class} mean {mean:.1} (z {z:.1}) — unusually high connectivity for its class"
+                    ),
+                };
+                hits.push(AnomalyHit {
+                    node_id: e.id.clone(),
+                    node_class: class,
+                    metric: m.to_string(),
+                    value: v,
+                    z_score: (z * 10.0).round() / 10.0,
+                    observation,
+                });
+            }
+        }
+        hits.sort_by(|a, b| b.z_score.partial_cmp(&a.z_score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(top_n);
+        hits
+    }
 }
 
 #[cfg(test)]
@@ -2753,5 +2848,57 @@ mod find_paths_tests {
         let g = chain_graph();
         assert!(g.find_paths("nope", Some("ACCT"), 4, None, 50).is_empty());
         assert!(g.find_paths("alice", Some("nope"), 4, None, 50).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod structural_anomaly_tests {
+    use super::*;
+    use crate::GraphHunter;
+    use crate::entity::Entity;
+    use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
+
+    // Star: hub HUB connected to many leaves → HUB has anomalous degree.
+    fn star_graph() -> GraphHunter {
+        let mut g = GraphHunter::new();
+        let mut triples = Vec::new();
+        for i in 0..12 {
+            triples.push((
+                Entity::new("HUB", EntityType::Host),
+                Relation::new("HUB", format!("leaf{i}"), RelationType::Connect, i as i64),
+                Entity::new(format!("leaf{i}"), EntityType::IP),
+            ));
+        }
+        g.insert_triples(triples, None).unwrap();
+        g.compute_scores(); // populate degree_score / rarity_score
+        g
+    }
+
+    #[test]
+    fn degree_anomaly_surfaces_the_hub() {
+        let g = star_graph();
+        let hits = g.structural_anomalies("degree", None, 10);
+        assert!(!hits.is_empty(), "hub should register as a degree anomaly");
+        assert_eq!(hits[0].node_id, "HUB");
+        assert_eq!(hits[0].metric, "degree");
+        assert!(hits[0].z_score > 0.0);
+    }
+
+    #[test]
+    fn node_class_scopes_candidates() {
+        let g = star_graph();
+        // Scope to IP leaves only — the hub (Host) is excluded entirely.
+        let hits = g.structural_anomalies("degree", Some("IP"), 10);
+        assert!(hits.iter().all(|h| h.node_class == "IP"));
+        assert!(hits.iter().all(|h| h.node_id != "HUB"));
+    }
+
+    #[test]
+    fn unknown_metric_or_tiny_graph_is_empty() {
+        let g = star_graph();
+        assert!(g.structural_anomalies("nonsense", None, 10).is_empty());
+        let tiny = GraphHunter::new();
+        assert!(tiny.structural_anomalies("all", None, 10).is_empty());
     }
 }

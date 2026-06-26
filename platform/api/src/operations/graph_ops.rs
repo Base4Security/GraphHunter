@@ -10,8 +10,9 @@ use graph_hunter_core::{
 
 use crate::dto::entity::{NodeScopedRequest, SessionOnly};
 use crate::dto::graph_ops::{
-    ChannelBehaviorRequest, ComputeScoresRequest, EventsForNodeRequest, EventsPaginatedRequest,
-    ExpandFilter, ExpandNodeRequest, GraphNeighborsRequest, GraphNeighborsResult, GraphPathRequest,
+    AnomalyItem, ChannelBehaviorRequest, ComputeScoresRequest, EventsForNodeRequest,
+    EventsPaginatedRequest, ExpandFilter, ExpandNodeRequest, GraphAnomalyRequest,
+    GraphAnomalyResult, GraphNeighborsRequest, GraphNeighborsResult, GraphPathRequest,
     GraphPathResult, GraphStats, HeavyEdgesRequest, NeighborItem, NeighborRef, NeighborsCenter,
     PaginatedEvents, PathDto, PathHopDto, PathNode, PreviewFieldsRequest, RuntimeInfo,
     SearchEntitiesRequest, Subgraph, SubgraphEdge, SubgraphNode, SubgraphRequest,
@@ -566,6 +567,32 @@ impl GraphHunterApi {
                 })
                 .collect();
             Ok(GraphPathResult { paths })
+        })
+    }
+
+    /// Phase 4 / ANALYSIS (§4.6): structural anomalies — entities whose
+    /// degree / betweenness / isolation is atypical for their class. Reuses the
+    /// per-entity centrality from scoring and reports z-scores. Pure graph read.
+    pub fn graph_anomaly(&self, req: GraphAnomalyRequest) -> ApiResult<GraphAnomalyResult> {
+        let metric = req.metric.as_deref().unwrap_or("all");
+        if !matches!(metric, "degree" | "betweenness" | "isolation" | "all") {
+            return Err(ApiError::InvalidInput(format!(
+                "metric must be one of degree|betweenness|isolation|all (got '{metric}')"
+            )));
+        }
+        let top_n = req.top_n.unwrap_or(20).clamp(1, 500);
+        self.with_graph_read(req.session.as_ref(), |g| {
+            let hits = g.structural_anomalies(metric, req.node_class.as_deref(), top_n);
+            let anomalies = hits
+                .into_iter()
+                .map(|h| AnomalyItem {
+                    entity: NeighborRef { class: h.node_class, value: h.node_id },
+                    metric: h.metric,
+                    observation: h.observation,
+                    z_score: h.z_score,
+                })
+                .collect();
+            Ok(GraphAnomalyResult { anomalies })
         })
     }
 

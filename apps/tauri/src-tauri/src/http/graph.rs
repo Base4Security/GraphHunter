@@ -212,6 +212,14 @@ pub(super) async fn handler_graph_path(
     api_response(api.graph_path(req))
 }
 
+/// §4.6 graph_anomaly — structural anomalies (degree/betweenness/isolation).
+pub(super) async fn handler_graph_anomaly(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(req): Json<graph_hunter_api::dto::graph_ops::GraphAnomalyRequest>,
+) -> Response {
+    api_response(api.graph_anomaly(req))
+}
+
 pub(super) async fn handler_node_details(
     State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<NodeDetailsQuery>,
