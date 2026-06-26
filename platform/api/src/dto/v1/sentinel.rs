@@ -417,6 +417,58 @@ pub struct GraphProposeResult {
     pub cost: Option<QueryCost>,
 }
 
+/// `graph_build` input (§4.3): materialize an approved proposal by id.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GraphBuildRequest {
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub azure_tenant_id: String,
+    #[serde(default)]
+    pub azure_client_id: String,
+    #[serde(default)]
+    pub azure_client_secret: String,
+    /// Id of a proposal previously emitted by `graph_propose` (session-scoped).
+    pub proposal_id: String,
+    /// Materialization window. The proposal's `materialization_kql` already
+    /// carries a `TimeGenerated` filter, which wins; this only applies when the
+    /// stored KQL lacks one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<TimeWindow>,
+    /// Enrichments to apply at build (`geoip`, `asn`). Default: all declared on
+    /// the schema. `threat_intel` is accepted but a no-op until a feed is wired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrich: Option<Vec<String>>,
+    /// `append` (default) — add to the existing graph — or `replace` — refresh
+    /// this proposal's prior build (snapshot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_mode: Option<String>,
+}
+
+/// Per-enrichment counts applied during a build (§4.3 `enrichment_applied`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnrichmentApplied {
+    pub geoip: usize,
+    pub asn: usize,
+    /// Always 0 today — honest stub until a threat-intel feed is configured.
+    pub threat_intel: usize,
+}
+
+/// `graph_build` output (§4.3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphBuildResult {
+    pub build_id: String,
+    pub proposal_id: String,
+    pub entities_created: usize,
+    pub relations_created: usize,
+    pub enrichment_applied: EnrichmentApplied,
+    pub duration_ms: u64,
+    /// Active graph state after the build (`empty` | `partial` | `populated`).
+    pub graph_state: crate::dto::geoip::GraphState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<QueryCost>,
+}
+
 /// Record of the most recent `graph_build`, surfaced in §5 status (`last_build`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildRecord {

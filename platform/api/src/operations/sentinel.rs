@@ -14,13 +14,14 @@ use graph_hunter_siem::{
 use uuid::Uuid;
 
 use crate::dto::sentinel::{
-    ConnectorStatusResponse, GraphProposal, GraphProposeRequest, GraphProposeResult,
-    HuntingTemplateId, KqlResult, NodeEnrichRequest, ProposalEdge, ProposalNode,
-    RunHuntingTemplateRequest, RunKqlRequest, SchemaDiscoverRequest, SchemaDiscoverResult,
-    SchemaField, SchemaTable, SeedFromIocRequest, SeedResult, SelectedField,
-    SentinelConnectRequest, SentinelConnectedEvent, SentinelEnvStatus, TimeWindow,
+    BuildRecord, ConnectorStatusResponse, EnrichmentApplied, GraphBuildRequest, GraphBuildResult,
+    GraphProposal, GraphProposeRequest, GraphProposeResult, HuntingTemplateId, KqlResult,
+    NodeEnrichRequest, ProposalEdge, ProposalNode, RunHuntingTemplateRequest, RunKqlRequest,
+    SchemaDiscoverRequest, SchemaDiscoverResult, SchemaField, SchemaTable, SeedFromIocRequest,
+    SeedResult, SelectedField, SentinelConnectRequest, SentinelConnectedEvent, SentinelEnvStatus,
+    TimeWindow,
 };
-use crate::util::parse_entity_type;
+use crate::util::{parse_entity_type, parse_relation_type};
 use crate::events::events as event_names;
 use crate::format_registry::make_parser_for_format;
 use crate::scoring::{run_full_scoring, run_scoring_adaptive, run_scoring_incremental};
@@ -658,6 +659,175 @@ impl GraphHunterApi {
         }
 
         Ok(GraphProposeResult { proposals, cost })
+    }
+
+    /// Phase 3 / MATERIALIZATION (§4.3): run an approved proposal's
+    /// `materialization_kql` against Sentinel, map rows to entities/relations
+    /// per the proposal schema, load them into the session graph, and apply
+    /// enrichment ONCE (geoip+asn for IP nodes; threat_intel is a stub).
+    /// `merge_mode=replace` refreshes this proposal's prior build (snapshot);
+    /// `append` (default) adds a fresh layer. Records `last_build` for §5 status.
+    pub async fn graph_build(&self, req: GraphBuildRequest) -> ApiResult<GraphBuildResult> {
+        let started = std::time::Instant::now();
+
+        let session = self.sessions().current_session().ok_or_else(|| {
+            ApiError::InvalidState("No current session. Run graph_propose first.".into())
+        })?;
+        let proposal = {
+            let store = session
+                .proposals
+                .read()
+                .map_err(|e| ApiError::Internal(format!("proposals lock poisoned: {e}")))?;
+            store.get(&req.proposal_id).cloned().ok_or_else(|| {
+                ApiError::InvalidInput(format!(
+                    "unknown proposal_id '{}' — run graph_propose first",
+                    req.proposal_id
+                ))
+            })?
+        };
+
+        let workspace_id = env_or(&req.workspace_id, "AZURE_WORKSPACE_ID")?;
+        let tenant_id = env_or(&req.azure_tenant_id, "AZURE_TENANT_ID")?;
+        let client_id = env_or(&req.azure_client_id, "AZURE_CLIENT_ID")?;
+        let client_secret = env_or(&req.azure_client_secret, "AZURE_CLIENT_SECRET")?;
+        let auth = SentinelAuth { tenant_id, client_id, client_secret };
+
+        // The stored KQL already filters TimeGenerated; soft-sugar is a no-op
+        // unless that filter is somehow absent (explicit always wins).
+        let kql = apply_time_window_sugar(&proposal.materialization_kql, req.time_window.as_ref());
+
+        let mut cost = CostAccumulator::default();
+        let (rows, stats) = run_kql_rows(&workspace_id, kql, auth.clone()).await?;
+        cost.add(&stats);
+
+        let mapped = map_rows_to_graph(&proposal, &rows);
+
+        let merge_mode = req.merge_mode.as_deref().unwrap_or("append").to_ascii_lowercase();
+        let replace = merge_mode == "replace";
+        let build_id = format!("build-{}", &Uuid::new_v4().to_string()[..8]);
+        let dataset_id = if replace {
+            format!("graph-build:{}", proposal.proposal_id)
+        } else {
+            format!("graph-build:{build_id}")
+        };
+
+        // Register the dataset for audit (snapshot-replace drops the prior one).
+        {
+            let mut datasets = session
+                .datasets
+                .write()
+                .map_err(|e| ApiError::Internal(format!("datasets lock poisoned: {e}")))?;
+            if replace {
+                datasets.retain(|d| d.id != dataset_id);
+            }
+            datasets.push(DatasetInfo {
+                id: dataset_id.clone(),
+                name: format!("Graph Build: {}", proposal.proposal_id),
+                path: None,
+                created_at: now_secs(),
+                entity_count: 0,
+                relation_count: 0,
+                field_config: None,
+                ingest_stats: None,
+            });
+        }
+
+        let (entities_created, relations_created) = {
+            let mut graph = session
+                .graph
+                .write()
+                .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+            if replace {
+                graph
+                    .remove_entities_and_relations_by_dataset(&dataset_id)
+                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+            }
+            // Lone nodes (edge-less proposals) are inserted directly.
+            let mut standalone_count = 0usize;
+            for mut e in mapped.standalone {
+                e.dataset_id = Some(dataset_id.as_str().into());
+                if graph.add_entity(e).is_ok() {
+                    standalone_count += 1;
+                }
+            }
+            let (ec, rc) = graph
+                .insert_triples(mapped.triples, Some(dataset_id.as_str()))
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            run_scoring_adaptive(&mut graph);
+            (ec + standalone_count, rc)
+        };
+
+        // Patch dataset counts.
+        {
+            let mut datasets = session
+                .datasets
+                .write()
+                .map_err(|e| ApiError::Internal(format!("datasets lock poisoned: {e}")))?;
+            if let Some(d) = datasets.iter_mut().find(|d| d.id == dataset_id) {
+                d.entity_count = entities_created;
+                d.relation_count = relations_created;
+            }
+        }
+
+        // Enrichment ONCE, at build (design principle §2): resolve geoip+asn for
+        // the IP nodes and store on entity metadata. threat_intel is a stub.
+        let want = |name: &str| {
+            req.enrich
+                .as_ref()
+                .map_or(true, |e| e.iter().any(|x| x.eq_ignore_ascii_case(name)))
+        };
+        let mut enrichment_applied = EnrichmentApplied::default();
+        if want("geoip") || want("asn") {
+            for ip in &mapped.ip_values {
+                if let Ok(res) = self
+                    .enrich_ip(crate::dto::geoip::EnrichIpRequest { session: None, ip: ip.clone() })
+                    .await
+                {
+                    if res.country_code.is_some() || res.city.is_some() {
+                        enrichment_applied.geoip += 1;
+                    }
+                    if res.asn.is_some() {
+                        enrichment_applied.asn += 1;
+                    }
+                }
+            }
+        }
+
+        let (total_entities, total_relations) = {
+            let graph = session
+                .graph
+                .read()
+                .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+            (graph.entity_count(), graph.relation_count())
+        };
+        let (graph_state, _) =
+            crate::dto::geoip::GraphState::classify(total_entities, total_relations);
+
+        // Record last_build for §5 status.
+        let at = now_secs();
+        if let Ok(mut slot) = session.last_build.write() {
+            *slot = Some(BuildRecord {
+                build_id: build_id.clone(),
+                proposal_id: proposal.proposal_id.clone(),
+                at,
+                entities_created,
+                relations_created,
+                merge_mode: merge_mode.clone(),
+            });
+        }
+
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let cost = cost.finish(duration_ms);
+        Ok(GraphBuildResult {
+            build_id,
+            proposal_id: proposal.proposal_id,
+            entities_created,
+            relations_created,
+            enrichment_applied,
+            duration_ms,
+            graph_state,
+            cost,
+        })
     }
 
     /// Phase M: run a pre-built hunting KQL template against Sentinel.
@@ -1634,6 +1804,104 @@ fn build_proposals(
     proposals
 }
 
+// ── graph_build schema-driven row→graph mapper (§4.3) ──────────────────
+
+/// Output of mapping materialized rows onto a proposal's schema.
+struct MappedGraph {
+    triples: Vec<graph_hunter_core::parser::ParsedTriple>,
+    /// Lone entities for edge-less proposals (no triple would carry them).
+    standalone: Vec<graph_hunter_core::entity::Entity>,
+    /// Distinct IP node values, for build-time enrichment.
+    ip_values: std::collections::HashSet<String>,
+}
+
+/// Coerce a JSON cell to a non-empty string id.
+fn cell_string(v: Option<&serde_json::Value>) -> Option<String> {
+    match v? {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Parse a Log Analytics `TimeGenerated` (RFC3339) to epoch seconds; 0 on miss.
+fn parse_ts(s: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.timestamp())
+        .unwrap_or(0)
+}
+
+/// Map materialized rows onto the proposal's nodes/edges. Each row yields one
+/// entity per node (by projected column) and one relation per edge whose
+/// endpoints are both present; edge `attributes` columns become edge metadata.
+/// Pure — no graph access — so it's unit-testable without a session.
+fn map_rows_to_graph(p: &GraphProposal, rows: &[serde_json::Value]) -> MappedGraph {
+    use graph_hunter_core::entity::Entity;
+    use graph_hunter_core::relation::Relation;
+    use graph_hunter_core::{EntityType, RelationType};
+
+    let node_alias = |src: &str| src.rsplit('.').next().unwrap_or(src).to_string();
+    let class_et = |class: &str| {
+        parse_entity_type(class).unwrap_or_else(|| EntityType::Other(class.to_string()))
+    };
+
+    let mut triples = Vec::new();
+    let mut standalone = Vec::new();
+    let mut ip_values = std::collections::HashSet::new();
+
+    for row in rows {
+        let obj = match row.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        // Resolve each node class to this row's value (first node of a class wins).
+        let mut class_val: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+        for n in &p.nodes {
+            if let Some(v) = cell_string(obj.get(&node_alias(&n.source))) {
+                if n.class == "IP" {
+                    ip_values.insert(v.clone());
+                }
+                if p.edges.is_empty() {
+                    standalone.push(Entity::new(&v, class_et(&n.class)));
+                }
+                class_val.entry(n.class.as_str()).or_insert(v);
+            }
+        }
+        if p.edges.is_empty() {
+            continue;
+        }
+        let ts = obj
+            .get("TimeGenerated")
+            .and_then(|v| v.as_str())
+            .map(parse_ts)
+            .unwrap_or(0);
+        for e in &p.edges {
+            let (from, to) = match (class_val.get(e.from.as_str()), class_val.get(e.to.as_str())) {
+                (Some(f), Some(t)) => (f.clone(), t.clone()),
+                _ => continue,
+            };
+            let rel_type =
+                parse_relation_type(&e.r#type).unwrap_or_else(|| RelationType::Other(e.r#type.clone()));
+            let mut rel = Relation::new(from.clone(), to.clone(), rel_type, ts);
+            for attr in &e.attributes {
+                if attr == "TimeGenerated" {
+                    continue;
+                }
+                if let Some(v) = cell_string(obj.get(attr)) {
+                    rel = rel.with_metadata(attr.clone(), v);
+                }
+            }
+            triples.push((
+                Entity::new(&from, class_et(&e.from)),
+                rel,
+                Entity::new(&to, class_et(&e.to)),
+            ));
+        }
+    }
+    MappedGraph { triples, standalone, ip_values }
+}
+
 /// Graph-first nudge for inspect-mode KQL: return an advisory when the query
 /// references identity/IP-like columns that GraphHunter could materialize as
 /// graph entities. Case-insensitive substring scan over a small set of the
@@ -2013,6 +2281,82 @@ mod graph_propose_tests {
         let probe = estimate_probe_kql(p).expect("probe");
         assert!(probe.contains("summarize Rows = count(), Entities = dcount(UserPrincipalName)"));
         assert!(probe.starts_with("SigninLogs\n"));
+    }
+}
+
+#[cfg(test)]
+mod graph_build_mapper_tests {
+    use super::*;
+
+    fn signin_proposal() -> GraphProposal {
+        let selected = vec![
+            SelectedField { table: "SigninLogs".into(), field: "UserPrincipalName".into() },
+            SelectedField { table: "SigninLogs".into(), field: "IPAddress".into() },
+            SelectedField { table: "SigninLogs".into(), field: "ResultType".into() },
+        ];
+        build_proposals(&selected, None, "where TimeGenerated > ago(24h)")
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn maps_rows_to_entities_relations_and_edge_metadata() {
+        let p = signin_proposal();
+        let rows = vec![
+            serde_json::json!({
+                "UserPrincipalName": "alice@corp.com",
+                "IPAddress": "203.0.113.7",
+                "ResultType": "0",
+                "TimeGenerated": "2026-06-01T10:00:00Z",
+            }),
+            serde_json::json!({
+                "UserPrincipalName": "bob@corp.com",
+                "IPAddress": "203.0.113.8",
+                "ResultType": "50126",
+                "TimeGenerated": "2026-06-01T11:00:00Z",
+            }),
+        ];
+        let mapped = map_rows_to_graph(&p, &rows);
+        assert_eq!(mapped.triples.len(), 2, "one User->IP edge per row");
+        // IP values collected for enrichment.
+        assert!(mapped.ip_values.contains("203.0.113.7"));
+        assert!(mapped.ip_values.contains("203.0.113.8"));
+        // First triple: User -> IP with ResultType + a parsed timestamp.
+        let (src, rel, dst) = &mapped.triples[0];
+        assert_eq!(src.id, "alice@corp.com");
+        assert_eq!(dst.id, "203.0.113.7");
+        assert_eq!(rel.metadata.get("ResultType").map(String::as_str), Some("0"));
+        assert!(rel.timestamp > 0, "TimeGenerated parsed to epoch");
+        // edge-bearing proposals produce no standalone entities.
+        assert!(mapped.standalone.is_empty());
+    }
+
+    #[test]
+    fn rows_missing_an_endpoint_are_skipped() {
+        let p = signin_proposal();
+        let rows = vec![serde_json::json!({
+            "UserPrincipalName": "alice@corp.com",
+            // IPAddress missing → no User->IP edge for this row.
+            "TimeGenerated": "2026-06-01T10:00:00Z",
+        })];
+        let mapped = map_rows_to_graph(&p, &rows);
+        assert!(mapped.triples.is_empty());
+    }
+
+    #[test]
+    fn edgeless_single_node_proposal_yields_standalone_entities() {
+        let selected = vec![SelectedField { table: "SigninLogs".into(), field: "IPAddress".into() }];
+        let p = build_proposals(&selected, None, "where TimeGenerated > ago(24h)")
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(p.edges.is_empty(), "single node → no edges");
+        let rows = vec![serde_json::json!({"IPAddress": "203.0.113.7"})];
+        let mapped = map_rows_to_graph(&p, &rows);
+        assert_eq!(mapped.standalone.len(), 1);
+        assert_eq!(mapped.standalone[0].id, "203.0.113.7");
+        assert!(mapped.triples.is_empty());
     }
 }
 
