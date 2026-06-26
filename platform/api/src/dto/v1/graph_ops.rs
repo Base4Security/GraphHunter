@@ -182,6 +182,67 @@ pub struct ExpandNodeRequest {
     pub time_window: Option<crate::dto::v1::sentinel::TimeWindow>,
 }
 
+// ── Graph-cycle analysis: neighbors (§4.5) + paths (§4.4) ──────────────
+
+/// An entity referenced by `{class, value}` (design doc §4.4/§4.5). Only
+/// `value` is used to resolve the node (it is the graph id); `class` is
+/// advisory context from the caller.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct EntityRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    pub value: String,
+}
+
+/// `graph_neighbors` input (§4.5).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GraphNeighborsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    pub entity: EntityRef,
+    /// Neighborhood expansion degree (hops). Default 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub degree: Option<usize>,
+    /// Restrict to these edge (relation) types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_filter: Option<Vec<String>>,
+    /// Cap neighbors returned (default 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_nodes: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NeighborsCenter {
+    pub class: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NeighborRef {
+    pub class: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NeighborItem {
+    pub edge: String,
+    pub node: NeighborRef,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub attributes: HashMap<String, String>,
+}
+
+/// `graph_neighbors` output (§4.5): the central entity's attributes plus its
+/// directly-connected entities and the edge metadata to each.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphNeighborsResult {
+    pub entity: NeighborsCenter,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub attributes: HashMap<String, String>,
+    pub neighbors: Vec<NeighborItem>,
+}
+
 /// Node and edge counts for the resolved session's graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphStats {

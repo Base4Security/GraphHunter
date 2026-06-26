@@ -194,6 +194,15 @@ pub(super) struct NodeDetailsQuery {
     node_id: String,
 }
 
+/// §4.5 graph_neighbors — immediate neighborhood of an entity, reshaped to the
+/// design-doc contract. Read-only graph traversal; no SIEM round-trip.
+pub(super) async fn handler_graph_neighbors(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(req): Json<graph_hunter_api::dto::graph_ops::GraphNeighborsRequest>,
+) -> Response {
+    api_response(api.graph_neighbors(req))
+}
+
 pub(super) async fn handler_node_details(
     State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<NodeDetailsQuery>,

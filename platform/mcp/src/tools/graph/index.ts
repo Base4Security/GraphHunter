@@ -10,6 +10,7 @@ import { graphHeavyEdges } from "./heavy_edges.js";
 import { graphChannelBehavior } from "./channel_behavior.js";
 import { graphPropose } from "./propose.js";
 import { graphBuild } from "./build.js";
+import { graphNeighbors } from "./neighbors.js";
 
 export const graphTools: Tool[] = [
   graphSummary,
@@ -23,4 +24,5 @@ export const graphTools: Tool[] = [
   graphChannelBehavior,
   graphPropose,
   graphBuild,
+  graphNeighbors,
 ];
