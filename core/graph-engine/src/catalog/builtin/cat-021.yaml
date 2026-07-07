@@ -1,0 +1,6 @@
+id: cat-021
+name: Impossible Travel
+mitre_id: T1078.004
+description: "User authenticates from 2+ distinct IPs inside a short window — heuristic for geo-impossible travel before enrichment lands."
+dsl_pattern: "User -[Auth]-> IP HAVING count(distinct IP) >= 2 WITHIN 6h"
+k_simplicity: 1

@@ -1,0 +1,13 @@
+{
+  "hosts": [
+    {
+      "label": "windows-dev",
+      "hints": {
+        "avg_degree": 20.0,
+        "n_vertices": 1000,
+        "n_edges": 20000
+      }
+    }
+  ],
+  "cost_constants_version": 1
+}

@@ -1,0 +1,268 @@
+\chapter{Matcheo de patrones temporales}
+\label{ch:matcher}
+
+El matcher es el hot path del motor. Cada hunt que corre el
+analista, cada llamada \code{run\_hunt} desde Claude, cada
+invocación CLI termina acá. La implementación trae tres variantes
+coordinadas:
+
+\begin{itemize}
+    \item \textsc{Search-Temporal-Pattern} --- el entry point;
+        despacha trabajo a workers rayon y junta resultados.
+    \item \textsc{Dfs-Match-Iterative} --- el DFS iterativo base
+        que se ejecuta por vértice de partida.
+    \item \textsc{Dfs-Match-Smart} --- variante con cota de
+        anomalía que mantiene un min-heap top-$K$ y poda ramas
+        cuyo estimado corriente las hace inadmisibles.
+\end{itemize}
+
+Un cuarto camino, \textsc{Search-Temporal-Pattern-Simd}, delega
+en \code{libgraphmatch} o en el módulo puro-Rust \code{simd\_rust}
+(Capítulo~\ref{ch:simd}) y está gateado por el feature \code{simd}
+más una prueba de CPU en runtime.
+
+\section{Estado compartido}
+
+\begin{lstlisting}[style=rust]
+// Scratch alocado una vez por worker y reusado entre starts.
+struct DfsFrame {
+    sid:          StrId,
+    step_idx:     usize,
+    edge_hi:      usize,   // cota superior de aristas salientes
+    edge_cursor:  usize,   // siguiente indice de arista a probar
+}
+
+struct SmartDfsFrame {
+    sid:              StrId,
+    step_idx:         usize,
+    edge_hi:          usize,
+    edge_cursor:      usize,
+    path_anomaly_sum: f64,   // suma de node_anomaly_estimate a lo largo del path
+}
+\end{lstlisting}
+
+Los frames de la pila son structs comunes guardados en un
+\code{Vec<Frame>} que se reusa entre vértices de partida. Este es
+el ahorro de alocación más grande del matcher --- la
+implementación recursiva anterior alocaba por frame en la pila
+del sistema y no podía reiniciarse trivialmente.
+
+\begin{invariant}[$k$-simplicidad]
+El \code{visit\_count: HashMap<StrId, usize>} corriente mantenido
+dentro de cada caminata DFS satisface \code{visit\_count[v] <= k}
+para todo $v$ en el camino actual, donde $k$ es
+\code{hypothesis.k\_simplicity}. Violarlo admitiría caminos que
+revisitan un vértice más de $k$ veces, contradiciendo la
+semántica de la hipótesis. El algoritmo impone el invariante en
+el push: si incrementar \code{visit\_count[dest]} excedería $k$,
+la arista se descarta.
+\end{invariant}
+
+\section{Entry point: \textsc{Search-Temporal-Pattern}}
+
+El algoritmo externo particiona el trabajo por vértice de
+partida. Por cada entidad cuyo tipo matchea el primer paso de
+$H$, un thread rayon ejecuta \textsc{Dfs-Match-Iterative} sobre
+ese vértice con su propia pila scratch y su propio buffer de
+resultados. Cuando todos los workers terminan, los resultados se
+mergean, puntúan, deduplican y paginan
+(Capítulo~\ref{ch:dedup-pagination}).
+
+\begin{algorithm}
+\caption{\textsc{Search-Temporal-Pattern}}\label{alg:search-entry}
+\KwIn{grafo $G$, hipótesis $H$, ventana opcional $(t_0, t_1)$,
+      cap opcional $\mathrm{max}$}
+\KwOut{vector de vectores de caminos}
+$\mathrm{starts} \gets $ \code{G.type\_index[H.steps[0].origin\_type]}\;
+\If{$\mathrm{starts} = \emptyset$}{\Return $\emptyset$\;}
+$\mathrm{cap} \gets $ \code{AtomicUsize(0)}\;
+$\mathrm{results} \gets $ map paralelo sobre $\mathrm{starts}$:
+    \ForEach{$s \in \mathrm{starts}$ en paralelo}{
+        $\mathrm{local} \gets $ \textsc{Dfs-Match-Iterative}($G, H, s, t_0, t_1, \mathrm{cap}, \mathrm{max}$)\;
+        \Return $\mathrm{local}$\;
+    }
+\Return concat de $\mathrm{results}$\;
+\end{algorithm}
+
+Cada worker lee el \code{AtomicUsize} cap en cada push de
+candidato, de modo que cuando el conteo agregado alcanza
+$\mathrm{max}$, los workers restantes paran lo antes posible. Es
+un patrón clásico de early-exit: el count puede rebasar
+$\mathrm{max}$ momentáneamente porque los workers \emph{commit}
+y luego chequean, pero el overshoot está acotado por la cantidad
+de workers rayon (típicamente 8--16).
+
+\section{El DFS iterativo}
+
+\begin{algorithm}
+\caption{\textsc{Dfs-Match-Iterative}}\label{alg:dfs-iter}
+\KwIn{grafo $G$, hipótesis $H$, start $s_0$, ventana $(t_0, t_1)$,
+      contador compartido $\mathrm{cap}$, cota $\mathrm{max}$}
+\KwOut{lista de caminos matcheantes rooteados en $s_0$}
+$\mathrm{results} \gets \emptyset$;
+$\mathrm{stack} \gets \emptyset$;
+$\mathrm{path} \gets [s_0]$;
+$\mathrm{visit} \gets \{s_0 : 1\}$\;
+\textsc{Push-Edges-For-Step}($\mathrm{stack}$, $G$, $s_0$, paso $0$, $t_0, t_1$)\;
+\While{$\mathrm{stack} \neq \emptyset$}{
+    $f \gets $ tope de $\mathrm{stack}$\;
+    \If{$f.\text{edge\_cursor} \geq f.\text{edge\_hi}$}{
+        popear $f$;
+        popear último vértice de $\mathrm{path}$;
+        decrementar $\mathrm{visit}[\cdot]$;
+        \Continue\;
+    }
+    $c \gets $ \code{G.edge\_store[f.sid][f.edge\_cursor]}\;
+    $f.\text{edge\_cursor} \gets f.\text{edge\_cursor} + 1$\;
+    \tcp{filtro: tipo de relación}
+    \If{$c.\text{rel\_type\_tag} \neq $ paso[$f.\text{step\_idx}$].rel}{
+        \Continue\;
+    }
+    \tcp{filtro: tipo de entidad destino vía tag SoA}
+    $u \gets c.\text{dest\_sid}$\;
+    \If{$\code{G.entity\_type\_tags}[u.0] \neq $ paso[$f.\text{step\_idx}$].dst}{
+        \Continue\;
+    }
+    \tcp{filtro: ventana temporal}
+    \If{$c.\text{timestamp} \notin [t_0, t_1]$}{\Continue\;}
+    \tcp{filtro: predicados de arista (sobre metadata)}
+    \If{\textsc{Evaluate-Predicates}(paso.edge\_predicates, $c$, $G$) = falso}{
+        \Continue\;
+    }
+    \tcp{prevención de ciclos vía $k$-simplicidad}
+    \If{$\mathrm{visit}[u] + 1 > H.k$}{\Continue\;}
+    $\mathrm{visit}[u] \gets \mathrm{visit}[u] + 1$;
+    anexar $u$ a $\mathrm{path}$\;
+    \If{$f.\text{step\_idx} + 1 = $ len($H.\text{steps}$)}{
+        registrar $\mathrm{path}$ en $\mathrm{results}$\;
+        incrementar $\mathrm{cap}$ atómicamente;
+        \If{$\mathrm{cap} \geq \mathrm{max}$}{salir del loop\;}
+        $\mathrm{visit}[u] \gets \mathrm{visit}[u] - 1$;
+        popear último vértice;
+        \Continue\;
+    }
+    empujar frame nuevo: $(u, f.\text{step\_idx}+1, \ldots)$ sobre $\mathrm{stack}$\;
+    \textsc{Push-Edges-For-Step}($\mathrm{stack}$, $G$, $u$, $f.\text{step\_idx}+1$, $t_0, t_1$)\;
+}
+\Return $\mathrm{results}$\;
+\end{algorithm}
+
+\textsc{Push-Edges-For-Step} es una rutina de una línea que hace
+binary search en \code{edge\_store[v]} para la primera arista con
+\code{timestamp} $\geq t_0$ y setea \code{edge\_hi} a la primera
+arista con \code{timestamp} $> t_1$. El sort por timestamp que se
+hace en finalize (Capítulo~\ref{ch:graph-hunter}) es lo que
+justifica que la binary search funcione.
+
+\begin{theorem}[Corrección del matcher]
+Al retornar, \textsc{Dfs-Match-Iterative} produce exactamente el
+conjunto de caminos temporales de longitud $\ell$ rooteados en
+$s_0$ que satisfacen la hipótesis $H$ dentro de $[t_0, t_1]$ y
+respetan la $k$-simplicidad.
+\end{theorem}
+
+\begin{proof}[Demostración (esbozo)]
+Por inducción sobre la profundidad de la hipótesis. El caso base
+($\ell = 1$) es el primer push en \code{stack}; el chequeo es
+paso a paso equivalente a las restricciones de la hipótesis sobre
+la primera arista. El paso inductivo observa que cada arista
+admitida extiende el camino exactamente un vértice, actualiza
+\code{visit} consistentemente, y que el chequeo de ciclos rechaza
+exactamente aquellas extensiones que excederían $k$-simplicidad.
+La pila se desenrolla restaurando \code{visit} y el camino, de
+modo que cada rama se explora independientemente; ningún camino
+se omite por backtracking faltante. \qed
+\end{proof}
+
+\begin{complexity}
+El peor caso es un grafo donde toda arista matchea todo paso.
+Entonces desde un start $s_0$ el DFS visita hasta
+$\bar{b}^\ell$ caminos (con $\bar{b}$ = grado saliente promedio
+de aristas calificantes por paso y $\ell$ = cantidad de pasos),
+dando $\Ord{\bar{b}^\ell \cdot \ell}$ por start. Cruzando los
+$n_s$ candidatos de partida, el total es
+\[
+    T_{\text{match}}(G, H) = \Ord{n_s \cdot \bar{b}^\ell \cdot \ell}.
+\]
+El espacio por worker es $\Ord{\ell}$ para la pila y el camino más
+$\Ord{\ell \cdot k}$ para el mapa \code{visit} (cada entrada es un
+vértice, y el camino tiene a lo sumo $\ell$ vértices distintos cada
+uno visitado a lo sumo $k$ veces). Con $W$ workers, el espacio
+total del matcher es $\Ord{W \cdot \ell \cdot k}$. En la práctica
+$\bar{b}$ es diminuto porque el fast-path por tag de tipo elimina
+la mayoría de las aristas salientes en la primera comparación de
+byte; mediciones empíricas desde
+\code{benches/hunt\_latency.rs} están en el Ap.~\ref{app:bench}.
+\end{complexity}
+
+\section{La variante smart}
+
+\textsc{Dfs-Match-Smart} se usa cuando el llamador pide los top-$K$
+caminos más anómalos en vez de ``todos los caminos''. Difiere del
+iterativo sólo en el orden de candidatos y el acumulador de
+resultados:
+
+\begin{itemize}
+    \item \textbf{Acumulador}: un min-heap de tamaño a lo sumo $K$
+        ordenado por puntaje compuesto de anomalía. Cuando está
+        lleno, los caminos nuevos se aceptan si y sólo si puntúan
+        más alto que el mínimo del heap.
+    \item \textbf{Cota corriente}: cada frame trackea
+        \code{path\_anomaly\_sum}, la suma de
+        \code{node\_anomaly\_estimate} (Capítulo~\ref{ch:anomaly})
+        a lo largo del camino hasta el momento. Extender el
+        camino no puede decrecer esta suma; si la suma ya cae por
+        debajo del mínimo del heap, la rama se poda.
+\end{itemize}
+
+\begin{algorithm}
+\caption{\textsc{Merge-Into-TopK}}\label{alg:merge-topk}
+\KwIn{heap local $L$, heap global $G$, capacidad $K$}
+\ForEach{$p \in L$}{
+    \If{$|G| < K$}{$G$.push($p$)}
+    \ElseIf{$\text{score}(p) > \min(G)$}{
+        $G$.pop\_min(); $G$.push($p$);
+    }
+}
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{(|L| + |G|) \log K}$. Cuando el matcher junta los workers
+rayon, cada heap local de tamaño $\leq K$ se mergea en un único
+heap global a costo total $\Ord{W K \log K}$, despreciable frente
+al trabajo del DFS.
+\end{complexity}
+
+\section{Paralelismo}
+
+El matcher es embarazosamente paralelo en el vértice de partida.
+Como cada DFS de worker lee el grafo exclusivamente (todos los
+escritores están bloqueados en un \code{RwLock::write} a nivel
+sesión), no hay sincronización entre workers más allá del
+contador compartido \code{cap} y la reducción final en un único
+vector de resultados.
+
+\begin{theorem}[Speedup paralelo]
+Dados $W$ workers rayon y $n_s$ vértices de partida con carga de
+DFS aproximadamente igual por start, el matcher alcanza un
+speedup de $\min(W, n_s)$ hasta el costo constante de la
+reducción final.
+\end{theorem}
+
+La prueba es el teorema de Brent aplicado a la partición trivial:
+el DFS de cada start no tiene dependencias entre starts, y la
+reducción final es $\Ord{\text{total resultados}}$, típicamente
+órdenes de magnitud menor que el DFS en sí.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/graph.rs:461} ---
+\code{search\_temporal\_pattern}.\\
+\filepath{graph\_hunter\_core/src/graph.rs:1121} ---
+\code{dfs\_match\_iterative}.\\
+\filepath{graph\_hunter\_core/src/graph.rs:782} ---
+\code{search\_temporal\_pattern\_smart}.\\
+\filepath{graph\_hunter\_core/src/graph.rs:932} ---
+\code{dfs\_match\_smart}.\\
+\filepath{graph\_hunter\_core/benches/hunt\_latency.rs} ---
+benchmarks de performance.
+\end{inthecode}

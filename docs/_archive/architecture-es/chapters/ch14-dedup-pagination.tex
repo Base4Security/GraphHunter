@@ -1,0 +1,116 @@
+\chapter{Deduplicación y paginación de caminos}
+\label{ch:dedup-pagination}
+
+El matcher puede devolver muchos caminos para una hipótesis laxa.
+Antes de que el analista los vea, se deduplican (según el modo
+pedido), se puntúan, se filtran, se ordenan y se paginan.
+\code{score\_and\_paginate\_paths} es la única función que hace
+todo eso; vive en \filepath{graph\_hunter\_core/src/analytics.rs}.
+
+\section{Modos de dedup}
+
+\begin{definition}[Modos de dedup]
+\code{DedupMode} es uno de:
+\begin{itemize}
+    \item \code{None} --- se mantiene cada camino del matcher.
+    \item \code{ByPath} --- los caminos con secuencias de
+        vértices idénticas se fusionan en un único
+        representante (el de mayor score).
+    \item \code{ByEndpoints} --- los caminos que comparten el
+        mismo par $(v_0, v_\ell)$ se fusionan, sin importar los
+        vértices intermedios.
+\end{itemize}
+\end{definition}
+
+\code{ByPath} es el default para hunts renderizados en la UI:
+cuando el grafo subyacente tiene muchas aristas paralelas entre
+el mismo par de vértices, el matcher produce múltiples caminos
+idénticos a la vista (uno por arista) y el analista sólo quiere
+ver la topología una vez.
+
+\code{ByEndpoints} se usa durante análisis en bulk: ``cuántos
+pares distintos start-end de alcanzabilidad satisfacen esta
+hipótesis'' --- la granularidad correcta para contar escenarios
+de ataque únicos.
+
+\section{Algoritmo}
+
+\begin{algorithm}
+\caption{\textsc{Score-And-Paginate}}\label{alg:score-paginate}
+\KwIn{caminos $\Pi$, índice de página $p$, tamaño de página $s$,
+      $\text{min\_score}$ opcional, modo $M$, scorer $S$}
+\KwOut{página de caminos + conteo total (pre-página)}
+\tcp{Paso 1: dedup según el modo}
+\Switch{$M$}{
+    \Case{\code{None}}{únicos $\gets \Pi$}
+    \Case{\code{ByPath}}{
+        clavar cada $\pi \in \Pi$ por su tupla de vértices;
+        quedarse con el $\pi$ de mayor score por clave
+    }
+    \Case{\code{ByEndpoints}}{
+        clavar cada $\pi \in \Pi$ por $(v_0, v_\ell)$;
+        quedarse con el $\pi$ de mayor score por clave
+    }
+}
+\tcp{Paso 2: puntuar}
+\ForEach{$\pi \in $ únicos}{
+    $(\text{composite}, \text{breakdown}) \gets S.\text{score\_path}(\pi)$
+}
+\tcp{Paso 3: filtro opcional}
+\If{$\text{min\_score}$ es Some}{descartar $\pi$ con composite $<$ min\_score}
+\tcp{Paso 4: sort DESC por (composite, max\_node\_score, total\_score)}
+ordenar únicos\;
+\tcp{Paso 5: slice}
+$\text{total} \gets |\text{únicos}|$\;
+\Return (únicos[$p \cdot s$ .. $(p+1) \cdot s$], total)\;
+\end{algorithm}
+
+\begin{complexity}
+Sea $P = |\Pi|$ (conteo crudo) y $U = |\text{únicos}|$ tras
+dedup.
+\begin{itemize}
+    \item Dedup en \code{ByPath}/\code{ByEndpoints} es
+        $\Ord{P \cdot \ell}$ (hashing la clave de largo $\ell$);
+        \code{None} es $\Ord{P}$.
+    \item Scoring es $\Ord{U \cdot \ell}$ usando \textsc{Score-Path}.
+    \item Sort es $\Ord{U \log U}$ comparaciones.
+    \item Slicing es $\Ord{s}$.
+\end{itemize}
+Total: $\Ord{P \cdot \ell + U \log U + s}$. Espacio $\Ord{U + s}$
+por encima del input.
+\end{complexity}
+
+\section{Estabilidad del sort}
+
+La clave de sort es una tupla
+\[
+    (\mathrm{composite}(\pi), \max_{v \in \pi}\mathrm{composite}(\{v\}),
+     \mathrm{total\_score}(\pi))
+\]
+ordenada en sentido descendente. La clave de tres vías importa
+porque los puntajes compuestos empatan seguido en caminos de
+longitud corta --- las claves secundaria y terciaria desempatan
+determinísticamente. En particular el max-node score promueve
+caminos que contienen un único vértice fuertemente anómalo por
+sobre caminos uniformemente mediocres.
+
+\section{Contrato de paginación}
+
+\begin{invariant}[Estabilidad de página]
+Dos llamadas consecutivas a \code{get\_hunt\_page} con los mismos
+parámetros devuelven el mismo orden, suponiendo que el grafo
+subyacente no fue mutado. El orden de caminos es determinista
+porque todo desempate es una cantidad totalmente ordenada
+derivada del estado del grafo.
+\end{invariant}
+
+El arnés de paridad (Capítulo~\ref{ch:parity-harness}) fija este
+invariante con una fixture que corre un hunt dos veces y
+asevera igualdad elemento a elemento de la página retornada.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/analytics.rs:1096} ---
+\code{score\_and\_paginate\_paths}.\\
+\filepath{graph\_hunter\_core/src/analytics.rs} --- variantes de
+\code{DedupMode} y helpers de derivación de clave.
+\end{inthecode}

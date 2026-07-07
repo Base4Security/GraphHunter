@@ -1,0 +1,43 @@
+name: bench-regression
+
+on:
+  pull_request:
+    paths:
+      - 'core/graph-engine/**'
+      - '.github/workflows/bench-regression.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'core/graph-engine/**'
+      - '.github/workflows/bench-regression.yml'
+
+concurrency:
+  group: bench-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bench-hunt-latency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core/graph-engine
+
+      - name: Restore Criterion baseline (main)
+        run: |
+          BASE="core/graph-engine/benches/baseline/criterion"
+          DEST="core/graph-engine/target/criterion"
+          mkdir -p "$DEST"
+          cp -r "$BASE/." "$DEST/"
+
+      - name: Bench hunt_latency vs baseline
+        continue-on-error: true
+        run: |
+          cargo bench --manifest-path core/graph-engine/Cargo.toml --bench hunt_latency -- --baseline main

@@ -1,0 +1,115 @@
+\chapter{Path Deduplication and Pagination}
+\label{ch:dedup-pagination}
+
+The matcher can return many paths for a lax hypothesis. Before an
+analyst sees them they're deduplicated (depending on the requested
+mode), scored, filtered, sorted, and paginated.
+\code{score\_and\_paginate\_paths} is the single function that does
+all of that; it lives in \filepath{graph\_hunter\_core/src/analytics.rs}.
+
+\section{Dedup modes}
+
+\begin{definition}[Dedup modes]
+\code{DedupMode} is one of:
+\begin{itemize}
+    \item \code{None} --- every path from the matcher is kept.
+    \item \code{ByPath} --- paths with identical vertex sequences
+        are merged into a single representative (the highest-scoring
+        one).
+    \item \code{ByEndpoints} --- paths sharing the same $(v_0,
+        v_\ell)$ pair are merged, regardless of the intermediate
+        vertices.
+\end{itemize}
+\end{definition}
+
+\code{ByPath} is the default for hunts rendered in the UI: when the
+underlying graph has many parallel edges between the same pair of
+vertices, the matcher produces multiple identical-looking paths
+(one per edge), and the analyst only wants to see the topology
+once.
+
+\code{ByEndpoints} is used during bulk analysis: ``how many
+distinct start-end reachability pairs satisfy this hypothesis,''
+which is the right granularity for counting unique attack
+scenarios.
+
+\section{Algorithm}
+
+\begin{algorithm}
+\caption{\textsc{Score-And-Paginate}}\label{alg:score-paginate}
+\KwIn{paths $\Pi$, page index $p$, page size $s$, optional
+      $\text{min\_score}$, mode $M$, scorer $S$}
+\KwOut{page of paths + total count (pre-page)}
+\tcp{Step 1: dedup according to mode}
+\Switch{$M$}{
+    \Case{\code{None}}{unique $\gets \Pi$}
+    \Case{\code{ByPath}}{
+        key each $\pi \in \Pi$ by its vertex tuple; keep the
+        highest-scoring $\pi$ per key
+    }
+    \Case{\code{ByEndpoints}}{
+        key each $\pi \in \Pi$ by $(v_0, v_\ell)$; keep the
+        highest-scoring $\pi$ per key
+    }
+}
+\tcp{Step 2: score}
+\ForEach{$\pi \in $ unique}{
+    $(\text{composite}, \text{breakdown}) \gets S.\text{score\_path}(\pi)$
+}
+\tcp{Step 3: optional filter}
+\If{$\text{min\_score}$ is Some}{drop $\pi$ with composite $<$ min\_score}
+\tcp{Step 4: sort DESC by (composite, max\_node\_score, total\_score)}
+sort unique\;
+\tcp{Step 5: slice}
+$\text{total} \gets |\text{unique}|$\;
+\Return (unique[$p \cdot s$ .. $(p+1) \cdot s$], total)\;
+\end{algorithm}
+
+\begin{complexity}
+Let $P = |\Pi|$ (raw count) and $U = |\text{unique}|$ after dedup.
+\begin{itemize}
+    \item Dedup in \code{ByPath}/\code{ByEndpoints} is
+        $\Ord{P \cdot \ell}$ (hashing the key of length $\ell$);
+        \code{None} is $\Ord{P}$.
+    \item Scoring is $\Ord{U \cdot \ell}$ using \textsc{Score-Path}.
+    \item Sorting is $\Ord{U \log U}$ comparisons.
+    \item Slicing is $\Ord{s}$.
+\end{itemize}
+Total: $\Ord{P \cdot \ell + U \log U + s}$. Space is $\Ord{U + s}$
+above the input.
+\end{complexity}
+
+\section{Sort stability}
+
+The sort key is a tuple
+\[
+    (\mathrm{composite}(\pi), \max_{v \in \pi}\mathrm{composite}(\{v\}),
+     \mathrm{total\_score}(\pi))
+\]
+sorted in descending order. The three-way key matters because
+composite scores tie frequently on paths with short length ---
+secondary and tertiary keys break ties deterministically. In
+particular the max-node score promotes paths that contain a
+single strongly anomalous vertex over paths that are uniformly
+mediocre.
+
+\section{Pagination contract}
+
+\begin{invariant}[Page stability]
+Two consecutive \code{get\_hunt\_page} calls with the same
+parameters return the same sorted order, provided the underlying
+graph has not been mutated. Path order is deterministic because
+every tie-breaker is a totally ordered quantity derived from the
+graph state.
+\end{invariant}
+
+The parity harness (Chapter~\ref{ch:parity-harness}) pins this
+invariant with a fixture that runs a hunt twice and asserts
+element-wise equality of the returned page.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/analytics.rs:1096} ---
+\code{score\_and\_paginate\_paths}.\\
+\filepath{graph\_hunter\_core/src/analytics.rs} --- \code{DedupMode}
+variants and key derivation helpers.
+\end{inthecode}

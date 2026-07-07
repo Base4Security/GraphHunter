@@ -1,0 +1,64 @@
+\chapter{Parsers}
+\label{ch:parsers}
+
+\begin{note}
+Stub. El trait \code{LogParser} y sus implementaciones por
+formato (Sentinel JSON, Sysmon XML, Cognito, IIS W3C,
+FortiAnalyzer XML, CSV/JSON genérico con mapeos de campo)
+merecen cada uno un capítulo; esta sección lista el seam y las
+implementaciones conocidas.
+\end{note}
+
+\section{Trait}
+
+\begin{lstlisting}[style=rust]
+pub trait LogParser: Send + Sync {
+    fn parse(&self, data: &str) -> Vec<ParsedTriple>;
+    fn parse_rows(&self, rows: &[serde_json::Value]) -> Vec<ParsedTriple> {
+        // Default: serializar rows de vuelta a JSON array y delegar.
+    }
+}
+
+pub type ParsedTriple = (Entity, Relation, Entity);
+\end{lstlisting}
+
+El override \code{parse\_rows} existe para cortocircuitar el
+round-trip ``JSON $\to$ string $\to$ JSON'' en los parsers que ya
+consumen el shape \code{serde\_json::Value} (notablemente
+\code{SentinelJsonParser}).
+
+\section{Implementaciones}
+
+\begin{itemize}
+    \item \filepath{graph\_hunter\_core/src/sentinel.rs} ---
+        \code{SentinelJsonParser} (también sobrescribe \code{parse\_rows}).
+    \item \filepath{graph\_hunter\_core/src/sysmon.rs} --- parseo
+        de eventos XML de Sysmon.
+    \item \filepath{graph\_hunter\_core/src/cognito.rs} --- parseo
+        de auditoría AWS Cognito.
+    \item \filepath{graph\_hunter\_core/src/iis\_w3c.rs} ---
+        formato de log IIS W3C.
+    \item \filepath{graph\_hunter\_core/src/forti\_analyzer.rs}
+        --- XML FortiAnalyzer con registro de handlers por
+        sección.
+    \item \filepath{graph\_hunter\_core/src/generic.rs} ---
+        CSV/JSON genérico con un \code{FieldMapping} que
+        describe qué columna cumple qué rol semántico.
+    \item \filepath{graph\_hunter\_core/src/csv\_parser.rs} ---
+        helper CSV liviano usado por \code{GenericParser}.
+\end{itemize}
+
+\section{Despacho de parser}
+
+El motor no hace autodetección de formato en el path del matcher;
+en cambio, la fachada de ingesta (\code{graph\_hunter\_api})
+elige un parser por \code{RawChunk.encoding} (Json / Jsonl /
+Parquet) más registro por fuente. La familia \code{preview}
+(\filepath{graph\_hunter\_core/src/preview.rs},
+\filepath{field\_preview.rs}) permite a la UI olfatear un archivo
+y sugerir un mapeo antes de comprometerse con la ingesta.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/parser.rs} --- trait
+\code{LogParser}.
+\end{inthecode}

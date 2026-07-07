@@ -1,0 +1,109 @@
+\chapter{Índice de fuente}
+\label{app:source}
+
+Punteros \code{archivo:línea} para cada algoritmo nombrado en el
+documento.
+
+\section{graph\_hunter\_core/src/}
+
+\begin{itemize}\setlength{\itemsep}{0pt}
+    \item \filepath{anomaly.rs:148} --- \textsc{Anomaly-Finalize}
+    \item \filepath{anomaly.rs:191} --- \textsc{Compute-NC}
+    \item \filepath{anomaly.rs:241} --- \textsc{Score-Path} (v1)
+    \item \filepath{anomaly.rs:351} --- \code{node\_anomaly\_estimate}
+    \item \filepath{analytics.rs:289} --- \code{build\_narrative}
+    \item \filepath{analytics.rs:641} --- \textsc{Compute-Betweenness}
+    \item \filepath{analytics.rs:746} --- \textsc{Temporal-PageRank}
+    \item \filepath{analytics.rs:1096} --- \textsc{Score-And-Paginate}
+    \item \filepath{analytics.rs:1289} --- \code{get\_relation\_schema}
+    \item \filepath{analytics.rs:1342} --- \textsc{Diff-Hunts}
+    \item \filepath{backend/mod.rs} --- \code{GraphRead}, \code{GraphWrite}
+    \item \filepath{backend/in\_memory.rs} --- impls del trait
+    \item \filepath{catalog/mod.rs:105} --- \textsc{Check-Step-Compat}
+    \item \filepath{catalog/loader.rs} --- carga YAML + validación
+    \item \filepath{dsl.rs:47} --- \textsc{Parse-Dsl}
+    \item \filepath{graph.rs:67} --- struct \Graph{}
+    \item \filepath{graph.rs:211} --- \textsc{Add-Entity}
+    \item \filepath{graph.rs:227} --- \textsc{Add-Relation}
+    \item \filepath{graph.rs:437} --- \textsc{Sort-Edges-By-Timestamp}
+    \item \filepath{graph.rs:461} --- \textsc{Search-Temporal-Pattern}
+    \item \filepath{graph.rs:689} --- \textsc{Search-Temporal-Pattern-Simd}
+    \item \filepath{graph.rs:782} --- \textsc{Search-Temporal-Pattern-Smart}
+    \item \filepath{graph.rs:932} --- \textsc{Dfs-Match-Smart}
+    \item \filepath{graph.rs:1121} --- \textsc{Dfs-Match-Iterative}
+    \item \filepath{hypothesis.rs} --- \code{Hypothesis},
+        \code{HypothesisStep}, \code{Predicate}
+    \item \filepath{ingest/batch.rs} --- \code{ParsedBatch}
+    \item \filepath{ingest/channels.rs} --- canales acotados
+    \item \filepath{ingest/enrichment.rs} --- preempción de enriquecimiento
+    \item \filepath{ingest/overflow.rs} --- persistencia de cola
+    \item \filepath{ingest/parser\_task.rs} --- task parser
+    \item \filepath{ingest/source\_poller.rs} --- loop de polling
+    \item \filepath{ingest/writer.rs} --- \code{GraphWriter}
+    \item \filepath{ingest\_adapter.rs} --- \code{IngestAdapter},
+        \code{LogSourceAdapter}
+    \item \filepath{interner.rs:60} --- \textsc{Intern}
+    \item \filepath{interner.rs:74} --- \textsc{Resolve}
+    \item \filepath{metadata\_store.rs} --- append / read de metadatos
+    \item \filepath{relation.rs:83} --- struct \Compact{}
+    \item \filepath{relation.rs:151} --- \textsc{Encode-Ingested-At}
+    \item \filepath{scoring/mod.rs} --- trait \code{ScoreComponent}
+    \item \filepath{scoring/composite.rs} --- \code{CompositeScorer}
+    \item \filepath{scoring/components.rs} --- 5 componentes
+    \item \filepath{simd\_matcher.rs} --- FFI libgraphmatch
+    \item \filepath{simd\_rust.rs} --- \textsc{Intersect-Sorted-U32}
+    \item \filepath{spill.rs:327} --- \textsc{K-Way-Merge} finalize
+    \item \filepath{spill.rs:524} --- \textsc{Get-Edges}
+    \item \filepath{sources/mod.rs:275} --- trait \code{LogSource}
+\end{itemize}
+
+\section{graph\_hunter\_api/src/}
+
+\begin{itemize}\setlength{\itemsep}{0pt}
+    \item \filepath{lib.rs} --- fachada \code{GraphHunterApi},
+        \code{ApiState}
+    \item \filepath{dto/*.rs} --- DTOs request/response
+    \item \filepath{operations/*.rs} --- operaciones por
+        categoría
+    \item \filepath{state/session.rs} --- \code{Session},
+        \code{SessionStore}, \code{SessionHandle}
+    \item \filepath{state/persistence.rs} --- load/save de sesión
+    \item \filepath{state/session\_types.rs} ---
+        \code{SessionFile}, \code{Note}, \code{EntityTag}
+    \item \filepath{tests/parity.rs} --- entry del arnés
+    \item \filepath{tests/parity/dto\_shapes.rs} --- Fase A
+    \item \filepath{tests/parity/scenarios.rs} --- Fase B
+    \item \filepath{tests/parity/fixture.rs} --- constructores de
+        fixture
+\end{itemize}
+
+\section{app/src-tauri/}
+
+\begin{itemize}\setlength{\itemsep}{0pt}
+    \item \filepath{src/commands/} --- módulos de comandos Tauri
+    \item \filepath{src/http\_api.rs} --- handlers HTTP
+    \item \filepath{src/lib.rs} --- registro en el
+        \code{Builder} Tauri
+    \item \filepath{src/tauri\_emitter.rs} ---
+        \code{TauriEventEmitter}
+\end{itemize}
+
+\section{graph-hunter-mcp/}
+
+\begin{itemize}\setlength{\itemsep}{0pt}
+    \item \filepath{src/index.ts} --- todos los handlers de tool
+        MCP
+\end{itemize}
+
+\section{libgraphmatch/}
+
+\begin{itemize}\setlength{\itemsep}{0pt}
+    \item \filepath{include/graphmatch/csr\_graph.hpp} ---
+        \code{CSRTemporalGraph} (add\_node, add\_edge, finalize)
+    \item \filepath{src/simd\_intersect.cpp} --- intersección
+        AVX2 de conjuntos ordenados
+    \item \filepath{src/matcher.cpp} --- entry del matcher SIMD
+    \item \filepath{tests/test\_csr\_graph.cpp} --- tests de
+        límites en C++ (incluyendo la suite add\_edge de
+        boundaries P2-D)
+\end{itemize}

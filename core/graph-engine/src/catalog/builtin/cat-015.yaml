@@ -1,0 +1,6 @@
+id: cat-015
+name: Lateral Movement with Return
+mitre_id: T1021
+description: "Host authenticates user, user executes process, process connects back to the originating host."
+dsl_pattern: "Host -[Auth]-> User -[Execute]-> Process -[Connect]-> Host {k=2}"
+k_simplicity: 2

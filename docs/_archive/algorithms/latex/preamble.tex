@@ -1,0 +1,130 @@
+% ============================================================
+%  preamble.tex — shared preamble for the algorithm reference.
+%  Typographic conventions inspired by the canonical algorithms
+%  textbook: Computer Modern, two-column-friendly math, boxed
+%  pseudocode with line numbers, margin-callout invariants.
+% ============================================================
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{textcomp}
+\usepackage[margin=1.25in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{caption}
+\usepackage[nottoc,notlot,notlof]{tocbibind}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{framed}
+\usepackage[ruled,linesnumbered,noend]{algorithm2e}
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=black,
+    pdftitle={GraphHunter Algorithms Reference},
+    pdfauthor={GraphHunter Team}
+}
+
+% ------------------------------------------------------------
+% Page style — running header with chapter + section, as in
+% the reference algorithms text.
+% ------------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[LE,RO]{\thepage}
+\fancyhead[LO]{\small\itshape\nouppercase{\rightmark}}
+\fancyhead[RE]{\small\itshape\nouppercase{\leftmark}}
+
+% ------------------------------------------------------------
+% Chapter / section styling — restrained, serif, no color.
+% ------------------------------------------------------------
+\titleformat{\chapter}[display]
+  {\normalfont\Huge\bfseries}
+  {\chaptertitlename\ \thechapter}{20pt}{\Huge}
+\titleformat*{\section}{\Large\bfseries}
+\titleformat*{\subsection}{\large\bfseries}
+\titleformat*{\subsubsection}{\normalsize\bfseries\itshape}
+
+% ------------------------------------------------------------
+% Theorem-like environments with custom styles matching the
+% "Theorem / Lemma / Invariant" layout.
+% ------------------------------------------------------------
+\newtheoremstyle{ghtheorem}
+  {12pt}{12pt}{\itshape}{}{\bfseries}{.}{.5em}
+  {\thmname{#1}\thmnumber{ #2}\thmnote{ (#3)}}
+\newtheoremstyle{ghdefinition}
+  {12pt}{12pt}{}{}{\bfseries}{.}{.5em}
+  {\thmname{#1}\thmnumber{ #2}\thmnote{ (#3)}}
+
+\theoremstyle{ghtheorem}
+\newtheorem{theorem}{Theorem}[chapter]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{invariant}[theorem]{Invariant}
+
+\theoremstyle{ghdefinition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{problem}[theorem]{Problem}
+\newtheorem{remark}[theorem]{Remark}
+
+% ------------------------------------------------------------
+% Algorithm2e tuning: numbered lines, bold keywords, en-dash
+% comments — matches the pseudocode convention of the canonical
+% text. Keywords small-caps, variable names italic math.
+% ------------------------------------------------------------
+\SetKwSty{textsc}
+\SetFuncSty{textsc}
+\SetArgSty{textit}
+\SetKwInOut{Input}{Input}
+\SetKwInOut{Output}{Output}
+\SetKwInOut{Invariant}{Invariant}
+\SetKwFor{For}{for}{do}{end for}
+\SetKwFor{While}{while}{do}{end while}
+\SetKw{KwReturn}{return}
+\SetKw{KwAnd}{and}
+\SetKw{KwOr}{or}
+\SetKw{KwNot}{not}
+\SetKwComment{Comment}{\hfill$\triangleright$\ }{}
+\DontPrintSemicolon
+\LinesNumbered
+
+% ------------------------------------------------------------
+% Custom math operators and shorthands used across chapters.
+% ------------------------------------------------------------
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator{\freq}{freq}
+\DeclareMathOperator{\degout}{deg}
+\newcommand{\bigO}{\mathcal{O}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\eps}{\varepsilon}
+\newcommand{\set}[1]{\{#1\}}
+\newcommand{\abs}[1]{\lvert #1 \rvert}
+\newcommand{\card}[1]{\lvert #1 \rvert}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\unit}[1]{\ensuremath{\,\mathrm{#1}}}
+
+% ------------------------------------------------------------
+% "Implementation note" side-block: a lightly framed aside that
+% connects the formal specification to the code that realizes it.
+% ------------------------------------------------------------
+\newenvironment{implnote}[1][Implementation note]{%
+  \par\medskip\noindent
+  \begin{framed}\small
+  \textbf{#1.}\ \ignorespaces
+}{\end{framed}\par\medskip}
+
+% End of preamble.

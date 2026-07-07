@@ -1,0 +1,35 @@
+\chapter{Overflow Persistence}
+\label{ch:overflow}
+
+\begin{note}
+Stub. When the ingest pipeline is cancelled (user closes the
+session, process exit) or when the \code{parsed\_channel} fills
+faster than the writer can drain it, queued \code{ParsedBatch}es
+are persisted to disk instead of being dropped. On the next
+session load the overflow is replayed in order before streaming
+resumes.
+\end{note}
+
+\section{Invariants}
+
+\begin{itemize}
+    \item Every persisted batch retains its \code{source\_id},
+        \code{watermark}, and priority, so resumption advances the
+        source's watermark exactly as a hot-path ingest would.
+    \item Replay is idempotent: the graph is de-duplicating by
+        $(source, dest, rel, timestamp)$ at
+        \code{GraphWriter::insert\_triples\_chunk}, so the same
+        batch applied twice has the same effect as once.
+\end{itemize}
+
+\section{File format}
+
+Overflow batches are stored under the session directory as JSON
+files. The format is stable across restarts and deliberately
+human-readable: an operator can inspect queued work with
+\code{jq} without any tooling beyond a text editor.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/ingest/overflow.rs} ---
+persistence and replay.
+\end{inthecode}

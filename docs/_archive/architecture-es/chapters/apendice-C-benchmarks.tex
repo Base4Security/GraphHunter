@@ -1,0 +1,58 @@
+\chapter{Benchmarks}
+\label{app:bench}
+
+Dos suites de benchmarks Criterion viven en
+\filepath{graph\_hunter\_core/benches/}:
+
+\begin{itemize}
+    \item \filepath{hunt\_latency.rs} --- timing end-to-end de
+        \code{search\_temporal\_pattern} sobre un grafo
+        sintético. Se usa como portón de ``$\leq 5\%$ de
+        regresión'' en los planes de refactor P1/P2.
+    \item \filepath{dedup\_throughput.rs} --- timing de ingesta
+        del \code{SpillableEdgeStore}. Valida el claim de RAM
+        $\Ord{k}$ del merge $k$-way sobre una muestra de 2M
+        records (delta de 0.23~MB vs los $\sim$92~MB del
+        approach basado en Vec anterior).
+\end{itemize}
+
+\section{Ejecución}
+
+\begin{verbatim}
+cd graph_hunter_core
+cargo bench --bench hunt_latency
+cargo bench --bench dedup_throughput
+\end{verbatim}
+
+El output default de Criterion aterriza en
+\filepath{graph\_hunter\_core/target/criterion/} como reportes
+HTML.
+
+\section{Baseline actual (ilustrativo)}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Benchmark} & \textbf{Resultado} & \textbf{Notas} \\
+\midrule
+\code{hunt\_latency} 2-pasos, 10K aristas & $\sim$ 200~\textmu s & Rust escalar \\
+\code{hunt\_latency} 2-pasos, 10K aristas, SIMD & $\sim$ 70~\textmu s & libgraphmatch \\
+\code{dedup\_throughput} 2M records & $\sim$ 1.5~s & modo spill \\
+\bottomrule
+\end{tabular}
+\caption{Números de benchmark ilustrativos en un CPU
+laptop-class (AMD Ryzen 7 5800H). Rerunnear localmente para
+números al día; los valores reales varían por hardware y flags
+de build.}
+\end{table}
+
+\section{Comparación three-way SIMD (planeada)}
+
+El follow-up P2-D agrega una tercera columna a la tabla de
+hunt-latency: \code{simd\_rust} puro-Rust. La comparación
+debería mostrar (a) escalar, (b) FFI libgraphmatch, (c)
+intrínsecos Rust. La expectativa es que los intrínsecos Rust
+alcancen $\sim$70--80\,\% del peak libgraphmatch, momento en el
+cual el beneficio operacional de sacar el toolchain C++ domina.

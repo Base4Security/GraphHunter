@@ -1,0 +1,6 @@
+id: cat-016
+name: "Fileless Loop (Process re-exec)"
+mitre_id: T1059
+description: "Process spawns child process that executes another process, forming a fileless execution loop."
+dsl_pattern: "Process -[Spawn]-> Process -[Execute]-> Process {k=2}"
+k_simplicity: 2

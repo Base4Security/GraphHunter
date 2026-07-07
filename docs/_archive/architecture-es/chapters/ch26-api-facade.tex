@@ -1,0 +1,57 @@
+\chapter{La fachada canónica de API}
+\label{ch:api-facade}
+
+\begin{note}
+Stub. \code{GraphHunterApi} es el único objeto del que cada
+transport (Tauri, HTTP, MCP) mantiene un \code{Arc}. Toda la
+gestión de sesión, cache de hunt, conversación AI, streaming
+Sentinel, scorer GNN y estado GeoIP vive dentro de \code{ApiState}.
+\end{note}
+
+\section{Estado}
+
+\begin{lstlisting}[style=rust]
+pub struct GraphHunterApi(Arc<ApiState>);
+
+struct ApiState {
+    sessions:           SessionStore,
+    hunt_cache:         Arc<RwLock<Vec<Vec<String>>>>,
+    npu_scorer:         Arc<RwLock<Option<NpuScorer>>>,
+    geoip_provider:     Arc<Mutex<Option<MaxMindProvider>>>,
+    http_geoip_client:  Arc<Mutex<Option<Arc<dyn HttpClient>>>>,
+    sentinel_connector: Arc<RwLock<Option<SentinelConnectorHandle>>>,
+    ai_config:          Arc<RwLock<Option<ProviderConfig>>>,
+    emitter:            Arc<dyn EventEmitter>,
+    // ... 8 campos mas
+}
+\end{lstlisting}
+
+La fachada la introdujo el refactor P1. Antes, cada transport
+sostenía su propio estado con forma distinta; con la fachada en
+su lugar, Tauri / HTTP / MCP son estrictamente capas de
+delegación.
+
+\section{Módulo de operaciones}
+
+Cada método de \code{GraphHunterApi} se define en
+\filepath{graph\_hunter\_api/src/operations/*.rs}, un archivo por
+categoría (analytics, anomaly, dataset, dsl, enrichment,
+entity, export, geoip, graph\_ops, hunt, ingestion, sentinel,
+session, sigma, ticket, ai). Un método acepta un request DTO,
+despacha la sesión si hace falta, llama al motor y devuelve un
+response DTO.
+
+\section{Handle de sesión}
+
+\code{SessionHandle(String)} es un ID opaco de sesión; los
+requests o lo llevan (target explícito) o lo omiten (usar la
+sesión actual). La fachada resuelve el handle en un solo lugar
+(\code{SessionStore::resolve}) así toda operación hereda la
+misma lógica de precedencia.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_api/src/lib.rs} --- fachada
+\code{GraphHunterApi}, \code{ApiState}.\\
+\filepath{graph\_hunter\_api/src/state/session.rs} ---
+\code{Session}, \code{SessionHandle}, \code{SessionStore}.
+\end{inthecode}

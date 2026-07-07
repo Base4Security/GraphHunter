@@ -1,0 +1,72 @@
+\chapter{Arnés de paridad}
+\label{ch:parity-harness}
+
+\begin{note}
+Stub. El arnés vive en
+\filepath{graph\_hunter\_api/tests/parity*.rs}. Dos fases se
+entregan hoy (A: forma de DTO; B: escenario); una tercera
+cubriendo el runtime HTTP + Tauri queda diferida.
+\end{note}
+
+\section{Fase A --- forma de DTO}
+
+Para cada par de DTO request/response, el arnés serializa un
+valor armado a mano a JSON y asevera que las claves top-level
+del objeto coincidan exactamente con un conjunto esperado. Un
+campo que falta o un rename levanta un error claro en test time.
+
+El helper:
+
+\begin{lstlisting}[style=rust]
+fn assert_keys<T: Serialize>(value: &T, expected: &[&str]) {
+    let v = serde_json::to_value(value).unwrap();
+    let actual: BTreeSet<_> = v.as_object().unwrap()
+        .keys().map(|s| s.as_str()).collect();
+    let want: BTreeSet<_> = expected.iter().copied().collect();
+    assert_eq!(actual, want);
+}
+\end{lstlisting}
+
+\section{Fase B --- escenario}
+
+Los escenarios end-to-end ejercitan secuencias ordenadas de
+operaciones contra la fachada directamente (no a través de un
+transport). El arnés construye una sesión fixture con un
+mini-grafo seed (Alice + Bob autenticándose a web-01, web-01
+ejecutando cmd.exe), corre una secuencia de llamadas de API y
+asevera estado observable en cada paso.
+
+Fixtures:
+\begin{itemize}
+    \item \code{fresh\_api\_with\_session()} --- API fresca vacía
+        más una sesión única.
+    \item \code{fresh\_api\_with\_seeded\_session()} --- el grafo
+        seed de 4 entidades / 3 aristas.
+    \item \code{tag}, \code{note}, \code{parse} --- helpers de
+        conveniencia para que los escenarios se lean al nivel
+        de operación.
+\end{itemize}
+
+Aserciones de muestra:
+\code{run\_hunt\_populates\_cache\_and\_pages\_back} (un run
+completo $\to$ round-trip de page-back matchea),
+\code{diff\_hunts\_rejects\_inverted\_window} (el invariante del
+Capítulo~\ref{ch:hunt-diff}),
+\code{export\_iocs\_sentinel\_watchlist\_csv\_contains\_tagged\_ips\_only}
+(el formato de export).
+
+\section{Fase C diferida}
+
+Un arnés runtime HTTP + Tauri completo (levantar axum en el
+test, cablear un mock de IPC Tauri) está marcado como follow-up.
+Fase A + B juntas atrapan los drifts de forma y semántica que
+habrían roto la paridad entre transports; Fase C agregaría
+round-trips a nivel de wire.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_api/tests/parity.rs} --- entry del arnés.\\
+\filepath{graph\_hunter\_api/tests/parity/fixture.rs} ---
+constructores de fixtures.\\
+\filepath{graph\_hunter\_api/tests/parity/dto\_shapes.rs} --- Fase A.\\
+\filepath{graph\_hunter\_api/tests/parity/scenarios.rs} --- Fase B.
+\end{inthecode}

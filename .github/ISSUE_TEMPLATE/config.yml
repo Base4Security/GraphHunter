@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Reporte de Seguridad
+    url: https://github.com/lsotomayorb4/Graph-Hunter/security/advisories/new
+    about: Vulnerabilidades de seguridad — usar GitHub Security Advisories, NO issue publico (ver SECURITY.md)
+  - name: Pregunta / Discusion
+    url: https://github.com/lsotomayorb4/Graph-Hunter/discussions
+    about: Para preguntas generales, prefiere Discussions sobre issues

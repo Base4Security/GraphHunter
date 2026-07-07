@@ -1,0 +1,28 @@
+{
+  "name": "@graphhunter/mcp",
+  "version": "2.0.0",
+  "description": "MCP server exposing GraphHunter tools — v2 orthogonal catalog (37 tools, namespaced). Hard-cut from v1; old flat names removed.",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "bin": {
+    "graph-hunter-mcp": "dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "start": "node dist/src/index.js",
+    "dev": "tsc && node dist/src/index.js",
+    "test:contract": "node --test dist/tests/contract/*.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

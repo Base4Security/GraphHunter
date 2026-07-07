@@ -1,0 +1,6 @@
+id: cat-013
+name: C2 Callback Loop
+mitre_id: T1071
+description: "Process resolves domain, connects to C2 IP, and callbacks to the originating process — forming a cycle."
+dsl_pattern: "Process -[DNS]-> Domain -[Connect]-> IP -[Connect]-> Process {k=2}"
+k_simplicity: 2

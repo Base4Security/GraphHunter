@@ -1,0 +1,6 @@
+id: cat-029
+name: Remote Scheduled Task
+mitre_id: T1053.005
+description: "User authenticates to a host, creates a scheduled Task, and the Task triggers a Process — cross-host persistence installed over the network."
+dsl_pattern: "User -[Auth]-> Host -[Create]-> Task -[Execute]-> Process"
+k_simplicity: 1

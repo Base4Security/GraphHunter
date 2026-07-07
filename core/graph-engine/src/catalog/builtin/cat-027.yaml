@@ -1,0 +1,6 @@
+id: cat-027
+name: BYOVD Driver Load
+mitre_id: T1014
+description: "A process loads a driver from an unusual path or with an unknown signer — Bring-Your-Own-Vulnerable-Driver precursor to EDR bypass."
+dsl_pattern: 'Process -[Load]-> File {path~".sys"}'
+k_simplicity: 1

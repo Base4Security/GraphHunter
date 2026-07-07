@@ -1,0 +1,6 @@
+id: cat-012
+name: Multi-stage Lateral Movement
+mitre_id: T1021
+description: "Full lateral movement chain: authentication, execution, file write, spawn."
+dsl_pattern: "User -[Auth]-> Host -[Execute]-> Process -[Write]-> File"
+k_simplicity: 1

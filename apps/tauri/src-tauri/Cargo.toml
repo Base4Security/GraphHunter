@@ -1,0 +1,107 @@
+[package]
+name = "graph-hunter-app"
+version = "1.0.0"
+edition = "2024"
+
+[lib]
+name = "graph_hunter_app_lib"
+# Removed "staticlib" from crate-type (was previously ["staticlib",
+# "cdylib", "rlib"]). Tauri v2 only needs "cdylib" (for the runtime
+# entry point) and "rlib" (for Rust tests / the main binary's link).
+# The "staticlib" output was producing a ~1.5 GB .lib file on every
+# build — a disk-pressure foot-gun on constrained dev machines. Add
+# it back if a non-Rust consumer ever needs to statically link the
+# library.
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "5"
+memmap2 = "0.9"
+graph_hunter_core = { path = "../../../core/graph-engine", features = ["geoip"] }
+# GNN inference lives in its own crate per F2.14 (see core/gnn). Tauri
+# activates `ml-scoring` here so NpuScorer + ort are pulled into the
+# build; platform/api's own `ml-scoring` feature forwards into this
+# same crate.
+graph_hunter_gnn = { path = "../../../core/gnn", features = ["ml-scoring"] }
+graph_hunter_cli = { path = "../../cli" }
+# `local-llm-candle` + `xgrammar` are default-on per the
+# plug-and-play invariant: the LLM-as-compiler path must work the
+# moment the user runs `npm run tauri dev`, with the bundled GGUF
+# resolved by `graph_hunter_local_llm::resolve_model_path`. Override
+# at runtime with `GRAPHHUNTER_LLM_INGEST=0` (drop the dispatcher)
+# or `GRAPHHUNTER_LOCAL_MODEL_PATH=/some/other.gguf` (point at a
+# different model). Build-time opt-out is `--no-default-features
+# --features custom-protocol`.
+graph_hunter_api = { path = "../../../platform/api", features = ["ml-scoring", "local-llm-candle", "xgrammar"] }
+# Concrete LogParser impls lifted out of core per F2.10 (Cognito,
+# FortiAnalyzer, IIS W3C). `extract_fields_header` now lives here.
+graph_hunter_parsers = { path = "../../../platform/parsers" }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+dotenvy = "0.15"
+axum = { version = "0.7", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors"] }
+evtx = { version = "0.11", default-features = false }
+memchr = "2"
+rayon = "1"
+rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Heavy-logs #4: process and host memory probe for the soft-ceiling
+# telemetry. `sysinfo` is the Rust ecosystem default; we pull only
+# the system+process feature so the dep stays light and doesn't drag
+# in disk/network monitors we don't need.
+sysinfo = { version = "0.32", default-features = false, features = ["system", "windows"] }
+# mimalloc is the global allocator for the desktop binary (declared in
+# main.rs). The cdylib path used by Tauri's mobile/runtime targets keeps
+# the host allocator — only the binary's `#[global_allocator]` is active.
+mimalloc = { version = "0.1", default-features = false }
+
+# Azure streaming smoke test (Phase 8 frontend validation)
+# These are transitive through graph_hunter_core; declared explicitly so
+# azure_streaming_smoke.rs can use them by name. Small / already-compiled.
+async-trait = "0.1"
+futures = "0.3"
+bytes = "1"
+tempfile = "3"
+subtle = "2"
+
+# Candle's quantized Phi-3 matmul + the gemm/half stack are unusably
+# slow in unoptimized debug builds — `tauri dev` was hanging the GUI
+# for 3+ minutes per inference. -O2 wasn't enough; -O3 matches what
+# the `--release` smoke test gets (~10s for one Phi-3 inference).
+# Own-crate code stays at debug opt-level for fast iterative
+# recompile. First build after this change recompiles every dep at
+# -O3 (~5 min one-shot, then cached).
+[profile.dev.package."*"]
+opt-level = 3
+
+# Phase I: workspace member crates aren't covered by the `"*"` wildcard
+# above — Cargo treats path-deps as "local" and leaves them at debug
+# opt-level=0. The per-token decode loop in
+# `graph_hunter_local_llm::candle::CandleBackend::infer` (Tensor
+# allocations, `to_vec1`, `mask_logits`, `consume`) was running
+# unoptimized while its matmul deps were fast, dragging one Phi-3
+# inference to ~9 minutes wall on a Ryzen 5 PRO 5650U. Optimizing the
+# three crates on the inference path drops it to ~10-20s, within ~2x
+# of `--release`. Own-crate iterative recompile only slows when these
+# specific crates change.
+[profile.dev.package.graph_hunter_local_llm]
+opt-level = 3
+[profile.dev.package.graph_hunter_constrained_decode]
+opt-level = 3
+[profile.dev.package.graph_hunter_api]
+opt-level = 3
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

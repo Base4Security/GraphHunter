@@ -1,0 +1,6 @@
+id: cat-018
+name: AAD Reconnaissance via PowerShell
+mitre_id: T1087.004
+description: "User authenticates from an Azure AD PowerShell client — frequently the first stage of graph-API directory enumeration."
+dsl_pattern: 'User -[Auth {app~"PowerShell"}]-> IP'
+k_simplicity: 1

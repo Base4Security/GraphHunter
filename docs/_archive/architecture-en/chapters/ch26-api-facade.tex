@@ -1,0 +1,55 @@
+\chapter{The Canonical API Façade}
+\label{ch:api-facade}
+
+\begin{note}
+Stub. \code{GraphHunterApi} is the single object every transport
+(Tauri, HTTP, MCP) holds an \code{Arc} to. All session management,
+hunt cache, AI conversation, Sentinel streaming, GNN scorer, and
+GeoIP state lives inside \code{ApiState}.
+\end{note}
+
+\section{State}
+
+\begin{lstlisting}[style=rust]
+pub struct GraphHunterApi(Arc<ApiState>);
+
+struct ApiState {
+    sessions:           SessionStore,
+    hunt_cache:         Arc<RwLock<Vec<Vec<String>>>>,
+    npu_scorer:         Arc<RwLock<Option<NpuScorer>>>,
+    geoip_provider:     Arc<Mutex<Option<MaxMindProvider>>>,
+    http_geoip_client:  Arc<Mutex<Option<Arc<dyn HttpClient>>>>,
+    sentinel_connector: Arc<RwLock<Option<SentinelConnectorHandle>>>,
+    ai_config:          Arc<RwLock<Option<ProviderConfig>>>,
+    emitter:            Arc<dyn EventEmitter>,
+    // ... 8 more fields
+}
+\end{lstlisting}
+
+The façade was introduced by the P1 refactor. Before it, each
+transport held its own state in a different shape; with the façade
+in place, Tauri / HTTP / MCP are strictly delegation layers.
+
+\section{Operations module}
+
+Each method on \code{GraphHunterApi} is defined in
+\filepath{graph\_hunter\_api/src/operations/*.rs}, one file per
+category (analytics, anomaly, dataset, dsl, enrichment, entity,
+export, geoip, graph\_ops, hunt, ingestion, sentinel, session,
+sigma, ticket, ai). A method accepts a request DTO, dispatches the
+session if needed, calls the engine, and returns a response DTO.
+
+\section{Session handle}
+
+\code{SessionHandle(String)} is an opaque session ID; requests
+either carry one (explicit target) or omit it (use current
+session). The façade resolves the handle in one place
+(\code{SessionStore::resolve}) so every operation inherits the
+same precedence logic.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_api/src/lib.rs} --- \code{GraphHunterApi}
+façade, \code{ApiState}.\\
+\filepath{graph\_hunter\_api/src/state/session.rs} ---
+\code{Session}, \code{SessionHandle}, \code{SessionStore}.
+\end{inthecode}

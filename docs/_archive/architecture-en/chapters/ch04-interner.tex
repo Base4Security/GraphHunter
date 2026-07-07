@@ -1,0 +1,128 @@
+\chapter{The String Interner}
+\label{ch:interner}
+
+Entity identifiers in ingested logs are long and massively
+repetitive --- a single \code{SecurityEvent} table in Sentinel will
+mention the same host name hundreds of thousands of times. Storing
+those strings as owned \code{String} inside \code{CompactRelation}
+would balloon the edge list. The engine side-steps this with a
+bidirectional interner that maps each unique string to a 32-bit
+handle \StrId{}.
+
+\section{Structure}
+
+\begin{figure}[h]
+\centering
+\begin{lstlisting}[style=rust]
+pub struct StrId(u32);
+
+pub struct StringInterner {
+    map:     HashMap<Arc<str>, StrId>,  // reverse lookup
+    strings: Vec<Arc<str>>,             // forward lookup by index
+}
+\end{lstlisting}
+\end{figure}
+
+Both containers hold \code{Arc<str>} pointing at the same
+heap-allocated slice, so each intern costs exactly one allocation
+(the \code{Arc::from(\&str)} inside the \code{intern} path) plus two
+refcount bumps. The alternative --- \code{String} in the map, plain
+\code{String} or a second copy in the vector --- would double the
+allocator pressure.
+
+\begin{invariant}[Intern bijection]
+For every index $i \in [0, \code{strings.len()})$ we have
+\code{map[strings[i]] == StrId(i as u32)}. The two containers are
+populated atomically inside \code{intern}; a panic during insertion
+cannot leave them out of sync because a half-inserted entry is
+not visible to subsequent lookups (the \code{map.insert} is the
+last action on the happy path).
+\end{invariant}
+
+\section{Algorithms}
+
+\begin{algorithm}
+\caption{\textsc{Intern}}\label{alg:intern}
+\KwIn{interner $I$, string $s$}
+\KwOut{\StrId{} assigned to $s$}
+\If{$s \in I.\text{map}$}{\Return $I.\text{map}[s]$\;}
+$\text{id} \gets I.\text{strings.len()}$ as \code{u32}\;
+$\text{arc} \gets \code{Arc::from}(s)$\Comment*[r]{1 heap alloc}
+\code{I.strings.push(arc.clone())}\Comment*[r]{refcount++ }
+\code{I.map.insert(arc, StrId(id))}\Comment*[r]{refcount++ }
+\Return \code{StrId(id)}\;
+\end{algorithm}
+
+\begin{algorithm}
+\caption{\textsc{Resolve}}\label{alg:resolve}
+\KwIn{interner $I$, \StrId{} $x$}
+\KwOut{$\&$\code{str} for $x$, or $\bot$ if out-of-range}
+\If{$x.0 \geq I.\text{strings.len()}$}{\Return $\bot$\;}
+\Return $\&* I.\text{strings}[x.0]$\;
+\end{algorithm}
+
+\begin{complexity}
+\textsc{Intern} is $\Ord{1}$ amortized; the \code{HashMap} uses
+ahash which hits very few collisions on real entity IDs, and the
+\code{Vec::push} amortises. The heap allocation occurs on the miss
+path only. \textsc{Resolve} is $\Thet{1}$: a bounds check and a
+pointer deref. Space consumption is
+\[
+    \Thet{\sum_{s \in \mathcal{U}} |s|} + \Thet{|\mathcal{U}|}
+\]
+where $\mathcal{U}$ is the set of unique strings --- the first
+term is the heap content, the second is the $\Ord{1}$-bytes-per-entry
+overhead of the two containers.
+\end{complexity}
+
+\section{Metrics}
+
+The engine exposes interner memory usage via
+\code{StringInterner::metrics()}:
+
+\begin{lstlisting}[style=rust]
+pub struct InternerMetrics {
+    pub unique_strings: usize,
+    pub approx_bytes:   usize,   // sum of Arc<str>.len()
+}
+\end{lstlisting}
+
+These are the trigger metrics for the deferred \emph{generational}
+or \emph{partitioned} back-ends (Chapter~\ref{ch:interner-trait}):
+when \code{unique\_strings} crosses $\sim$$10^7$, or when a
+long-running streaming session's \code{approx\_bytes} grows
+monotonically past a few hundred MB, the operator knows to switch.
+
+\section{The trait seam}
+
+The P2-F refactor introduced \code{StringInternerBackend} as the
+swap-in point:
+
+\begin{lstlisting}[style=rust]
+pub trait StringInternerBackend {
+    fn intern(&mut self, s: &str) -> StrId;
+    fn resolve(&self, id: StrId) -> &str;
+    fn try_resolve(&self, id: StrId) -> Option<&str>;
+    fn get(&self, s: &str) -> Option<StrId>;
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool;
+    fn reserve(&mut self, additional: usize);
+    fn metrics(&self) -> InternerMetrics;
+}
+\end{lstlisting}
+
+\code{StringInterner} is the only impl today. When the engine
+acquires evidence that the global-interner assumption breaks
+(multi-tenant process, 24$\times$7 streaming past $10^7$ unique
+strings), a \code{GenerationalInterner} or
+\code{PartitionedInterner} drops behind the same trait; the 121+
+existing call sites keep compiling because they hold a concrete
+\code{StringInterner} and the inherent \code{metrics()} method
+delegates to the trait body.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/interner.rs:1} --- struct + trait
++ metrics.\\
+\filepath{graph\_hunter\_core/src/interner.rs:115} --- unit tests
+pinning the bijection.
+\end{inthecode}

@@ -1,0 +1,79 @@
+\chapter{DSL Parsing}
+\label{ch:dsl}
+
+The DSL is a small arrow-chain grammar designed to be read aloud
+(``User authenticates to a Host and executes a Process'') and to
+fit on one line of a UI input. The parser is a hand-written
+single-pass recursive-descent walker --- no grammar file, no
+parser-generator dependency.
+
+\section{Grammar}
+
+\begin{verbatim}
+hypothesis      := step ( step )* modifier*
+step            := entity_type arrow
+arrow           := "-[" rel_type predicates? "]->" entity_type binding?
+                   predicates? dest_predicates?
+entity_type     := ident ( "(" binding ")" )? | "*"
+rel_type        := ident | "*"
+predicates      := "{" predicate ( "," predicate )* "}"
+predicate       := key ("=" | "~" | " in ") (literal | list)
+modifier        := having | within | k_clause
+having          := "HAVING" agg_op "(" agg_arg ")" cmp literal
+within          := "WITHIN" int time_unit
+k_clause        := "{k=" int "}"
+\end{verbatim}
+
+Every token type is recognised by a character-class probe, so the
+parser performs exactly one pass over the input string. There is no
+backtracking; the grammar is LL(1) after lexer-level lookahead for
+predicates.
+
+\section{Algorithm}
+
+\begin{algorithm}
+\caption{\textsc{Parse-Dsl}}\label{alg:parse-dsl}
+\KwIn{string $\texttt{src}$, optional hypothesis name $\texttt{nm}$}
+\KwOut{\code{Hypothesis} or \code{DslError}}
+$\text{toks} \gets $ \textsc{Tokenize}($\texttt{src}$) \Comment*[r]{\Ord{|\texttt{src}|}}
+$\text{steps} \gets \emptyset$\;
+$\sigma_0 \gets $ \textsc{Parse-Entity-Type}(toks)\;
+\While{toks has remaining ``$\to$''}{
+    $\rho, P^{\text{edge}} \gets $ \textsc{Parse-Edge-Spec}(toks)\;
+    $\sigma_i \gets $ \textsc{Parse-Entity-Type}(toks)\;
+    $P^{\text{dst}} \gets $ \textsc{Parse-Dest-Predicates}(toks)\;
+    push \code{HypothesisStep}$(\sigma_{i-1}, \rho, \sigma_i, P^{\text{edge}}, P^{\text{dst}})$ onto steps\;
+}
+$k \gets$ parse optional $\texttt{\{k=N\}}$, default 1\;
+$A \gets$ \textsc{Parse-Having}(toks)\;
+$w \gets$ \textsc{Parse-Within}(toks)\;
+\Return \code{Hypothesis}(nm, steps, $k$, $A$, $w$)\;
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{|\texttt{src}|}$ time and space. Every token is
+visited exactly once; the \code{HashMap}-based predicate lists are
+$\Ord{1}$ to populate. Space is linear in the parsed chain length
+plus the predicate literals.
+\end{complexity}
+
+\begin{theorem}[Parser determinism]
+\textsc{Parse-Dsl} is deterministic: for any fixed input string, it
+produces the same \code{Hypothesis} or the same \code{DslError} on
+every invocation.
+\end{theorem}
+
+\begin{proof}
+No hash-map iteration order, no random values, no calls to the
+system clock anywhere in the parser. All data structures built
+during parsing (the final \code{edge\_predicates} and
+\code{dest\_predicates} on each step) preserve insertion order.
+\qed
+\end{proof}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/dsl.rs:47} ---
+\code{parse\_dsl} entry point.\\
+\filepath{graph\_hunter\_core/src/dsl.rs} --- full grammar
+implementation (private helpers).
+\end{inthecode}

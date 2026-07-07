@@ -1,0 +1,63 @@
+\chapter{Parsers}
+\label{ch:parsers}
+
+\begin{note}
+Stub. The \code{LogParser} trait and its format-specific
+implementations (Sentinel JSON, Sysmon XML, Cognito, IIS W3C,
+FortiAnalyzer XML, generic CSV/JSON with field mappings) deserve a
+chapter each; this section lists the seam and the known
+implementations.
+\end{note}
+
+\section{Trait}
+
+\begin{lstlisting}[style=rust]
+pub trait LogParser: Send + Sync {
+    fn parse(&self, data: &str) -> Vec<ParsedTriple>;
+    fn parse_rows(&self, rows: &[serde_json::Value]) -> Vec<ParsedTriple> {
+        // Default: serialize rows back to a JSON array and delegate.
+    }
+}
+
+pub type ParsedTriple = (Entity, Relation, Entity);
+\end{lstlisting}
+
+The \code{parse\_rows} override exists to short-circuit the
+``JSON $\to$ string $\to$ JSON'' round-trip for parsers that
+already consume the \code{serde\_json::Value} shape (notably
+\code{SentinelJsonParser}).
+
+\section{Implementations}
+
+\begin{itemize}
+    \item \filepath{graph\_hunter\_core/src/sentinel.rs} ---
+        \code{SentinelJsonParser} (also overrides \code{parse\_rows}).
+    \item \filepath{graph\_hunter\_core/src/sysmon.rs} --- Sysmon
+        XML event parsing.
+    \item \filepath{graph\_hunter\_core/src/cognito.rs} --- AWS
+        Cognito audit parsing.
+    \item \filepath{graph\_hunter\_core/src/iis\_w3c.rs} --- IIS
+        W3C log format.
+    \item \filepath{graph\_hunter\_core/src/forti\_analyzer.rs} ---
+        FortiAnalyzer XML with per-handler registry.
+    \item \filepath{graph\_hunter\_core/src/generic.rs} --- generic
+        CSV/JSON with a \code{FieldMapping} describing which column
+        is which semantic role.
+    \item \filepath{graph\_hunter\_core/src/csv\_parser.rs} ---
+        lightweight CSV helper used by \code{GenericParser}.
+\end{itemize}
+
+\section{Parser dispatch}
+
+The engine does not do format auto-detection in the matcher path;
+instead, the ingest façade (\code{graph\_hunter\_api}) picks a
+parser per \code{RawChunk.encoding} (Json / Jsonl / Parquet) plus
+per-source registration. The \code{preview} family
+(\filepath{graph\_hunter\_core/src/preview.rs},
+\filepath{field\_preview.rs}) lets the UI sniff a file and suggest
+a mapping before committing to ingest.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/parser.rs} --- \code{LogParser}
+trait.
+\end{inthecode}

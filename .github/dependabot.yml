@@ -1,0 +1,190 @@
+version: 2
+updates:
+  # Rust crates - 14 separate Cargo.toml manifests (no [workspace] root).
+  # Use lockfile-only so dependabot does not fight with manual CVE bumps (e.g. PR #74).
+  - package-ecosystem: cargo
+    directory: /apps/cli
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /apps/tauri/src-tauri
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /core/gnn
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /core/graph-engine
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /core/matcher-ffi
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /platform/api
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /platform/canonical
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /platform/constrained-decode
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /platform/dsl
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /platform/local-llm
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /platform/parsers
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /platform/siem
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /platform/sources
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directory: /platform/vrl
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  # npm - Tauri frontend
+  - package-ecosystem: npm
+    directory: /apps/tauri
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3

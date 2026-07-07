@@ -1,0 +1,94 @@
+// VRL subset grammar shipped by GraphHunter's deterministic compiler
+// (graph_hunter_vrl::field_config_to_vrl). Format: Lark, the syntax
+// llguidance loads natively.
+//
+// The grammar is deliberately small — the goal is that the agentic
+// LLM, when running with constrained decoding, cannot emit anything
+// outside this subset. Anything that parses here is also accepted by
+// VrlSubsetValidator (see grammar_roundtrip test).
+
+start: line+
+
+line: blank
+    | comment
+    | statement
+    | block
+    | return_
+
+blank: NEWLINE
+comment: /#[^\n]*/ NEWLINE
+return_: "." NEWLINE
+
+// ---- statements (single line, depth 0 or inside an `if exists` block)
+
+statement: assignment NEWLINE
+         | del_call NEWLINE
+
+del_call: "del(" field_access ")"
+
+assignment: lhs "=" rhs
+
+lhs: ROOT_LHS
+   | "."
+   | ".canonical"
+   | ".canonical.entities"
+   | ".canonical.metadata"
+   | ".canonical.timestamp"
+   | metadata_field
+
+ROOT_LHS: "."
+metadata_field: ".canonical.metadata." (IDENT_PATH | QUOTED)
+
+rhs: empty_object
+   | empty_array
+   | null_lit
+   | string_literal
+   | parse_json_message
+   | push_entity
+   | parse_timestamp_form
+   | field_access
+   | string_coerce_call
+
+empty_object: "{}"
+empty_array: "[]"
+null_lit: "null"
+
+parse_json_message: "parse_json!(string!(.message))"
+
+// `push(.canonical.entities, { ... })` — the inner object is treated
+// opaquely; the deterministic compiler emits a vetted template and the
+// LLM can only add string-valued fields. Outer-shape check is what
+// keeps things safe — same rationale as VrlSubsetValidator.
+push_entity: "push(.canonical.entities, {" PUSH_INNER "})"
+PUSH_INNER: /[^{}]*(?:\{[^{}]*\}[^{}]*)*/
+
+// `parse_timestamp(<args>) ?? null` — args is opaque (any field access
+// + format string); the `?? null` tail is mandatory.
+parse_timestamp_form: "parse_timestamp(" PARSE_TS_ARGS ") ?? null"
+PARSE_TS_ARGS: /[^()]+/
+
+string_coerce_call: COERCE_FN "(" field_access ")"
+COERCE_FN: "to_string!" | "string!" | "downcase!" | "upcase!"
+
+// ---- if-blocks: single statement form `if exists(<field>) { <stmts> }`
+
+block: "if exists(" field_access ") {" NEWLINE inner_line+ "}" NEWLINE
+inner_line: blank
+          | comment
+          | statement
+
+// ---- field access
+
+field_access: "." IDENT_PATH?
+            | "." QUOTED
+            | "." IDENT_PATH "." QUOTED   // mixed: .a.b."c d"
+
+IDENT_PATH: /[A-Za-z_][A-Za-z0-9_.]*/
+QUOTED: /"[^"]*"/
+
+// ---- string literal (no escapes, no backticks — keeps decode simple)
+
+string_literal: /"[^"`]*"/
+
+%import common.NEWLINE
+%ignore /[ \t]+/

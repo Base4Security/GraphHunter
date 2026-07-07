@@ -1,0 +1,110 @@
+\chapter{Notation and Preliminaries}
+\label{ch:notation}
+
+This chapter fixes the notation used throughout the document. The
+conventions are CLRS-compatible where possible.
+
+\section{Graphs}
+
+\begin{definition}[Temporal directed multigraph]
+A \emph{temporal directed multigraph} is a tuple $G = (V, E, \tau,
+\ell_V, \ell_E)$ where $V$ is a finite set of vertices, $E \subseteq
+V \times V \times \mathbb{N}$ is a multiset of directed edges (the
+third component is a unique edge identifier, so multiple edges
+between the same pair are distinct elements of $E$), $\tau : E \to
+\mathbb{Z}$ assigns each edge an event-time timestamp, $\ell_V : V
+\to \mathcal{T}_V$ labels vertices with an entity type, and $\ell_E
+: E \to \mathcal{T}_E$ labels edges with a relation type.
+\end{definition}
+
+We will write $|V| = n$ and $|E| = m$. The out-neighbourhood of a
+vertex $v \in V$ at edge time $[t_0, t_1]$ is
+\[
+    N^{+}_{[t_0, t_1]}(v) = \{\, u \in V \mid \exists\, e = (v, u,
+    k) \in E : \tau(e) \in [t_0, t_1]\,\}.
+\]
+The in-neighbourhood $N^{-}_{[t_0, t_1]}(v)$ is defined symmetrically.
+When the time window is the full domain we drop the subscript and
+just write $N^{+}(v)$, $N^{-}(v)$.
+
+\begin{definition}[MVCC extension]
+The \emph{MVCC extension} of $G$ adds a second timestamp
+$\iota : E \to \mathbb{Z}$ recording when each edge was inserted
+into the graph. The engine stores $\iota$ as a compact delta
+against a fixed epoch; see Chapter~\ref{ch:compact-relation}. A
+snapshot query at instant $s$ considers only the subgraph
+\[
+    G|_{s} = (V, \{\,e \in E \mid \iota(e) \leq s\,\}, \tau, \ell_V,
+    \ell_E),
+\]
+i.e.\ ``what the graph knew at time $s$.''
+\end{definition}
+
+\section{Paths and hypotheses}
+
+\begin{definition}[Temporal path]
+A \emph{temporal path} of length $\ell$ in $G$ is a sequence
+\[
+    \pi = (v_0, e_1, v_1, e_2, \ldots, e_\ell, v_\ell),
+\]
+with $v_i \in V$, $e_i = (v_{i-1}, v_i, k_i) \in E$, and
+$\tau(e_1) \leq \tau(e_2) \leq \cdots \leq \tau(e_\ell)$ (temporal
+monotonicity). We will frequently abbreviate a path as its vertex
+list $(v_0, v_1, \ldots, v_\ell)$ when the intermediate edges are
+clear from context.
+\end{definition}
+
+\begin{definition}[$k$-simple path]
+A path is \emph{$k$-simple} iff no vertex appears more than $k$
+times in it. $k$-simplicity relaxes the classical requirement of
+no-repeats ($k=1$) to allow cycles that a real attacker exhibits
+--- for instance, a C2 callback loop where the same process re-enters
+the path. $k$ is set per hypothesis; the default is 1.
+\end{definition}
+
+\begin{definition}[Hypothesis]
+A \emph{hypothesis} $H$ is an arrow chain
+\[
+    H = (\sigma_0, \rho_1, P_1^{\text{edge}}, P_1^{\text{dst}},
+        \sigma_1, \rho_2, \ldots, \rho_\ell, P_\ell^{\text{edge}},
+        P_\ell^{\text{dst}}, \sigma_\ell)
+\]
+where $\sigma_i \in \mathcal{T}_V \cup \{\ast\}$ is the required
+entity type of the $i$-th vertex (or $\ast$ for ``any''),
+$\rho_i \in \mathcal{T}_E \cup \{\ast\}$ is the required relation
+type of the $i$-th edge, and $P_i^{\text{edge}}$, $P_i^{\text{dst}}$
+are optional predicates on edge metadata and destination-vertex
+metadata respectively.  The chain also carries aggregation
+constraints (\code{HAVING}, \code{WITHIN}) processed
+post-match. A path $\pi = (v_0, \ldots, v_\ell)$ \emph{satisfies}
+$H$ iff $\ell_V(v_i) \in \sigma_i$, $\ell_E(e_i) \in \rho_i$, and
+every predicate holds for the respective edge or destination.
+\end{definition}
+
+\section{Asymptotic notation}
+
+Standard CLRS conventions apply. $\Ord{f(n)}$ is upper bound, $\Thet{f(n)}$
+tight bound, $\Omega(f(n))$ lower bound. ``Amortized $O(f)$'' means
+the per-operation cost averaged over a worst-case sequence is
+$O(f)$, even if individual operations are more expensive.
+
+\section{Memory model}
+
+Rust's ownership model makes most invariants locally checkable.
+Where the engine relies on interior mutability, we call it out
+explicitly --- \code{Arc<RwLock<\_>>} for shared session state,
+\code{RwLock<SpillableEdgeStore>} for the in-memory edge buffer
+that may be flushed to disk during ingest, \code{OnceLock} for the
+process-wide catalog snapshot. The engine never shares mutable
+graphs across threads without a lock; the DFS matcher
+parallelizes by giving each rayon worker an immutable reference and
+a thread-local scratch stack (Chapter~\ref{ch:matcher}).
+
+\section{Source-pointer convention}
+
+Every chapter ends with an \emph{In the code} block listing
+\code{file:line} pointers into the Rust implementation. The paths
+are relative to the repository root, e.g.
+\filepath{graph\_hunter\_core/src/graph.rs:461}. Line numbers drift
+across revisions, so prefer grepping the function name if the
+pointer is stale.

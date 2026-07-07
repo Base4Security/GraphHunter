@@ -1,0 +1,89 @@
+\documentclass[11pt,openany]{book}
+\input{preamble}
+
+\title{\Huge GraphHunter\\
+    \Large A CLRS-Style Architecture Reference}
+\author{Lucas Sotomayor \\ \small Base4Security}
+\date{\today}
+
+\begin{document}
+
+\frontmatter
+\maketitle
+
+\tableofcontents
+
+\chapter*{Preface}
+\addcontentsline{toc}{chapter}{Preface}
+
+This document describes the architecture and algorithms of
+GraphHunter, a temporal-graph threat-hunting engine. The style is
+modelled on \emph{Introduction to Algorithms} (Cormen, Leiserson,
+Rivest, Stein — ``CLRS''): each algorithm is presented as formal
+pseudocode with line numbers, followed by a derivation of its time
+and space complexity and, where the invariants aren't obvious, a
+correctness argument.
+
+The reference is internal: its purpose is to let a future maintainer
+(or the author, six months from now) understand \emph{why} the
+engine is shaped the way it is without reading every source file.
+Every chapter ends with an \emph{In the code} block giving
+\texttt{file:line} pointers so readers can drop into the Rust
+implementation on any point of interest.
+
+Parts I--III are fleshed out in this revision. Parts IV--VI (ingest
+pipeline, extension seams, transport layer) ship as stubs with
+structures and file references but without full pseudocode; the
+intent is to expand them chapter-by-chapter in follow-up revisions.
+
+\mainmatter
+
+\part{Preliminaries}
+\input{chapters/ch01-introduction}
+\input{chapters/ch02-notation}
+
+\part{Core Data Structures}
+\input{chapters/ch03-compact-relation}
+\input{chapters/ch04-interner}
+\input{chapters/ch05-graph-hunter}
+\input{chapters/ch06-spill}
+\input{chapters/ch07-metadata}
+\input{chapters/ch08-hypothesis}
+
+\part{Core Algorithms}
+\input{chapters/ch09-dsl}
+\input{chapters/ch10-matcher}
+\input{chapters/ch11-simd}
+\input{chapters/ch12-anomaly}
+\input{chapters/ch13-analytics}
+\input{chapters/ch14-dedup-pagination}
+\input{chapters/ch15-hunt-diff}
+
+\part{Ingestion Pipeline}
+\input{chapters/ch16-logsource}
+\input{chapters/ch17-parsers}
+\input{chapters/ch18-writer}
+\input{chapters/ch19-mvcc}
+\input{chapters/ch20-overflow}
+
+\part{Extension Seams}
+\input{chapters/ch21-graph-traits}
+\input{chapters/ch22-scorer-traits}
+\input{chapters/ch23-interner-trait}
+\input{chapters/ch24-ingest-adapter}
+\input{chapters/ch25-catalog-yaml}
+
+\part{Transport Layer}
+\input{chapters/ch26-api-facade}
+\input{chapters/ch27-dtos}
+\input{chapters/ch28-transports}
+\input{chapters/ch29-parity-harness}
+\input{chapters/ch30-persistence}
+
+\appendix
+\input{chapters/appendix-A-complexity}
+\input{chapters/appendix-B-catalog}
+\input{chapters/appendix-C-benchmarks}
+\input{chapters/appendix-D-source-index}
+
+\end{document}

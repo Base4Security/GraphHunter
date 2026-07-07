@@ -1,0 +1,66 @@
+\chapter{\code{GraphRead} / \code{GraphWrite} Traits}
+\label{ch:graph-traits}
+
+\begin{note}
+Stub. The P2-B refactor extracted these traits so the engine's
+consumers (anomaly scorer, GNN feature extractor, ingest writer)
+can depend on a semantic API rather than the concrete
+\code{GraphHunter} struct. The eventual goal is to swap in remote
+backends (Neo4j, a streaming MVCC store) without editing the
+scorer, matcher, or writer --- provided the trait impls exist.
+\end{note}
+
+\section{Traits}
+
+\begin{lstlisting}[style=rust]
+pub trait GraphRead {
+    fn entity_count(&self) -> usize;
+    fn relation_count(&self) -> usize;
+    fn get_entity(&self, id: &str) -> Option<&Entity>;
+    fn get_compact_relations(&self, src: &str)
+        -> Cow<'_, [CompactRelation]>;
+    fn get_reverse_source_ids(&self, id: &str) -> Vec<String>;
+    fn entity_ids_for_type(&self, et: &EntityType) -> Option<Vec<String>>;
+    fn entity_types_in_graph(&self) -> Vec<String>;
+    fn materialize_relation(&self, c: &CompactRelation) -> Relation;
+    fn supports_simd(&self) -> bool { false }
+}
+
+pub trait GraphWrite: GraphRead {
+    fn add_entity(&mut self, e: Entity)   -> Result<(), GraphError>;
+    fn add_relation(&mut self, r: Relation) -> Result<(), GraphError>;
+}
+\end{lstlisting}
+
+The \code{Cow<'\_, [CompactRelation]>} return is the key to letting
+remote backends coexist: \code{InMemoryGraph} returns
+\code{Cow::Borrowed(\&slice)} at zero cost; a remote impl returns
+\code{Cow::Owned(vec)} when it has to synthesise the list.
+
+\section{What's on the trait vs off}
+
+\textbf{On:} semantic read and write, the operations a hypothetical
+remote backend would need to implement.
+
+\textbf{Off:} the matcher itself (\code{search\_temporal\_pattern}),
+the SIMD dispatch, the analytics (\code{pagerank},
+\code{betweenness}). These are engine-specific; a Neo4j backend
+would ship its own pattern engine rather than implement Rust's DFS
+against a \code{\&dyn GraphRead}.
+
+\section{Dual-impl contract}
+
+\filepath{graph\_hunter\_core/tests/backend\_dual\_impl.rs} runs a
+generic \code{validate\_backend<B: GraphWrite>(b)} harness that
+exercises every trait method against
+\code{GraphHunter}. When a second impl lands, the same harness
+covers it for free.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/backend/mod.rs} --- trait
+definitions.\\
+\filepath{graph\_hunter\_core/src/backend/in\_memory.rs} ---
+\code{impl GraphRead + GraphWrite for GraphHunter}.\\
+\filepath{graph\_hunter\_core/tests/backend\_dual\_impl.rs} ---
+dual-impl validation.
+\end{inthecode}

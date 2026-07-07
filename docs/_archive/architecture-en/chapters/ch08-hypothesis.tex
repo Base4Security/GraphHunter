@@ -1,0 +1,107 @@
+\chapter{The Hypothesis AST}
+\label{ch:hypothesis}
+
+Every hunt is driven by a parsed \code{Hypothesis} value. The AST
+is deliberately small --- a flat vector of steps with per-step
+predicate lists, plus optional aggregation and time-window clauses
+attached to the whole chain.
+
+\section{Types}
+
+\begin{lstlisting}[style=rust]
+pub struct Hypothesis {
+    pub name:           String,
+    pub steps:          Vec<HypothesisStep>,
+    pub k_simplicity:   usize,            // default 1
+    pub aggregations:   Vec<AggClause>,   // HAVING  clauses
+    pub window_seconds: Option<u64>,      // WITHIN  clause
+}
+
+pub struct HypothesisStep {
+    pub origin_type:     EntityType,
+    pub relation_type:   RelationType,
+    pub dest_type:       EntityType,
+    pub edge_predicates: Vec<Predicate>,  // on edge metadata
+    pub dest_predicates: Vec<Predicate>,  // on destination-vertex metadata
+    pub origin_binding:  Option<String>,  // `(User u)` for ref in HAVING
+    pub dest_binding:    Option<String>,
+}
+
+pub enum Predicate {
+    Eq      { key: String, value: String },
+    Substr  { key: String, pattern: String },
+    Regex   { key: String, pattern: String },
+    In      { key: String, values: Vec<String> },
+}
+
+pub struct AggClause {
+    pub op:     AggOp,        // Count, CountDistinct, Min, Max, Sum, Avg
+    pub column: AggColumn,    // bound name or step index
+    pub cmp:    AggComparison, // >=, <=, >, <, ==
+    pub value:  f64,
+}
+\end{lstlisting}
+
+\section{Invariants}
+
+\begin{invariant}[Step count $\geq 1$]
+A hypothesis must have at least one step; the DSL parser rejects
+the empty input with \code{ApiError::InvalidInput}. This keeps the
+matcher from having to treat the zero-edge case as a special
+branch.
+\end{invariant}
+
+\begin{invariant}[$k$-simplicity positive]
+$k_{\text{simplicity}} \geq 1$. Zero would admit only the empty
+path and violates the sense of ``max visits per vertex.''
+\end{invariant}
+
+\begin{invariant}[Binding uniqueness]
+If \code{origin\_binding} or \code{dest\_binding} is \code{Some(b)}
+on any step, $b$ does not repeat on any other binding position
+inside the hypothesis. The parser enforces this at parse time so
+the matcher can look bindings up by name during aggregation
+without disambiguation.
+\end{invariant}
+
+\section{Static compatibility check}
+
+Before running a hunt, the engine can cross-reference the
+hypothesis against the graph's relation schema to see if any step
+is structurally impossible on the loaded dataset --- e.g., a
+\code{User -[Auth]-> Host} step against a purely cloud-identity
+graph where no \code{Host} entities exist. This is
+\textsc{Check-Catalog-Compatibility} (Chapter~\ref{ch:catalog-yaml}),
+which returns a \code{CatalogEntryWithStatus} flagging the missing
+entity or relation types per step.
+
+\begin{algorithm}
+\caption{\textsc{Check-Step-Compatibility}}\label{alg:check-step}
+\KwIn{schema $\Sigma$ (multiset of $(\text{source}, \text{rel},
+\text{target})$ triples), step $s$}
+\KwOut{\code{bool} compatible, set of missing axes}
+\For{each $(\text{src}, r, \text{dst}) \in \Sigma$}{
+    \If{$(\text{src} = s.\text{origin\_type} \vee s.\text{origin\_type} = *)$
+       $\wedge (r = s.\text{relation\_type} \vee s.\text{relation\_type} = *)$
+       $\wedge (\text{dst} = s.\text{dest\_type} \vee s.\text{dest\_type} = *)$}{
+        \Return $(\mathrm{true}, \emptyset)$\;
+    }
+}
+$\text{missing} \gets $ set of axes absent from any triple in $\Sigma$ \;
+\Return $(\mathrm{false}, \text{missing})$\;
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{|\Sigma|}$ per step, $\Ord{|\Sigma| \cdot \ell}$ per
+hypothesis, where $\ell$ is the step count. $|\Sigma|$ is bounded by
+$|\mathcal{T}_V|^2 \cdot |\mathcal{T}_E|$ in practice (there are
+only a few dozen entity/relation types), so the check is
+effectively constant.
+\end{complexity}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/hypothesis.rs} --- \code{Hypothesis},
+\code{HypothesisStep}, \code{Predicate}.\\
+\filepath{graph\_hunter\_core/src/catalog/mod.rs:105} ---
+\code{check\_catalog\_compatibility}.
+\end{inthecode}

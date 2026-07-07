@@ -1,0 +1,38 @@
+\chapter{Persistencia de desborde}
+\label{ch:overflow}
+
+\begin{note}
+Stub. Cuando el pipeline de ingesta se cancela (el usuario cierra
+la sesión, el proceso termina) o cuando el \code{parsed\_channel}
+se llena más rápido de lo que el writer puede drenar, los
+\code{ParsedBatch}es encolados se persisten a disco en vez de
+descartarse. En la próxima carga de sesión el desborde se
+reproduce en orden antes de que el streaming se reanude.
+\end{note}
+
+\section{Invariantes}
+
+\begin{itemize}
+    \item Cada batch persistido retiene su \code{source\_id},
+        \code{watermark} y prioridad, así que la reanudación
+        avanza el watermark de la fuente exactamente como lo
+        haría una ingesta en caliente.
+    \item El replay es idempotente: el grafo deduplica por
+        $(source, dest, rel, timestamp)$ en
+        \code{GraphWriter::insert\_triples\_chunk}, así que el
+        mismo batch aplicado dos veces tiene el mismo efecto que
+        una sola.
+\end{itemize}
+
+\section{Formato de archivo}
+
+Los batches de desborde se guardan bajo el directorio de sesión
+como archivos JSON. El formato es estable entre reinicios y
+deliberadamente legible para humanos: un operador puede
+inspeccionar el trabajo encolado con \code{jq} sin más herramientas
+que un editor de texto.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/ingest/overflow.rs} ---
+persistencia y replay.
+\end{inthecode}

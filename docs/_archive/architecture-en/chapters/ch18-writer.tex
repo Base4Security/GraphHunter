@@ -1,0 +1,71 @@
+\chapter{Writer and Backpressure}
+\label{ch:writer}
+
+\begin{note}
+Stub. The writer task is the single point of mutation for the
+\Graph{} during streaming ingest. A full treatment
+(enrichment preemption, quota accounting, overflow to disk) is
+deferred.
+\end{note}
+
+\section{Pipeline shape}
+
+\begin{verbatim}
+LogSource -> raw_channel -> ParserTask -> parsed_channel -> GraphWriter -> Graph
+\end{verbatim}
+
+Both channels are bounded \code{tokio::sync::mpsc} queues (default
+capacities 4 and 8 respectively, configurable per source). A full
+channel backpressures the upstream stage; a source whose poll
+cannot find room in \code{raw\_channel} blocks on
+\code{send().await} until the writer has drained enough to make
+progress.
+
+\section{Modules}
+
+\begin{itemize}
+    \item \filepath{graph\_hunter\_core/src/ingest/batch.rs} ---
+        \code{ParsedBatch} unit of work (triples + source\_id +
+        dataset\_id + priority + watermark).
+    \item \filepath{graph\_hunter\_core/src/ingest/parser\_task.rs}
+        --- \code{ParserTask} consumes \code{raw\_channel}, calls
+        the format-specific \code{LogParser}, emits
+        \code{ParsedBatch}.
+    \item \filepath{graph\_hunter\_core/src/ingest/writer.rs} ---
+        \code{GraphWriter}: singleton task that drains
+        \code{parsed\_channel}, holds the graph's write lock for
+        one batch at a time, and releases between batches so
+        readers can make progress.
+    \item \filepath{graph\_hunter\_core/src/ingest/source\_poller.rs}
+        --- \code{SourcePoller}: per-source timer loop driving
+        \code{LogSource::poll\_since}.
+    \item \filepath{graph\_hunter\_core/src/ingest/enrichment.rs}
+        --- on-demand enrichment batches, priority-preempted ahead
+        of bulk ingest.
+    \item \filepath{graph\_hunter\_core/src/ingest/channels.rs} ---
+        bounded channel constructors.
+    \item \filepath{graph\_hunter\_core/src/ingest/overflow.rs} ---
+        serialises queued \code{ParsedBatch}es to disk on
+        cancellation; replays on restart (Chapter~\ref{ch:overflow}).
+\end{itemize}
+
+\section{Lock contention}
+
+The writer holds \code{graph.write()} for the duration of a single
+\code{insert\_triples\_chunk} call and releases between batches.
+Readers (hunts, analytics queries, enrichment queries) acquire
+\code{graph.read()} and coexist with each other. Typical batch
+sizes are 1--5 K triples, so a write hold lasts milliseconds ---
+readers backing off once per batch is cheap.
+
+\begin{invariant}[Writer uniqueness]
+Each session has at most one \code{GraphWriter} task active at any
+time. The \code{SessionStore} registers the writer's
+\code{JoinHandle} when the task starts and refuses to start a
+second; this rules out writer-writer races entirely.
+\end{invariant}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/ingest/writer.rs} --- writer
+main loop.
+\end{inthecode}

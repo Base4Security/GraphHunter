@@ -1,0 +1,152 @@
+\chapter{Centrality and Analytics}
+\label{ch:analytics}
+
+Beyond hunt execution, the engine offers a handful of graph-wide
+analytics: betweenness centrality (for surfacing structurally
+important nodes), temporal PageRank (for identifying nodes whose
+influence peaked near a reference time), and a few auxiliary
+helpers such as \code{get\_relation\_schema}. This chapter covers
+the first two in depth --- they are the non-trivial analytics and
+the ones most likely to surprise a reader with their cost.
+
+\section{Betweenness centrality (sampled Brandes)}
+
+Brandes' 2001 algorithm computes exact betweenness on a directed
+graph in $\Ord{VE}$ time, which is prohibitive for the multi-M-edge
+graphs the engine regularly ingests. GraphHunter uses a sampled
+variant: pick a uniformly random subset of $S$ starting vertices,
+run single-source shortest-path BFS from each, and approximate
+betweenness as the average contribution across the sample.
+
+\begin{algorithm}
+\caption{\textsc{Compute-Betweenness}}\label{alg:betweenness}
+\KwIn{graph $G$, sample size $S$}
+\KwOut{map $B : V \to \mathbb{R}_{\geq 0}$}
+\If{$|V| \leq S$}{sources $\gets V$}
+\Else{sources $\gets$ uniform sample of $S$ vertices}
+$B \gets \{v : 0 \;\forall v \in V\}$\;
+\ForEach{source $s \in$ sources}{
+    \textsc{Brandes-Single-Source}($G, s, B$)\;
+}
+scale every entry of $B$ by $|V| / |\text{sources}|$\;
+\Return $B$\;
+\end{algorithm}
+
+\begin{algorithm}
+\caption{\textsc{Brandes-Single-Source}}\label{alg:brandes-ss}
+\KwIn{graph $G$, source $s$, accumulator $B$}
+\tcp{Phase 1: BFS forward}
+for every $v$: $d[v] \gets \infty$, $\sigma[v] \gets 0$, $P[v] \gets \emptyset$\;
+$d[s] \gets 0$; $\sigma[s] \gets 1$; queue $Q \gets [s]$; stack $St \gets []$\;
+\While{$Q$ nonempty}{
+    $v \gets Q.\text{pop\_front}$; push $v$ onto $St$\;
+    \ForEach{out-neighbour $u$ of $v$ (undirected view: outgoing $\cup$ incoming)}{
+        \If{$d[u] = \infty$}{$d[u] \gets d[v] + 1$; push $u$ onto $Q$}
+        \If{$d[u] = d[v] + 1$}{
+            $\sigma[u] \gets \sigma[u] + \sigma[v]$;
+            append $v$ to $P[u]$\;
+        }
+    }
+}
+\tcp{Phase 2: back-accumulation}
+for every $v$: $\delta[v] \gets 0$\;
+\While{$St$ nonempty}{
+    $w \gets St.\text{pop}$\;
+    \ForEach{$v \in P[w]$}{
+        $\delta[v] \gets \delta[v] + \frac{\sigma[v]}{\sigma[w]} (1 + \delta[w])$\;
+    }
+    \If{$w \neq s$}{$B[w] \gets B[w] + \delta[w]$\;}
+}
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{V + E}$ time and space per source (standard BFS + back-pass).
+Total time with $S$ sources is $\Ord{S (V + E)}$; for the default
+$S = 500$ and a graph with $V = 10^5$ and $E = 10^6$, the cost is
+$\sim 5 \times 10^8$ operations --- a few hundred ms on a modern
+laptop. Space is $\Ord{V + E}$: the BFS state is reused across
+sources.
+\end{complexity}
+
+The expected approximation quality is bounded by Chernoff on a
+random sample: with $S = O(\log V / \epsilon^2)$ sources, per-vertex
+betweenness is estimated within multiplicative factor $1 \pm \epsilon$
+with high probability, assuming the shortest-path structure is not
+pathologically skewed. The engine does not attempt to certify this
+bound online; the sample size is a configurable knob.
+
+\section{Temporal PageRank}
+
+Temporal PageRank extends classical PageRank with an exponential
+decay on edge weights: an edge with timestamp $\tau(e)$ contributes
+to the rank computed at reference time $\tau_0$ with weight
+$\exp(-\lambda (\tau_0 - \tau(e)))$ if $\tau(e) \leq \tau_0$, zero
+otherwise.
+
+\begin{algorithm}
+\caption{\textsc{Compute-Temporal-PageRank}}\label{alg:temporal-pr}
+\KwIn{graph $G$, decay $\lambda$, damping $d$, max iterations
+      $I_{\max}$, tolerance $\epsilon$, reference time $\tau_0$}
+\KwOut{map $r : V \to [0, 1]$ summing to 1}
+$n \gets |V|$; initialise $r[v] \gets 1/n$ for all $v \in V$\;
+compute edge weights $w(e) \gets \exp(-\lambda \max(0, \tau_0 - \tau(e)))$\;
+compute normalised outgoing weights $w_{\text{out}}(v) \gets \sum_{e: v \to \cdot} w(e)$\;
+\For{iter $\gets 1$ \KwTo $I_{\max}$}{
+    $r' \gets \{v : (1-d)/n \;\forall v\}$\;
+    \ForEach{vertex $v$ with $w_{\text{out}}(v) > 0$}{
+        \ForEach{outgoing edge $e = (v \to u)$}{
+            $r'[u] \gets r'[u] + d \cdot r[v] \cdot \frac{w(e)}{w_{\text{out}}(v)}$\;
+        }
+    }
+    distribute dangling-node mass (vertices with $w_{\text{out}} = 0$)
+    uniformly over $V$\;
+    \If{$\|r' - r\|_1 < \epsilon$}{\Return $r'$\;}
+    $r \gets r'$\;
+}
+\Return $r$\;
+\end{algorithm}
+
+\begin{complexity}
+Each iteration is $\Ord{V + E}$. Power iteration on a damped chain
+converges geometrically at rate $d$, so the iteration count is
+$\Ord{\log(1 / \epsilon) / \log(1/d)}$. With $d = 0.85$ and
+$\epsilon = 10^{-6}$ the engine observes convergence in 10--20
+iterations in practice, giving total time $\Ord{20 (V + E)}$ ---
+linear in graph size with a small constant.
+\end{complexity}
+
+\section{Relation schema}
+
+\code{get\_relation\_schema} walks every edge and groups into
+unique triples $(\ell_V(\text{src}), \ell_E(e), \ell_V(\text{dst}))$,
+returning a vector sorted lexicographically. It is used by
+Chapter~\ref{ch:catalog-yaml}'s compatibility check.
+
+\begin{algorithm}
+\caption{\textsc{Get-Relation-Schema}}\label{alg:rel-schema}
+\KwIn{graph $G$}
+\KwOut{sorted vector of $(\text{src\_type}, \text{rel\_type},
+       \text{dst\_type}, \text{count})$}
+$M \gets$ empty HashMap\;
+\ForEach{edge $e = (u, v, k)$ in $G$}{
+    $M[(\ell_V(u), \ell_E(e), \ell_V(v))] \mathrel{+}= 1$\;
+}
+$\mathrm{out} \gets M.\text{into\_iter}$ as vector\;
+sort $\mathrm{out}$ lexicographically\;
+\Return $\mathrm{out}$\;
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{E + T \log T}$ where $T = |M|$ is the number of unique
+triples. $T$ is tiny in practice (low hundreds) so the sort cost is
+nominal; the dominant cost is the linear edge walk.
+\end{complexity}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/analytics.rs:641} ---
+\code{compute\_betweenness}.\\
+\filepath{graph\_hunter\_core/src/analytics.rs:746} ---
+\code{compute\_temporal\_pagerank}.\\
+\filepath{graph\_hunter\_core/src/analytics.rs:1289} ---
+\code{get\_relation\_schema}.
+\end{inthecode}

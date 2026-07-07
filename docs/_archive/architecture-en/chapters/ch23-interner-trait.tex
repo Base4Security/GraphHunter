@@ -1,0 +1,51 @@
+\chapter{\code{StringInternerBackend} Trait}
+\label{ch:interner-trait}
+
+\begin{note}
+Stub. See Chapter~\ref{ch:interner} for the underlying struct and
+metrics. The trait exists as a seam for a future
+\code{GenerationalInterner} or \code{PartitionedInterner}; no
+second impl is shipped today, the trait is pre-positioned for when
+production evidence justifies one.
+\end{note}
+
+\section{Contract}
+
+\begin{lstlisting}[style=rust]
+pub trait StringInternerBackend {
+    fn intern(&mut self, s: &str) -> StrId;
+    fn resolve(&self, id: StrId) -> &str;
+    fn try_resolve(&self, id: StrId) -> Option<&str>;
+    fn get(&self, s: &str) -> Option<StrId>;
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool;
+    fn reserve(&mut self, additional: usize);
+    fn metrics(&self) -> InternerMetrics;
+}
+
+pub struct InternerMetrics {
+    pub unique_strings: usize,
+    pub approx_bytes:   usize,
+}
+\end{lstlisting}
+
+\section{Trigger conditions}
+
+A second backend is worth implementing when any of:
+\begin{itemize}
+    \item \code{metrics().unique\_strings} exceeds $\sim 10^7$ in
+        a live session.
+    \item A streaming session runs 24$\times$7 for more than 72h
+        without compaction.
+    \item A single process serves multiple tenants
+        (MSSP deployment).
+\end{itemize}
+
+The engine exposes the metrics via
+\code{api.get\_interner\_metrics()} so an operator can observe the
+approach to a trigger rather than hit it blind.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/interner.rs} --- trait + metrics.\\
+\filepath{TODO.md} --- trigger criteria.
+\end{inthecode}

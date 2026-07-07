@@ -1,0 +1,219 @@
+[package]
+name = "graph_hunter_core"
+version = "1.0.0"
+edition = "2024"
+description = "Graph-based threat hunting engine: temporal knowledge graphs and hypothesis-driven path search"
+license = "GPL-3.0"
+
+[features]
+default = []
+# GNN ONNX Runtime inference moved out of core per F2.14. The
+# `ml-scoring` / `directml` features now live on `graph_hunter_gnn`;
+# downstream crates activate them directly via
+# `features = ["graph_hunter_gnn/ml-scoring"]`.
+geoip = ["maxminddb"]
+# M3 — opt-in nauty/Traces FFI for arbitrary-pattern automorphism
+# analysis. Linux/macOS only: nauty's C source includes <unistd.h>
+# which is POSIX-exclusive and does not build under MSVC. The Cargo
+# feature stays defined on Windows (so workspace `--all-features`
+# does not error) but the FFI module is `#[cfg(unix)]`-gated; the
+# dependency itself is target-gated so it is not even fetched on
+# Windows hosts. See `nauty_symmetry::HAS_NAUTY` for the runtime
+# capability check and `docs/perf/latex/cambios-perf-2026-04.tex`
+# (M3 chapter) for design rationale.
+symmetry-nauty = ["dep:nauty-Traces-sys"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# YAML catalog loader (P2-C). Deprecated upstream but still the de-facto
+# ecosystem standard — the deprecation is not "broken", and no drop-in
+# replacement has critical mass. Alternatives like serde_yaml_ng exist
+# if/when we revisit.
+serde_yaml = "0.9"
+simd-json = "0.14"
+# RH-P1-012: ParseError variants for malformed-row propagation via
+# LogParser::try_parse. Pinned to v1 to match platform/local-llm and
+# platform/api which are already on v1 (avoids dual-crate bloat).
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+rayon = "1"
+ahash = "0.8"
+ordered-float = "4"
+lru = "0.12"
+tempfile = "3"
+memmap2 = "0.9"
+fs4 = "0.8"
+# B5: inline-path SmallVec for DFS scratch + per-result path. Inline cap = 8
+# covers every 2/3/4-hop bench (depth+1 ≤ 5 today) without spilling to heap.
+# Falls back to a Vec on overflow so deeper hypotheses still work.
+smallvec = "1"
+# 2c-part-2: parking_lot::RwLock for the streaming layer. std::sync::RwLock
+# on Windows wraps SRWLOCK and added ~30 ns per outer.read() + slot.read()
+# pair, which scaled to ~300 ms of pure atomic cycles on a 4-hop / 100K
+# bench (~10M frame-pushes). parking_lot's RwLock acquire is ~3-5x cheaper
+# in benchmark results we've seen, brings the migration's per-frame
+# overhead inside the <10% regression budget.
+parking_lot = "0.12"
+
+# ── Azure streaming plan deps (Phase 2 foundation) ─────────────────────
+# async-trait: object-safe `dyn LogSource` (RPITIT is not object-safe,
+# verified by Spike 1 at spikes/logsource_objectsafety/).
+async-trait = "0.1"
+# tokio: shared async runtime primitives. We pull "rt", "sync", "time"
+# rather than "full" so graph_hunter_core stays a library-sized async
+# dep, not a kitchen-sink runtime.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+# tokio-util: CancellationToken — the cancellation primitive the existing
+# sentinel_connector.rs already uses. Generalized across all LogSource
+# impls via the trait.
+tokio-util = "0.7"
+# futures: BoxStream and stream combinators. Used for the `ChunkStream`
+# type alias the trait returns.
+futures = "0.3"
+# bytes: `RawChunk.rows` is a `Bytes` so HTTP transports can pass
+# ownership of response buffers without cloning.
+bytes = "1"
+# rusqlite (bundled): watermark store backing. Bundled feature statically
+# links SQLite so there's no system library dep on Windows. The per-store
+# database lives under each session's directory (<session>/ops.sqlite).
+rusqlite = { version = "0.31", features = ["bundled"] }
+# quick-xml: FortiAnalyzer XML report parser (see `src/forti_analyzer.rs`).
+# Already present transitively via `plist` → `tauri`, so this is a
+# zero-compile-cost promotion to a direct dependency. Uses the raw
+# event-based Reader API — no `serialize` feature needed.
+quick-xml = "0.38"
+# MaxMind GeoLite2 offline GeoIP/ASN lookup. Optional: only pulled when the
+# `geoip` feature is enabled. The reader is ~50KB compiled, no network deps.
+maxminddb = { version = "0.28", optional = true }
+# LogSource trait + Azure connectors live in platform/sources per F2.11.
+# Core re-exports these under the old `sources::` path so existing call
+# sites (ingest pipeline, watermark_store, ingest_adapter) keep
+# resolving without a flag-day rewrite.
+graph_hunter_sources = { path = "../../platform/sources" }
+# DSL parser + the types/hypothesis modules it consumes live in
+# platform/dsl per F2.12. Core re-exports them under the original
+# `types::` / `hypothesis::` / `dsl::` paths so all ~140 internal
+# `crate::types::X` references keep resolving.
+graph_hunter_dsl = { path = "../../platform/dsl" }
+# mimalloc for the in-crate bins. profile_graph keeps its custom
+# CountingAllocator (alloc accounting is its whole purpose) and
+# intentionally does NOT use mimalloc — only profile_relation_schema
+# wires it in via `#[global_allocator]`. Library code never names this
+# dep, so downstream crates pay nothing for it.
+mimalloc = { version = "0.1", default-features = false }
+
+[dev-dependencies]
+# Enables `tokio::time::advance` + `#[tokio::test(start_paused = true)]`
+# for deterministic rate-limiter tests. Only pulled during test builds.
+tokio = { version = "1", features = ["test-util"] }
+# Benchmark harness for the suites under `benches/`. Only pulled for
+# benchmark builds; regular `cargo test` / `cargo check` don't pay for it.
+criterion = "0.5"
+# Property-based testing for invariants the unit tests can't exhaustively
+# prove (F3 — ADR PHASE1). Covers DSL roundtrip, DFS↔SIMD equivalence,
+# anomaly-score bounds/monotony. Default features include the `std`
+# harness + proc-macro `proptest!`, no extra config needed.
+proptest = "1"
+
+[[bench]]
+name = "hunt_latency"
+harness = false
+
+[[bench]]
+name = "dedup_throughput"
+harness = false
+
+[[bench]]
+name = "ingest_throughput"
+harness = false
+
+[[bench]]
+name = "matching_hops"
+harness = false
+
+[[bench]]
+name = "matching_powerlaw"
+harness = false
+
+[[bench]]
+name = "scoring_path"
+harness = false
+
+[[bench]]
+name = "triangle_count"
+harness = false
+
+[[bench]]
+name = "triangle_query"
+harness = false
+
+[[bench]]
+name = "triangle_multiquery"
+harness = false
+
+[[bench]]
+name = "clique4_count"
+harness = false
+
+[[bench]]
+name = "clique4_query"
+harness = false
+
+[[bench]]
+name = "clique5_count"
+harness = false
+
+[[bench]]
+name = "cycle6_count"
+harness = false
+
+[[bench]]
+name = "cycle6_query"
+harness = false
+
+[[bench]]
+name = "cycle6_sysmon_scale"
+harness = false
+
+# Release profile — A1 bisection (docs/perf/release-profile.md).
+#
+# Locked-in: thin LTO only. The cell0 (default), cell1 (thin), and
+# cell2 (thin + target-cpu=native) experiment showed:
+#   - cell1 beat cell0 on every suite by 4–7% geomean.
+#   - cell2 added `target-cpu=native` and *regressed* hunt 10K by
+#     ~15% and ingest 1K/10K by 25–27% on the bench host (Galaxy
+#     Book4, Intel Core Ultra hybrid P/E). The likely cause is the
+#     hybrid-core CPU throttling on AVX-512: when the compiler emits
+#     512-bit ops, the E-cores stall or migrate work back to the
+#     P-cores, eating the ISA win on memory-bound workloads.
+#   - The earlier `lto="fat" + codegen-units=1 + native` profile cost
+#     70 min to compile; not worth re-testing once cell2 was rejected.
+#
+# So we ship thin LTO without rustflags. CI/Docker pick up the same
+# settings. If a future host has uniform performance cores, revisit
+# cell2 via `CARGO_BUILD_RUSTFLAGS="-C target-cpu=native"`.
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = false
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+debug = false
+
+# B8: libc only needed for the Linux-only `madvise(MADV_HUGEPAGE)` helper
+# in `src/mmap_advise.rs`. On Windows / macOS the helper is a no-op stub
+# and `libc` isn't pulled in, keeping the dep graph identical for the
+# dev host. Gated at runtime by `GRAPHHUNTER_HUGEPAGES=1`.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+# M3 — nauty/Traces FFI is target-gated to unix because nauty's C
+# source includes <unistd.h>, which MSVC does not provide. Bundled
+# C build (default feature) compiles ~25 KLOC nauty C via cc-rs and
+# bindgen on the build host; Linux CI exercises this, Windows local
+# builds skip it entirely.
+[target.'cfg(unix)'.dependencies]
+nauty-Traces-sys = { version = "0.11", optional = true }

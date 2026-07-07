@@ -1,0 +1,55 @@
+\chapter{YAML Catalog Loader}
+\label{ch:catalog-yaml}
+
+\begin{note}
+Stub. The P2-C refactor moved the ATT\&CK hypothesis catalog from
+a compile-time \code{const} array to 29 embedded YAMLs plus an
+optional user-override directory.
+\end{note}
+
+\section{Precedence}
+
+Later sources override earlier ones by catalog \code{id}:
+\begin{enumerate}
+    \item \textbf{Built-in} --- 29 files embedded via
+        \code{include\_str!} from
+        \filepath{graph\_hunter\_core/src/catalog/builtin/cat-NNN.yaml}.
+    \item \textbf{User directory} ---
+        \code{\$GRAPHHUNTER\_CATALOG\_DIR} if set; else
+        \code{\$USERPROFILE/.graphhunter/catalog/} (Windows) or
+        \code{\$HOME/.graphhunter/catalog/} (Unix). Silent when
+        missing.
+\end{enumerate}
+
+\section{Validation}
+
+Every loaded entry passes through a validation pass:
+
+\begin{itemize}
+    \item \code{id} matches \code{[A-Za-z0-9\-\_]+}.
+    \item \code{mitre\_id} matches \code{T\textbackslash d\{4\}(\textbackslash.\textbackslash d\{3\})?}.
+    \item \code{dsl\_pattern} parses via \code{parse\_dsl}.
+    \item \code{k\_simplicity >= 1}.
+\end{itemize}
+
+Malformed user files do not panic or break startup: the loader logs
+a \code{CatalogLoadError} and continues. Built-in YAMLs are
+structurally covered by a golden test
+(\filepath{graph\_hunter\_core/tests/catalog\_golden.rs}) and by
+the \code{include\_str!} compile-time check.
+
+\section{Diagnostics}
+
+\code{api.get\_catalog\_diagnostics()} returns the collected
+\code{Vec<CatalogLoadError>}. The transports surface it via
+\code{cmd\_get\_catalog\_diagnostics} (Tauri) and
+\code{GET /catalog/diagnostics} (HTTP).
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/catalog/mod.rs} --- public API
+(\code{get\_catalog}, \code{get\_catalog\_snapshot}).\\
+\filepath{graph\_hunter\_core/src/catalog/loader.rs} --- loading +
+validation.\\
+\filepath{graph\_hunter\_core/src/catalog/builtin/*.yaml} --- 29
+built-in entries.
+\end{inthecode}

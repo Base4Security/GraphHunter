@@ -1,0 +1,57 @@
+name: Propuesta de feature
+description: Sugerir una nueva funcionalidad o mejora para GraphHunter
+title: "[feature]: "
+labels:
+  - enhancement
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por sugerir una mejora. Por favor describi el problema que querés resolver
+        y como imaginas la solucion. Esto nos ayuda a evaluar el alcance y priorizar.
+
+  - type: textarea
+    id: problema
+    attributes:
+      label: Problema que resuelve
+      description: |
+        Describi el problema o limitacion que motiva esta propuesta.
+        Que estabas intentando hacer cuando te diste cuenta de que faltaba esta feature?
+      placeholder: |
+        Cuando ingreso un EVTX grande no puedo cancelar el proceso si me equivoco de archivo;
+        tengo que matar el proceso entero y perder el grafo ya cargado.
+    validations:
+      required: true
+
+  - type: textarea
+    id: propuesta
+    attributes:
+      label: Propuesta
+      description: Describi como te gustaria que funcione la feature.
+      placeholder: |
+        Agregar un boton "Cancelar" al lado de la barra de progreso de ingest que
+        aborte la operacion en curso sin tocar el grafo ya cargado.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternativas
+    attributes:
+      label: Alternativas consideradas
+      description: Otras soluciones o workarounds que evaluaste.
+      placeholder: |
+        - Reiniciar la app (pierdo el grafo cargado, no sirve).
+        - Ingerir archivos chicos primero (no soluciona el caso de ingest accidental).
+    validations:
+      required: false
+
+  - type: textarea
+    id: contexto
+    attributes:
+      label: Contexto adicional
+      description: |
+        Cualquier informacion adicional: capturas de pantalla, ejemplos de otras herramientas,
+        referencias a issues relacionados, etc.
+    validations:
+      required: false

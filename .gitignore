@@ -1,0 +1,90 @@
+# Environment
+.venv/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Gateway uploaded files
+gateway/uploads/
+
+# Large real-world datasets (download separately, see demo_data/DOWNLOAD_REAL_DATA.md)
+demo_data/mordor_combined_attacks.json
+demo_data/mega_attack_dataset.json
+demo_data/mega_dataset_1gb.json
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+
+# Other artifacts
+**/target/
+# Stray per-crate build dirs from custom CARGO_TARGET_DIR runs (e.g. target-alt,
+# target-tauri-check, target-test-live-tail) — never commit these.
+**/target-*/
+**/node_modules/
+apps/tauri/dist/
+app/dist/
+docs/_build/
+**/.claude/
+.vscode/*
+dev-*
+
+# Local exploratory work — not part of the shipped product
+spikes/
+
+# Confidential incident reports — keep out of VCS
+CSIRT-Report-*.md
+docs/_archive/incidents/*.md
+!docs/_archive/incidents/.gitkeep
+
+# Personal LaTeX/PDF documentation trees — kept locally (2026-05-07).
+# The 5 books (algoritmos/arquitectura/especificacion/manual/paper) were archived
+# under docs/_archive/2026-libros-pre-unificacion/ in M0 (2026-05-20), where they
+# ARE tracked. Other personal trees remain local-only.
+docs/diseno/
+docs/formalization/
+docs/internals-systems/
+
+# LaTeX build artifacts (keep .tex, ignore compile output)
+docs/**/*.aux
+docs/**/*.log
+docs/**/*.out
+docs/**/*.toc
+docs/**/*.lof
+docs/**/*.lot
+docs/**/*.idx
+docs/**/*.ilg
+docs/**/*.ind
+docs/**/*.bbl
+docs/**/*.bcf
+docs/**/*.blg
+docs/**/*.run.xml
+docs/**/*.synctex.gz
+docs/**/*.fdb_latexmk
+docs/**/*.fls
+docs/**/*.pdf
+!docs/_archive/2026-libros-pre-unificacion/**/*.pdf
+docs/**/out.txt
+.playwright-mcp/
+
+# Tauri sidecar runtime binaries � downloaded via tools/fetch-sidecar-binaries.sh per release
+apps/tauri/src-tauri/binaries/
+
+# Sidecar .NET build artifacts (source lives on feature branches; bin/obj are local)
+sidecar/dotnet/**/bin/
+sidecar/dotnet/**/obj/
+
+audit-tmp/
+
+# TypeScript / Vite / npm build outputs (untracked post-book-v1.0.0)
+dist/
+*.tsbuildinfo

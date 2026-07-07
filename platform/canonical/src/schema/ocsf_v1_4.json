@@ -1,0 +1,220 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://graphhunter.local/schema/ocsf-1.4-subset",
+  "title": "OCSF v1.4 Subset + Graph Hunter Provenance Extension (v0.1)",
+  "description": "The subset of OCSF v1.4 emitted by the seven shipping parsers today. Extended with a 'provenance' object per event. Additional classes land here as mappings need them; removing a class is a breaking change gated by schema_version in ProvenanceCtx.",
+  "type": "object",
+  "required": ["class_name"],
+  "properties": {
+    "class_name": {
+      "type": "string",
+      "enum": [
+        "authentication",
+        "process_activity",
+        "network_activity",
+        "dns_activity",
+        "file_system_activity",
+        "registry_key_activity",
+        "other"
+      ]
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/Authentication" },
+    { "$ref": "#/$defs/ProcessActivity" },
+    { "$ref": "#/$defs/NetworkActivity" },
+    { "$ref": "#/$defs/DnsActivity" },
+    { "$ref": "#/$defs/FileSystemActivity" },
+    { "$ref": "#/$defs/RegistryKeyActivity" },
+    { "$ref": "#/$defs/Other" }
+  ],
+  "$defs": {
+    "ProvenanceCtx": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "source_dataset_id",
+        "mapping_id",
+        "mapping_version",
+        "mapping_hash",
+        "parser_name",
+        "confidence"
+      ],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "source_dataset_id": { "type": "string" },
+        "mapping_id": { "type": "string" },
+        "mapping_version": { "type": "integer", "minimum": 0 },
+        "mapping_hash": { "type": "string" },
+        "parser_name": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "raw_event_sha256": {
+          "description": "SHA-256 of the raw event bytes. Omitted entirely when the source did not retain raw bytes (live Sentinel/Sysmon streams). When present, must be 64 lowercase hex characters.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "upstream_ids": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "UserRef": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "uid": { "type": ["string", "null"] },
+        "domain": { "type": ["string", "null"] }
+      }
+    },
+    "EndpointRef": {
+      "type": "object",
+      "properties": {
+        "ip": { "type": ["string", "null"] },
+        "hostname": { "type": ["string", "null"] },
+        "port": { "type": ["integer", "null"], "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "FileRef": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string" },
+        "name": { "type": ["string", "null"] },
+        "hashes": { "type": ["object", "null"] }
+      }
+    },
+    "ProcessRef": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "pid": { "type": ["integer", "null"] },
+        "cmd_line": { "type": ["string", "null"] },
+        "file": { "type": ["object", "null"] }
+      }
+    },
+    "RegistryKeyRef": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string" },
+        "value": { "type": ["string", "null"] }
+      }
+    },
+    "DnsQuery": {
+      "type": "object",
+      "required": ["hostname"],
+      "properties": {
+        "hostname": { "type": "string" },
+        "qtype": { "type": ["string", "null"] }
+      }
+    },
+    "Authentication": {
+      "type": "object",
+      "properties": {
+        "class_name": { "const": "authentication" },
+        "class_uid": { "const": 3002 },
+        "activity_id": { "type": "integer" },
+        "time": { "type": "integer" },
+        "actor_user": { "anyOf": [{ "$ref": "#/$defs/UserRef" }, { "type": "null" }] },
+        "dst_endpoint": { "anyOf": [{ "$ref": "#/$defs/EndpointRef" }, { "type": "null" }] },
+        "auth_protocol": { "type": ["string", "null"] },
+        "status": { "type": ["string", "null"] },
+        "provenance": { "$ref": "#/$defs/ProvenanceCtx" }
+      },
+      "required": ["class_uid", "activity_id", "time", "provenance"]
+    },
+    "ProcessActivity": {
+      "type": "object",
+      "properties": {
+        "class_name": { "const": "process_activity" },
+        "class_uid": { "const": 1007 },
+        "activity_id": { "type": "integer" },
+        "time": { "type": "integer" },
+        "actor_user": { "anyOf": [{ "$ref": "#/$defs/UserRef" }, { "type": "null" }] },
+        "parent_process": { "anyOf": [{ "$ref": "#/$defs/ProcessRef" }, { "type": "null" }] },
+        "process": { "$ref": "#/$defs/ProcessRef" },
+        "provenance": { "$ref": "#/$defs/ProvenanceCtx" }
+      },
+      "required": ["class_uid", "activity_id", "time", "process", "provenance"]
+    },
+    "NetworkActivity": {
+      "type": "object",
+      "properties": {
+        "class_name": { "const": "network_activity" },
+        "class_uid": { "const": 4001 },
+        "activity_id": { "type": "integer" },
+        "time": { "type": "integer" },
+        "src_endpoint": { "anyOf": [{ "$ref": "#/$defs/EndpointRef" }, { "type": "null" }] },
+        "dst_endpoint": { "anyOf": [{ "$ref": "#/$defs/EndpointRef" }, { "type": "null" }] },
+        "protocol": { "type": ["string", "null"] },
+        "provenance": { "$ref": "#/$defs/ProvenanceCtx" }
+      },
+      "required": ["class_uid", "activity_id", "time", "provenance"]
+    },
+    "DnsActivity": {
+      "type": "object",
+      "properties": {
+        "class_name": { "const": "dns_activity" },
+        "class_uid": { "const": 4003 },
+        "activity_id": { "type": "integer" },
+        "time": { "type": "integer" },
+        "src_endpoint": { "anyOf": [{ "$ref": "#/$defs/EndpointRef" }, { "type": "null" }] },
+        "query": { "$ref": "#/$defs/DnsQuery" },
+        "provenance": { "$ref": "#/$defs/ProvenanceCtx" }
+      },
+      "required": ["class_uid", "activity_id", "time", "query", "provenance"]
+    },
+    "FileSystemActivity": {
+      "type": "object",
+      "properties": {
+        "class_name": { "const": "file_system_activity" },
+        "class_uid": { "const": 1001 },
+        "activity_id": { "type": "integer" },
+        "time": { "type": "integer" },
+        "actor_process": { "anyOf": [{ "$ref": "#/$defs/ProcessRef" }, { "type": "null" }] },
+        "file": { "$ref": "#/$defs/FileRef" },
+        "provenance": { "$ref": "#/$defs/ProvenanceCtx" }
+      },
+      "required": ["class_uid", "activity_id", "time", "file", "provenance"]
+    },
+    "RegistryKeyActivity": {
+      "type": "object",
+      "properties": {
+        "class_name": { "const": "registry_key_activity" },
+        "class_uid": { "const": 5001 },
+        "activity_id": { "type": "integer" },
+        "time": { "type": "integer" },
+        "actor_process": { "anyOf": [{ "$ref": "#/$defs/ProcessRef" }, { "type": "null" }] },
+        "reg_key": { "$ref": "#/$defs/RegistryKeyRef" },
+        "provenance": { "$ref": "#/$defs/ProvenanceCtx" }
+      },
+      "required": ["class_uid", "activity_id", "time", "reg_key", "provenance"]
+    },
+    "Other": {
+      "type": "object",
+      "properties": {
+        "class_name": { "const": "other" },
+        "class_uid": { "const": 0 },
+        "time": { "type": "integer" },
+        "rel_type": { "type": "string" },
+        "source_type": { "type": "string" },
+        "source_id": { "type": "string" },
+        "dest_type": { "type": "string" },
+        "dest_id": { "type": "string" },
+        "reason": { "type": "string" },
+        "provenance": { "$ref": "#/$defs/ProvenanceCtx" }
+      },
+      "required": [
+        "class_uid",
+        "time",
+        "rel_type",
+        "source_type",
+        "source_id",
+        "dest_type",
+        "dest_id",
+        "reason",
+        "provenance"
+      ]
+    }
+  }
+}

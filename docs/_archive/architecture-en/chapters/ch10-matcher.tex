@@ -1,0 +1,259 @@
+\chapter{Temporal Pattern Matching}
+\label{ch:matcher}
+
+The matcher is the engine's hot path. Every hunt the analyst runs,
+every \code{run\_hunt} call from Claude, every CLI invocation ends
+up here. The implementation ships three coordinated variants:
+
+\begin{itemize}
+    \item \textsc{Search-Temporal-Pattern} --- the entry point;
+        dispatches work to rayon workers and collects results.
+    \item \textsc{Dfs-Match-Iterative} --- the baseline iterative
+        DFS executed per starting vertex.
+    \item \textsc{Dfs-Match-Smart} --- an anomaly-bounded variant
+        that maintains a top-$K$ min-heap and prunes branches
+        whose running anomaly estimate makes them inadmissible.
+\end{itemize}
+
+A fourth path, \textsc{Search-Temporal-Pattern-Simd}, delegates to
+\code{libgraphmatch} or the pure-Rust \code{simd\_rust} module
+(Chapter~\ref{ch:simd}) and is gated on the \code{simd} feature
+plus a runtime CPU probe.
+
+\section{Shared state}
+
+\begin{lstlisting}[style=rust]
+// Scratch allocated once per worker and reused across starts.
+struct DfsFrame {
+    sid:          StrId,
+    step_idx:     usize,
+    edge_hi:      usize,   // upper bound of outgoing edges
+    edge_cursor:  usize,   // next edge index to try
+}
+
+struct SmartDfsFrame {
+    sid:              StrId,
+    step_idx:         usize,
+    edge_hi:          usize,
+    edge_cursor:      usize,
+    path_anomaly_sum: f64,   // sum of node_anomaly_estimate along path
+}
+\end{lstlisting}
+
+Stack frames are plain structs stored in a \code{Vec<Frame>} that is
+reused across starting vertices. This is the single biggest
+allocation savings in the matcher --- the old recursive
+implementation allocated per-frame on the system stack and could
+not trivially restart.
+
+\begin{invariant}[$k$-simplicity]
+The running \code{visit\_count: HashMap<StrId, usize>} maintained
+inside every DFS walk satisfies \code{visit\_count[v] <= k} for
+every $v$ on the current path, where $k$ is
+\code{hypothesis.k\_simplicity}. Violating this would admit paths
+that revisit a vertex more than $k$ times, contradicting the
+hypothesis' semantic. The algorithm enforces the invariant at
+push-time: if incrementing \code{visit\_count[dest]} would exceed
+$k$, the edge is skipped.
+\end{invariant}
+
+\section{Entry point: \textsc{Search-Temporal-Pattern}}
+
+The outer algorithm partitions work by starting vertex. For each
+entity whose type matches $H$'s first step, a rayon-managed worker
+thread runs \textsc{Dfs-Match-Iterative} on that starting vertex
+with its own scratch stack and result buffer. When every worker has
+finished, results are merged, scored, deduplicated and paginated
+(Chapter~\ref{ch:dedup-pagination}).
+
+\begin{algorithm}
+\caption{\textsc{Search-Temporal-Pattern}}\label{alg:search-entry}
+\KwIn{graph $G$, hypothesis $H$, optional window $(t_0, t_1)$,
+      optional cap $\mathrm{max}$}
+\KwOut{vector of path vectors}
+$\mathrm{starts} \gets $ \code{G.type\_index[H.steps[0].origin\_type]}\;
+\If{$\mathrm{starts} = \emptyset$}{\Return $\emptyset$\;}
+$\mathrm{cap} \gets $ \code{AtomicUsize(0)}\;
+$\mathrm{results} \gets $ parallel-map over $\mathrm{starts}$:
+    \ForEach{$s \in \mathrm{starts}$ \KwIn{parallel}}{
+        $\mathrm{local} \gets $ \textsc{Dfs-Match-Iterative}($G, H, s, t_0, t_1, \mathrm{cap}, \mathrm{max}$) \;
+        \Return $\mathrm{local}$\;
+    }
+\Return concat of $\mathrm{results}$\;
+\end{algorithm}
+
+The \code{AtomicUsize} cap is read by every worker on every
+candidate push so that once the aggregate result count reaches
+$\mathrm{max}$, remaining workers stop as early as possible. This
+is a classical early-exit pattern: the count may briefly exceed
+$\mathrm{max}$ because workers commit then check, but the overshoot
+is bounded by the number of rayon workers (typically 8--16).
+
+\section{The iterative DFS}
+
+\begin{algorithm}
+\caption{\textsc{Dfs-Match-Iterative}}\label{alg:dfs-iter}
+\KwIn{graph $G$, hypothesis $H$, start $s_0$, window $(t_0, t_1)$,
+      shared cap counter $\mathrm{cap}$, cap $\mathrm{max}$}
+\KwOut{list of matching paths rooted at $s_0$}
+$\mathrm{results} \gets \emptyset$;
+$\mathrm{stack} \gets \emptyset$;
+$\mathrm{path} \gets [s_0]$;
+$\mathrm{visit} \gets \{s_0 : 1\}$\;
+\textsc{Push-Edges-For-Step}($\mathrm{stack}$, $G$, $s_0$, step $0$, $t_0, t_1$)\;
+\While{$\mathrm{stack} \neq \emptyset$}{
+    $f \gets $ top of $\mathrm{stack}$ \;
+    \If{$f.\text{edge\_cursor} \geq f.\text{edge\_hi}$}{
+        pop $f$;
+        pop last vertex from $\mathrm{path}$;
+        decrement $\mathrm{visit}[\cdot]$;
+        \Continue\;
+    }
+    $c \gets $ \code{G.edge\_store[f.sid][f.edge\_cursor]}\;
+    $f.\text{edge\_cursor} \gets f.\text{edge\_cursor} + 1$\;
+    \tcp{filter: relation type}
+    \If{$c.\text{rel\_type\_tag} \neq $ step[$f.\text{step\_idx}$].rel}{
+        \Continue\;
+    }
+    \tcp{filter: destination entity type via SoA tag}
+    $u \gets c.\text{dest\_sid}$\;
+    \If{$\code{G.entity\_type\_tags}[u.0] \neq $ step[$f.\text{step\_idx}$].dst}{
+        \Continue\;
+    }
+    \tcp{filter: time window}
+    \If{$c.\text{timestamp} \notin [t_0, t_1]$}{\Continue\;}
+    \tcp{filter: edge predicates (on metadata)}
+    \If{\textsc{Evaluate-Predicates}(step.edge\_predicates, $c$, $G$) = false}{
+        \Continue\;
+    }
+    \tcp{cycle prevention via $k$-simplicity}
+    \If{$\mathrm{visit}[u] + 1 > H.k$}{\Continue\;}
+    $\mathrm{visit}[u] \gets \mathrm{visit}[u] + 1$;
+    append $u$ to $\mathrm{path}$\;
+    \If{$f.\text{step\_idx} + 1 = $ len($H.\text{steps}$)}{
+        record $\mathrm{path}$ in $\mathrm{results}$\;
+        increment $\mathrm{cap}$ atomically; \If{$\mathrm{cap} \geq \mathrm{max}$}{break loop\;}
+        $\mathrm{visit}[u] \gets \mathrm{visit}[u] - 1$;
+        pop last vertex;
+        \Continue\;
+    }
+    push new frame: $(u, f.\text{step\_idx}+1, \ldots)$ onto $\mathrm{stack}$\;
+    \textsc{Push-Edges-For-Step}($\mathrm{stack}$, $G$, $u$, $f.\text{step\_idx}+1$, $t_0, t_1$)\;
+}
+\Return $\mathrm{results}$\;
+\end{algorithm}
+
+\textsc{Push-Edges-For-Step} is a one-liner that binary-searches
+\code{edge\_store[v]} for the first edge with \code{timestamp}
+$\geq t_0$ and sets \code{edge\_hi} to the first edge with
+\code{timestamp} $> t_1$. The sort by timestamp performed at
+finalize (Chapter~\ref{ch:graph-hunter}) is what makes this binary
+search correct.
+
+\begin{theorem}[Matcher correctness]
+Upon return, \textsc{Dfs-Match-Iterative} produces exactly the set
+of temporal paths of length $\ell$ rooted at $s_0$ that satisfy the
+hypothesis $H$ within $[t_0, t_1]$ and respect $k$-simplicity.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+By induction on the hypothesis depth. The base case ($\ell = 1$)
+is the first push into \code{stack}; the check is step-by-step
+equivalent to the hypothesis constraints on the first edge. The
+inductive step observes that each admitted edge extends the path by
+exactly one vertex, updates \code{visit} consistently, and that
+the cycle check rejects exactly those extensions that would exceed
+$k$-simplicity. The stack unwinds restoring \code{visit} and the
+path, so every branch is explored independently; no path is ever
+omitted because of missed backtracking. \qed
+\end{proof}
+
+\begin{complexity}
+The worst case is a graph where every edge matches every step.
+Then from a start $s_0$ the DFS visits up to
+$\bar{b}^\ell$ paths (where $\bar{b}$ is the average out-degree of
+qualifying edges per step and $\ell$ is the step count), giving
+$\Ord{\bar{b}^\ell \cdot \ell}$ time per start. Across all $n_s$
+candidate starts, the total is
+\[
+    T_{\text{match}}(G, H) = \Ord{n_s \cdot \bar{b}^\ell \cdot \ell}.
+\]
+Space per worker is $\Ord{\ell}$ for the stack and path plus
+$\Ord{\ell \cdot k}$ for the \code{visit} map (each entry is one
+vertex, and the path holds at most $\ell$ distinct vertices each
+visited at most $k$ times). With $W$ workers total matcher space is
+$\Ord{W \cdot \ell \cdot k}$. In practice $\bar{b}$ is tiny because
+the type-tag fast-path eliminates most outgoing edges on the first
+byte comparison; empirical results from \code{benches/hunt\_latency.rs}
+are in App.~\ref{app:bench}.
+\end{complexity}
+
+\section{The smart variant}
+
+\textsc{Dfs-Match-Smart} is used when the caller requests the
+top-$K$ most anomalous paths instead of ``all paths.'' It differs
+from the iterative variant only in the candidate ordering and the
+result accumulator:
+
+\begin{itemize}
+    \item \textbf{Accumulator}: a min-heap of size at most $K$
+        ordered by composite anomaly score. When full, new paths
+        are accepted iff they score higher than the heap's minimum.
+    \item \textbf{Running bound}: each frame tracks
+        \code{path\_anomaly\_sum}, the sum of
+        \code{node\_anomaly\_estimate} (Chapter~\ref{ch:anomaly}) along
+        the path so far. Extending the path cannot decrease this
+        sum; if the sum already falls below the heap's minimum,
+        the branch is pruned.
+\end{itemize}
+
+\begin{algorithm}
+\caption{\textsc{Merge-Into-TopK}}\label{alg:merge-topk}
+\KwIn{local heap $L$, global heap $G$, capacity $K$}
+\ForEach{$p \in L$}{
+    \If{$|G| < K$}{$G$.push($p$)}
+    \ElseIf{$\text{score}(p) > \min(G)$}{
+        $G$.pop\_min(); $G$.push($p$);
+    }
+}
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{(|L| + |G|) \log K}$. When the matcher joins rayon workers,
+each local heap of size $\leq K$ merges into a single global heap
+at total cost $\Ord{W K \log K}$, negligible compared to the DFS
+work.
+\end{complexity}
+
+\section{Parallelism}
+
+The matcher is embarrassingly parallel in the starting vertex.
+Because each worker's DFS reads the graph exclusively (all writers
+are blocked on an \code{RwLock::write} at the session level), there
+is no inter-worker synchronisation beyond the shared \code{cap}
+counter and the final reduction into a single result vector.
+
+\begin{theorem}[Parallel speedup]
+Given $W$ rayon workers and $n_s$ starting vertices with
+approximately equal DFS work per start, the matcher achieves a
+speedup factor of $\min(W, n_s)$ up to the constant cost of the
+final reduction.
+\end{theorem}
+
+The proof is Brent's theorem applied to the trivial partition: each
+start's DFS has no inter-start dependencies, and the final
+reduction is $\Ord{\text{total results}}$ which is typically orders
+of magnitude smaller than the DFS itself.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/graph.rs:461} ---
+\code{search\_temporal\_pattern}.\\
+\filepath{graph\_hunter\_core/src/graph.rs:1121} ---
+\code{dfs\_match\_iterative}.\\
+\filepath{graph\_hunter\_core/src/graph.rs:782} ---
+\code{search\_temporal\_pattern\_smart}.\\
+\filepath{graph\_hunter\_core/src/graph.rs:932} ---
+\code{dfs\_match\_smart}.\\
+\filepath{graph\_hunter\_core/benches/hunt\_latency.rs} ---
+performance benchmarks.
+\end{inthecode}

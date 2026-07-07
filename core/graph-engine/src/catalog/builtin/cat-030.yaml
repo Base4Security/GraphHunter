@@ -1,0 +1,6 @@
+id: cat-030
+name: Impossible Travel (proxy)
+mitre_id: T1078.004
+description: "Successful authentications by the same user from 2+ distinct IPs within a one-hour window — proxy for impossible travel. The DSL itself does not consult geo metadata; pair this match with GeoIP enrichment (`enrich_ip`) on the matched IPs to confirm physical impossibility versus benign roaming (VPN, mobile carriers). Complementary to cat-017 (password spraying, looser 24h spray window) and cat-019 (anonymizing service)."
+dsl_pattern: 'User -[Auth {status="Success"}]-> IP HAVING count(distinct IP) >= 2 WITHIN 1h'
+k_simplicity: 1

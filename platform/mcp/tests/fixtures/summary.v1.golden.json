@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-06-19T00:00:00Z",
+  "totals": { "nodes": 0, "edges": 0, "by_type": {} },
+  "sources": [],
+  "active_datasets": [],
+  "active_hunts": [],
+  "recent_pivots": [],
+  "graph_empty": true
+}

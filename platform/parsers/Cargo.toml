@@ -1,0 +1,19 @@
+[package]
+name = "graph_hunter_parsers"
+version = "0.1.0"
+edition = "2024"
+description = "Concrete LogParser implementations (Cognito, FortiAnalyzer, IIS W3C) lifted out of graph_hunter_core in F2.10. The LogParser trait, ParsedTriple, and ParseStats remain in core so its ingest pipeline stays trait-consuming rather than impl-consuming — that keeps the dependency arrow one-way (parsers -> core) and preserves the shearing-layer invariant. Sysmon, Sentinel, Generic, and CsvParser impls still live in core; migrating them requires hoisting core's inline test suite first."
+license = "GPL-3.0"
+
+[lib]
+name = "graph_hunter_parsers"
+path = "src/lib.rs"
+
+[dependencies]
+graph_hunter_core = { path = "../../core/graph-engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+# FortiAnalyzer XML report parser (raw event-based Reader API, no
+# serialize feature needed).
+quick-xml = "0.38"

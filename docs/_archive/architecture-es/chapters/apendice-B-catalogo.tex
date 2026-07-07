@@ -1,0 +1,58 @@
+\chapter{Referencia del catálogo}
+\label{app:catalog}
+
+Los 29 patrones de hipótesis ATT\&CK built-in. Cada entrada vive
+como un YAML separado en
+\filepath{graph\_hunter\_core/src/catalog/builtin/cat-NNN.yaml} y
+se valida + cachea en el primer acceso
+(Capítulo~\ref{ch:catalog-yaml}).
+
+\begin{table}[h]
+\centering
+\scriptsize
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{ID} & \textbf{MITRE} & \textbf{Patrón} & \textbf{k} \\
+\midrule
+cat-001 & T1078     & User $\to$ Host $\to$ Process & 1 \\
+cat-002 & T1059.001 & User $\to$ Process $\to$ Process $\to$ File & 1 \\
+cat-003 & T1021.001 & IP $\to$ Host $\to$ User $\to$ Process & 1 \\
+cat-004 & T1003     & User $\to$ Process $\to$ File & 1 \\
+cat-005 & T1071     & Process $\to$ Domain $\to$ IP & 1 \\
+cat-006 & T1569.002 & User $\to$ Process $\to$ Service & 1 \\
+cat-007 & T1053.005 & Process $\to$ File $\to$ Process & 1 \\
+cat-008 & T1055     & Process $\to$ Process $\to$ File & 1 \\
+cat-009 & T1048.003 & User $\to$ Process $\to$ Domain & 1 \\
+cat-010 & T1204.002 & Process $\to$ File $\to$ Process & 1 \\
+cat-011 & T1547.001 & Process $\to$ Registry $\to$ Process & 1 \\
+cat-012 & T1021     & User $\to$ Host $\to$ Process $\to$ File & 1 \\
+cat-013 & T1071     & Process $\to$ Domain $\to$ IP $\to$ Process (ciclo) & 2 \\
+cat-014 & T1547.001 & Process $\to$ Registry $\to$ Process (ciclo) & 2 \\
+cat-015 & T1021     & Host $\to$ User $\to$ Process $\to$ Host (ciclo) & 2 \\
+cat-016 & T1059     & Process $\to$ Process $\to$ Process (ciclo) & 2 \\
+cat-017 & T1110.003 & User \{status=Failure\} $\to$ IP HAVING count(distinct IP) $\geq 3$ WITHIN 24h & 1 \\
+cat-018 & T1087.004 & User \{app$\sim$PowerShell\} $\to$ IP & 1 \\
+cat-019 & T1078.004 & User \{risk\_tag=anonymizing\} $\to$ IP & 1 \\
+cat-020 & T1110.003 & User \{status=Success\} $\to$ IP HAVING count(distinct IP) $\geq 2$ & 1 \\
+cat-021 & T1078.004 & User $\to$ IP HAVING count(distinct IP) $\geq 2$ WITHIN 6h & 1 \\
+cat-022 & T1528     & User $\to$ OAuthApp & 1 \\
+cat-023 & T1098.003 & User $\to$ ServicePrincipal & 1 \\
+cat-024 & T1098.003 & User $\to$ Role $\to$ User & 1 \\
+cat-025 & T1564.008 & User $\to$ MailboxRule $\to$ Domain & 1 \\
+cat-026 & T1218     & Process $\to$ Process \{name$\sim$certutil\} & 1 \\
+cat-027 & T1014     & Process $\to$ File \{path$\sim$.sys\} & 1 \\
+cat-028 & T1562.001 & Process $\to$ Service \{name$\sim$Sense\} & 1 \\
+cat-029 & T1053.005 & User $\to$ Host $\to$ Task $\to$ Process & 1 \\
+\bottomrule
+\end{tabular}
+\caption{Catálogo built-in. Las flechas omiten el tipo de
+relación por compacidad; ver el YAML para los patrones
+exactos.}
+\end{table}
+
+Las entradas 017--021 ejercitan la gramática de predicados de
+metadata; 022--025 son los patrones de identidad cloud que
+requieren tipos de relación \code{Consent}, \code{Create},
+\code{Assign}, \code{Forward}; 026--028 son los patrones de
+modernización de endpoint que usan matchers de substring sobre
+metadata del vértice destino.

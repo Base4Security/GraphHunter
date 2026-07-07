@@ -1,0 +1,30 @@
+# Layering exceptions — pragmatic violations to phase out
+#
+# Format: <owner-crate-dir> -> <dep-crate-dir>
+# (paths relative to workspace root; arrow direction = dep direction)
+#
+# Each entry MUST have:
+#   (a) a one-line rationale in a comment above it,
+#   (b) a phase-out plan (even "eventual" counts — just state it).
+#
+# Checked automatically by scripts/check-layering.sh in CI.
+# To add a new exception: open an ADR, get approval, add entry here.
+# The count of exceptions MUST NOT grow without explicit ADR sign-off.
+#
+# Current count: 2 (target: 0)
+
+# Rationale: graph_hunter_core re-exports LogSource/AadEventBatch types under
+# the original crate::sources path so the ~40 call sites inside core/ stay
+# source-compatible.  Moving them to core/ proper would require a flag-day
+# API break across all consumer crates.
+# Phase-out plan: introduce a core/types crate holding the shared type
+#   surface; migrate sources to depend on it; remove this edge.
+core/graph-engine -> platform/sources
+
+# Rationale: graph_hunter_core re-exports Hypothesis/DSL parser types under
+# the original crate::types / crate::hypothesis / crate::dsl paths so
+# the ~140 internal `crate::types::X` references keep resolving.
+# Splitting the types out requires a careful multi-PR migration.
+# Phase-out plan: same core/types crate as above absorbs the shared types;
+#   platform/dsl shrinks to only the parser logic; edge disappears.
+core/graph-engine -> platform/dsl

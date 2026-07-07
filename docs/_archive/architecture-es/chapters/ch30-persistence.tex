@@ -1,0 +1,65 @@
+\chapter{Persistencia de sesión}
+\label{ch:persistence}
+
+\begin{note}
+Stub. Las sesiones se serializan a archivos JSON bajo el
+directorio de datos de app del SO. El formato es hoy
+schema\_version $= 1$; un bump v2 para la migración MVCC P3
+está planeado (Capítulo~\ref{ch:mvcc}).
+\end{note}
+
+\section{Layout en disco}
+
+\begin{itemize}
+    \item Windows: \code{\%APPDATA\%\textbackslash GraphHunter\textbackslash sessions\textbackslash <id>.json}
+    \item Unix: \code{\$HOME/.local/share/GraphHunter/sessions/<id>.json}
+\end{itemize}
+
+\code{<id>} se valida contra \code{[A-Za-z0-9\_-]\{1,128\}}
+para prevenir path traversal. El path se construye vía
+\code{PathBuf::join}, nunca por concatenación de strings.
+
+\section{Forma del SessionFile}
+
+\begin{lstlisting}[style=rust]
+pub struct SessionFile {
+    pub id:              String,
+    pub name:            String,
+    pub created_at:      i64,
+    pub entities:        Vec<Entity>,
+    pub relations:       Vec<Relation>,
+    pub path_node_ids:   Vec<String>,
+    pub notes:           Vec<Note>,
+    pub datasets:        Vec<DatasetInfo>,
+    pub tags:            Vec<EntityTag>,
+    // SIN ai_conversation -- el chat es deliberadamente efimero.
+}
+\end{lstlisting}
+
+\section{Progreso de carga}
+
+La carga es asíncrona. El \code{EventEmitter} recibe eventos
+\code{SESSION\_LOAD\_PROGRESS} en cada etapa: parseo del archivo,
+inserción de entidades, inserción de relaciones, reconstrucción
+de índices (finalize del scorer), listo. La UI renderiza una
+barra de progreso; HTTP / MCP simplemente ignoran los eventos
+(\code{NoopEmitter}).
+
+\section{Migración v2 (diferida)}
+
+Cuando aterrice el cambio de writer MVCC P3, las aristas
+heredadas (cargadas de archivos v1) deben backfillearse con un
+\code{ingested\_at} sintético. El plan es usar el
+\code{timestamp} de la arista como valor de backfill: no es
+exactamente correcto (la arista fue ingerida en algún momento
+posterior), pero es una elección definida y determinista que
+permite a las queries de snapshot v2 producir resultados
+sensatos contra datos v1. La UI muestra un banner
+``snapshot aproximado'' para que el analista lo sepa.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_api/src/state/persistence.rs} ---
+load / save.\\
+\filepath{graph\_hunter\_api/src/state/session\_types.rs} ---
+\code{SessionFile}, \code{Note}, \code{EntityTag}.
+\end{inthecode}

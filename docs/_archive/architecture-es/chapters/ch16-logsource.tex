@@ -1,0 +1,63 @@
+\chapter{El trait \code{LogSource}}
+\label{ch:logsource}
+
+\begin{note}
+Este capítulo es un \emph{stub}. El trait \code{LogSource} es la
+capa inferior del pipeline de ingesta streaming: cada
+implementación representa un productor externo de datos (un
+workspace Microsoft Sentinel, un tenant Defender XDR, una fuente
+blob Azure Data Lake). Un recorrido completo del ciclo de vida
+del polling --- semántica de retomar en \code{poll\_since},
+cancelación, monotonía de watermark, backoff y quota --- queda
+diferido a una revisión posterior.
+\end{note}
+
+\section{Estructura}
+
+\begin{lstlisting}[style=rust]
+#[async_trait]
+pub trait LogSource: Send + Sync {
+    fn source_id(&self) -> &str;
+    fn kind(&self) -> SourceKind;
+    fn available_tables(&self) -> &[&'static str];
+    async fn check_auth(&self) -> Result<(), SourceError>;
+    async fn query_scoped(
+        &self,
+        scope: QueryScope,
+        cancel: CancellationToken,
+    ) -> Result<ChunkStream, SourceError>;
+    async fn poll_since(
+        &self,
+        table: &str,
+        watermark: Watermark,
+        cancel: CancellationToken,
+    ) -> Result<PollStream, SourceError>;
+}
+\end{lstlisting}
+
+Un \code{RawChunk} es un fragmento de respuesta respaldado por
+\code{Bytes} que lleva \code{source\_id}, \code{table},
+\code{fetched\_at}, y un \code{watermark\_candidate} opcional que
+la fuente sugiere persistir tras un parseo exitoso.
+
+\section{Implementaciones}
+
+\begin{itemize}
+    \item \filepath{graph\_hunter\_core/src/sources/log\_analytics.rs}
+          --- Microsoft Sentinel / Azure Log Analytics.
+    \item \filepath{graph\_hunter\_core/src/sources/defender\_xdr.rs}
+          --- Microsoft Defender XDR (Advanced Hunting).
+    \item \filepath{graph\_hunter\_core/src/sources/data\_lake.rs}
+          --- enumeración de blobs en Azure Data Lake.
+    \item \filepath{graph\_hunter\_core/src/sources/aad\_training\_export.rs}
+          --- pipeline de exportación de entrenamiento Azure AD.
+\end{itemize}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/sources/mod.rs:275} ---
+definición del trait.\\
+\filepath{graph\_hunter\_core/src/sources/token\_cache.rs} ---
+cacheo de tokens Azure.\\
+\filepath{graph\_hunter\_core/src/sources/backoff.rs} --- política
+de backoff exponencial.
+\end{inthecode}

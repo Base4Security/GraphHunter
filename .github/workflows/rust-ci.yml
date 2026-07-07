@@ -1,0 +1,103 @@
+name: rust-ci
+
+on:
+  pull_request:
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '**/*.rs'
+      - '.github/workflows/rust-ci.yml'
+  push:
+    branches: [main]
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }} / ${{ matrix.manifest }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        manifest:
+          - apps/cli/Cargo.toml
+          - apps/tauri/src-tauri/Cargo.toml
+          - core/gnn/Cargo.toml
+          - core/graph-engine/Cargo.toml
+          - core/matcher-ffi/Cargo.toml
+          - platform/api/Cargo.toml
+          - platform/canonical/Cargo.toml
+          - platform/constrained-decode/Cargo.toml
+          - platform/dsl/Cargo.toml
+          - platform/local-llm/Cargo.toml
+          - platform/parsers/Cargo.toml
+          - platform/siem/Cargo.toml
+          - platform/sources/Cargo.toml
+          - platform/vrl/Cargo.toml
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Compute crate directory
+        id: crate
+        shell: bash
+        run: echo "dir=$(dirname '${{ matrix.manifest }}')" >> "$GITHUB_OUTPUT"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ steps.crate.outputs.dir }}
+
+      - name: Build (release)
+        run: cargo build --release --manifest-path ${{ matrix.manifest }}
+
+      - name: Test
+        run: cargo test --manifest-path ${{ matrix.manifest }}
+
+      - name: Clippy (soft)
+        run: cargo clippy --manifest-path ${{ matrix.manifest }} -- -D warnings
+        continue-on-error: true
+
+      - name: Fmt check (soft)
+        run: cargo fmt --manifest-path ${{ matrix.manifest }} --all -- --check
+        continue-on-error: true
+
+  audit:
+    name: audit (deny + audit, soft)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny + cargo-audit
+        run: cargo install cargo-deny cargo-audit --locked
+
+      - name: cargo deny (soft for now)
+        continue-on-error: true
+        run: |
+          set +e
+          while IFS= read -r manifest; do
+            echo "::group::deny ${manifest}"
+            cargo deny check --manifest-path "${manifest}" || echo "::warning::deny failed for ${manifest}"
+            echo "::endgroup::"
+          done < <(find . -name Cargo.toml -not -path '*/target/*' -not -path '*/_archive/*')
+
+      - name: cargo audit (soft for now)
+        continue-on-error: true
+        run: |
+          set +e
+          while IFS= read -r lockfile; do
+            echo "::group::audit ${lockfile}"
+            cargo audit --file "${lockfile}" || echo "::warning::audit failed for ${lockfile}"
+            echo "::endgroup::"
+          done < <(find . -name Cargo.lock -not -path '*/target/*' -not -path '*/_archive/*')

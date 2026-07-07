@@ -1,0 +1,120 @@
+\chapter{Notación y preliminares}
+\label{ch:notation}
+
+Este capítulo fija la notación usada en todo el documento. Las
+convenciones son compatibles con CLRS donde aplica.
+
+\section{Grafos}
+
+\begin{definition}[Multigrafo dirigido temporal]
+Un \emph{multigrafo dirigido temporal} es una tupla $G = (V, E,
+\tau, \ell_V, \ell_E)$ donde $V$ es un conjunto finito de
+vértices, $E \subseteq V \times V \times \mathbb{N}$ es un
+multiconjunto de aristas dirigidas (el tercer componente es un
+identificador único de arista, por lo que varias aristas entre el
+mismo par son elementos distintos de $E$), $\tau : E \to
+\mathbb{Z}$ asigna a cada arista una marca temporal de evento,
+$\ell_V : V \to \mathcal{T}_V$ etiqueta a los vértices con un tipo
+de entidad, y $\ell_E : E \to \mathcal{T}_E$ etiqueta a las
+aristas con un tipo de relación.
+\end{definition}
+
+Escribiremos $|V| = n$ y $|E| = m$. La vecindad saliente de un
+vértice $v \in V$ en la ventana $[t_0, t_1]$ es
+\[
+    N^{+}_{[t_0, t_1]}(v) = \{\, u \in V \mid \exists\, e = (v, u,
+    k) \in E : \tau(e) \in [t_0, t_1]\,\}.
+\]
+La vecindad entrante $N^{-}_{[t_0, t_1]}(v)$ se define
+simétricamente. Cuando la ventana es todo el dominio omitimos el
+subíndice y escribimos $N^{+}(v)$, $N^{-}(v)$.
+
+\begin{definition}[Extensión MVCC]
+La \emph{extensión MVCC} de $G$ agrega un segundo timestamp
+$\iota : E \to \mathbb{Z}$ que registra cuándo se insertó cada
+arista en el grafo. El motor almacena $\iota$ como un delta
+compacto contra un epoch fijo; ver
+Capítulo~\ref{ch:compact-relation}. Una consulta por snapshot en
+el instante $s$ considera sólo el subgrafo
+\[
+    G|_{s} = (V, \{\,e \in E \mid \iota(e) \leq s\,\}, \tau, \ell_V,
+    \ell_E),
+\]
+es decir, ``lo que el grafo sabía al momento $s$''.
+\end{definition}
+
+\section{Caminos e hipótesis}
+
+\begin{definition}[Camino temporal]
+Un \emph{camino temporal} de longitud $\ell$ en $G$ es una
+secuencia
+\[
+    \pi = (v_0, e_1, v_1, e_2, \ldots, e_\ell, v_\ell),
+\]
+con $v_i \in V$, $e_i = (v_{i-1}, v_i, k_i) \in E$, y
+$\tau(e_1) \leq \tau(e_2) \leq \cdots \leq \tau(e_\ell)$
+(monotonía temporal). Con frecuencia abreviaremos un camino como
+su lista de vértices $(v_0, v_1, \ldots, v_\ell)$ cuando las
+aristas intermedias se deducen del contexto.
+\end{definition}
+
+\begin{definition}[Camino $k$-simple]
+Un camino es \emph{$k$-simple} si y sólo si ningún vértice aparece
+en él más de $k$ veces. La $k$-simplicidad relaja la exigencia
+clásica de no-repeticiones ($k=1$) para admitir ciclos que un
+atacante real sí exhibe --- por ejemplo, un bucle de callback C2
+donde el mismo proceso vuelve a entrar en el camino. $k$ se fija
+por hipótesis; el valor por defecto es 1.
+\end{definition}
+
+\begin{definition}[Hipótesis]
+Una \emph{hipótesis} $H$ es una cadena de flechas
+\[
+    H = (\sigma_0, \rho_1, P_1^{\text{edge}}, P_1^{\text{dst}},
+        \sigma_1, \rho_2, \ldots, \rho_\ell, P_\ell^{\text{edge}},
+        P_\ell^{\text{dst}}, \sigma_\ell)
+\]
+donde $\sigma_i \in \mathcal{T}_V \cup \{\ast\}$ es el tipo de
+entidad requerido en el $i$-ésimo vértice (o $\ast$ para
+``cualquiera''), $\rho_i \in \mathcal{T}_E \cup \{\ast\}$ es el
+tipo de relación requerido en la $i$-ésima arista, y
+$P_i^{\text{edge}}$, $P_i^{\text{dst}}$ son predicados opcionales
+sobre los metadatos de la arista y del vértice de destino,
+respectivamente. La cadena también lleva restricciones de
+agregación (\code{HAVING}, \code{WITHIN}) que se procesan después
+del match. Un camino $\pi = (v_0, \ldots, v_\ell)$
+\emph{satisface} $H$ si y sólo si $\ell_V(v_i) \in \sigma_i$,
+$\ell_E(e_i) \in \rho_i$, y cada predicado se cumple sobre la
+arista o el vértice correspondiente.
+\end{definition}
+
+\section{Notación asintótica}
+
+Valen las convenciones estándar de CLRS. $\Ord{f(n)}$ es cota
+superior, $\Thet{f(n)}$ es cota ajustada, $\Omega(f(n))$ es cota
+inferior. ``Amortizado $O(f)$'' significa que el costo por
+operación, promediado sobre una secuencia peor caso, es $O(f)$,
+aun cuando operaciones individuales sean más caras.
+
+\section{Modelo de memoria}
+
+El modelo de propiedad (\emph{ownership}) de Rust hace que la
+mayoría de los invariantes sean chequeables localmente. Donde el
+motor depende de mutabilidad interior, lo marcamos explícitamente
+--- \code{Arc<RwLock<\_>>} para estado de sesión compartido,
+\code{RwLock<SpillableEdgeStore>} para el buffer de aristas en
+memoria que puede volcarse a disco durante ingesta,
+\code{OnceLock} para el snapshot del catálogo a nivel proceso. El
+motor nunca comparte grafos mutables entre threads sin un lock; el
+matcher DFS paraleliza dando a cada worker rayon una referencia
+inmutable y una pila scratch local al thread
+(Capítulo~\ref{ch:matcher}).
+
+\section{Convención de punteros a fuente}
+
+Cada capítulo termina con un bloque \emph{En el código} que lista
+punteros \code{archivo:línea} a la implementación Rust. Las rutas
+son relativas a la raíz del repositorio, p.~ej.\
+\filepath{graph\_hunter\_core/src/graph.rs:461}. Los números de
+línea pueden derivar entre revisiones, así que si el puntero está
+desactualizado conviene grepear el nombre de la función.

@@ -1,0 +1,54 @@
+\chapter{Trait \code{StringInternerBackend}}
+\label{ch:interner-trait}
+
+\begin{note}
+Stub. Ver Capítulo~\ref{ch:interner} para el struct y las
+métricas subyacentes. El trait existe como seam para un futuro
+\code{GenerationalInterner} o \code{PartitionedInterner}; no se
+entrega una segunda impl hoy, el trait está pre-posicionado
+para cuando la evidencia de producción lo justifique.
+\end{note}
+
+\section{Contrato}
+
+\begin{lstlisting}[style=rust]
+pub trait StringInternerBackend {
+    fn intern(&mut self, s: &str) -> StrId;
+    fn resolve(&self, id: StrId) -> &str;
+    fn try_resolve(&self, id: StrId) -> Option<&str>;
+    fn get(&self, s: &str) -> Option<StrId>;
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool;
+    fn reserve(&mut self, additional: usize);
+    fn metrics(&self) -> InternerMetrics;
+}
+
+pub struct InternerMetrics {
+    pub unique_strings: usize,
+    pub approx_bytes:   usize,
+}
+\end{lstlisting}
+
+\section{Condiciones disparadoras}
+
+Implementar un segundo backend vale la pena cuando cualquiera
+de:
+\begin{itemize}
+    \item \code{metrics().unique\_strings} excede $\sim 10^7$ en
+        una sesión viva.
+    \item Una sesión streaming corre 24$\times$7 por más de 72h
+        sin compactación.
+    \item Un único proceso sirve a múltiples tenants
+        (despliegue MSSP).
+\end{itemize}
+
+El motor expone las métricas vía
+\code{api.get\_interner\_metrics()} para que un operador pueda
+observar la aproximación a un gatillo en vez de chocarse con
+él a ciegas.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/interner.rs} --- trait +
+métricas.\\
+\filepath{TODO.md} --- criterios de disparo.
+\end{inthecode}

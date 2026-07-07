@@ -1,0 +1,57 @@
+\chapter{Cargador de catálogo YAML}
+\label{ch:catalog-yaml}
+
+\begin{note}
+Stub. El refactor P2-C movió el catálogo de hipótesis ATT\&CK de
+un array \code{const} en compile time a 29 YAMLs embebidos más un
+directorio opcional de override de usuario.
+\end{note}
+
+\section{Precedencia}
+
+Las fuentes posteriores sobrescriben a las anteriores por
+\code{id} de catálogo:
+\begin{enumerate}
+    \item \textbf{Built-in} --- 29 archivos embebidos vía
+        \code{include\_str!} desde
+        \filepath{graph\_hunter\_core/src/catalog/builtin/cat-NNN.yaml}.
+    \item \textbf{Directorio de usuario} ---
+        \code{\$GRAPHHUNTER\_CATALOG\_DIR} si está seteado; si no
+        \code{\$USERPROFILE/.graphhunter/catalog/} (Windows) o
+        \code{\$HOME/.graphhunter/catalog/} (Unix). Silencioso si
+        no existe.
+\end{enumerate}
+
+\section{Validación}
+
+Cada entrada cargada pasa por una validación:
+
+\begin{itemize}
+    \item \code{id} matchea \code{[A-Za-z0-9\-\_]+}.
+    \item \code{mitre\_id} matchea
+        \code{T\textbackslash d\{4\}(\textbackslash.\textbackslash d\{3\})?}.
+    \item \code{dsl\_pattern} parsea vía \code{parse\_dsl}.
+    \item \code{k\_simplicity >= 1}.
+\end{itemize}
+
+Los archivos de usuario malformados no hacen panic ni rompen el
+startup: el cargador loguea un \code{CatalogLoadError} y sigue.
+Los YAMLs built-in los cubre estructuralmente un golden test
+(\filepath{graph\_hunter\_core/tests/catalog\_golden.rs}) y el
+chequeo de compile time \code{include\_str!}.
+
+\section{Diagnósticos}
+
+\code{api.get\_catalog\_diagnostics()} devuelve el
+\code{Vec<CatalogLoadError>} recolectado. Los transports lo
+exponen vía \code{cmd\_get\_catalog\_diagnostics} (Tauri) y
+\code{GET /catalog/diagnostics} (HTTP).
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/catalog/mod.rs} --- API pública
+(\code{get\_catalog}, \code{get\_catalog\_snapshot}).\\
+\filepath{graph\_hunter\_core/src/catalog/loader.rs} --- carga +
+validación.\\
+\filepath{graph\_hunter\_core/src/catalog/builtin/*.yaml} --- 29
+entradas built-in.
+\end{inthecode}

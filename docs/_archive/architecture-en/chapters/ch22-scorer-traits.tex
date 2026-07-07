@@ -1,0 +1,66 @@
+\chapter{\code{Scorer} and \code{ScoreComponent} Traits}
+\label{ch:scorer-traits}
+
+\begin{note}
+Stub. The P2-A refactor extracted each scoring dimension into a
+separate \code{impl ScoreComponent}. See Chapter~\ref{ch:anomaly}
+for the underlying math.
+\end{note}
+
+\section{Traits}
+
+\begin{lstlisting}[style=rust]
+pub trait ScoreComponent: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn score_path(&self, ctx: &PathContext<'_>) -> f64;
+    fn explain(&self, value: f64, ctx: &PathContext<'_>) -> Option<String> {
+        None
+    }
+}
+
+pub struct ScoringCaches<'a> {
+    pub entity_freq:       &'a HashMap<String, u64>,
+    pub pair_freq:         &'a HashMap<(String, String), u64>,
+    pub first_seen:        &'a HashMap<String, i64>,
+    pub nc_cache:          &'a HashMap<String, f64>,
+    pub gnn_cache:         &'a HashMap<String, f64>,
+    pub log_max_freq:      f64,
+    pub log_max_pair_freq: f64,
+    pub tau_min:           i64,
+    pub tau_max:           i64,
+}
+
+pub struct PathContext<'a> {
+    pub path:   &'a [String],
+    pub caches: &'a ScoringCaches<'a>,
+}
+\end{lstlisting}
+
+Five built-in components: \code{EntityRarity}, \code{EdgeRarity},
+\code{NeighborhoodConcentration}, \code{TemporalNovelty},
+\code{GnnThreat}. Each lives in
+\filepath{graph\_hunter\_core/src/scoring/components.rs} as a unit
+struct implementing \code{ScoreComponent}.
+
+\section{Composite orchestrator}
+
+\code{CompositeScorer} holds \code{Vec<Box<dyn ScoreComponent>>}
+plus matching weights and does a $\sum w_i c_i / \sum w_i$
+weighted average. Zero weight disables a component (it's still
+evaluated but contributes 0).
+
+\section{Migration}
+
+\code{AnomalyScorer::score\_path\_v2} is a drop-in alternative to
+the hardcoded \code{score\_path}. Both coexist for one release;
+\filepath{graph\_hunter\_core/tests/scoring\_snapshot.rs} pins
+bit-equivalence. A follow-up flips the default and deletes v1.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/scoring/mod.rs} --- trait +
+\code{ScoreOutcome}.\\
+\filepath{graph\_hunter\_core/src/scoring/composite.rs} ---
+\code{CompositeScorer}.\\
+\filepath{graph\_hunter\_core/src/scoring/components.rs} --- 5
+component impls.
+\end{inthecode}

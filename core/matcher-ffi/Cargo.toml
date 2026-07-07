@@ -1,0 +1,17 @@
+[package]
+name = "graph_hunter_matcher_ffi"
+version = "0.1.0"
+edition = "2024"
+description = "Thin Rust forwarder for `search_temporal_pattern_simd`. Previously bridged to the C++ libgraphmatch static library; that tree was removed 2026-05-07 after the pure-Rust DFS proved 3-25x faster on every measured workload."
+license = "GPL-3.0"
+
+[lib]
+name = "graph_hunter_matcher_ffi"
+path = "src/lib.rs"
+
+[dependencies]
+graph_hunter_core = { path = "../graph-engine" }
+# mimalloc as global allocator for the bench_dfs binary. Library code
+# in this crate never names this dep — only the bin's
+# `#[global_allocator]` does.
+mimalloc = { version = "0.1", default-features = false }

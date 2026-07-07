@@ -1,0 +1,42 @@
+   Compiling getrandom v0.3.4
+   Compiling ppv-lite86 v0.2.21
+   Compiling fnv v1.0.7
+   Compiling bit-vec v0.8.0
+   Compiling wait-timeout v0.2.1
+   Compiling quick-error v1.2.3
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.10
+   Compiling rusty-fork v0.3.1
+   Compiling bit-set v0.8.0
+   Compiling ahash v0.8.12
+   Compiling rand_core v0.9.5
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.4
+   Compiling rand_chacha v0.9.0
+   Compiling hashbrown v0.14.5
+   Compiling halfbrown v0.2.5
+   Compiling hashlink v0.9.1
+   Compiling value-trait v0.10.1
+   Compiling rusqlite v0.31.0
+   Compiling proptest v1.11.0
+   Compiling simd-json v0.14.3
+   Compiling graph_hunter_core v1.0.0 (C:\Users\lsotomayor\GraphHunter\core\graph-engine)
+warning: unused import: `std::path::Path`
+  --> C:\Users\lsotomayor\GraphHunter\core\graph-engine\src\geoip.rs:12:5
+   |
+12 | use std::path::Path;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling graph_hunter_matcher_ffi v0.1.0 (C:\Users\lsotomayor\GraphHunter\core\matcher-ffi)
+warning: `graph_hunter_core` (lib) generated 1 warning (run `cargo fix --lib -p graph_hunter_core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 38.12s
+     Running tests\equivalence_proptest.rs (target\release\deps\equivalence_proptest-930e70afd9f88939.exe)
+
+running 2 tests
+test dfs_and_simd_return_identical_result_sets ... ok
+test iterative_smart_simd_return_identical_result_sets ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+

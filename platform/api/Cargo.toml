@@ -1,0 +1,131 @@
+[package]
+name = "graph_hunter_api"
+version = "1.0.0"
+edition = "2024"
+description = "Canonical API layer for Graph Hunter: owns session/service state and exposes a transport-agnostic surface that Tauri, HTTP, and MCP serialize against."
+license = "GPL-3.0"
+
+[lib]
+name = "graph_hunter_api"
+path = "src/lib.rs"
+
+[dependencies]
+graph_hunter_core = { path = "../../core/graph-engine", features = ["geoip"] }
+# Thin Rust forwarder for `search_temporal_pattern_simd`. Kept as a
+# separate crate for API stability after the C++ libgraphmatch tree
+# was removed (2026-05-07).
+graph_hunter_matcher_ffi = { path = "../../core/matcher-ffi" }
+# GNN inference + training-corpus export (ex graph_hunter_core::gnn_bridge /
+# npu_scorer / aad_training_export), extracted per F2.14. `run_hunt`'s
+# `compute_gnn_scores` call dispatches here; the `ml-scoring` feature on
+# this crate forwards to `graph_hunter_gnn/ml-scoring` where the ONNX
+# Runtime deps actually live.
+graph_hunter_gnn = { path = "../../core/gnn" }
+graph_hunter_canonical = { path = "../canonical" }
+# Concrete LogParser impls (Cognito, FortiAnalyzer, IIS W3C) lifted out
+# of core per F2.10. The rest still live in core (see parsers/src/lib.rs
+# for the full justification).
+graph_hunter_parsers = { path = "../parsers" }
+# Deterministic FieldConfig -> VRL compiler. Used at export_ocsf time to
+# stamp the real `mapping_hash = sha256(vrl_source)` onto provenance,
+# instead of the generic `builtin:unknown` fallback.
+graph_hunter_vrl = { path = "../vrl" }
+# M6: VRL-subset grammar validator. The parser_generator uses this to
+# reject any LLM refinement that drifts outside the safe sublanguage,
+# falling back to the deterministic compile when the refinement fails.
+graph_hunter_constrained_decode = { path = "../constrained-decode" }
+# SentinelTransport, KqlQueryBuilder, SentinelTokenCache,
+# normalize_response — lifted out of apps/cli per ADR-001 so the
+# canonical API no longer takes a hard edge on a /apps/ crate.
+graph_hunter_siem = { path = "../siem" }
+# LocalLlm trait + mock/candle backends. Extracted so downstream
+# consumers (mcp, future cli slow-lane runner) can depend on the trait
+# without pulling in the rest of the API surface.
+graph_hunter_local_llm = { path = "../local-llm" }
+# Randomness for the sentinel connector's jittered backoff.
+rand = "0.8"
+# Windows Event Log binary parser. Tauri already pulls evtx 0.11 with
+# default features disabled; mirror those settings so the link unifies.
+evtx = { version = "0.11", default-features = false }
+# PCAP / PCAPNG framing — pure-Rust, sans-io. We deliberately avoid
+# `pcap` / `pnet`, which would force a libpcap (or Npcap on Windows)
+# native link. PR1 only uses this for sampling preview metadata
+# (first ~10K packets); PR2 will reuse it for the full streaming
+# flow ingest path.
+pcap-parser = "0.16"
+# L2-L4 decode (Ethernet, 802.1Q VLAN, IPv4/IPv6, TCP/UDP/ICMP).
+# Pure-Rust, no external link. >= 0.15 has the VLAN handling we
+# need for the modern Wireshark sample captures.
+etherparse = "0.15"
+# MD5 for JA3 client fingerprint hashing. Tiny, single-purpose
+# crate; JA3 spec mandates MD5 specifically (not a security hash —
+# a stable fingerprint format the SOC tooling already understands).
+md5 = "0.7"
+# ISO 8601 timestamp parsing for Suricata `eve.json` (`timestamp`
+# field) and decimal-seconds parsing for Zeek log files. Same major
+# version as core / parsers, so we share the lockfile pin.
+chrono = "0.4"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# bincode: binary session format for heavy-logs #3. Streaming
+# encode/decode of Entity/Relation records keeps save+load O(1)
+# memory in addition to ~5x smaller on-disk and ~5x faster I/O.
+# 1.x because it's the well-trodden stable API; 2.x has a different
+# encode!()/decode!() shape and we don't need its perks here.
+bincode = "1"
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+thiserror = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+parking_lot = "0.12"
+tracing = "0.1"
+# Resolves the per-user session data directory across platforms.
+dirs = "5"
+# HTTP client for external integrations (Jira, ServiceNow, Sentinel publish).
+# Default features drop into reqwest's native TLS which Tauri already pulls,
+# keeping the link unified.
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+# Temp files for DLQ reingest replay (writes raw events back to disk
+# before feeding them through load_data_with_config).
+tempfile = "3"
+# Streaming ingestion primitives (moved from Tauri in F2.16). `memmap2`
+# opens the file as a zero-copy slice, `memchr` scans for newline
+# boundaries an order of magnitude faster than byte-by-byte, and
+# `rayon` parallelizes per-batch parsing across cores.
+memmap2 = "0.9"
+memchr = "2"
+rayon = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+jsonschema = "0.18"
+criterion = "0.5"
+
+[[bench]]
+name = "batch_csh_cold_vs_warm"
+harness = false
+
+[features]
+default = []
+# Mirrors graph_hunter_core's ml-scoring; exposed here so Tauri can forward it
+# without pulling the feature through transitively-unnamed paths.
+ml-scoring = ["graph_hunter_gnn/ml-scoring"]
+# F4.5 (ADR-003). Forwarded from `graph_hunter_gnn/gnn-v2-experimental`.
+# Off by default — do NOT enable in production builds. Transitively
+# activates `ml-scoring` so the ONNX backend is compiled.
+gnn-v2-experimental = ["graph_hunter_gnn/gnn-v2-experimental"]
+# Enables the candle-backed Phi-3 LocalLlm. Off by default at the
+# crate level — the mock backend covers tests / CI. Enabled by the
+# desktop / CLI binaries via their own feature lists so users get a
+# real backend without setting env vars; the resolver in
+# `graph_hunter_local_llm::resolve_model_path` finds the bundled
+# `.gguf` next to the executable. `GRAPHHUNTER_LOCAL_MODEL_PATH`
+# remains the manual override.
+local-llm-candle = ["graph_hunter_local_llm/candle"]
+# Enables the xgrammar-backed prefix-constrained sampler. Off at the
+# crate level so library tests stay light; the apps flip it on so
+# the LLM-as-compiler path emits VRL that parses by construction
+# rather than relying on post-hoc validation.
+xgrammar = ["graph_hunter_constrained_decode/xgrammar"]

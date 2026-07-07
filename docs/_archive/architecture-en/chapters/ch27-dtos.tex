@@ -1,0 +1,51 @@
+\chapter{DTOs}
+\label{ch:dtos}
+
+\begin{note}
+Stub. Every operation between a transport and the façade uses a
+DTO pair (\code{*Request} + \code{*Response}) that lives in
+\filepath{graph\_hunter\_api/src/dto/}. The DTOs are the
+wire-level contract: if a field is renamed here, every transport's
+serde output changes identically, and the parity harness
+(Chapter~\ref{ch:parity-harness}) catches the drift at test time.
+\end{note}
+
+\section{Module layout}
+
+One file per operation category, mirroring
+\filepath{operations/}: \code{ai.rs}, \code{analytics.rs},
+\code{anomaly.rs}, \code{dataset.rs}, \code{dsl.rs},
+\code{enrichment.rs}, \code{entity.rs}, \code{export.rs},
+\code{geoip.rs}, \code{graph\_ops.rs}, \code{hunt.rs},
+\code{ingestion.rs}, \code{sentinel.rs}, \code{session.rs},
+\code{sigma.rs}, \code{ticket.rs}.
+
+\section{Common patterns}
+
+\begin{itemize}
+    \item Every request DTO that touches session state embeds
+        \code{session: Option<SessionHandle>}. The façade resolves
+        \code{None} to the current session.
+    \item Errors flow via \code{Result<T, ApiError>} (see
+        \filepath{graph\_hunter\_api/src/error.rs}) which every
+        transport maps into its own envelope (HTTP 400/404/500,
+        Tauri \code{CommandError}, MCP tool error text).
+    \item Enum variants use \code{\#[serde(tag = "kind")]} for
+        struct variants; newtype variants are serialised as their
+        plain string display (a serde limitation we documented in
+        Chapter~\ref{ch:parity-harness}'s error-roundtrip test).
+\end{itemize}
+
+\section{Shape invariants}
+
+The parity harness's \emph{Phase A} pins every DTO's key set:
+a rename silently changes the JSON sent over the wire, and two
+transports built on the same façade would still disagree if one
+had cached a stale DTO copy.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_api/src/dto/*.rs} --- all DTOs.\\
+\filepath{graph\_hunter\_api/src/error.rs} --- \code{ApiError}.\\
+\filepath{graph\_hunter\_api/tests/parity/dto\_shapes.rs} ---
+Phase A shape pinning.
+\end{inthecode}

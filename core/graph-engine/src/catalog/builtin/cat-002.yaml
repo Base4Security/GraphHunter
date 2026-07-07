@@ -1,0 +1,6 @@
+id: cat-002
+name: PowerShell Execution
+mitre_id: T1059.001
+description: User executes a process that spawns PowerShell (or child process) and writes to disk.
+dsl_pattern: "User -[Execute]-> Process -[Spawn]-> Process -[Write]-> File"
+k_simplicity: 1

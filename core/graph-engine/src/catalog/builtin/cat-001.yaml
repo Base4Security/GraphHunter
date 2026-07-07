@@ -1,0 +1,6 @@
+id: cat-001
+name: "Valid Accounts — Lateral Auth"
+mitre_id: T1078
+description: Compromised credentials used to authenticate across hosts, then execute processes.
+dsl_pattern: "User -[Auth]-> Host -[Execute]-> Process"
+k_simplicity: 1

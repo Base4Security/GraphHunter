@@ -1,0 +1,6 @@
+id: cat-003
+name: RDP Lateral Movement
+mitre_id: T1021.001
+description: IP connects to a host, authenticates as a user, then executes a process.
+dsl_pattern: "IP -[Connect]-> Host -[Auth]-> User -[Execute]-> Process"
+k_simplicity: 1

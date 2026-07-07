@@ -1,0 +1,6 @@
+id: cat-019
+name: Anonymizing Service Login
+mitre_id: T1078.004
+description: "User authenticates from an IP flagged as anonymizing / VPN / hosting — typical of credential-theft follow-on."
+dsl_pattern: 'User -[Auth {risk_tag="anonymizing"}]-> IP'
+k_simplicity: 1

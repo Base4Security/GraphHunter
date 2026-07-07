@@ -1,0 +1,6 @@
+id: cat-017
+name: Password Spraying
+mitre_id: T1110.003
+description: "One user fails authentication against many distinct IPs inside a short window — the canonical spray signal on Azure AD / Entra / Okta."
+dsl_pattern: 'User -[Auth {status="Failure"}]-> IP HAVING count(distinct IP) >= 3 WITHIN 24h'
+k_simplicity: 1

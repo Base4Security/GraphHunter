@@ -1,0 +1,6 @@
+id: cat-028
+name: EDR Tampering
+mitre_id: T1562.001
+description: "A process modifies a protected security-tool service (Defender / CrowdStrike / Sense)."
+dsl_pattern: 'Process -[Modify]-> Service {name~"Sense"}'
+k_simplicity: 1

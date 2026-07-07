@@ -1,0 +1,6 @@
+id: cat-025
+name: Mailbox Forwarding Rule
+mitre_id: T1564.008
+description: "User sets up an inbox forwarding rule to an external domain — classic attacker-established exfiltration channel via Outlook rules."
+dsl_pattern: "User -[Create]-> MailboxRule -[Forward]-> Domain"
+k_simplicity: 1

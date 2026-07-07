@@ -1,0 +1,97 @@
+\chapter{El Metadata Store}
+\label{ch:metadata}
+
+Los metadatos por arista (pares clave-valor arbitrarios en
+\code{HashMap<String, String>} que los parsers llenan) son el
+campo de tamaño más variable asociado a una relación. Inlinearlos
+dentro de \Compact{} forzaría un registro de largo variable y
+destruiría el invariante de 32 bytes
+(Capítulo~\ref{ch:compact-relation}). El motor en cambio guarda
+los metadatos externamente en \code{MetadataStore} y deja sólo un
+offset de 64 bits en \Compact{}.
+
+\section{Estructura}
+
+\code{MetadataStore} es un buffer de bytes append-only con una
+codificación simple prefijada por longitud:
+
+\begin{lstlisting}[style=rust]
+pub struct MetadataStore {
+    buf: Vec<u8>,   // append-only
+}
+// layout de un record en offset o:
+//   u32 num_entries
+//   num_entries veces:
+//     u16 key_len, bytes de la key, u16 value_len, bytes del value
+\end{lstlisting}
+
+El primer offset de record válido es 1, así que
+$\code{metadata\_offset} = 0$ en \Compact{} significa
+inequívocamente ``sin metadatos''. En el \code{append}, el store
+devuelve el offset donde escribió el record nuevo y ese offset
+vive en \Compact{} el resto de la sesión.
+
+\section{Operaciones}
+
+\begin{algorithm}
+\caption{\textsc{Metadata-Append}}\label{alg:meta-append}
+\KwIn{store $M$, mapa $K : \{(k, v)\}$}
+\KwOut{offset $o \geq 1$, o 0 si $K$ está vacío}
+\If{$K$ está vacío}{\Return 0\;}
+$o \gets M.\text{buf.len()} + 1$\;
+escribir \code{u32(len($K$))} y luego cada par \code{(key, value)}
+con prefijos de largo \code{u16} en $M.\text{buf}$\;
+\Return $o$\;
+\end{algorithm}
+
+\begin{algorithm}
+\caption{\textsc{Metadata-Read}}\label{alg:meta-read}
+\KwIn{store $M$, offset $o$}
+\KwOut{\code{HashMap<String, String>}, o vacío si $o = 0$}
+\If{$o = 0$}{\Return mapa vacío\;}
+posicionar cursor en $o - 1$ dentro de $M.\text{buf}$\;
+leer \code{u32 num}\;
+\For{$i \gets 0$ \KwTo $num-1$}{
+    leer \code{u16 k\_len}, siguientes \code{k\_len} bytes como
+    UTF-8 $\to k$\;
+    leer \code{u16 v\_len}, siguientes \code{v\_len} bytes como
+    UTF-8 $\to v$\;
+    insertar $(k, v)$\;
+}
+\Return mapa\;
+\end{algorithm}
+
+\begin{complexity}
+\textsc{Metadata-Append}: $\Ord{|K| + \sum |k| + \sum |v|}$.
+\textsc{Metadata-Read}: lo mismo. El espacio por arista es cero
+si el parser no produjo metadatos, si no la longitud en bytes del
+record codificado. Una arista Sysmon típica produce $\sim$60
+bytes de metadatos, comparado con los 32 bytes de \Compact{} ---
+por eso importa el store externo: las aristas se mantienen
+densas en el hot path del matcher y los metadatos sólo se pagan
+cuando un analista los pide.
+\end{complexity}
+
+\section{Inmutabilidad}
+
+\begin{invariant}[Metadata append-only]
+Una vez que un record fue escrito en \code{MetadataStore.buf},
+ninguna operación trunca o reescribe los bytes previos. Los
+offsets son entonces estables por la vida del grafo. En
+particular, el matcher puede capturar un offset dentro de un
+\Compact{} en tiempo de ingesta y leer los metadatos a través de
+él en tiempo de hunt sin preocuparse por mutaciones concurrentes
+del writer.
+\end{invariant}
+
+Cuando se persiste una sesión el \code{MetadataStore.buf} entero
+se serializa junto con las listas de entidades/relaciones; al
+cargar, el store se reconstituye verbatim preservando todos los
+offsets.
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/metadata\_store.rs} --- struct
+y rutinas de append/read.\\
+\filepath{graph\_hunter\_core/src/graph.rs:246} --- donde
+\textsc{Add-Relation} llama a \code{meta\_store.append}.
+\end{inthecode}

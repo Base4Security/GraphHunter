@@ -1,0 +1,21 @@
+# Per-host build settings — A1 bisection result.
+#
+# `target-cpu=native` is INTENTIONALLY DISABLED. The bisection (see
+# docs/perf/release-profile.md) showed it regressed hunt benches
+# 7–19% and ingest 1K/10K 25–27% on the Galaxy Book4 (Intel Core
+# Ultra, hybrid P/E core). The hypothesis: rustc emits AVX-512 with
+# native and the E-cores either stall or downclock, costing more
+# than the ISA win on these memory-bound workloads.
+#
+# Re-enable only on a host with uniform performance cores (server
+# Xeons, AMD EPYC, etc.) AND re-run scripts/bisect-release-profile.sh
+# to confirm. Override per-build with
+#   CARGO_BUILD_RUSTFLAGS="-C target-cpu=native"
+# without editing this file.
+#
+# This file lives at the repo root so every `cargo` invocation —
+# whether from `core/graph-engine/`, `platform/api/`, or any other
+# crate (we don't have a workspace root) — picks it up.
+#
+# [build]
+# rustflags = ["-C", "target-cpu=native"]

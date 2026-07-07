@@ -1,0 +1,6 @@
+id: cat-009
+name: DNS Exfiltration
+mitre_id: T1048.003
+description: "Process resolves many domains (data exfiltration via DNS tunneling)."
+dsl_pattern: "User -[Execute]-> Process -[DNS]-> Domain"
+k_simplicity: 1

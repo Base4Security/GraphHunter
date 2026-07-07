@@ -1,0 +1,45 @@
+   Compiling graph_hunter_core v1.0.0 (C:\Users\lsotomayor\GraphHunter\core\graph-engine)
+warning: unused import: `std::path::Path`
+  --> C:\Users\lsotomayor\GraphHunter\core\graph-engine\src\geoip.rs:12:5
+   |
+12 | use std::path::Path;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling graph_hunter_matcher_ffi v0.1.0 (C:\Users\lsotomayor\GraphHunter\core\matcher-ffi)
+warning: `graph_hunter_core` (lib) generated 1 warning (run `cargo fix --lib -p graph_hunter_core` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 29.35s
+     Running `target\release\bench_dfs.exe`
+=== DFS pattern-match micro-benchmark ===
+(verifying StrId-based DFS refactor; paths must still materialize to valid entity ids)
+
+Graph(small): 5000 entities, 39980 relations
+small / spawn_chain L=2                  iters=20  results=4       avg=0.066 ms
+small / spawn_chain L=3                  iters=20  results=0       avg=0.030 ms
+small / lateral L=3                      iters=20  results=0       avg=0.030 ms
+small / lateral L=4                      iters=20  results=0       avg=0.033 ms
+
+Graph(big): 20000 entities, 159980 relations
+big   / spawn_chain L=2                  iters=10  results=38      avg=0.133 ms
+big   / spawn_chain L=3                  iters=10  results=0       avg=0.095 ms
+big   / lateral L=3                      iters=10  results=0       avg=0.111 ms
+big   / lateral L=4                      iters=10  results=0       avg=0.083 ms
+
+--- Saturation workloads (Any/Any chains, cap=10K) ---
+small / any_chain L=2                    iters=10  results=10000   avg=0.637 ms
+small / any_chain L=3                    iters=10  results=10000   avg=0.674 ms
+small / any_chain L=4                    iters=10  results=10000   avg=0.773 ms
+big   / any_chain L=2                    iters=10  results=10000   avg=0.756 ms
+big   / any_chain L=3                    iters=10  results=10000   avg=0.807 ms
+big   / any_chain L=4                    iters=10  results=10000   avg=0.878 ms
+
+--- Smart top-K search (anomaly-pruned, top_k=1000) ---
+small / smart any_chain L=3              iters=10  results=1000    avg=80.099 ms
+small / smart any_chain L=4              iters=10  results=1000    avg=446.367 ms
+big   / smart any_chain L=3              iters=10  results=1000    avg=693.246 ms
+big   / smart any_chain L=4              iters=10  results=1000    avg=3179.312 ms
+big   / smart spawn_chain L=2            iters=10  results=38      avg=0.313 ms
+big   / smart lateral L=3                iters=10  results=0       avg=0.277 ms
+
+OK: all paths produced valid, resolvable entity ids.

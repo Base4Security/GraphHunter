@@ -1,0 +1,18 @@
+[package]
+name = "graph_hunter_siem"
+version = "0.1.0"
+edition = "2024"
+description = "SIEM query runners and async streaming primitives for Azure Sentinel and Elasticsearch. Extracted from graph_hunter_cli so both the CLI process and the canonical API can consume the same transport layer without the api->cli edge forbidden by ADR-001."
+license = "GPL-3.0"
+
+[lib]
+name = "graph_hunter_siem"
+path = "src/lib.rs"
+
+[dependencies]
+# reqwest provides both the async `Client` used by the streaming
+# transport and the blocking client used by the one-shot runners.
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+# tokio::sync::RwLock backs the token cache.
+tokio = { version = "1", features = ["sync"] }
+serde_json = "1"

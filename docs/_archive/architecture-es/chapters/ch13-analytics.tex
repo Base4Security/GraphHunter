@@ -1,0 +1,161 @@
+\chapter{Centralidad y analíticos}
+\label{ch:analytics}
+
+Más allá de la ejecución de hunts, el motor ofrece un puñado de
+analíticos sobre el grafo: centralidad betweenness (para
+destacar nodos estructuralmente importantes), PageRank temporal
+(para identificar nodos cuya influencia llegó al pico cerca de
+un tiempo de referencia) y algunos helpers auxiliares como
+\code{get\_relation\_schema}. Este capítulo cubre los dos
+primeros en profundidad --- son los analíticos no triviales y los
+que más probablemente sorprendan al lector con su costo.
+
+\section{Centralidad betweenness (Brandes con sampling)}
+
+El algoritmo de Brandes 2001 computa betweenness exacto en un
+grafo dirigido en $\Ord{VE}$, lo cual es prohibitivo para los
+grafos de múltiples M-aristas que el motor ingiere
+regularmente. GraphHunter usa una variante con sampling:
+escoger un subconjunto uniforme aleatorio de $S$ vértices de
+partida, correr BFS de camino más corto de fuente única desde
+cada uno y aproximar el betweenness como promedio de la
+contribución sobre la muestra.
+
+\begin{algorithm}
+\caption{\textsc{Compute-Betweenness}}\label{alg:betweenness}
+\KwIn{grafo $G$, tamaño de muestra $S$}
+\KwOut{mapa $B : V \to \mathbb{R}_{\geq 0}$}
+\If{$|V| \leq S$}{sources $\gets V$}
+\Else{sources $\gets$ muestra uniforme de $S$ vértices}
+$B \gets \{v : 0 \;\forall v \in V\}$\;
+\ForEach{source $s \in$ sources}{
+    \textsc{Brandes-Single-Source}($G, s, B$)\;
+}
+escalar cada entrada de $B$ por $|V| / |\text{sources}|$\;
+\Return $B$\;
+\end{algorithm}
+
+\begin{algorithm}
+\caption{\textsc{Brandes-Single-Source}}\label{alg:brandes-ss}
+\KwIn{grafo $G$, fuente $s$, acumulador $B$}
+\tcp{Fase 1: BFS hacia adelante}
+para cada $v$: $d[v] \gets \infty$, $\sigma[v] \gets 0$, $P[v] \gets \emptyset$\;
+$d[s] \gets 0$; $\sigma[s] \gets 1$; cola $Q \gets [s]$; pila $St \gets []$\;
+\While{$Q$ no vacía}{
+    $v \gets Q.\text{pop\_front}$; push $v$ en $St$\;
+    \ForEach{vecino saliente $u$ de $v$ (vista no dirigida: salientes $\cup$ entrantes)}{
+        \If{$d[u] = \infty$}{$d[u] \gets d[v] + 1$; push $u$ en $Q$}
+        \If{$d[u] = d[v] + 1$}{
+            $\sigma[u] \gets \sigma[u] + \sigma[v]$;
+            anexar $v$ a $P[u]$\;
+        }
+    }
+}
+\tcp{Fase 2: back-accumulation}
+para cada $v$: $\delta[v] \gets 0$\;
+\While{$St$ no vacía}{
+    $w \gets St.\text{pop}$\;
+    \ForEach{$v \in P[w]$}{
+        $\delta[v] \gets \delta[v] + \frac{\sigma[v]}{\sigma[w]} (1 + \delta[w])$\;
+    }
+    \If{$w \neq s$}{$B[w] \gets B[w] + \delta[w]$\;}
+}
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{V + E}$ en tiempo y espacio por source (BFS estándar +
+back-pass). El tiempo total con $S$ sources es $\Ord{S (V + E)}$;
+para el default $S = 500$ y un grafo con $V = 10^5$ y $E = 10^6$,
+el costo es $\sim 5 \times 10^8$ operaciones --- unos pocos
+cientos de ms en una laptop moderna. El espacio es $\Ord{V + E}$:
+el estado BFS se reusa entre sources.
+\end{complexity}
+
+La calidad esperada de la aproximación está acotada por
+Chernoff sobre una muestra aleatoria: con $S = O(\log V /
+\epsilon^2)$ sources, el betweenness por vértice se estima
+dentro de un factor multiplicativo $1 \pm \epsilon$ con alta
+probabilidad, asumiendo que la estructura de caminos más cortos
+no está patológicamente sesgada. El motor no intenta certificar
+esta cota online; el tamaño de muestra es una perilla
+configurable.
+
+\section{PageRank temporal}
+
+El PageRank temporal extiende al PageRank clásico con un
+decaimiento exponencial sobre los pesos de arista: una arista
+con timestamp $\tau(e)$ contribuye al rank computado al tiempo
+de referencia $\tau_0$ con peso
+$\exp(-\lambda (\tau_0 - \tau(e)))$ si $\tau(e) \leq \tau_0$,
+cero en caso contrario.
+
+\begin{algorithm}
+\caption{\textsc{Compute-Temporal-PageRank}}\label{alg:temporal-pr}
+\KwIn{grafo $G$, decay $\lambda$, damping $d$, máx. iteraciones
+      $I_{\max}$, tolerancia $\epsilon$, tiempo de referencia $\tau_0$}
+\KwOut{mapa $r : V \to [0, 1]$ que suma 1}
+$n \gets |V|$; inicializar $r[v] \gets 1/n$ para todo $v \in V$\;
+computar pesos de arista $w(e) \gets \exp(-\lambda \max(0, \tau_0 - \tau(e)))$\;
+computar pesos salientes normalizados $w_{\text{out}}(v) \gets \sum_{e: v \to \cdot} w(e)$\;
+\For{iter $\gets 1$ \KwTo $I_{\max}$}{
+    $r' \gets \{v : (1-d)/n \;\forall v\}$\;
+    \ForEach{vértice $v$ con $w_{\text{out}}(v) > 0$}{
+        \ForEach{arista saliente $e = (v \to u)$}{
+            $r'[u] \gets r'[u] + d \cdot r[v] \cdot \frac{w(e)}{w_{\text{out}}(v)}$\;
+        }
+    }
+    distribuir masa de nodos colgantes (vértices con
+    $w_{\text{out}} = 0$) uniformemente sobre $V$\;
+    \If{$\|r' - r\|_1 < \epsilon$}{\Return $r'$\;}
+    $r \gets r'$\;
+}
+\Return $r$\;
+\end{algorithm}
+
+\begin{complexity}
+Cada iteración es $\Ord{V + E}$. La iteración de potencia sobre
+una cadena amortiguada converge geométricamente con ratio $d$,
+así que la cantidad de iteraciones es $\Ord{\log(1 / \epsilon) /
+\log(1/d)}$. Con $d = 0.85$ y $\epsilon = 10^{-6}$ el motor
+observa convergencia en 10--20 iteraciones en la práctica, dando
+tiempo total $\Ord{20 (V + E)}$ --- lineal en el tamaño del grafo
+con constante chica.
+\end{complexity}
+
+\section{Schema de relaciones}
+
+\code{get\_relation\_schema} barre cada arista y agrupa en
+triples únicos $(\ell_V(\text{src}), \ell_E(e), \ell_V(\text{dst}))$,
+devolviendo un vector ordenado lexicográficamente. Lo usa el
+chequeo de compatibilidad del
+Capítulo~\ref{ch:catalog-yaml}.
+
+\begin{algorithm}
+\caption{\textsc{Get-Relation-Schema}}\label{alg:rel-schema}
+\KwIn{grafo $G$}
+\KwOut{vector ordenado de $(\text{src\_type}, \text{rel\_type},
+       \text{dst\_type}, \text{count})$}
+$M \gets$ HashMap vacío\;
+\ForEach{arista $e = (u, v, k)$ en $G$}{
+    $M[(\ell_V(u), \ell_E(e), \ell_V(v))] \mathrel{+}= 1$\;
+}
+$\mathrm{out} \gets M.\text{into\_iter}$ como vector\;
+ordenar $\mathrm{out}$ lexicográficamente\;
+\Return $\mathrm{out}$\;
+\end{algorithm}
+
+\begin{complexity}
+$\Ord{E + T \log T}$ donde $T = |M|$ es la cantidad de triples
+únicos. $T$ es diminuto en la práctica (cientos bajos) así que
+el costo del sort es nominal; el costo dominante es el barrido
+lineal de aristas.
+\end{complexity}
+
+\begin{inthecode}
+\filepath{graph\_hunter\_core/src/analytics.rs:641} ---
+\code{compute\_betweenness}.\\
+\filepath{graph\_hunter\_core/src/analytics.rs:746} ---
+\code{compute\_temporal\_pagerank}.\\
+\filepath{graph\_hunter\_core/src/analytics.rs:1289} ---
+\code{get\_relation\_schema}.
+\end{inthecode}

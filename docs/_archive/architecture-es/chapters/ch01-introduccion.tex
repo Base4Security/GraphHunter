@@ -1,0 +1,122 @@
+\chapter{Introducción}
+\label{ch:intro}
+
+\section{Dominio del problema}
+
+GraphHunter es una herramienta interactiva de \emph{threat hunting}
+construida alrededor de una idea: la mayor parte del comportamiento
+de un atacante es naturalmente un camino en un grafo dirigido
+temporal, así que dejamos al analista \emph{pedir caminos} en vez
+de escribir SQL por tabla. Una hipótesis se expresa en un pequeño
+DSL de cadena de flechas --- por ejemplo,
+
+\begin{center}
+\code{User -[Auth \{status="Failure"\}]-> IP HAVING count(distinct IP)
+>= 3 WITHIN 24h}
+\end{center}
+
+y el motor devuelve los caminos del grafo ingerido que la
+satisfacen, rankeados por un puntaje de anomalía compuesto. El
+grafo se construye a partir de fuentes de logs heterogéneas
+(Microsoft Sentinel, Defender XDR, Fortinet, Sysmon, IIS, CSV/JSON
+genéricos). Las cargas típicas van desde unos pocos miles de
+aristas (un ticket de incidente) hasta cientos de millones (dump
+EVTX de varias semanas de una empresa mediana).
+
+\section{Vista general del sistema}
+
+El código está organizado como un monorepo Rust con cinco
+componentes principales, dispuestos en capas como en la
+Figura~\ref{fig:crate-graph}.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  node distance=4mm and 10mm,
+  crate/.style={draw, rounded corners, minimum width=3.2cm,
+                minimum height=0.85cm, align=center, font=\small},
+  layer/.style={draw, dashed, rounded corners, inner sep=4mm},
+]
+
+  \node[crate] (core) {\textbf{graph\_hunter\_core}\\ motor};
+  \node[crate, right=of core] (api) {\textbf{graph\_hunter\_api}\\ fachada canónica};
+
+  \node[crate, above right=of api] (tauri) {Tauri desktop\\ (\texttt{app/src-tauri})};
+  \node[crate, right=of api]       (http)  {Servidor HTTP\\ (\texttt{http\_api.rs})};
+  \node[crate, below right=of api] (mcp)   {Servidor MCP\\ (\texttt{graph-hunter-mcp})};
+
+  \node[crate, below=of core] (libgm) {\textbf{libgraphmatch}\\ SIMD AVX2 en C++};
+
+  \draw[-{Stealth}] (core) -- (api);
+  \draw[-{Stealth}] (api) -- (tauri);
+  \draw[-{Stealth}] (api) -- (http);
+  \draw[-{Stealth}] (api) -- (mcp);
+  \draw[-{Stealth}] (libgm) -- (core) node[midway,right,font=\tiny]{FFI};
+  \draw[-{Stealth}, dashed] (mcp) to[bend right=25] node[above,font=\tiny]{HTTP} (http);
+
+\end{tikzpicture}
+\caption{Grafo de crates. El motor (\texttt{graph\_hunter\_core})
+lo consume una fachada canónica (\texttt{graph\_hunter\_api});
+tres capas de transporte delegan en esa fachada. El servidor MCP
+llega al mismo motor invocando el servidor HTTP sobre la interfaz
+de loopback, en vez de enlazarse directamente a la fachada.}
+\label{fig:crate-graph}
+\end{figure}
+
+El motor es una biblioteca Rust pura: sin dependencias de
+framework, sin estado global salvo un puñado de catálogos cacheados
+vía \texttt{OnceLock}. La crate fachada (\code{graph\_hunter\_api})
+envuelve al motor con gestión de sesión, DTOs y un trait
+\code{EventEmitter}, de modo que las tres capas de transporte
+compartan una única implementación sin importar los tipos de bajo
+nivel. El backend SIMD en C++ (\code{libgraphmatch}) se enlaza por
+FFI cuando el feature \code{simd} está activado; una alternativa
+pura en Rust (\code{simd\_rust}) ya está en camino de reemplazarlo
+(Capítulo~\ref{ch:simd}).
+
+\section{Qué cubre esta referencia}
+
+El documento recorre el motor de abajo hacia arriba:
+
+\begin{itemize}
+    \item \textbf{Parte II} --- las estructuras de datos que el
+        motor mantiene en memoria: relaciones compactas, el
+        internador de strings bidireccional, el grafo en memoria,
+        el edge store con capacidad de \emph{spill}, el almacén
+        externo de metadatos y el AST de hipótesis que produce el
+        parser del DSL.
+    \item \textbf{Parte III} --- los algoritmos principales:
+        parseo del DSL, matcheo de patrones temporales (DFS con
+        podado, variante \emph{smart} con cota de anomalía),
+        aceleración SIMD, \emph{scoring} de anomalía, analíticos
+        de centralidad (betweenness de Brandes, PageRank
+        temporal), deduplicación \& paginación de caminos, y
+        \emph{diff} de hunts.
+    \item \textbf{Parte IV} --- el pipeline de ingesta en
+        \emph{streaming}: trait \code{LogSource}, parsers,
+        escritor con canales acotados, estampado MVCC a nivel de
+        arista y persistencia de desborde.
+    \item \textbf{Parte V} --- los puntos de extensión que
+        introdujo el refactor P2: \code{GraphRead}/\code{GraphWrite},
+        \code{ScoreComponent}/\code{Scorer},
+        \code{StringInternerBackend}, \code{IngestAdapter} y el
+        cargador de catálogo YAML.
+    \item \textbf{Parte VI} --- la capa de transporte: la API
+        canónica, los DTOs, \code{EventEmitter}, los adaptadores
+        Tauri/HTTP/MCP, el arnés de paridad y la persistencia de
+        sesión.
+\end{itemize}
+
+Cierran el documento cuatro apéndices: un resumen de complejidad
+de una página (Ap.~\ref{app:complexity}), la referencia del
+catálogo ATT\&CK (Ap.~\ref{app:catalog}), una tabla de
+benchmarks (Ap.~\ref{app:bench}) y un índice de código que mapea
+cada algoritmo a su \code{archivo:línea} (Ap.~\ref{app:source}).
+
+\begin{inthecode}
+Las raíces de crates son \filepath{graph\_hunter\_core/Cargo.toml},
+\filepath{graph\_hunter\_api/Cargo.toml},
+\filepath{app/src-tauri/Cargo.toml},
+\filepath{graph-hunter-mcp/package.json} y
+\filepath{libgraphmatch/CMakeLists.txt}.
+\end{inthecode}

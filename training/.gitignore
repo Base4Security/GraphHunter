@@ -1,0 +1,29 @@
+# Virtual environment
+.venv/
+
+# Downloaded datasets (too large for git)
+data/cadets/*.json
+data/cadets/*.tar.gz
+data/cadets/parsed/
+data/cadets/features/
+data/theia/*.json
+data/theia/*.tar.gz
+data/theia/parsed/
+data/theia/features/
+data/trace/*.json
+data/trace/*.tar.gz
+data/trace/parsed/
+data/trace/features/
+data/streamspot/all*
+data/streamspot/*.tsv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temp clones
+/tmp/
