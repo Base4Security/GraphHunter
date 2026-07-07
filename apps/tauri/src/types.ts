@@ -456,6 +456,19 @@ export interface GraphSummary {
   type_distribution: TypeDistribution[];
   time_range: [number, number] | null;
   top_anomalies: TopAnomaly[];
+  /** Active graph state derived from the counts (empty/partial/populated). */
+  graph_state?: "empty" | "partial" | "populated";
+  /** Advisory nudge for empty/partial graphs; omitted when populated. */
+  advisory?: string;
+  /** §5: most recent graph_build for the session, or absent if never built. */
+  last_build?: {
+    build_id: string;
+    proposal_id: string;
+    at: number;
+    entities_created: number;
+    relations_created: number;
+    merge_mode: string;
+  };
 }
 
 export interface ExpandFilter {
@@ -725,6 +738,16 @@ export interface KqlResult {
   take_limit?: number | null;
   /** Phase N: true when row_count saturates take_limit. */
   truncated?: boolean;
+  /** Graph-first nudge: set in inspect mode when the query touches identity/IP-like columns. */
+  graph_advisory?: string | null;
+  /** §4.7: ready-to-run graph_propose args derived from the query's entity columns. */
+  graph_propose?: {
+    next_tool: string;
+    table: string;
+    selected_fields: { table: string; field: string }[];
+  } | null;
+  /** §4.7: true when an unacknowledged entity-class raw-KQL query was NOT executed. */
+  fallback_gated?: boolean;
 }
 
 // ── Temporal heatmap ──

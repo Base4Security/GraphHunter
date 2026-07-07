@@ -25,6 +25,10 @@ const input = z.object({
     .max(200)
     .optional()
     .describe("Only with ingest=true: name this ingest as a refreshable layer — re-running with the same dataset name REPLACES it instead of duplicating (snapshot). Omit for a one-off append."),
+  acknowledge_fallback: z
+    .boolean()
+    .optional()
+    .describe("§4.7 fallback gate. An inspect query (ingest not true) that projects entity-class columns (IPs/identities) is NOT executed unless this is true — instead a ready-to-run graph_propose payload is returned. Prefer following that payload (graph_propose → graph_build); set true only to read rows out as a deliberate one-off raw-KQL fallback (logged)."),
 });
 
 export const sentinelQuery = defineTool({
@@ -36,11 +40,12 @@ export const sentinelQuery = defineTool({
   stability: "stable",
   inputSchema: input,
   outputSchema: z.unknown(),
-  async execute(ctx, { query, lookback, ingest, max_rows, dataset }) {
+  async execute(ctx, { query, lookback, ingest, max_rows, dataset, acknowledge_fallback }) {
     const body: Record<string, unknown> = { kql: query, ingest: ingest ?? false };
     if (lookback) body.lookback = lookback;
     if (max_rows != null) body.max_rows = max_rows;
     if (dataset) body.dataset = dataset;
+    if (acknowledge_fallback != null) body.acknowledge_fallback = acknowledge_fallback;
     return ctx.api.post("/kql", body, HEAVY);
   },
 });

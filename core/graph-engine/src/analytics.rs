@@ -15,6 +15,31 @@ use crate::types::{EntityType, RelationType};
 /// and flag the response.
 pub const AUTO_GROUPED_THRESHOLD: usize = 50;
 
+/// One hop in a path returned by [`GraphHunter::find_paths`]. `edge` is the
+/// relation type taken INTO this node; the first hop of a path (the origin)
+/// has `edge: None`.
+#[derive(Serialize, Clone, Debug)]
+pub struct PathHop {
+    pub node_id: String,
+    pub node_class: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge: Option<String>,
+}
+
+/// A structurally anomalous entity surfaced by [`GraphHunter::structural_anomalies`].
+#[derive(Serialize, Clone, Debug)]
+pub struct AnomalyHit {
+    pub node_id: String,
+    pub node_class: String,
+    /// `degree` | `betweenness` | `isolation`.
+    pub metric: String,
+    /// Raw metric value (the per-entity score the z-score is computed from).
+    pub value: f64,
+    /// Standard scores above the population (optionally class-scoped) mean.
+    pub z_score: f64,
+    pub observation: String,
+}
+
 // ── Serializable structs ──
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2232,6 +2257,207 @@ impl GraphHunter {
         out.truncate(opts.top_n);
         out
     }
+
+    /// Entity-class (EntityType display) for a node, or "" when unknown.
+    fn class_of(&self, sid: StrId) -> String {
+        self.entities
+            .get(&sid)
+            .map(|e| format!("{}", e.entity_type))
+            .unwrap_or_default()
+    }
+
+    /// Find simple paths from `from_id` following outgoing edges. When `to_id`
+    /// is `Some`, returns paths that terminate at it; when `None`, returns every
+    /// outbound path up to `max_depth` hops. `rel_filter` restricts which edge
+    /// (relation) types may be traversed. Capped at `max_paths` results. Each
+    /// path is a node→edge→node→… sequence (the origin hop has `edge: None`).
+    ///
+    /// This is the traversal `graph_path` (design doc §4.4) exposes — chains
+    /// that in KQL would need repeated joins are one precomputed walk here.
+    pub fn find_paths(
+        &self,
+        from_id: &str,
+        to_id: Option<&str>,
+        max_depth: usize,
+        rel_filter: Option<&[RelationType]>,
+        max_paths: usize,
+    ) -> Vec<Vec<PathHop>> {
+        let Some(from_sid) = self.interner.get(from_id) else {
+            return Vec::new();
+        };
+        if !self.entities.contains_key(&from_sid) {
+            return Vec::new();
+        }
+        let to_sid = match to_id {
+            Some(t) => match self.interner.get(t) {
+                Some(s) if self.entities.contains_key(&s) => Some(s),
+                // Target named but absent → no paths.
+                _ => return Vec::new(),
+            },
+            None => None,
+        };
+
+        let mut out: Vec<Vec<PathHop>> = Vec::new();
+        let mut on_path: HashSet<StrId> = HashSet::new();
+        on_path.insert(from_sid);
+        let mut path = vec![PathHop {
+            node_id: from_id.to_string(),
+            node_class: self.class_of(from_sid),
+            edge: None,
+        }];
+        self.dfs_paths(
+            from_sid, to_sid, max_depth, rel_filter, &mut path, &mut on_path, &mut out, max_paths,
+        );
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dfs_paths(
+        &self,
+        current: StrId,
+        to_sid: Option<StrId>,
+        max_depth: usize,
+        rel_filter: Option<&[RelationType]>,
+        path: &mut Vec<PathHop>,
+        on_path: &mut HashSet<StrId>,
+        out: &mut Vec<Vec<PathHop>>,
+        max_paths: usize,
+    ) {
+        if out.len() >= max_paths {
+            return;
+        }
+        let edges_so_far = path.len() - 1;
+        if path.len() > 1 {
+            match to_sid {
+                // Stop at the target — don't traverse through it.
+                Some(t) => {
+                    if current == t {
+                        out.push(path.clone());
+                        return;
+                    }
+                }
+                None => out.push(path.clone()),
+            }
+        }
+        if edges_so_far >= max_depth {
+            return;
+        }
+
+        // Snapshot this node's outgoing edges, then drop the per-node read lock
+        // before recursing so we never hold nested per-node locks.
+        let children: Vec<(StrId, u8, u64)> = match self.streaming.neighbors_arc(current) {
+            Some(arc) => {
+                let g = arc.read();
+                g.as_slice()
+                    .iter()
+                    .filter(|e| {
+                        rel_filter.is_none_or(|rf| rf.iter().any(|rt| rt.to_u8() == e.rel_type_tag))
+                    })
+                    .map(|e| (e.dest_sid, e.rel_type_tag, e.metadata_offset))
+                    .collect()
+            }
+            None => Vec::new(),
+        };
+
+        for (dest, tag, off) in children {
+            if out.len() >= max_paths {
+                break;
+            }
+            if on_path.contains(&dest) {
+                continue; // simple paths only
+            }
+            path.push(PathHop {
+                node_id: self.interner.resolve(dest).to_string(),
+                node_class: self.class_of(dest),
+                edge: Some(self.resolve_rel_type_name_raw(tag, off)),
+            });
+            on_path.insert(dest);
+            self.dfs_paths(dest, to_sid, max_depth, rel_filter, path, on_path, out, max_paths);
+            on_path.remove(&dest);
+            path.pop();
+        }
+    }
+
+    /// Structural anomalies (design doc §4.6): entities whose graph metric is
+    /// atypical for their population. `metric` is `degree`, `betweenness`,
+    /// `isolation`, or `all`. `node_class` scopes both the candidates and the
+    /// mean/stddev baseline. Returns the `top_n` by z-score (above-mean only),
+    /// each with a human-readable observation. Reuses the per-entity centrality
+    /// computed by the scoring pass (`isolation` derives from `rarity_score`,
+    /// the inverted-degree signal — high = weakly connected / rare).
+    pub fn structural_anomalies(
+        &self,
+        metric: &str,
+        node_class: Option<&str>,
+        top_n: usize,
+    ) -> Vec<AnomalyHit> {
+        // Candidate entities, optionally scoped to one class.
+        let candidates: Vec<&crate::entity::Entity> = self
+            .entities
+            .values()
+            .filter(|e| node_class.is_none_or(|c| format!("{}", e.entity_type) == c))
+            .collect();
+        if candidates.len() < 2 {
+            return Vec::new(); // no meaningful distribution
+        }
+
+        let metrics: Vec<&str> = match metric {
+            "all" => vec!["degree", "betweenness", "isolation"],
+            m => vec![m],
+        };
+
+        let mut hits: Vec<AnomalyHit> = Vec::new();
+        for m in metrics {
+            if !matches!(m, "degree" | "betweenness" | "isolation") {
+                continue; // unknown metric name — nothing to score
+            }
+            let value_of = |e: &crate::entity::Entity| -> f64 {
+                match m {
+                    "betweenness" => e.betweenness,
+                    "isolation" => e.rarity_score,
+                    _ => e.degree_score, // "degree" + unknown fall back to degree
+                }
+            };
+            let vals: Vec<f64> = candidates.iter().map(|e| value_of(e)).collect();
+            let n = vals.len() as f64;
+            let mean = vals.iter().sum::<f64>() / n;
+            let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+            let std = var.sqrt();
+            if std < f64::EPSILON {
+                continue; // flat distribution — nothing stands out
+            }
+            for e in &candidates {
+                let v = value_of(e);
+                let z = (v - mean) / std;
+                if z <= 0.0 {
+                    continue; // only above-mean values are "anomalous"
+                }
+                let class = format!("{}", e.entity_type);
+                let observation = match m {
+                    "betweenness" => format!(
+                        "betweenness {v:.1} vs {class} mean {mean:.1} (z {z:.1}) — bridges otherwise-separate clusters"
+                    ),
+                    "isolation" => format!(
+                        "isolation {v:.1} vs {class} mean {mean:.1} (z {z:.1}) — weakly connected / rare for its class"
+                    ),
+                    _ => format!(
+                        "degree {v:.1} vs {class} mean {mean:.1} (z {z:.1}) — unusually high connectivity for its class"
+                    ),
+                };
+                hits.push(AnomalyHit {
+                    node_id: e.id.clone(),
+                    node_class: class,
+                    metric: m.to_string(),
+                    value: v,
+                    z_score: (z * 10.0).round() / 10.0,
+                    observation,
+                });
+            }
+        }
+        hits.sort_by(|a, b| b.z_score.partial_cmp(&a.z_score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(top_n);
+        hits
+    }
 }
 
 #[cfg(test)]
@@ -2534,5 +2760,145 @@ mod channel_behavior_tests {
         });
         assert!(out.iter().all(|c| c.rel_type=="SNAT"), "only SNAT channels");
         assert!(out.iter().any(|c| c.source=="A" && c.target=="D"), "the SNAT channel is present");
+    }
+}
+
+#[cfg(test)]
+mod find_paths_tests {
+    use super::*;
+    use crate::GraphHunter;
+    use crate::entity::Entity;
+    use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
+
+    // Chain: alice -Auth-> IP -Connect-> ROLE -Connect-> ACCT, plus a side edge
+    // alice -Connect-> HOST to exercise edge_filter and branching.
+    fn chain_graph() -> GraphHunter {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![
+                (
+                    Entity::new("alice", EntityType::User),
+                    Relation::new("alice", "1.1.1.1", RelationType::Auth, 1),
+                    Entity::new("1.1.1.1", EntityType::IP),
+                ),
+                (
+                    Entity::new("1.1.1.1", EntityType::IP),
+                    Relation::new("1.1.1.1", "ROLE", RelationType::Connect, 2),
+                    Entity::new("ROLE", EntityType::Other("Role".into())),
+                ),
+                (
+                    Entity::new("ROLE", EntityType::Other("Role".into())),
+                    Relation::new("ROLE", "ACCT", RelationType::Connect, 3),
+                    Entity::new("ACCT", EntityType::Other("Account".into())),
+                ),
+                (
+                    Entity::new("alice", EntityType::User),
+                    Relation::new("alice", "HOST", RelationType::Connect, 4),
+                    Entity::new("HOST", EntityType::Host),
+                ),
+            ],
+            None,
+        )
+        .unwrap();
+        g
+    }
+
+    #[test]
+    fn finds_path_between_two_entities() {
+        let g = chain_graph();
+        let paths = g.find_paths("alice", Some("ACCT"), 4, None, 50);
+        assert_eq!(paths.len(), 1, "one simple path alice→ACCT");
+        let p = &paths[0];
+        // hops: alice, IP, ROLE, ACCT  → length 3
+        assert_eq!(p.len(), 4);
+        assert_eq!(p[0].node_id, "alice");
+        assert!(p[0].edge.is_none(), "origin hop carries no edge");
+        assert_eq!(p[1].edge.as_deref(), Some("Auth"));
+        assert_eq!(p[3].node_id, "ACCT");
+        assert_eq!(p[3].node_class, "Account");
+    }
+
+    #[test]
+    fn max_depth_bounds_traversal() {
+        let g = chain_graph();
+        // ACCT is 3 hops away; depth 2 can't reach it.
+        assert!(g.find_paths("alice", Some("ACCT"), 2, None, 50).is_empty());
+    }
+
+    #[test]
+    fn edge_filter_restricts_traversal() {
+        let g = chain_graph();
+        // Only Auth edges: alice→IP is the single reachable path.
+        let paths = g.find_paths("alice", None, 4, Some(&[RelationType::Auth]), 50);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].last().unwrap().node_id, "1.1.1.1");
+    }
+
+    #[test]
+    fn all_outbound_paths_when_no_target() {
+        let g = chain_graph();
+        let paths = g.find_paths("alice", None, 4, None, 50);
+        // alice→IP, alice→IP→ROLE, alice→IP→ROLE→ACCT, alice→HOST = 4 paths.
+        assert_eq!(paths.len(), 4);
+    }
+
+    #[test]
+    fn unknown_origin_or_target_yields_no_paths() {
+        let g = chain_graph();
+        assert!(g.find_paths("nope", Some("ACCT"), 4, None, 50).is_empty());
+        assert!(g.find_paths("alice", Some("nope"), 4, None, 50).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod structural_anomaly_tests {
+    use super::*;
+    use crate::GraphHunter;
+    use crate::entity::Entity;
+    use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
+
+    // Star: hub HUB connected to many leaves → HUB has anomalous degree.
+    fn star_graph() -> GraphHunter {
+        let mut g = GraphHunter::new();
+        let mut triples = Vec::new();
+        for i in 0..12 {
+            triples.push((
+                Entity::new("HUB", EntityType::Host),
+                Relation::new("HUB", format!("leaf{i}"), RelationType::Connect, i as i64),
+                Entity::new(format!("leaf{i}"), EntityType::IP),
+            ));
+        }
+        g.insert_triples(triples, None).unwrap();
+        g.compute_scores(); // populate degree_score / rarity_score
+        g
+    }
+
+    #[test]
+    fn degree_anomaly_surfaces_the_hub() {
+        let g = star_graph();
+        let hits = g.structural_anomalies("degree", None, 10);
+        assert!(!hits.is_empty(), "hub should register as a degree anomaly");
+        assert_eq!(hits[0].node_id, "HUB");
+        assert_eq!(hits[0].metric, "degree");
+        assert!(hits[0].z_score > 0.0);
+    }
+
+    #[test]
+    fn node_class_scopes_candidates() {
+        let g = star_graph();
+        // Scope to IP leaves only — the hub (Host) is excluded entirely.
+        let hits = g.structural_anomalies("degree", Some("IP"), 10);
+        assert!(hits.iter().all(|h| h.node_class == "IP"));
+        assert!(hits.iter().all(|h| h.node_id != "HUB"));
+    }
+
+    #[test]
+    fn unknown_metric_or_tiny_graph_is_empty() {
+        let g = star_graph();
+        assert!(g.structural_anomalies("nonsense", None, 10).is_empty());
+        let tiny = GraphHunter::new();
+        assert!(tiny.structural_anomalies("all", None, 10).is_empty());
     }
 }

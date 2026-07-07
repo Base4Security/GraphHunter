@@ -312,6 +312,31 @@ The assistant will translate your request into different searchs, the appropriat
 
 **Quick setup:** See **[graph-hunter-mcp/README.md](graph-hunter-mcp/README.md)** for install, `mcp.json` example, tool list, and troubleshooting (firewall, port, 401, session required).
 
+### Graph cycle (Sentinel → graph)
+
+For Microsoft Sentinel, GraphHunter exposes a four-phase cycle that makes the
+**persistent graph the default path** and raw KQL the explicit exception:
+
+1. **`schema_discover`** — list active tables and classify each field
+   (`graph_affinity`, `node_class`, `enrichable`, cardinality) to decide what's
+   worth building.
+2. **`graph_propose`** — turn selected `{table, field}` pairs into candidate
+   graph schemas, each with the exact materialization KQL.
+3. **`graph_build`** — run an approved proposal, materialize entities/relations,
+   and enrich (GeoIP/ASN) **once** at build time.
+4. **`graph_neighbors` / `graph_path` / `graph_anomaly`** — analyze the built
+   graph (immediate context, relation chains, structural outliers) with **no new
+   SIEM queries**.
+
+`sentinel_query` remains as a raw-KQL escape hatch, but an inspect query over
+identity/IP columns is **gated**: it returns a ready-to-run `graph_propose`
+payload and must be re-run with `acknowledge_fallback=true` to execute as a
+logged one-off. `graph_summary` / `session_check` report active state
+(`graph_state`, `advisory`, `capabilities`, `last_build`).
+
+`scripts/e2e-graph-cycle.mjs` (env-gated `GRAPHHUNTER_E2E=1`) drives the whole
+cycle end-to-end against a live/test workspace.
+
 ---
 
 ## Screenshots

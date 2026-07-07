@@ -10,11 +10,14 @@ use graph_hunter_core::{
 
 use crate::dto::entity::{NodeScopedRequest, SessionOnly};
 use crate::dto::graph_ops::{
-    ChannelBehaviorRequest, ComputeScoresRequest, EventsForNodeRequest, EventsPaginatedRequest,
-    ExpandNodeRequest, GraphStats, HeavyEdgesRequest, PaginatedEvents, PreviewFieldsRequest,
-    RuntimeInfo, SearchEntitiesRequest, Subgraph, SubgraphEdge, SubgraphNode, SubgraphRequest,
+    AnomalyItem, ChannelBehaviorRequest, ComputeScoresRequest, EventsForNodeRequest,
+    EventsPaginatedRequest, ExpandFilter, ExpandNodeRequest, GraphAnomalyRequest,
+    GraphAnomalyResult, GraphNeighborsRequest, GraphNeighborsResult, GraphPathRequest,
+    GraphPathResult, GraphStats, HeavyEdgesRequest, NeighborItem, NeighborRef, NeighborsCenter,
+    PaginatedEvents, PathDto, PathHopDto, PathNode, PreviewFieldsRequest, RuntimeInfo,
+    SearchEntitiesRequest, Subgraph, SubgraphEdge, SubgraphNode, SubgraphRequest,
 };
-use crate::util::{parse_entity_type, to_core_filter};
+use crate::util::{parse_entity_type, parse_relation_type, to_core_filter};
 use crate::{ApiError, ApiResult, GraphHunterApi};
 
 impl GraphHunterApi {
@@ -451,6 +454,154 @@ impl GraphHunterApi {
         })
     }
 
+    /// Phase 4 / ANALYSIS (§4.5): immediate neighborhood of an entity. Wraps
+    /// `expand_node` and reshapes to the doc contract — the center entity's
+    /// attributes plus its directly-connected entities and per-edge metadata.
+    /// Pure graph read; no SIEM round-trip (the value over raw KQL pivoting).
+    pub fn graph_neighbors(
+        &self,
+        req: GraphNeighborsRequest,
+    ) -> ApiResult<GraphNeighborsResult> {
+        let center = req.entity.value.clone();
+        let filter = req.edge_filter.clone().map(|rt| ExpandFilter {
+            relation_types: Some(rt),
+            ..Default::default()
+        });
+        let hood = self.expand_node(ExpandNodeRequest {
+            session: req.session.clone(),
+            node_id: center.clone(),
+            max_hops: Some(req.degree.unwrap_or(1).max(1)),
+            max_nodes: Some(req.max_nodes.unwrap_or(100)),
+            filter,
+            live: false,
+            time_window: None,
+        })?;
+
+        // Center entity class + attributes (label from metadata when present).
+        let (center_class, attributes, label) =
+            self.with_graph_read(req.session.as_ref(), |g| {
+                Ok(match g.get_entity(&center) {
+                    Some(e) => (
+                        format!("{}", e.entity_type),
+                        e.metadata.clone(),
+                        e.metadata.get("label").cloned(),
+                    ),
+                    None => (
+                        req.entity.class.clone().unwrap_or_default(),
+                        std::collections::HashMap::new(),
+                        None,
+                    ),
+                })
+            })?;
+
+        // node id → class, for rendering neighbor refs.
+        let class_of: std::collections::HashMap<&str, &str> = hood
+            .nodes
+            .iter()
+            .map(|n| (n.id.as_str(), n.entity_type.as_str()))
+            .collect();
+
+        let mut neighbors = Vec::new();
+        for edge in &hood.edges {
+            let other = if edge.source == center {
+                &edge.target
+            } else if edge.target == center {
+                &edge.source
+            } else {
+                continue; // edge between two neighbors (degree>1) — not incident to center
+            };
+            neighbors.push(NeighborItem {
+                edge: edge.rel_type.clone(),
+                node: NeighborRef {
+                    class: class_of.get(other.as_str()).copied().unwrap_or("").to_string(),
+                    value: other.clone(),
+                },
+                attributes: edge.metadata.clone(),
+            });
+        }
+
+        Ok(GraphNeighborsResult {
+            entity: NeighborsCenter { class: center_class, value: center, label },
+            attributes,
+            neighbors,
+        })
+    }
+
+    /// Phase 4 / ANALYSIS (§4.4): paths between two entities (or all outbound
+    /// paths up to `max_depth` when `to_entity` is omitted). Pure graph
+    /// traversal — chains that KQL would resolve with repeated joins are one
+    /// precomputed walk here. IP nodes carry their geoip enrichment inline.
+    pub fn graph_path(&self, req: GraphPathRequest) -> ApiResult<GraphPathResult> {
+        let rel_filter: Option<Vec<graph_hunter_core::RelationType>> = req
+            .edge_filter
+            .as_ref()
+            .map(|v| v.iter().filter_map(|s| parse_relation_type(s)).collect());
+        // An all-unknown filter would silently match nothing; treat empty as "no filter".
+        let rel_filter = rel_filter.filter(|v| !v.is_empty());
+        let max_depth = req.max_depth.unwrap_or(4).clamp(1, 8);
+        let max_paths = req.max_paths.unwrap_or(50).clamp(1, 500);
+        let to_value = req.to_entity.as_ref().map(|e| e.value.clone());
+
+        self.with_graph_read(req.session.as_ref(), |g| {
+            let paths = g.find_paths(
+                &req.from_entity.value,
+                to_value.as_deref(),
+                max_depth,
+                rel_filter.as_deref(),
+                max_paths,
+            );
+            let paths = paths
+                .into_iter()
+                .map(|hops| {
+                    let length = hops.len().saturating_sub(1);
+                    let hops = hops
+                        .into_iter()
+                        .map(|h| {
+                            let geoip = g.get_entity(&h.node_id).and_then(|e| {
+                                e.metadata
+                                    .get("geo_country")
+                                    .or_else(|| e.metadata.get("geo_country_code"))
+                                    .cloned()
+                            });
+                            PathHopDto {
+                                edge: h.edge,
+                                node: PathNode { class: h.node_class, value: h.node_id, geoip },
+                            }
+                        })
+                        .collect();
+                    PathDto { length, hops }
+                })
+                .collect();
+            Ok(GraphPathResult { paths })
+        })
+    }
+
+    /// Phase 4 / ANALYSIS (§4.6): structural anomalies — entities whose
+    /// degree / betweenness / isolation is atypical for their class. Reuses the
+    /// per-entity centrality from scoring and reports z-scores. Pure graph read.
+    pub fn graph_anomaly(&self, req: GraphAnomalyRequest) -> ApiResult<GraphAnomalyResult> {
+        let metric = req.metric.as_deref().unwrap_or("all");
+        if !matches!(metric, "degree" | "betweenness" | "isolation" | "all") {
+            return Err(ApiError::InvalidInput(format!(
+                "metric must be one of degree|betweenness|isolation|all (got '{metric}')"
+            )));
+        }
+        let top_n = req.top_n.unwrap_or(20).clamp(1, 500);
+        self.with_graph_read(req.session.as_ref(), |g| {
+            let hits = g.structural_anomalies(metric, req.node_class.as_deref(), top_n);
+            let anomalies = hits
+                .into_iter()
+                .map(|h| AnomalyItem {
+                    entity: NeighborRef { class: h.node_class, value: h.node_id },
+                    metric: h.metric,
+                    observation: h.observation,
+                    z_score: h.z_score,
+                })
+                .collect();
+            Ok(GraphAnomalyResult { anomalies })
+        })
+    }
+
     /// Top-N heaviest (source → target : rel_type) groups ranked by edge
     /// count. Delegates directly to `GraphHunter::heavy_edges`.
     pub fn graph_heavy_edges(
@@ -730,5 +881,95 @@ mod expand_live_tests {
             hood.hydration.is_none(),
             "non-live expand must not attach hydration"
         );
+    }
+}
+
+#[cfg(test)]
+mod graph_neighbors_tests {
+    use super::*;
+    use crate::dto::session::CreateSessionRequest;
+    use crate::dto::v1::graph_ops::{EntityRef, GraphNeighborsRequest};
+    use graph_hunter_core::entity::Entity;
+    use graph_hunter_core::relation::Relation;
+    use graph_hunter_core::types::{EntityType, RelationType};
+
+    #[test]
+    fn neighbors_reshapes_to_doc_contract() {
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest { name: Some("nbr-test".into()) })
+            .unwrap();
+        {
+            let session = api.resolve_session(None).unwrap();
+            let mut g = session.graph.write().unwrap();
+            let user = Entity::new("alice@corp.com", EntityType::User);
+            let ip = Entity::new("203.0.113.7", EntityType::IP);
+            let rel = Relation::new("alice@corp.com", "203.0.113.7", RelationType::Auth, 1_700_000_000)
+                .with_metadata("ResultType", "0");
+            g.insert_triples(vec![(user, rel, ip)], Some("test")).unwrap();
+        }
+
+        let res = api
+            .graph_neighbors(GraphNeighborsRequest {
+                session: None,
+                entity: EntityRef { class: Some("User".into()), value: "alice@corp.com".into() },
+                degree: Some(1),
+                edge_filter: None,
+                max_nodes: None,
+            })
+            .expect("graph_neighbors");
+
+        assert_eq!(res.entity.class, "User");
+        assert_eq!(res.entity.value, "alice@corp.com");
+        let ip_nbr = res
+            .neighbors
+            .iter()
+            .find(|n| n.node.value == "203.0.113.7")
+            .expect("IP neighbor present");
+        assert_eq!(ip_nbr.node.class, "IP");
+        assert_eq!(ip_nbr.edge, "Auth");
+        assert_eq!(ip_nbr.attributes.get("ResultType").map(String::as_str), Some("0"));
+    }
+
+    #[test]
+    fn edge_filter_restricts_relation_types() {
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest { name: Some("nbr-filter".into()) })
+            .unwrap();
+        {
+            let session = api.resolve_session(None).unwrap();
+            let mut g = session.graph.write().unwrap();
+            let u = Entity::new("alice@corp.com", EntityType::User);
+            let ip = Entity::new("203.0.113.7", EntityType::IP);
+            let host = Entity::new("HOST1", EntityType::Host);
+            g.insert_triples(
+                vec![(
+                    u.clone(),
+                    Relation::new("alice@corp.com", "203.0.113.7", RelationType::Auth, 1),
+                    ip,
+                )],
+                Some("test"),
+            )
+            .unwrap();
+            g.insert_triples(
+                vec![(
+                    u,
+                    Relation::new("alice@corp.com", "HOST1", RelationType::Connect, 1),
+                    host,
+                )],
+                Some("test"),
+            )
+            .unwrap();
+        }
+        let res = api
+            .graph_neighbors(GraphNeighborsRequest {
+                session: None,
+                entity: EntityRef { class: None, value: "alice@corp.com".into() },
+                degree: Some(1),
+                edge_filter: Some(vec!["Auth".into()]),
+                max_nodes: None,
+            })
+            .expect("graph_neighbors");
+        assert!(res.neighbors.iter().all(|n| n.edge == "Auth"), "only Auth edges pass the filter");
+        assert!(res.neighbors.iter().any(|n| n.node.value == "203.0.113.7"));
     }
 }

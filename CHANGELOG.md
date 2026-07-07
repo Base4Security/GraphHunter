@@ -4,6 +4,53 @@ All notable changes to Graph Hunter are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Graph-cycle intermediation (design doc §3–§5)
+
+Turns the four-phase graph cycle from a design proposal into working tools, so
+the graph — not raw KQL — is the default hunting path against Microsoft Sentinel.
+
+#### Added — the six cycle tools (MCP + HTTP)
+
+- **`schema_discover`** (§4.1) — live Log Analytics table/field discovery via the
+  `Usage` table + per-table sampling; classifies each field's `graph_affinity`
+  (node/edge/attribute), `node_class`, `cardinality`, and `enrichable` tags, and
+  reports query cost. (Renamed from the interim `sentinel_schema`, which remains
+  a deprecated alias.)
+- **`graph_propose`** (§4.2) — from selected `{table, field}` pairs, emits candidate
+  graph schemas with the exact `materialization_kql` (guards columns with
+  `columnifexists`, extracts nested AWSCloudTrail fields via `parse_json`);
+  proposals persist in the session by `proposal_id`.
+- **`graph_build`** (§4.3) — runs an approved proposal's KQL, maps rows to
+  entities/relations with a schema-driven mapper, loads them into the graph, and
+  applies enrichment **once** (GeoIP+ASN on IP nodes; `threat_intel` is an honest
+  stub). Supports `merge_mode` append/replace; records `last_build`.
+- **`graph_neighbors`** (§4.5) — immediate neighborhood of an entity over the
+  built graph (no SIEM round-trip).
+- **`graph_path`** (§4.4) — paths between two entities (or all outbound paths up
+  to `max_depth`), backed by a new bounded simple-path traversal in the engine.
+- **`graph_anomaly`** (§4.6) — structural anomalies by degree / betweenness /
+  isolation with z-scores, optionally scoped to a node class.
+
+#### Changed — enforcement & active state
+
+- **`sentinel_query` fallback gate** (§4.7) — inspect queries projecting
+  entity-class columns are no longer executed by default; they return a
+  ready-to-run `graph_propose` payload and `fallback_gated=true`. Pass
+  `acknowledge_fallback=true` to run raw KQL as a logged one-off. Ingest/
+  materialize paths are never gated.
+- **`graph_summary` / `session_check`** now report the §5 active-state shape:
+  `graph_state` (empty/partial/populated), `advisory`, `capabilities`, and
+  `last_build`.
+- **Sentinel client** captures query cost (`Prefer: include-statistics`):
+  bytes scanned + server duration, surfaced by the cycle tools.
+
+#### Added — verification
+
+- `scripts/e2e-graph-cycle.mjs` — env-gated (`GRAPHHUNTER_E2E=1`) end-to-end run
+  of the full cycle against a live/test workspace.
+
 ## [code-v1.0.0] – 2026-05-28
 
 **First stable OSS public release** of the GraphHunter engine + app. Release-gated by a security & handoff audit; the user-facing book is maintained separately (internal).

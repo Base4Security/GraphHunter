@@ -12,6 +12,50 @@ pub struct SentinelQueryResult {
     pub data: String,
     /// Last TimeGenerated seen (ISO8601 or epoch string) for next query_start.
     pub next_query_start: Option<String>,
+    /// Query cost reported by Log Analytics when `Prefer: include-statistics`
+    /// was honored. `None` when the service returned no `statistics` object.
+    pub stats: Option<QueryStats>,
+}
+
+/// Cost/statistics for a single Log Analytics query, extracted from the
+/// response `statistics` object. Plain data (no serde derive) to keep the
+/// siem crate dependency-light; the API layer maps this into its own
+/// serializable cost DTO for tool responses.
+#[derive(Debug, Clone, Default)]
+pub struct QueryStats {
+    /// Bytes scanned across input datasets, when the service reports it.
+    pub bytes_scanned: Option<u64>,
+    /// Server-side execution time in milliseconds (`statistics.query.executionTime`).
+    pub server_duration_ms: Option<u64>,
+}
+
+/// Best-effort extraction of `statistics` from a Log Analytics query response.
+/// Defensive: any missing/renamed field degrades to `None` rather than erroring,
+/// because the statistics shape is not part of the stable contract and is only
+/// present when `Prefer: include-statistics` was honored.
+pub fn parse_query_stats(raw: &serde_json::Value) -> Option<QueryStats> {
+    let query = raw.get("statistics")?.get("query")?;
+    // executionTime is in seconds (float); convert to ms.
+    let server_duration_ms = query
+        .get("executionTime")
+        .and_then(|v| v.as_f64())
+        .map(|secs| (secs * 1000.0).round() as u64);
+    // Bytes scanned is not consistently exposed; sum per-table `tableSize`
+    // from datasetStatistics when present.
+    let bytes_scanned = query
+        .get("datasetStatistics")
+        .and_then(|v| v.as_array())
+        .map(|tables| {
+            tables
+                .iter()
+                .filter_map(|t| t.get("tableSize").and_then(|s| s.as_u64()))
+                .sum::<u64>()
+        })
+        .filter(|&b| b > 0);
+    if server_duration_ms.is_none() && bytes_scanned.is_none() {
+        return None;
+    }
+    Some(QueryStats { bytes_scanned, server_duration_ms })
 }
 
 /// Optional Azure AD credentials. When provided, used instead of env vars.
@@ -102,6 +146,9 @@ fn execute_log_analytics_query(
         .post(&url)
         .header("Authorization", format!("Bearer {}", bearer))
         .header("Content-Type", "application/json")
+        // Ask Log Analytics to attach a `statistics` object so callers can
+        // surface query cost (bytes scanned, server execution time).
+        .header("Prefer", "include-statistics")
         .json(&body)
         .send()
         .map_err(|e| format!("query request failed: {}", e))?;
@@ -165,6 +212,7 @@ fn normalize_log_analytics_response(raw: &serde_json::Value) -> Result<SentinelQ
     Ok(SentinelQueryResult {
         data,
         next_query_start: last_time,
+        stats: parse_query_stats(raw),
     })
 }
 
@@ -205,5 +253,32 @@ mod tests {
         assert!(result.data.contains("SecurityEvent"));
         assert!(result.data.contains("DC-01"));
         assert_eq!(result.next_query_start.as_deref(), Some("2024-01-15T14:31:00Z"));
+        // No statistics object in this response → no cost captured.
+        assert!(result.stats.is_none());
+    }
+
+    #[test]
+    fn parse_query_stats_extracts_duration_and_bytes() {
+        let raw = serde_json::json!({
+            "tables": [],
+            "statistics": {
+                "query": {
+                    "executionTime": 0.5,
+                    "datasetStatistics": [
+                        {"tableSize": 1000},
+                        {"tableSize": 2000}
+                    ]
+                }
+            }
+        });
+        let stats = parse_query_stats(&raw).expect("stats present");
+        assert_eq!(stats.server_duration_ms, Some(500));
+        assert_eq!(stats.bytes_scanned, Some(3000));
+    }
+
+    #[test]
+    fn parse_query_stats_absent_is_none() {
+        let raw = serde_json::json!({ "tables": [] });
+        assert!(parse_query_stats(&raw).is_none());
     }
 }

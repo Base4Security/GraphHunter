@@ -159,6 +159,24 @@ pub struct RunKqlRequest {
     /// duplicating. Omit for a one-off append (random dataset id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset: Option<String>,
+    /// §4.7 fallback gate. An inspect-mode (`ingest != true`) query whose
+    /// projection touches entity-class columns is NOT executed unless this is
+    /// `true` — instead a ready-to-run `graph_propose` payload is returned to
+    /// steer the analyst onto the graph path. Set `true` to acknowledge the
+    /// raw-KQL escape hatch and run anyway (logged). Ignored on the ingest path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledge_fallback: Option<bool>,
+}
+
+/// A ready-to-run `graph_propose` payload (§4.7): the table + entity-class
+/// fields extracted from a raw KQL projection, so the analyst can pivot to the
+/// graph path in one call instead of reading rows out via raw KQL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphProposePayload {
+    /// The tool to call next.
+    pub next_tool: String,
+    pub table: String,
+    pub selected_fields: Vec<SelectedField>,
 }
 
 /// One-click hunting template (Phase M). The body is a KQL string
@@ -214,6 +232,282 @@ pub struct KqlResult {
     /// not read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<Vec<serde_json::Value>>,
+    /// Graph-first nudge: set in inspect mode (`ingest=false`) when the query
+    /// touches identity/IP-like columns that could be materialized as graph
+    /// entities. Steers the analyst toward `sentinel_seed` / `sentinel_schema`
+    /// for recurring pivots instead of repeated raw KQL. `None` when ingesting
+    /// or when the query is graph-irrelevant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_advisory: Option<String>,
+    /// §4.7: ready-to-run `graph_propose` arguments derived from the query's
+    /// entity-class columns. Present whenever the query is graph-relevant
+    /// (both when gated and when an acknowledged fallback runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_propose: Option<GraphProposePayload>,
+    /// §4.7: `true` when the query was NOT executed because it is an
+    /// unacknowledged entity-class raw-KQL fallback. Re-run with
+    /// `acknowledge_fallback=true`, or follow `graph_propose`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fallback_gated: bool,
+}
+
+// ── Schema discovery (Phase 1 / cold-start orientation) ───────────────
+
+/// Discover the active Sentinel tables and, per table, the fields worth
+/// building a graph from. Reuses the same field classifier the ingest
+/// preview uses, then annotates each field with its `graph_affinity`
+/// (node | edge | attribute) and which enrichments apply. The default
+/// "what's in this workspace?" call before materializing a graph.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SchemaDiscoverRequest {
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub azure_tenant_id: String,
+    #[serde(default)]
+    pub azure_client_id: String,
+    #[serde(default)]
+    pub azure_client_secret: String,
+    /// Sampling/aggregation window. Default `ago(24h)` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<TimeWindow>,
+    /// Restrict discovery to these tables (case-insensitive). Empty = all
+    /// active tables in the window.
+    #[serde(default)]
+    pub table_filter: Vec<String>,
+    /// Exclude tables whose billable ingestion in the window is below this
+    /// many MB. `None` = no floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_ingestion_mb: Option<f64>,
+    /// Cap on the number of tables sampled + classified (most-ingested
+    /// first). Protects against one sample query per table on large
+    /// workspaces. Default 25.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tables: Option<u32>,
+    /// Rows sampled per table for field classification. Default 200.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rows: Option<u32>,
+}
+
+/// One field within a discovered table, annotated for graph construction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaField {
+    pub name: String,
+    /// Coarse JSON type inferred from sample values: `string` | `number`
+    /// | `bool`.
+    pub r#type: String,
+    /// `high` | `low` — distinctness in the sample. High-cardinality
+    /// identifier-like fields make the best graph nodes.
+    pub cardinality: String,
+    /// `node` | `edge` | `attribute` — the field's role in the graph.
+    pub graph_affinity: String,
+    /// Canonical entity class when `graph_affinity == "node"` (IP, User,
+    /// Host, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_class: Option<String>,
+    /// Enrichments that apply to this field's entity type (e.g. `geoip`,
+    /// `asn` for IPs). Empty when none apply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enrichable: Vec<String>,
+    /// Up to 5 distinct sample values, for orientation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sample_values: Vec<String>,
+}
+
+/// A discovered Sentinel table with its classified fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaTable {
+    pub name: String,
+    /// Billable ingestion in the sampling window (MB), from the `Usage` table.
+    /// Named per design doc §4.1; reflects the request `lookback` window
+    /// (default 24h).
+    #[serde(rename = "ingestion_24h_mb", skip_serializing_if = "Option::is_none")]
+    pub ingestion_24h_mb: Option<f64>,
+    /// Most recent ingestion timestamp in the window (ISO-8601).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_ingested: Option<String>,
+    pub fields: Vec<SchemaField>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaDiscoverResult {
+    pub tables: Vec<SchemaTable>,
+    /// Total active tables discovered (after filtering, before the
+    /// `max_tables` cap).
+    pub total_tables: usize,
+    /// Set when fewer tables were introspected than discovered (cap hit)
+    /// — surfaced so the cap is never silent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Aggregate Sentinel query cost for this discovery (usage probe + per-table
+    /// samples). Lets analysts measure SIEM usage. `None` when the service
+    /// returned no statistics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<QueryCost>,
+}
+
+/// Serializable Sentinel query cost surfaced in tool responses. `wall_ms` is
+/// measured locally; the other two come from the Log Analytics `statistics`
+/// object (see `graph_hunter_siem::QueryStats`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QueryCost {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_scanned: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_duration_ms: Option<u64>,
+    /// Wall-clock time spent in Sentinel round-trips for this tool call.
+    pub wall_ms: u64,
+}
+
+// ── Graph cycle: proposals (§4.2) + build records (§4.3 / §5) ──────────
+
+/// A node in a proposed graph schema: an entity class sourced from a
+/// `Table.Field` column, optionally enriched at build time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalNode {
+    /// Entity class (engine `EntityType` name: IP, User, Host, …).
+    pub class: String,
+    /// `Table.Field` the node value is drawn from.
+    pub source: String,
+    /// Enrichments to apply to this node's entities at build (e.g. geoip, asn).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enrich: Vec<String>,
+}
+
+/// An edge in a proposed graph schema, connecting two node classes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalEdge {
+    /// Relation type label (e.g. `authenticated_from`).
+    pub r#type: String,
+    pub from: String,
+    pub to: String,
+    /// Result columns carried onto the edge as metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<String>,
+}
+
+/// A candidate graph schema (§4.2). Emitted by `graph_propose`, persisted in
+/// the session, and executed by `graph_build` via `materialization_kql`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphProposal {
+    pub proposal_id: String,
+    pub description: String,
+    pub nodes: Vec<ProposalNode>,
+    pub edges: Vec<ProposalEdge>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_entities: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_relations: Option<u64>,
+    /// Exact KQL `graph_build` runs to materialize this schema.
+    pub materialization_kql: String,
+}
+
+/// A `{table, field}` the analyst picked from `schema_discover` to build a
+/// graph from. Input to `graph_propose`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SelectedField {
+    pub table: String,
+    pub field: String,
+}
+
+/// `graph_propose` input (§4.2): selected fields + optional hunt context.
+/// Azure creds are optional — they're only used for a best-effort
+/// `estimated_entities/relations` probe; proposal generation itself is offline.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GraphProposeRequest {
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub azure_tenant_id: String,
+    #[serde(default)]
+    pub azure_client_id: String,
+    #[serde(default)]
+    pub azure_client_secret: String,
+    pub selected_fields: Vec<SelectedField>,
+    /// Free-text hunt description to orient the proposal's `description`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hypothesis_context: Option<String>,
+    /// Max candidate schemas to return (default 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_proposals: Option<u32>,
+    /// Window spliced into `materialization_kql` and the estimate probe
+    /// (default `ago(24h)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<TimeWindow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphProposeResult {
+    pub proposals: Vec<GraphProposal>,
+    /// Cost of the best-effort estimate probes; absent when no probe ran
+    /// (e.g. no Azure creds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<QueryCost>,
+}
+
+/// `graph_build` input (§4.3): materialize an approved proposal by id.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GraphBuildRequest {
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub azure_tenant_id: String,
+    #[serde(default)]
+    pub azure_client_id: String,
+    #[serde(default)]
+    pub azure_client_secret: String,
+    /// Id of a proposal previously emitted by `graph_propose` (session-scoped).
+    pub proposal_id: String,
+    /// Materialization window. The proposal's `materialization_kql` already
+    /// carries a `TimeGenerated` filter, which wins; this only applies when the
+    /// stored KQL lacks one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_window: Option<TimeWindow>,
+    /// Enrichments to apply at build (`geoip`, `asn`). Default: all declared on
+    /// the schema. `threat_intel` is accepted but a no-op until a feed is wired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrich: Option<Vec<String>>,
+    /// `append` (default) — add to the existing graph — or `replace` — refresh
+    /// this proposal's prior build (snapshot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_mode: Option<String>,
+}
+
+/// Per-enrichment counts applied during a build (§4.3 `enrichment_applied`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EnrichmentApplied {
+    pub geoip: usize,
+    pub asn: usize,
+    /// Always 0 today — honest stub until a threat-intel feed is configured.
+    pub threat_intel: usize,
+}
+
+/// `graph_build` output (§4.3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphBuildResult {
+    pub build_id: String,
+    pub proposal_id: String,
+    pub entities_created: usize,
+    pub relations_created: usize,
+    pub enrichment_applied: EnrichmentApplied,
+    pub duration_ms: u64,
+    /// Active graph state after the build (`empty` | `partial` | `populated`).
+    pub graph_state: crate::dto::geoip::GraphState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<QueryCost>,
+}
+
+/// Record of the most recent `graph_build`, surfaced in §5 status (`last_build`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildRecord {
+    pub build_id: String,
+    pub proposal_id: String,
+    /// Unix seconds when the build completed.
+    pub at: i64,
+    pub entities_created: usize,
+    pub relations_created: usize,
+    /// `append` | `replace`.
+    pub merge_mode: String,
 }
 
 // ── Env probe ──────────────────────────────────────────────────────────

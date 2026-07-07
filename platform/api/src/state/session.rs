@@ -131,6 +131,14 @@ pub struct Session {
     pub phase: RwLock<SessionPhase>,
     /// Post-finalize tail append counters (Track H).
     pub live_tail_stats: RwLock<LiveTailStats>,
+    /// Graph-cycle proposals (§4.2) keyed by `proposal_id`. `graph_propose`
+    /// writes them; `graph_build` reads by id. Ephemeral — NOT persisted in
+    /// `SessionFile` (a proposal is only meaningful against the live schema
+    /// it was derived from), same policy as `ai_conversation`.
+    pub proposals: RwLock<std::collections::HashMap<String, crate::dto::sentinel::GraphProposal>>,
+    /// Most recent `graph_build` (§4.3), surfaced in §5 status as `last_build`.
+    /// Ephemeral — cleared on process restart.
+    pub last_build: RwLock<Option<crate::dto::sentinel::BuildRecord>>,
 }
 
 /// D3 stage 3+4 — Session-level LFTJ index cache. Built lazily on
@@ -355,6 +363,8 @@ impl Session {
             yannakakis_cache: RwLock::new(None),
             phase: RwLock::new(SessionPhase::Loading),
             live_tail_stats: RwLock::new(LiveTailStats::default()),
+            proposals: RwLock::new(std::collections::HashMap::new()),
+            last_build: RwLock::new(None),
         }
     }
 
