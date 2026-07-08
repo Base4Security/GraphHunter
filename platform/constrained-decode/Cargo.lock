@@ -572,7 +572,7 @@ dependencies = [
  "graph_hunter_vrl",
  "llguidance",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "tokenizers",
  "toktrie_hf_tokenizers",
 ]
