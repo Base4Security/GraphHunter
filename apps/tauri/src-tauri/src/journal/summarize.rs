@@ -19,7 +19,7 @@ const AGG_TOP_N: usize = 3;
 
 /// Max singleton (count == 1) values surfaced per column in the aggregates'
 /// `rare` list — the long tail that `top`-by-frequency hides.
-const AGG_RARE_N: usize = 3;
+const AGG_RARE_N: usize = 6;
 
 /// Wide rows (Sentinel/AAD logs carry ~74 columns, mostly Azure metadata)
 /// are projected to hunt-relevant columns before storage. A row with more
@@ -67,9 +67,9 @@ const CLOUDTRAIL_PRIORITY: &[&str] = &[
 
 const DEVICE_PRIORITY: &[&str] = &[
     "timegenerated", "devicename", "accountname", "actiontype", "filename",
-    "folderpath", "processcommandline", "sha256", "initiatingprocessfilename",
-    "initiatingprocesscommandline", "initiatingprocessaccountname", "processid",
-    "initiatingprocesssignertype", "initiatingprocesssignaturestatus",
+    "processcommandline", "initiatingprocessfilename", "initiatingprocesscommandline",
+    "initiatingprocesssignaturestatus", "initiatingprocesssignertype", "sha256", "folderpath",
+    "initiatingprocessaccountname", "processid",
 ];
 
 const NETFLOW_PRIORITY: &[&str] = &[
@@ -576,13 +576,14 @@ mod tests {
         let trimmed_tokens = est_tokens(&summary);
         let untrimmed_tokens = est_tokens(&untrimmed_summary);
         assert!(
-            // Threshold loosened from 60% (40% smaller) to 75%, then to 80%:
-            // distribution aggregates over all 25 rows now ride along in the
-            // summary — and, per Fix B, each aggregated column also carries
-            // a "total" count plus an optional "rare" singleton list — so
-            // the margin over the untrimmed 5-row comparison is a bit
-            // narrower still, though still meaningfully smaller.
-            trimmed_tokens <= untrimmed_tokens * 80 / 100,
+            // Threshold loosened from 60% (40% smaller) to 75%, to 80%, then
+            // to 85%: distribution aggregates over all 25 rows now ride
+            // along in the summary — and, per Fix B, each aggregated column
+            // also carries a "total" count plus an optional "rare" singleton
+            // list, widened from 3 to 6 entries — so the margin over the
+            // untrimmed 5-row comparison is a bit narrower still, though
+            // still meaningfully smaller.
+            trimmed_tokens <= untrimmed_tokens * 85 / 100,
             "trimmed ({trimmed_tokens}) should be meaningfully smaller than untrimmed ({untrimmed_tokens})"
         );
     }
@@ -730,11 +731,12 @@ mod tests {
         let projected_tokens = est_tokens(&summary);
         let untrimmed_tokens = est_tokens(&untrimmed_summary);
         assert!(
-            // Threshold loosened from 40% (60% smaller) to 60%, then to 65%:
-            // see the comment on the analogous assertion above — aggregates
-            // add a bounded amount of distribution data over all 25 rows,
-            // now including a per-column "total" and optional "rare" list.
-            projected_tokens <= untrimmed_tokens * 65 / 100,
+            // Threshold loosened from 40% (60% smaller) to 60%, to 65%, then
+            // to 70%: see the comment on the analogous assertion above —
+            // aggregates add a bounded amount of distribution data over all
+            // 25 rows, now including a per-column "total" and an optional
+            // "rare" list widened (Fix B) from 3 to 6 entries.
+            projected_tokens <= untrimmed_tokens * 70 / 100,
             "projected ({projected_tokens}) should be meaningfully smaller than untrimmed ({untrimmed_tokens})"
         );
     }
@@ -1302,13 +1304,16 @@ mod tests {
 
     // --- Fix A: signature-status columns in DEVICE_PRIORITY ---------------
 
-    /// Builds a wide (~27-key) DeviceProcessEvents-shaped row: the device
-    /// hunt columns actually present in real telemetry (a subset of
-    /// DEVICE_PRIORITY — deliberately omitting FolderPath/ProcessCommandLine/
-    /// Sha256/ProcessId so the signer columns fit within MAX_PROJECTED_KEYS),
-    /// including `InitiatingProcessSignatureStatus`, plus Azure-plumbing
-    /// noise columns. Row 0 carries an unsigned binary — the needle a
-    /// fidelity eval found invisible before Fix A.
+    /// Builds a wide (~27-key) DeviceProcessEvents-shaped row: a subset of
+    /// DEVICE_PRIORITY columns (omitting FolderPath/ProcessCommandLine/
+    /// Sha256/ProcessId), including `InitiatingProcessSignatureStatus`, plus
+    /// Azure-plumbing noise columns. Row 0 carries an unsigned binary. With
+    /// DEVICE_PRIORITY reordered (Fix A), the signer columns survive
+    /// projection both in this narrower shape and in a realistic FULL
+    /// 14-priority-column row — see `realistic_full_device_row` below,
+    /// which is the fixture that actually exercised the old append-at-end
+    /// bug (that bug required all 12 higher-priority columns present, which
+    /// this narrower fixture deliberately avoided).
     fn device_process_event_row(i: usize) -> Value {
         json!({
             "Type": "DeviceProcessEvents",
@@ -1361,6 +1366,87 @@ mod tests {
         assert!(
             summary["aggregates"].get("InitiatingProcessSignatureStatus").is_some(),
             "signer status column should be aggregated across all rows"
+        );
+    }
+
+    /// Builds a realistic ~27-key DeviceProcessEvents row carrying ALL 12
+    /// non-signer DEVICE_PRIORITY columns (as real 73-column telemetry
+    /// does) PLUS the two signer columns PLUS Azure-plumbing noise. Under
+    /// the OLD append-at-end DEVICE_PRIORITY order, those 12 non-signer
+    /// columns alone fill MAX_PROJECTED_KEYS before the priority scan ever
+    /// reaches the signer entries at (old) positions 13-14 — cutting them
+    /// entirely. This is the fixture that actually exercised the bug Fix A
+    /// closes; `device_process_event_row` above was a narrower shape that
+    /// happened to dodge it.
+    fn realistic_full_device_row(i: usize) -> Value {
+        json!({
+            "Type": "DeviceProcessEvents",
+            "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+            "DeviceName": format!("WKSTN-{i:03}.contoso.com"),
+            "AccountName": format!("user{i}"),
+            "ActionType": "ProcessCreated",
+            "FileName": "powershell.exe",
+            "ProcessCommandLine": format!("powershell.exe -enc payload{i}"),
+            "InitiatingProcessFileName": "explorer.exe",
+            "InitiatingProcessCommandLine": "explorer.exe /startup",
+            "Sha256": format!("{:064x}", i),
+            "FolderPath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "InitiatingProcessAccountName": format!("user{i}"),
+            "ProcessId": 1000 + i,
+            "InitiatingProcessSignerType": if i == 0 { "NotSigned" } else { "OsVendor" },
+            "InitiatingProcessSignatureStatus": if i == 0 { "Unsigned" } else { "Valid" },
+            "TenantId": "11111111-2222-3333-4444-555555555555",
+            "ResourceId": "/subscriptions/x/resourceGroups/y",
+            "CorrelationId": format!("corr-{i}"),
+            "SourceSystem": "OpsManager",
+            "OperationVersion": "1.0",
+            "SubscriptionId": "sub-abc",
+            "AadTenantId": "aad-xyz",
+            "col_noise_1": "n1",
+            "col_noise_2": "n2",
+            "col_noise_3": "n3",
+            "col_noise_4": "n4",
+            "col_noise_5": "n5",
+        })
+    }
+
+    #[test]
+    fn summarize_promotes_signer_columns_into_full_device_row_projection() {
+        let rows: Vec<Value> = (0..25).map(realistic_full_device_row).collect();
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            rows[0].as_object().unwrap().len() > WIDE_ROW_KEYS,
+            "fixture must exceed WIDE_ROW_KEYS to trigger projection"
+        );
+
+        let summary = summarize("/kql", &resp, "h#sig-full").expect("should summarize");
+        let top = summary["top"].as_array().expect("top is an array");
+        let first = top[0].as_object().expect("row is an object");
+
+        assert!(
+            first.contains_key("InitiatingProcessSignatureStatus"),
+            "signer status must survive projection even in a full 14-priority-column row, got keys: {:?}",
+            first.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            first.contains_key("InitiatingProcessSignerType"),
+            "signer type must survive projection even in a full 14-priority-column row, got keys: {:?}",
+            first.keys().collect::<Vec<_>>()
+        );
+
+        let agg = summary["aggregates"]
+            .get("InitiatingProcessSignatureStatus")
+            .expect("signer status column should be aggregated");
+        let top_values: Vec<&str> = agg["top"]
+            .as_array()
+            .expect("top is an array")
+            .iter()
+            .map(|v| v["value"].as_str().unwrap())
+            .collect();
+        assert!(
+            top_values.contains(&"Unsigned"),
+            "Unsigned value should appear in aggregates top, got {top_values:?}"
         );
     }
 
@@ -1460,9 +1546,9 @@ mod tests {
         for _ in 0..3 {
             rows.push(json!({"col": "common"}));
         }
-        // Four singleton values, inserted out of alphabetical order; only
-        // AGG_RARE_N (3) may survive, sorted ascending.
-        for v in ["d", "b", "a", "c"] {
+        // More singleton values than AGG_RARE_N (6), inserted out of
+        // alphabetical order; only the first AGG_RARE_N (ascending) survive.
+        for v in ["h", "d", "f", "b", "a", "g", "c", "e"] {
             rows.push(json!({"col": v}));
         }
 
@@ -1470,7 +1556,57 @@ mod tests {
         let rare = agg["col"]["rare"].as_array().expect("rare is an array");
         let rare_values: Vec<&str> = rare.iter().map(|v| v.as_str().unwrap()).collect();
 
-        assert_eq!(rare_values, vec!["a", "b", "c"]);
+        assert_eq!(rare_values, vec!["a", "b", "c", "d", "e", "f"]);
         assert_eq!(rare_values.len(), AGG_RARE_N);
+    }
+
+    /// Fix B regression: a real CloudTrail sample had 7 singleton EventName
+    /// values where the hunt-relevant success event (`GetBucketPublicAccessBlock`)
+    /// was the 5th alphabetically — invisible under the old AGG_RARE_N=3 cap.
+    #[test]
+    fn aggregates_rare_widened_to_six_surfaces_fifth_alphabetical_singleton() {
+        let singleton_names = [
+            "CreateBucket",
+            "DeleteBucket",
+            "DescribeInstances",
+            "GetBucketAcl",
+            "GetBucketPublicAccessBlock",
+            "ListRoles",
+            "PutBucketPolicy",
+        ];
+        let mut rows: Vec<Value> = (0..18)
+            .map(|i| {
+                json!({
+                    "Type": "AWSCloudTrail",
+                    "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+                    "EventName": "AssumeRole",
+                    "SourceIpAddress": format!("10.0.0.{i}"),
+                })
+            })
+            .collect();
+        for (i, name) in singleton_names.iter().enumerate() {
+            rows.push(json!({
+                "Type": "AWSCloudTrail",
+                "TimeGenerated": format!("2026-07-14T13:{:02}:00Z", i),
+                "EventName": name,
+                "SourceIpAddress": format!("10.0.1.{i}"),
+            }));
+        }
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#rare6").expect("should summarize");
+
+        let rare = summary["aggregates"]["EventName"]["rare"]
+            .as_array()
+            .expect("rare is an array");
+        let rare_values: Vec<&str> = rare.iter().map(|v| v.as_str().unwrap()).collect();
+
+        assert!(
+            rare_values.contains(&"GetBucketPublicAccessBlock"),
+            "5th-alphabetical singleton must surface with AGG_RARE_N=6, got {rare_values:?}"
+        );
+        assert!(rare.len() <= AGG_RARE_N);
+        assert!(rare.len() <= 6);
     }
 }
