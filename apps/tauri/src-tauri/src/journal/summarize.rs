@@ -17,6 +17,10 @@ const MAX_FIELD_CHARS: usize = 200;
 /// Max distinct values reported per column in the aggregates.
 const AGG_TOP_N: usize = 3;
 
+/// Max singleton (count == 1) values surfaced per column in the aggregates'
+/// `rare` list — the long tail that `top`-by-frequency hides.
+const AGG_RARE_N: usize = 3;
+
 /// Wide rows (Sentinel/AAD logs carry ~74 columns, mostly Azure metadata)
 /// are projected to hunt-relevant columns before storage. A row with more
 /// than this many keys gets projected; narrower rows keep all (non-empty) keys.
@@ -65,6 +69,7 @@ const DEVICE_PRIORITY: &[&str] = &[
     "timegenerated", "devicename", "accountname", "actiontype", "filename",
     "folderpath", "processcommandline", "sha256", "initiatingprocessfilename",
     "initiatingprocesscommandline", "initiatingprocessaccountname", "processid",
+    "initiatingprocesssignertype", "initiatingprocesssignaturestatus",
 ];
 
 const NETFLOW_PRIORITY: &[&str] = &[
@@ -232,20 +237,26 @@ fn summarize_query(resp: &Value) -> (Value, Vec<Value>, Value) {
 
 /// Computes per-column value-frequency distribution over ALL of `rows` for
 /// each of `columns`, returning
-/// `{ "<col>": { "distinct": <n>, "top": [ {"value": <v>, "count": <c>}, ... ] } }`.
+/// `{ "<col>": { "distinct": <n>, "total": <m>, "top": [ {"value": <v>, "count": <c>}, ... ], "rare": [<v>, ...] } }`.
 ///
 /// For each column: `Null` and empty-string values are skipped; other values
 /// are stringified (`Value::String(s)` as-is, everything else via
 /// `to_string()`) and truncated to `MAX_FIELD_CHARS` characters. `distinct`
-/// is the number of distinct (post-truncation) values seen; `top` holds the
-/// `AGG_TOP_N` most frequent, sorted by count descending then value
-/// ascending (a deterministic tiebreak — never relies on hashmap iteration
-/// order). A column with zero non-null/non-empty values across all rows is
-/// omitted from the result entirely.
+/// is the number of distinct (post-truncation) values seen; `total` is the
+/// count of non-null/non-empty values seen for the column (so a consumer can
+/// compute exact proportions, e.g. top value 17 of total 25 = 68%); `top`
+/// holds the `AGG_TOP_N` most frequent, sorted by count descending then
+/// value ascending (a deterministic tiebreak — never relies on hashmap
+/// iteration order); `rare` holds up to `AGG_RARE_N` distinct values that
+/// appear EXACTLY ONCE (singletons — the long tail top-N-by-frequency
+/// hides), sorted value ascending, and is OMITTED entirely when there are no
+/// singletons. A column with zero non-null/non-empty values across all rows
+/// is omitted from the result entirely.
 fn aggregate_columns(rows: &[Value], columns: &[String]) -> Value {
     let mut result = Map::new();
     for col in columns {
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        let mut total: u64 = 0;
         for row in rows {
             let value = match row.get(col) {
                 None | Some(Value::Null) => continue,
@@ -259,6 +270,7 @@ fn aggregate_columns(rows: &[Value], columns: &[String]) -> Value {
             } else {
                 value
             };
+            total += 1;
             *counts.entry(truncated).or_insert(0) += 1;
         }
 
@@ -272,13 +284,33 @@ fn aggregate_columns(rows: &[Value], columns: &[String]) -> Value {
         // break ties (BTreeMap iteration is already value-ascending, but
         // sort explicitly so the ordering doesn't silently depend on that).
         entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        // Singleton (count == 1) values are the long tail `top` hides.
+        // Collected before truncating `entries` to AGG_TOP_N, sorted value
+        // ascending, capped at AGG_RARE_N.
+        let mut rare: Vec<String> = entries
+            .iter()
+            .filter(|(_, count)| *count == 1)
+            .map(|(value, _)| value.clone())
+            .collect();
+        rare.sort();
+        rare.truncate(AGG_RARE_N);
+
         let top: Vec<Value> = entries
             .into_iter()
             .take(AGG_TOP_N)
             .map(|(value, count)| json!({ "value": value, "count": count }))
             .collect();
 
-        result.insert(col.clone(), json!({ "distinct": distinct, "top": top }));
+        let mut col_agg = Map::new();
+        col_agg.insert("distinct".to_string(), json!(distinct));
+        col_agg.insert("total".to_string(), json!(total));
+        col_agg.insert("top".to_string(), Value::Array(top));
+        if !rare.is_empty() {
+            col_agg.insert("rare".to_string(), json!(rare));
+        }
+
+        result.insert(col.clone(), Value::Object(col_agg));
     }
     Value::Object(result)
 }
@@ -544,12 +576,14 @@ mod tests {
         let trimmed_tokens = est_tokens(&summary);
         let untrimmed_tokens = est_tokens(&untrimmed_summary);
         assert!(
-            // Threshold loosened from 60% (40% smaller) to 75%: distribution
-            // aggregates over all 25 rows now ride along in the summary, so
+            // Threshold loosened from 60% (40% smaller) to 75%, then to 80%:
+            // distribution aggregates over all 25 rows now ride along in the
+            // summary — and, per Fix B, each aggregated column also carries
+            // a "total" count plus an optional "rare" singleton list — so
             // the margin over the untrimmed 5-row comparison is a bit
-            // narrower — still meaningfully smaller, just not as tight.
-            trimmed_tokens <= untrimmed_tokens * 75 / 100,
-            "trimmed ({trimmed_tokens}) should be at least 25% smaller than untrimmed ({untrimmed_tokens})"
+            // narrower still, though still meaningfully smaller.
+            trimmed_tokens <= untrimmed_tokens * 80 / 100,
+            "trimmed ({trimmed_tokens}) should be meaningfully smaller than untrimmed ({untrimmed_tokens})"
         );
     }
 
@@ -696,11 +730,12 @@ mod tests {
         let projected_tokens = est_tokens(&summary);
         let untrimmed_tokens = est_tokens(&untrimmed_summary);
         assert!(
-            // Threshold loosened from 40% (60% smaller) to 60%: see the
-            // comment on the analogous assertion above — aggregates add a
-            // bounded amount of distribution data over all 25 rows.
-            projected_tokens <= untrimmed_tokens * 60 / 100,
-            "projected ({projected_tokens}) should be at least 40% smaller than untrimmed ({untrimmed_tokens})"
+            // Threshold loosened from 40% (60% smaller) to 60%, then to 65%:
+            // see the comment on the analogous assertion above — aggregates
+            // add a bounded amount of distribution data over all 25 rows,
+            // now including a per-column "total" and optional "rare" list.
+            projected_tokens <= untrimmed_tokens * 65 / 100,
+            "projected ({projected_tokens}) should be meaningfully smaller than untrimmed ({untrimmed_tokens})"
         );
     }
 
@@ -1263,5 +1298,179 @@ mod tests {
         assert_eq!(kept.chars().count(), MAX_FIELD_CHARS + 1);
         assert!(kept.ends_with('…'));
         assert_eq!(top[0]["count"], json!(1));
+    }
+
+    // --- Fix A: signature-status columns in DEVICE_PRIORITY ---------------
+
+    /// Builds a wide (~27-key) DeviceProcessEvents-shaped row: the device
+    /// hunt columns actually present in real telemetry (a subset of
+    /// DEVICE_PRIORITY — deliberately omitting FolderPath/ProcessCommandLine/
+    /// Sha256/ProcessId so the signer columns fit within MAX_PROJECTED_KEYS),
+    /// including `InitiatingProcessSignatureStatus`, plus Azure-plumbing
+    /// noise columns. Row 0 carries an unsigned binary — the needle a
+    /// fidelity eval found invisible before Fix A.
+    fn device_process_event_row(i: usize) -> Value {
+        json!({
+            "Type": "DeviceProcessEvents",
+            "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+            "DeviceName": format!("WKSTN-{i:03}.contoso.com"),
+            "AccountName": format!("user{i}"),
+            "ActionType": "ProcessCreated",
+            "FileName": "powershell.exe",
+            "InitiatingProcessFileName": "explorer.exe",
+            "InitiatingProcessCommandLine": format!("powershell.exe -enc payload{i}"),
+            "InitiatingProcessAccountName": format!("user{i}"),
+            "InitiatingProcessSignerType": if i == 0 { "NotSigned" } else { "OsVendor" },
+            "InitiatingProcessSignatureStatus": if i == 0 { "Unsigned" } else { "Valid" },
+            "TenantId": "11111111-2222-3333-4444-555555555555",
+            "ResourceId": "/subscriptions/x/resourceGroups/y",
+            "CorrelationId": format!("corr-{i}"),
+            "SourceSystem": "OpsManager",
+            "OperationVersion": "1.0",
+            "SubscriptionId": "sub-abc",
+            "AadTenantId": "aad-xyz",
+            "col_noise_1": "n1",
+            "col_noise_2": "n2",
+            "col_noise_3": "n3",
+            "col_noise_4": "n4",
+            "col_noise_5": "n5",
+            "col_noise_6": "n6",
+            "col_noise_7": "n7",
+            "col_noise_8": "n8",
+            "col_noise_9": "n9",
+        })
+    }
+
+    #[test]
+    fn summarize_projects_and_aggregates_signature_status_for_device_rows() {
+        let rows: Vec<Value> = (0..25).map(device_process_event_row).collect();
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#sig").expect("should summarize");
+        let top = summary["top"].as_array().expect("top is an array");
+        let first = top[0].as_object().expect("row is an object");
+
+        assert!(
+            first.contains_key("InitiatingProcessSignatureStatus"),
+            "DEVICE_PRIORITY projection should keep InitiatingProcessSignatureStatus, got keys: {:?}",
+            first.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(first["InitiatingProcessSignatureStatus"], json!("Unsigned"));
+
+        assert!(
+            summary["aggregates"].get("InitiatingProcessSignatureStatus").is_some(),
+            "signer status column should be aggregated across all rows"
+        );
+    }
+
+    // --- Fix B: total + rare (singleton) values in aggregates -------------
+
+    #[test]
+    fn aggregates_expose_total_for_exact_proportions() {
+        // 25-row AWSCloudTrail-shaped fixture: EventSource is "ec2.amazonaws.com"
+        // in 20/25 rows (80%) — total must make that proportion computable.
+        let rows: Vec<Value> = (0..25)
+            .map(|i| {
+                let source = if i < 20 { "ec2.amazonaws.com" } else { "s3.amazonaws.com" };
+                json!({
+                    "Type": "AWSCloudTrail",
+                    "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+                    "EventName": "AssumeRole",
+                    "EventSource": source,
+                    "SourceIpAddress": format!("10.0.0.{i}"),
+                })
+            })
+            .collect();
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#total").expect("should summarize");
+
+        assert_eq!(summary["aggregates"]["EventSource"]["total"], json!(25));
+        assert_eq!(
+            summary["aggregates"]["EventSource"]["top"][0],
+            json!({"value": "ec2.amazonaws.com", "count": 20})
+        );
+    }
+
+    #[test]
+    fn aggregates_surface_singleton_value_hidden_by_top_n() {
+        // 25-row fixture: EventName is "AssumeRole" x12 and "ListBuckets" x12
+        // (both repeated), plus a single "GetBucketPublicAccessBlock" row —
+        // the "rare successful action among failures" needle top-N hides.
+        let rows: Vec<Value> = (0..25)
+            .map(|i| {
+                let name = if i == 24 {
+                    "GetBucketPublicAccessBlock"
+                } else if i % 2 == 0 {
+                    "AssumeRole"
+                } else {
+                    "ListBuckets"
+                };
+                json!({
+                    "Type": "AWSCloudTrail",
+                    "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+                    "EventName": name,
+                    "SourceIpAddress": format!("10.0.0.{i}"),
+                })
+            })
+            .collect();
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#rare").expect("should summarize");
+
+        let rare = summary["aggregates"]["EventName"]["rare"]
+            .as_array()
+            .expect("rare is an array");
+        let rare_values: Vec<&str> = rare.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(
+            rare_values.contains(&"GetBucketPublicAccessBlock"),
+            "singleton value should be in rare, got {rare_values:?}"
+        );
+        assert!(
+            !rare_values.contains(&"AssumeRole"),
+            "repeated value must not be in rare"
+        );
+        assert!(
+            !rare_values.contains(&"ListBuckets"),
+            "repeated value must not be in rare"
+        );
+    }
+
+    #[test]
+    fn aggregates_omit_rare_key_when_no_singletons_exist() {
+        // Reuses the ResultType distribution (12/8/5 — every value repeats,
+        // minimum count is 5) from signin_distribution_response: no
+        // singletons anywhere, so `rare` must be entirely absent.
+        let resp = signin_distribution_response();
+        let summary = summarize("/kql", &resp, "h#norare").expect("should summarize");
+
+        assert!(
+            summary["aggregates"]["ResultType"].get("rare").is_none(),
+            "column with no singleton values should have no rare key"
+        );
+    }
+
+    #[test]
+    fn aggregate_columns_rare_values_are_sorted_ascending_and_capped() {
+        let mut rows: Vec<Value> = Vec::new();
+        // A non-singleton value (count = 3) that must never appear in rare.
+        for _ in 0..3 {
+            rows.push(json!({"col": "common"}));
+        }
+        // Four singleton values, inserted out of alphabetical order; only
+        // AGG_RARE_N (3) may survive, sorted ascending.
+        for v in ["d", "b", "a", "c"] {
+            rows.push(json!({"col": v}));
+        }
+
+        let agg = aggregate_columns(&rows, &["col".to_string()]);
+        let rare = agg["col"]["rare"].as_array().expect("rare is an array");
+        let rare_values: Vec<&str> = rare.iter().map(|v| v.as_str().unwrap()).collect();
+
+        assert_eq!(rare_values, vec!["a", "b", "c"]);
+        assert_eq!(rare_values.len(), AGG_RARE_N);
     }
 }
