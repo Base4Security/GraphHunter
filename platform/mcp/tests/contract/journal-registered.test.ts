@@ -21,6 +21,46 @@ test("contract: journal tool is registered", () => {
   assert.ok(op?.success, "op=list is a valid input");
 });
 
+// Task B2: journal_stats (op=stats) surfaces per-hunt token accounting.
+test("contract: journal tool accepts op=stats", () => {
+  const journal = registry.find((t) => t.name === "journal");
+  assert.ok(journal, "journal tool present in registry");
+
+  const withoutId = journal?.inputSchema.safeParse({ op: "stats" });
+  assert.ok(withoutId?.success, "op=stats without id is schema-valid (id is checked at execute time)");
+
+  const withId = journal?.inputSchema.safeParse({ op: "stats", id: "hunt-123" });
+  assert.ok(withId?.success, "op=stats with id is a valid input");
+});
+
+test("contract: journal op=stats calls GET /journal/:id/stats and returns it as-is", async () => {
+  const journal = registry.find((t) => t.name === "journal");
+  assert.ok(journal, "journal tool present in registry");
+
+  const stats = { hunt_id: "hunt-123", cumulative_est_tokens: 59, event_count: 2, by_kind: { query: 1, traverse: 1 } };
+
+  const noopLogger: Logger = {
+    info() {},
+    warn() {},
+    error() {},
+    tool() {},
+    api() {},
+  };
+  const fakeApi: ApiClient = {
+    async get(path: string) {
+      assert.equal(path, "/journal/hunt-123/stats");
+      return stats;
+    },
+    async post() {
+      throw new Error("unexpected POST in op=stats test");
+    },
+  };
+  const ctx: ToolContext = { api: fakeApi, logger: noopLogger, requestId: "test" };
+
+  const result = await journal!.execute(ctx, { op: "stats", id: "hunt-123" });
+  assert.deepEqual(result, stats);
+});
+
 // Regression for the "op=export returns an escaped NDJSON string" finding:
 // the MCP content layer JSON.stringifies whatever `execute` returns, so a
 // joined-string return value would force the LLM to un-escape and re-split

@@ -3,9 +3,9 @@ import { defineTool, type Tool } from "../../lib/types.js";
 
 const input = z.object({
   op: z
-    .enum(["start", "list", "get", "export"])
+    .enum(["start", "list", "get", "export", "stats"])
     .describe(
-      "Discriminator. start: open a new hunt (rarely needed — the first captured API call already lazily opens one). list: summaries of every past hunt (id, label, timestamps, event/entity/relation counts). get: hunt metadata plus its events, as {meta, events} — use this for hunt context (label, timestamps, counts) alongside the event log. export: just that hunt's full ordered event array (the replayable hunt route/topology) as structured JSON — use this when you only need the events themselves, e.g. to reconstruct or replay a prior hunt.",
+      "Discriminator. start: open a new hunt (rarely needed — the first captured API call already lazily opens one). list: summaries of every past hunt (id, label, timestamps, event/entity/relation counts). get: hunt metadata plus its events, as {meta, events} — use this for hunt context (label, timestamps, counts) alongside the event log. export: just that hunt's full ordered event array (the replayable hunt route/topology) as structured JSON — use this when you only need the events themselves, e.g. to reconstruct or replay a prior hunt. stats: per-hunt token accounting — {hunt_id, cumulative_est_tokens, event_count, by_kind} — the measured proof that journaling summaries instead of full response bodies is cheaper.",
     ),
   label: z
     .string()
@@ -16,7 +16,9 @@ const input = z.object({
     .string()
     .max(200)
     .optional()
-    .describe("op=get / op=export only. The hunt id, as returned by op=list or op=start."),
+    .describe(
+      "op=get / op=export / op=stats only. The hunt id, as returned by op=list or op=start.",
+    ),
 });
 
 interface JournalHuntRecord {
@@ -27,7 +29,7 @@ interface JournalHuntRecord {
 export const journal = defineTool({
   name: "journal",
   description:
-    "Read the append-only audit trail of past hunts — every API call made (redacted params, status, topology deltas), grouped by hunt. op=list to see past hunts cheaply, op=get to pull one hunt's metadata plus its full event log as {meta, events}, op=export to pull just the ordered event array (the replayable hunt route/topology) as structured JSON. Use this to RECONSTRUCT a prior hunt's findings instead of re-running the same queries.",
+    "Read the append-only audit trail of past hunts — every API call made (redacted params, status, topology deltas), grouped by hunt. op=list to see past hunts cheaply, op=get to pull one hunt's metadata plus its full event log as {meta, events}, op=export to pull just the ordered event array (the replayable hunt route/topology) as structured JSON, op=stats to pull per-hunt token accounting (cumulative_est_tokens, event_count, by_kind) — the measured proof the journal path is cheaper than re-fetching full responses. Use this to RECONSTRUCT a prior hunt's findings instead of re-running the same queries.",
   category: "hunt",
   version: 1,
   stability: "stable",
@@ -43,6 +45,10 @@ export const journal = defineTool({
     if (op === "get") {
       if (!id) throw new Error("op=get requires id");
       return ctx.api.get(`/journal/${id}`);
+    }
+    if (op === "stats") {
+      if (!id) throw new Error("op=stats requires id");
+      return ctx.api.get(`/journal/${id}/stats`);
     }
     // op === "export"
     if (!id) throw new Error("op=export requires id");

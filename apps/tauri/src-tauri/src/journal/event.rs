@@ -21,6 +21,11 @@ pub struct EventResult {
     pub new_relations: Option<u64>,
     pub body_bytes: u64,
     pub est_tokens: u64,
+    /// Compact semantic summary (Task B1's `summarize::summarize`) for
+    /// large/known-shape responses — never the full response body. `None`
+    /// when the response was already small or of an unrecognized shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

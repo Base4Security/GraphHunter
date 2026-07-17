@@ -74,6 +74,19 @@ pub(super) async fn handler_get(
     }
 }
 
+/// `GET /journal/:id/stats` — per-hunt token accounting (Task B2):
+/// `{hunt_id, cumulative_est_tokens, event_count, by_kind}`. Additive —
+/// does not alter `GET /journal/:id`'s response shape.
+pub(super) async fn handler_stats(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    match state.journal.stats(&id) {
+        Some(stats) => ok_json(stats),
+        None => not_found(&id),
+    }
+}
+
 /// `POST /journal/export` — body `{id: String}`. Streams the hunt's events
 /// back as NDJSON (one `HuntEvent` per line), mirroring the on-disk
 /// `events.jsonl` byte-for-byte in structure.

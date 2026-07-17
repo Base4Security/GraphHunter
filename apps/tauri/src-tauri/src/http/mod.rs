@@ -180,6 +180,12 @@ async fn capture(
         return next.run(request).await;
     }
     let method = request.method().to_string();
+    // current_hunt_id() is idempotent/lazy: calling it here (before append)
+    // just returns the already-open hunt or lazily opens one, same as the
+    // append() call below would. Used as the summary's detail_ref so an
+    // LLM reading a compact summary knows which hunt to pull the full
+    // detail from via the journal API.
+    let detail_ref = app.journal.current_hunt_id();
 
     // Buffer the request body; best-effort JSON (non-JSON/undecodable ->
     // Null). Rebuild the request from the buffered bytes so the real
@@ -237,7 +243,7 @@ async fn capture(
         // (Null resp_json) since the body was never inspected.
         let resp_json = serde_json::Value::Null;
         let mut event = crate::journal::capture::build_event(
-            &path, &method, status, dur_ms, &req_json, &resp_json, before, after,
+            &path, &method, status, dur_ms, &req_json, &resp_json, before, after, &detail_ref,
         );
         event.result.body_bytes = known_len.unwrap_or(0);
         let event_body_bytes = event.result.body_bytes;
@@ -284,7 +290,7 @@ async fn capture(
     };
 
     let mut event = crate::journal::capture::build_event(
-        &path, &method, status, dur_ms, &req_json, &resp_json, before, after,
+        &path, &method, status, dur_ms, &req_json, &resp_json, before, after, &detail_ref,
     );
     // build_event derives body_bytes/est_tokens from resp_json, which is
     // Null for oversized bodies; correct body_bytes to the real wire size
@@ -385,6 +391,7 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
         .route("/journal/list", get(journal::handler_list))
         .route("/journal/export", post(journal::handler_export))
         .route("/journal/:id", get(journal::handler_get))
+        .route("/journal/:id/stats", get(journal::handler_stats))
         .fallback(misc::fallback_404)
         // 10 MB cap on request bodies. Hunt payloads are small (a DSL string
         // plus maybe a note); anything larger is almost certainly malformed

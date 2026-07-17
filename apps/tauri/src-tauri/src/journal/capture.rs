@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::event::{EventResult, GraphCounts, HuntEvent, Topology};
 use super::interpret::{classify_kind, extract_result_meta, extract_touched};
 use super::redact::redact_secrets;
+use super::summarize;
 
 fn now_millis() -> i64 {
     SystemTime::now()
@@ -32,6 +33,7 @@ pub fn build_event(
     resp_body: &Value,
     before: GraphCounts,
     after: GraphCounts,
+    detail_ref: &str,
 ) -> HuntEvent {
     let kind = classify_kind(path).to_string();
     let params = redact_secrets(req_body);
@@ -40,7 +42,15 @@ pub fn build_event(
 
     let resp_serialized = serde_json::to_string(resp_body).unwrap_or_default();
     let body_bytes = resp_serialized.len() as u64;
-    let est_tokens = body_bytes / 4;
+
+    // Task B2: record what an LLM would actually pay to read this event —
+    // the compact summary's token cost when one was produced (the measured
+    // saving), otherwise the full response's cost (today's body_bytes/4).
+    let summary = summarize::summarize(path, resp_body, detail_ref);
+    let est_tokens = match &summary {
+        Some(s) => summarize::est_tokens(s),
+        None => summarize::est_tokens(resp_body),
+    };
 
     HuntEvent {
         seq: 0,
@@ -56,6 +66,7 @@ pub fn build_event(
             new_relations,
             body_bytes,
             est_tokens,
+            summary,
         },
         topology: Topology {
             graph_before: before,
@@ -83,6 +94,7 @@ mod tests {
             &resp,
             GraphCounts { entities: 0, relations: 0 },
             GraphCounts { entities: 0, relations: 0 },
+            "h#0",
         );
         assert_eq!(ev.kind, "query");
         assert_eq!(ev.params["azure_client_secret"], "[REDACTED]");
@@ -105,11 +117,68 @@ mod tests {
             &json!({"new_entities": 8, "new_relations": 227}),
             GraphCounts { entities: 10, relations: 20 },
             GraphCounts { entities: 18, relations: 247 },
+            "h#0",
         );
         assert_eq!(ev.kind, "build");
         assert_eq!(ev.result.new_entities, Some(8));
         assert_eq!(ev.result.new_relations, Some(227));
         assert_eq!(ev.topology.graph_before.entities, 10);
         assert_eq!(ev.topology.graph_after.entities, 18);
+    }
+
+    fn big_kql_response(row_count: usize) -> Value {
+        let rows: Vec<Value> = (0..row_count)
+            .map(|i| {
+                json!({
+                    "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+                    "Account": format!("user{i}@contoso.com"),
+                    "IPAddress": format!("10.0.{}.{}", i % 256, (i * 7) % 256),
+                    "ResultType": if i % 3 == 0 { "50126" } else { "0" },
+                    "AppDisplayName": "Azure Portal",
+                })
+            })
+            .collect();
+        json!({ "rows": rows, "row_count": row_count })
+    }
+
+    #[test]
+    fn build_event_summarizes_large_kql_response_and_lowers_est_tokens() {
+        let resp = big_kql_response(100);
+        let ev = build_event(
+            "/kql",
+            "POST",
+            200,
+            10,
+            &Value::Null,
+            &resp,
+            GraphCounts { entities: 0, relations: 0 },
+            GraphCounts { entities: 0, relations: 0 },
+            "h#1",
+        );
+        assert!(ev.result.summary.is_some(), "large response should be summarized");
+        let summary = ev.result.summary.as_ref().unwrap();
+        assert_eq!(summary["_summary"], json!(true));
+        assert_eq!(summary["detail_ref"], json!("h#1"));
+        // The summary's token cost must be strictly cheaper than the full
+        // body's — this is the measured saving the journal exists to prove.
+        assert!(ev.result.est_tokens < ev.result.body_bytes / 4);
+    }
+
+    #[test]
+    fn build_event_small_response_is_not_summarized() {
+        let resp = big_kql_response(2);
+        let ev = build_event(
+            "/kql",
+            "POST",
+            200,
+            10,
+            &Value::Null,
+            &resp,
+            GraphCounts { entities: 0, relations: 0 },
+            GraphCounts { entities: 0, relations: 0 },
+            "h#2",
+        );
+        assert!(ev.result.summary.is_none());
+        assert_eq!(ev.result.est_tokens, ev.result.body_bytes / 4);
     }
 }

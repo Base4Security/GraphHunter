@@ -172,6 +172,24 @@ impl JournalStore {
         Some((meta, events))
     }
 
+    /// Per-hunt token accounting (Task B2): cumulative estimated tokens,
+    /// event count, and a per-`kind` breakdown — the measured proof that
+    /// journaling summaries instead of full bodies is cheaper. `None` if
+    /// the hunt is unknown.
+    pub fn stats(&self, id: &str) -> Option<serde_json::Value> {
+        let (meta, events) = self.read(id)?;
+        let mut by_kind: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        for ev in &events {
+            *by_kind.entry(ev.kind.clone()).or_insert(0) += 1;
+        }
+        Some(serde_json::json!({
+            "hunt_id": id,
+            "cumulative_est_tokens": meta.cumulative_est_tokens,
+            "event_count": meta.event_count,
+            "by_kind": by_kind,
+        }))
+    }
+
     fn meta_path(dir: &Path) -> PathBuf {
         dir.join("meta.json")
     }
@@ -235,6 +253,41 @@ mod tests {
         assert_eq!(events[0].endpoint, "/kql");
         assert_eq!(meta.event_count, 1);
         assert_eq!(meta.cumulative_est_tokens, 42);
+    }
+
+    #[test]
+    fn append_two_events_sums_cumulative_est_tokens_and_stats_matches() {
+        let store = JournalStore::new(tmp());
+        let id = store.start_hunt(Some("cycle-B".into()));
+
+        let mut ev1 = HuntEvent::default();
+        ev1.kind = "query".into();
+        ev1.endpoint = "/kql".into();
+        ev1.result.est_tokens = 42;
+        store.append(ev1);
+
+        let mut ev2 = HuntEvent::default();
+        ev2.kind = "traverse".into();
+        ev2.endpoint = "/graph/neighbors".into();
+        ev2.result.est_tokens = 17;
+        store.append(ev2);
+
+        let (meta, _) = store.read(&id).expect("hunt exists");
+        assert_eq!(meta.cumulative_est_tokens, 42 + 17);
+        assert_eq!(meta.event_count, 2);
+
+        let stats = store.stats(&id).expect("stats for known hunt");
+        assert_eq!(stats["hunt_id"], serde_json::json!(id));
+        assert_eq!(stats["cumulative_est_tokens"], serde_json::json!(59));
+        assert_eq!(stats["event_count"], serde_json::json!(2));
+        assert_eq!(stats["by_kind"]["query"], serde_json::json!(1));
+        assert_eq!(stats["by_kind"]["traverse"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn stats_returns_none_for_unknown_hunt() {
+        let store = JournalStore::new(tmp());
+        assert!(store.stats("no-such-hunt").is_none());
     }
 
     #[test]
