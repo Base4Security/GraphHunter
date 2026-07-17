@@ -4,9 +4,9 @@
 //! this root owns `HttpState`, the auth middleware, and router assembly.
 
 use axum::{
-    body::{to_bytes, Body},
+    body::{to_bytes, Body, Bytes, HttpBody},
     extract::{FromRef, Request, State},
-    http::StatusCode,
+    http::{header::CONTENT_LENGTH, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -110,11 +110,22 @@ fn journal_capture_skips(path: &str) -> bool {
     path == "/" || path == "/health" || path == "/metrics" || path.starts_with("/journal")
 }
 
-/// Cap on how many bytes `capture` will buffer from a request/response
-/// body via `to_bytes`. Matches the `DefaultBodyLimit` cap applied lower
-/// in the stack (see `build_app`) — `to_bytes` requires its own explicit
-/// limit regardless of that layer.
+/// Cap on how many bytes `capture` will buffer from a *request* body via
+/// `to_bytes`. Matches the `DefaultBodyLimit` cap applied lower in the
+/// stack (see `build_app`) — `to_bytes` requires its own explicit limit
+/// regardless of that layer. When a request exceeds this, `capture`
+/// rejects it with `413 Payload Too Large` up front instead of forwarding
+/// a truncated body to the handler (see `capture`).
 const CAPTURE_BODY_LIMIT: usize = 10 * 1024 * 1024;
+
+/// Cap on how many bytes `capture` will buffer from a *response* body when
+/// it does decide to buffer one (see `capture`). Comfortably above any
+/// real graph/OCSF export produced by this app. Responses whose declared
+/// size (`Content-Length`, or the body's own size hint) already exceeds
+/// this limit are never buffered at all — they are forwarded to the
+/// client completely untouched, since truncating an already-produced
+/// response to empty would be silent data loss.
+const RESP_CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Above this size, skip JSON-parsing the response body for the
 /// interpreter (`extract_touched`/`row_count`/etc). The raw bytes are
@@ -141,8 +152,18 @@ fn graph_counts(api: &GraphHunterApi) -> GraphCounts {
 /// Mandatory hunt-journal capture middleware (Task A4). Buffers the
 /// request body (rebuilding the request so the real handler still sees
 /// it), reads graph counts before/after, runs the handler, buffers the
-/// response body (rebuilding the response so the client still sees it),
-/// and appends a redacted `HuntEvent` to the current hunt.
+/// response body when it's safe to do so (rebuilding the response so the
+/// client still sees it), and appends a redacted `HuntEvent` to the
+/// current hunt.
+///
+/// Buffered bodies must reach their downstream consumer (handler or
+/// client) *unchanged*. `to_bytes` returns `Err` when a body exceeds the
+/// limit passed to it — silently substituting an empty `Bytes` in that
+/// case (via `unwrap_or_default`) would forward a corrupted, zero-byte
+/// body to whichever side is downstream. `capture` never does that:
+/// an over-limit *request* is rejected with `413` before the handler
+/// runs, and an over-limit *response* is forwarded completely untouched
+/// (buffering is skipped up front, before the body is ever consumed).
 ///
 /// Registered *inside* `auth_middleware` (see `build_app`) so it only
 /// runs for authenticated, resolved requests — unauthorized probes never
@@ -162,8 +183,28 @@ async fn capture(
     // Buffer the request body; best-effort JSON (non-JSON/undecodable ->
     // Null). Rebuild the request from the buffered bytes so the real
     // handler downstream still gets a fully-formed body.
+    //
+    // If the body exceeds CAPTURE_BODY_LIMIT, `to_bytes` returns `Err`.
+    // Reject with 413 here instead of substituting an empty body: an
+    // empty body would reach the handler as a confusing, silently-wrong
+    // request instead of the clean 413 a >limit request used to get from
+    // `DefaultBodyLimit` before `capture` sat in front of it.
     let (parts, body) = request.into_parts();
-    let req_bytes = to_bytes(body, CAPTURE_BODY_LIMIT).await.unwrap_or_default();
+    let req_bytes = match to_bytes(body, CAPTURE_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "Request body exceeds the {}-byte limit.",
+                        CAPTURE_BODY_LIMIT
+                    )
+                })),
+            )
+                .into_response();
+        }
+    };
     let req_json: serde_json::Value =
         serde_json::from_slice(&req_bytes).unwrap_or(serde_json::Value::Null);
     let request = Request::from_parts(parts, Body::from(req_bytes));
@@ -175,12 +216,66 @@ async fn capture(
     let after = graph_counts(&api);
     let status = response.status().as_u16();
 
-    // Buffer the response body the same way. Cap JSON parsing separately
-    // from the buffering limit: a huge-but-legitimate response (e.g. a
-    // large export) still gets forwarded to the client byte-for-byte,
-    // it just isn't interpreted for row_count/touched in the journal.
+    // Decide whether the response is safe to buffer *before* touching its
+    // body. The handler already produced a valid response; `capture` must
+    // never corrupt it. Prefer the declared `Content-Length`, falling
+    // back to the body's own size hint (exact for the `Bytes`-backed
+    // bodies this app's `Json(...)` handlers produce).
+    let declared_len = response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    let hinted_len = HttpBody::size_hint(response.body()).upper();
+    let known_len = declared_len.or(hinted_len);
+
+    if known_len.is_some_and(|n| n as usize > RESP_CAPTURE_LIMIT) {
+        // Oversized: skip buffering entirely and forward the original
+        // response untouched — this is the fix for the data-loss bug.
+        // The journal still gets an event; row_count/touched are skipped
+        // (Null resp_json) since the body was never inspected.
+        let resp_json = serde_json::Value::Null;
+        let mut event = crate::journal::capture::build_event(
+            &path, &method, status, dur_ms, &req_json, &resp_json, before, after,
+        );
+        event.result.body_bytes = known_len.unwrap_or(0);
+        let event_body_bytes = event.result.body_bytes;
+        app.journal.append(event);
+
+        tracing::debug!(
+            "journal: captured {} {} -> {} ({} ms, oversized response {} bytes, buffering skipped)",
+            method, path, status, dur_ms, event_body_bytes
+        );
+        return response;
+    }
+
+    // Normal-sized (or unknown-length, under the buffering cap) response:
+    // buffer and rebuild as before. Cap JSON parsing separately from the
+    // buffering limit: a large-but-under-cap response still gets
+    // forwarded to the client byte-for-byte, it just isn't interpreted
+    // for row_count/touched in the journal.
     let (resp_parts, resp_body) = response.into_parts();
-    let resp_bytes = to_bytes(resp_body, CAPTURE_BODY_LIMIT).await.unwrap_or_default();
+    let resp_bytes = match to_bytes(resp_body, RESP_CAPTURE_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            // The size pre-check above should route anything over
+            // RESP_CAPTURE_LIMIT away from this branch for every handler
+            // in this app (all `Json(...)`, which always sets
+            // Content-Length). Getting here means a body streamed past
+            // the cap without a usable size hint — not a real case
+            // today, and unrecoverable once `to_bytes` has already
+            // consumed the stream: there's no original response left to
+            // forward. Log loudly and fall back to an empty body as the
+            // last resort.
+            tracing::warn!(
+                "journal: response body for {} {} exceeded {} bytes with no usable \
+                 Content-Length/size hint; forwarding EMPTY body to client — \
+                 this is unrecoverable data loss for this one response: {}",
+                method, path, RESP_CAPTURE_LIMIT, e
+            );
+            Bytes::new()
+        }
+    };
     let resp_json: serde_json::Value = if resp_bytes.len() <= CAPTURE_PARSE_LIMIT {
         serde_json::from_slice(&resp_bytes).unwrap_or(serde_json::Value::Null)
     } else {
