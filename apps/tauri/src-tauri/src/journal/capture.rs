@@ -43,13 +43,27 @@ pub fn build_event(
     let resp_serialized = serde_json::to_string(resp_body).unwrap_or_default();
     let body_bytes = resp_serialized.len() as u64;
 
+    // CRITICAL fix: never let raw secret-bearing response rows reach the
+    // persisted summary. `summarize` copies up to TOP_N raw rows into
+    // `top`, and that summary is written to disk (events.jsonl) and served
+    // back via GET /journal/:id, /journal/export, and the MCP get/export
+    // ops — so redact the response the same way `params` (the request) is
+    // above, before it can ever be summarized. `body_bytes` stays keyed to
+    // the ORIGINAL (unredacted) serialization since it records real wire
+    // size, not persisted content; `redact_secrets` only replaces values in
+    // place, so row_count and other counts derived from the redacted copy
+    // still match.
+    let safe_resp = redact_secrets(resp_body);
+
     // Task B2: record what an LLM would actually pay to read this event —
     // the compact summary's token cost when one was produced (the measured
-    // saving), otherwise the full response's cost (today's body_bytes/4).
-    let summary = summarize::summarize(path, resp_body, detail_ref);
+    // saving), otherwise the full response's cost (today's body_bytes/4,
+    // reusing the serialization already computed above for body_bytes
+    // instead of re-serializing the body a second time).
+    let summary = summarize::summarize(path, &safe_resp, detail_ref);
     let est_tokens = match &summary {
         Some(s) => summarize::est_tokens(s),
-        None => summarize::est_tokens(resp_body),
+        None => resp_serialized.len() as u64 / 4,
     };
 
     HuntEvent {
@@ -162,6 +176,51 @@ mod tests {
         // The summary's token cost must be strictly cheaper than the full
         // body's — this is the measured saving the journal exists to prove.
         assert!(ev.result.est_tokens < ev.result.body_bytes / 4);
+    }
+
+    #[test]
+    fn build_event_redacts_secret_fields_inside_summarized_response_rows() {
+        // A /kql response whose rows carry a secret-keyed field (mirrors a
+        // real Sentinel result column like RefreshToken/ClientSecret). Large
+        // enough (row_count well past summarize's THRESHOLD=400 est_tokens)
+        // that `summarize` copies raw rows into `top` — this is exactly the
+        // path CRITICAL-1 found leaking secrets into the persisted journal.
+        let row_count = 100;
+        let rows: Vec<Value> = (0..row_count)
+            .map(|i| {
+                json!({
+                    "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+                    "Account": format!("user{i}@contoso.com"),
+                    "IPAddress": format!("10.0.{}.{}", i % 256, (i * 7) % 256),
+                    "AppDisplayName": "Azure Portal",
+                    "RefreshToken": "SECRET-XYZ",
+                })
+            })
+            .collect();
+        let resp = json!({ "rows": rows, "row_count": row_count });
+
+        let ev = build_event(
+            "/kql",
+            "POST",
+            200,
+            10,
+            &Value::Null,
+            &resp,
+            GraphCounts { entities: 0, relations: 0 },
+            GraphCounts { entities: 0, relations: 0 },
+            "h#secret",
+        );
+
+        assert!(ev.result.summary.is_some(), "large response should be summarized");
+        let serialized = serde_json::to_string(&ev.result.summary).unwrap();
+        assert!(
+            !serialized.contains("SECRET-XYZ"),
+            "secret leaked into persisted journal summary: {serialized}"
+        );
+        assert!(
+            serialized.contains("[REDACTED]"),
+            "expected redact_secrets marker in persisted summary: {serialized}"
+        );
     }
 
     #[test]

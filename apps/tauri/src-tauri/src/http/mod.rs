@@ -180,12 +180,6 @@ async fn capture(
         return next.run(request).await;
     }
     let method = request.method().to_string();
-    // current_hunt_id() is idempotent/lazy: calling it here (before append)
-    // just returns the already-open hunt or lazily opens one, same as the
-    // append() call below would. Used as the summary's detail_ref so an
-    // LLM reading a compact summary knows which hunt to pull the full
-    // detail from via the journal API.
-    let detail_ref = app.journal.current_hunt_id();
 
     // Buffer the request body; best-effort JSON (non-JSON/undecodable ->
     // Null). Rebuild the request from the buffered bytes so the real
@@ -242,10 +236,26 @@ async fn capture(
         // The journal still gets an event; row_count/touched are skipped
         // (Null resp_json) since the body was never inspected.
         let resp_json = serde_json::Value::Null;
+        // detail_ref is resolved here, post-handler (after `next.run` above),
+        // so the window between naming a hunt and `append()` landing the
+        // event in it is only two fast lock ops with no await in between —
+        // a concurrent /journal/close can no longer race a slow handler and
+        // make this event land in the wrong hunt. current_hunt_id() is
+        // idempotent/lazy: it just returns the already-open hunt or lazily
+        // opens one, same as append() below would. Used as the summary's
+        // detail_ref so an LLM reading a compact summary knows which hunt
+        // to pull the full detail from via the journal API.
+        let detail_ref = app.journal.current_hunt_id();
         let mut event = crate::journal::capture::build_event(
             &path, &method, status, dur_ms, &req_json, &resp_json, before, after, &detail_ref,
         );
         event.result.body_bytes = known_len.unwrap_or(0);
+        // IMPORTANT fix: build_event derived est_tokens from resp_json
+        // (Null here, since the body was never inspected) which collapses
+        // to ~1 token regardless of true size — silently under-counting the
+        // largest responses in cumulative_est_tokens. Recompute it from the
+        // real wire size now that body_bytes has been corrected above.
+        event.result.est_tokens = event.result.body_bytes / 4;
         let event_body_bytes = event.result.body_bytes;
         app.journal.append(event);
 
@@ -289,6 +299,13 @@ async fn capture(
         serde_json::Value::Null
     };
 
+    // detail_ref is resolved here, post-handler (after `next.run` above), so
+    // the window between naming a hunt and `append()` landing the event in
+    // it is only two fast lock ops with no await in between — a concurrent
+    // /journal/close can no longer race a slow handler and make this event
+    // land in the wrong hunt. See the oversized branch above for the full
+    // rationale.
+    let detail_ref = app.journal.current_hunt_id();
     let mut event = crate::journal::capture::build_event(
         &path, &method, status, dur_ms, &req_json, &resp_json, before, after, &detail_ref,
     );
