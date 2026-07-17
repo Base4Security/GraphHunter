@@ -12,6 +12,72 @@ const TOP_N: usize = 5;
 /// Max characters kept for a single string field value in a `top` row before truncation.
 const MAX_FIELD_CHARS: usize = 200;
 
+/// Wide rows (Sentinel/AAD logs carry ~74 columns, mostly Azure metadata)
+/// are projected to hunt-relevant columns before storage. A row with more
+/// than this many keys gets projected; narrower rows keep all (non-empty) keys.
+const WIDE_ROW_KEYS: usize = 20;
+
+/// Minimum projected keys; if the signal match yields fewer, fall back to the
+/// first N original keys so we never emit a near-empty row.
+const MIN_PROJECTED_KEYS: usize = 8;
+
+/// Key-name substrings (case-insensitive) that mark a column as hunt-relevant.
+const SIGNAL_KEY_SUBSTRINGS: &[&str] = &[
+    "time",
+    "user",
+    "account",
+    "principal",
+    "identity",
+    "ipaddress",
+    "address",
+    "location",
+    "city",
+    "country",
+    "result",
+    "status",
+    "app",
+    "operation",
+    "client",
+    "device",
+    "browser",
+    "agent",
+    "risk",
+    "conditional",
+    "category",
+    "action",
+    "target",
+    "actor",
+    "sign",
+    "logon",
+    "auth",
+    "error",
+    "reason",
+    "name",
+];
+
+/// Key-name substrings (case-insensitive) that mark a column as pure Azure
+/// plumbing — excluded even if it also matches a signal substring.
+const NOISE_KEY_SUBSTRINGS: &[&str] = &[
+    "tenant",
+    "resourceid",
+    "correlation",
+    "originalrequest",
+    "operationversion",
+    "sourcesystem",
+    "subscription",
+    "aadtenant",
+];
+
+/// True when `key` names a hunt-relevant column: it contains a signal
+/// substring and does not contain a noise substring (case-insensitive).
+fn is_signal_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    if NOISE_KEY_SUBSTRINGS.iter().any(|n| lower.contains(n)) {
+        return false;
+    }
+    SIGNAL_KEY_SUBSTRINGS.iter().any(|s| lower.contains(s))
+}
+
 /// Serialized-length / 4 heuristic for estimating LLM token cost of a JSON value.
 pub fn est_tokens(v: &Value) -> u64 {
     serde_json::to_string(v).unwrap_or_default().len() as u64 / 4
@@ -60,6 +126,14 @@ fn summarize_query(resp: &Value) -> (Value, Vec<Value>) {
 /// null or an empty string (Sentinel rows carry many empty columns that add
 /// bytes but no signal), and truncates over-long string values. Non-object
 /// rows (arrays, scalars) are returned unchanged.
+///
+/// Wide rows (Sentinel/AAD logs carry ~74 columns, mostly Azure metadata
+/// such as TenantId, ResourceId, CorrelationId) often have zero empty
+/// values, so the drop-empty step alone doesn't touch them — the real
+/// token cost is column COUNT. If the surviving object still has more than
+/// `WIDE_ROW_KEYS` keys, it is projected down to hunt-relevant ("signal")
+/// columns; if that projection yields too few keys to be useful, an
+/// order-preserving fallback keeps the first `WIDE_ROW_KEYS` surviving keys.
 fn trim_row(row: &Value) -> Value {
     let map = match row {
         Value::Object(map) => map,
@@ -80,7 +154,26 @@ fn trim_row(row: &Value) -> Value {
             }
         }
     }
-    Value::Object(trimmed)
+
+    if trimmed.len() <= WIDE_ROW_KEYS {
+        return Value::Object(trimmed);
+    }
+
+    let projected: Map<String, Value> = trimmed
+        .iter()
+        .filter(|(key, _)| is_signal_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+
+    if projected.len() >= MIN_PROJECTED_KEYS {
+        Value::Object(projected)
+    } else {
+        let fallback: Map<String, Value> = trimmed
+            .into_iter()
+            .take(WIDE_ROW_KEYS)
+            .collect();
+        Value::Object(fallback)
+    }
 }
 
 fn summarize_traverse(resp: &Value) -> (Value, Vec<Value>) {
@@ -250,6 +343,150 @@ mod tests {
         assert!(
             trimmed_tokens <= untrimmed_tokens * 60 / 100,
             "trimmed ({trimmed_tokens}) should be at least 40% smaller than untrimmed ({untrimmed_tokens})"
+        );
+    }
+
+    /// Builds a wide (~30-key) row mixing Azure-noise columns with
+    /// hunt-signal columns, mirroring a real SigninLogs row shape.
+    fn wide_signin_row(i: usize) -> Value {
+        json!({
+            "TenantId": "11111111-2222-3333-4444-555555555555",
+            "ResourceId": format!("/tenants/t{i}/providers/Microsoft.aadiam"),
+            "CorrelationId": format!("corr-{i}"),
+            "SourceSystem": "Azure AD",
+            "OperationVersion": "1.0",
+            "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+            "UserPrincipalName": format!("user{i}@contoso.com"),
+            "IPAddress": format!("10.0.{}.{}", i % 256, (i * 7) % 256),
+            "ResultType": if i % 3 == 0 { "50126" } else { "0" },
+            "AppDisplayName": "Azure Portal",
+            "Location": "US",
+            "ClientAppUsed": "Browser",
+            "RiskLevel": "none",
+            "Status": "Success",
+            "OriginalRequestIds": format!("req-{i}"),
+            "SubscriptionId": "sub-abc",
+            "AadTenantId": "aad-xyz",
+            "col_noise_1": "n1",
+            "col_noise_2": "n2",
+            "col_noise_3": "n3",
+            "col_noise_4": "n4",
+            "col_noise_5": "n5",
+            "col_noise_6": "n6",
+            "col_noise_7": "n7",
+            "col_noise_8": "n8",
+            "col_noise_9": "n9",
+            "col_noise_10": "n10",
+            "col_noise_11": "n11",
+            "col_noise_12": "n12",
+            "col_noise_13": "n13",
+        })
+    }
+
+    #[test]
+    fn trim_row_projects_wide_row_to_signal_columns() {
+        let row = wide_signin_row(1);
+        let obj = row.as_object().unwrap();
+        assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
+
+        let trimmed = trim_row(&row);
+        let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
+
+        let signal_keys = [
+            "TimeGenerated",
+            "UserPrincipalName",
+            "IPAddress",
+            "ResultType",
+            "AppDisplayName",
+            "Location",
+            "ClientAppUsed",
+            "RiskLevel",
+            "Status",
+        ];
+        for key in signal_keys {
+            assert!(trimmed_obj.contains_key(key), "missing signal key {key}");
+        }
+
+        let noise_keys = ["TenantId", "ResourceId", "CorrelationId", "SourceSystem", "OperationVersion"];
+        for key in noise_keys {
+            assert!(!trimmed_obj.contains_key(key), "noise key {key} should be projected out");
+        }
+
+        assert!(trimmed_obj.len() <= signal_keys.len() + 2);
+    }
+
+    #[test]
+    fn trim_row_leaves_narrow_row_untouched() {
+        let row = json!({
+            "TimeGenerated": "2026-07-14T12:00:00Z",
+            "UserPrincipalName": "user@contoso.com",
+            "IPAddress": "10.0.0.1",
+            "ResultType": "0",
+            "AppDisplayName": "Azure Portal",
+            "Location": "US",
+        });
+        let obj = row.as_object().unwrap();
+        assert!(obj.len() <= WIDE_ROW_KEYS, "fixture must be narrow");
+
+        let trimmed = trim_row(&row);
+        let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
+        assert_eq!(trimmed_obj.len(), 6);
+        for key in obj.keys() {
+            assert!(trimmed_obj.contains_key(key));
+        }
+    }
+
+    #[test]
+    fn trim_row_falls_back_to_first_n_keys_when_no_signal_matches() {
+        let mut map = Map::new();
+        for i in 1..=25 {
+            map.insert(format!("col{i}"), json!(format!("v{i}")));
+        }
+        let row = Value::Object(map.clone());
+        assert!(map.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
+
+        let trimmed = trim_row(&row);
+        let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
+        assert_eq!(trimmed_obj.len(), WIDE_ROW_KEYS);
+
+        let expected_first_keys: Vec<String> =
+            map.keys().take(WIDE_ROW_KEYS).cloned().collect();
+        for key in &expected_first_keys {
+            assert!(
+                trimmed_obj.contains_key(key),
+                "fallback should keep first {WIDE_ROW_KEYS} original keys, missing {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn summarize_query_compresses_realistic_wide_sentinel_payload() {
+        let rows: Vec<Value> = (0..25).map(wide_signin_row).collect();
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#1").expect("should summarize");
+
+        let untrimmed_top: Vec<Value> = resp["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(TOP_N)
+            .cloned()
+            .collect();
+        let untrimmed_summary = json!({
+            "_summary": true,
+            "kind": "query",
+            "counts": summary["counts"].clone(),
+            "top": untrimmed_top,
+            "detail_ref": "h#1",
+        });
+
+        let projected_tokens = est_tokens(&summary);
+        let untrimmed_tokens = est_tokens(&untrimmed_summary);
+        assert!(
+            projected_tokens <= untrimmed_tokens * 40 / 100,
+            "projected ({projected_tokens}) should be at least 60% smaller than untrimmed ({untrimmed_tokens})"
         );
     }
 
