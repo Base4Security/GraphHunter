@@ -9,6 +9,9 @@ const THRESHOLD: u64 = 400;
 /// Max number of representative rows/items kept in `top`.
 const TOP_N: usize = 5;
 
+/// Max characters kept for a single string field value in a `top` row before truncation.
+const MAX_FIELD_CHARS: usize = 200;
+
 /// Serialized-length / 4 heuristic for estimating LLM token cost of a JSON value.
 pub fn est_tokens(v: &Value) -> u64 {
     serde_json::to_string(v).unwrap_or_default().len() as u64 / 4
@@ -48,9 +51,36 @@ fn summarize_query(resp: &Value) -> (Value, Vec<Value>) {
     let rows = resp.get("rows").and_then(|v| v.as_array());
     let row_count = rows.map(|r| r.len()).unwrap_or(0);
     let top = rows
-        .map(|r| r.iter().take(TOP_N).cloned().collect())
+        .map(|r| r.iter().take(TOP_N).map(trim_row).collect())
         .unwrap_or_default();
     (json!({ "row_count": row_count }), top)
+}
+
+/// Compacts one representative row for `top`: drops fields whose value is
+/// null or an empty string (Sentinel rows carry many empty columns that add
+/// bytes but no signal), and truncates over-long string values. Non-object
+/// rows (arrays, scalars) are returned unchanged.
+fn trim_row(row: &Value) -> Value {
+    let map = match row {
+        Value::Object(map) => map,
+        other => return other.clone(),
+    };
+
+    let mut trimmed = Map::new();
+    for (key, value) in map {
+        match value {
+            Value::Null => continue,
+            Value::String(s) if s.is_empty() => continue,
+            Value::String(s) if s.chars().count() > MAX_FIELD_CHARS => {
+                let truncated: String = s.chars().take(MAX_FIELD_CHARS).collect();
+                trimmed.insert(key.clone(), Value::String(format!("{truncated}…")));
+            }
+            other => {
+                trimmed.insert(key.clone(), other.clone());
+            }
+        }
+    }
+    Value::Object(trimmed)
 }
 
 fn summarize_traverse(resp: &Value) -> (Value, Vec<Value>) {
@@ -134,6 +164,93 @@ mod tests {
         let resp = Value::Object(padding);
         assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
         assert_eq!(summarize("/something_new", &resp, "hunt-x#9"), None);
+    }
+
+    #[test]
+    fn trim_row_drops_empty_and_null_fields() {
+        let row = json!({"a": "x", "empty": "", "nothing": null, "n": 42});
+        let trimmed = trim_row(&row);
+        assert_eq!(trimmed, json!({"a": "x", "n": 42}));
+    }
+
+    #[test]
+    fn trim_row_truncates_long_strings() {
+        let long_value = "z".repeat(500);
+        let row = json!({"field": long_value});
+        let trimmed = trim_row(&row);
+        let kept = trimmed["field"].as_str().expect("field is a string");
+        assert_eq!(kept.chars().count(), MAX_FIELD_CHARS + 1);
+        assert!(kept.ends_with('…'));
+    }
+
+    fn wide_sentinel_like_response(row_count: usize) -> Value {
+        let long_value = "x".repeat(500);
+        let rows: Vec<Value> = (0..row_count)
+            .map(|i| {
+                json!({
+                    "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+                    "Account": format!("user{i}@contoso.com"),
+                    "IPAddress": format!("10.0.{}.{}", i % 256, (i * 7) % 256),
+                    "ResultType": if i % 3 == 0 { "50126" } else { "0" },
+                    "AppDisplayName": "Azure Portal",
+                    "RawEventData": long_value.clone(),
+                    "empty1": "",
+                    "empty2": "",
+                    "empty3": "",
+                    "empty4": "",
+                    "empty5": "",
+                    "empty6": "",
+                    "empty7": "",
+                    "empty8": "",
+                    "empty9": "",
+                    "empty10": Value::Null,
+                })
+            })
+            .collect();
+        json!({ "rows": rows, "row_count": row_count })
+    }
+
+    #[test]
+    fn summarize_query_compresses_wide_column_rows() {
+        let resp = wide_sentinel_like_response(25);
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#1").expect("should summarize");
+
+        let top = summary["top"].as_array().expect("top is an array");
+        assert!(!top.is_empty());
+        for row in top {
+            let obj = row.as_object().expect("row is an object");
+            for key in obj.keys() {
+                assert!(
+                    !key.starts_with("empty"),
+                    "trimmed row should not contain empty-valued keys, found {key}"
+                );
+            }
+        }
+
+        // Build the same envelope but with untrimmed (full) top rows for comparison.
+        let untrimmed_top: Vec<Value> = resp["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(TOP_N)
+            .cloned()
+            .collect();
+        let untrimmed_summary = json!({
+            "_summary": true,
+            "kind": "query",
+            "counts": summary["counts"].clone(),
+            "top": untrimmed_top,
+            "detail_ref": "h#1",
+        });
+
+        let trimmed_tokens = est_tokens(&summary);
+        let untrimmed_tokens = est_tokens(&untrimmed_summary);
+        assert!(
+            trimmed_tokens <= untrimmed_tokens * 60 / 100,
+            "trimmed ({trimmed_tokens}) should be at least 40% smaller than untrimmed ({untrimmed_tokens})"
+        );
     }
 
     #[test]
