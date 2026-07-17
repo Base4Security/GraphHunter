@@ -313,6 +313,19 @@ async fn capture(
     // Null for oversized bodies; correct body_bytes to the real wire size
     // regardless (est_tokens stays a best-effort estimate in that case).
     event.result.body_bytes = resp_bytes.len() as u64;
+    // I-1 fix: when the body exceeded CAPTURE_PARSE_LIMIT above, resp_json
+    // was left Null and build_event computed est_tokens from
+    // `len("null")/4 ≈ 1` — silently under-reporting exactly the large raw
+    // responses (e.g. a multi-MB raw /kql dump) in
+    // journal_stats.cumulative_est_tokens, which can invert the "tool <
+    // raw" token guarantee the journal exists to prove. Recompute from the
+    // corrected body_bytes, symmetric to the oversized-response branch
+    // above. Small responses (resp_json parsed normally) are untouched:
+    // their est_tokens already came from `summarize`/body_bytes via
+    // build_event.
+    if resp_bytes.len() > CAPTURE_PARSE_LIMIT {
+        event.result.est_tokens = event.result.body_bytes / 4;
+    }
     app.journal.append(event);
 
     tracing::debug!("journal: captured {} {} -> {} ({} ms)", method, path, status, dur_ms);

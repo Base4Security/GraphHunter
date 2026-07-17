@@ -82,7 +82,15 @@ impl JournalStore {
 
     /// Creates a new hunt dir + `meta.json`, sets it current, returns the id.
     pub fn start_hunt(&self, label: Option<String>) -> String {
-        let mut inner = self.0.lock().unwrap();
+        // I-3: recover from a poisoned mutex instead of propagating the
+        // panic. Capture is best-effort audit trail, not the source of
+        // truth — a prior panic under this lock (e.g. a filesystem fault)
+        // must not brick every subsequent journal call for the rest of the
+        // process lifetime and take the whole capture middleware down with
+        // it. The recovered guard may reflect a partially-updated `Inner`,
+        // but `Inner` only holds `base`/`current`, which are never
+        // partially mutated mid-operation.
+        let mut inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
         Self::start_hunt_locked(&mut inner, label)
     }
 
@@ -96,9 +104,33 @@ impl JournalStore {
         id
     }
 
+    /// Fallible twin of `start_hunt_locked`, used only from `append`'s lazy
+    /// hunt-start path (I-3). `append` is best-effort: a filesystem fault
+    /// while lazily opening a hunt must be logged and dropped, not panic
+    /// under the `Inner` lock like the eager `start_hunt`/`current_hunt_id`
+    /// paths still do (those are explicit, infrequent user/API actions
+    /// where surfacing the failure is acceptable).
+    fn try_start_hunt_locked(inner: &mut Inner, label: Option<String>) -> std::io::Result<String> {
+        let id = new_hunt_id();
+        let dir = inner.base.join(&id);
+        fs::create_dir_all(&dir)?;
+        let meta = HuntMeta::new(id.clone(), label);
+        Self::try_write_meta(&dir, &meta)?;
+        inner.current = Some(id.clone());
+        Ok(id)
+    }
+
     /// Current hunt id, lazily creating an anonymous hunt if none is open.
     pub fn current_hunt_id(&self) -> String {
-        let mut inner = self.0.lock().unwrap();
+        // I-3: recover from a poisoned mutex instead of propagating the
+        // panic. Capture is best-effort audit trail, not the source of
+        // truth — a prior panic under this lock (e.g. a filesystem fault)
+        // must not brick every subsequent journal call for the rest of the
+        // process lifetime and take the whole capture middleware down with
+        // it. The recovered guard may reflect a partially-updated `Inner`,
+        // but `Inner` only holds `base`/`current`, which are never
+        // partially mutated mid-operation.
+        let mut inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(id) = &inner.current {
             return id.clone();
         }
@@ -107,36 +139,84 @@ impl JournalStore {
 
     /// Appends one JSON line to the current hunt's `events.jsonl` and bumps
     /// `meta.json` counters. Lazily starts an anonymous hunt if none is open.
+    ///
+    /// I-3: best-effort by design. Hunt availability wins over audit
+    /// completeness on this single-analyst desktop app — the capture
+    /// middleware runs this with no panic guard, so any I/O failure here is
+    /// logged via `tracing::error!` and the event is dropped, never
+    /// propagated as a panic. A poisoned mutex is recovered from rather
+    /// than repanicking (see the lock comment below), and every fallible
+    /// filesystem step (lazy hunt dir creation, opening/appending to
+    /// `events.jsonl`, writing `meta.json`) returns early on error instead
+    /// of `.expect()`-ing. The happy path is unchanged. `meta`'s counters
+    /// are only bumped in memory after the event line is durably written,
+    /// so a failed write never inflates `cumulative_est_tokens`/
+    /// `event_count`.
     pub fn append(&self, mut ev: HuntEvent) {
-        let mut inner = self.0.lock().unwrap();
+        // I-3: recover from a poisoned mutex instead of propagating the
+        // panic. Capture is best-effort audit trail, not the source of
+        // truth — a prior panic under this lock (e.g. a filesystem fault)
+        // must not brick every subsequent journal call for the rest of the
+        // process lifetime and take the whole capture middleware down with
+        // it. The recovered guard may reflect a partially-updated `Inner`,
+        // but `Inner` only holds `base`/`current`, which are never
+        // partially mutated mid-operation.
+        let mut inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let id = match &inner.current {
             Some(id) => id.clone(),
-            None => Self::start_hunt_locked(&mut inner, None),
+            None => match Self::try_start_hunt_locked(&mut inner, None) {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!("journal: append failed: {e}");
+                    return;
+                }
+            },
         };
         let dir = inner.base.join(&id);
 
         let mut meta = Self::read_meta(&dir).unwrap_or_else(|| HuntMeta::new(id.clone(), None));
 
         ev.seq = meta.event_count;
-        let line = serde_json::to_string(&ev).expect("journal: serialize HuntEvent");
+        let line = match serde_json::to_string(&ev) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("journal: append failed: {e}");
+                return;
+            }
+        };
 
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("events.jsonl"))
-            .expect("journal: open events.jsonl");
-        writeln!(f, "{}", line).expect("journal: append event line");
+        if let Err(e) = Self::try_append_line(&dir, &line) {
+            tracing::error!("journal: append failed: {e}");
+            return;
+        }
 
         meta.event_count += 1;
         meta.cumulative_est_tokens += ev.result.est_tokens;
         meta.entities_added += ev.result.new_entities.unwrap_or(0);
         meta.relations_added += ev.result.new_relations.unwrap_or(0);
-        Self::write_meta(&dir, &meta);
+        if let Err(e) = Self::try_write_meta(&dir, &meta) {
+            // The event line above is already durably appended; only the
+            // meta.json summary (counts) failed to update. Log and move on
+            // rather than panic — a stale meta.json is far better than a
+            // bricked API.
+            tracing::error!("journal: append failed: {e}");
+        }
+    }
+
+    /// Opens (creating if needed) `events.jsonl` and appends one line.
+    /// Fallible twin of the inline open+writeln! `append` used to do
+    /// directly (I-3) — propagates I/O errors instead of `.expect()`-ing.
+    fn try_append_line(dir: &Path, line: &str) -> std::io::Result<()> {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("events.jsonl"))?;
+        writeln!(f, "{}", line)
     }
 
     /// All known hunts (unordered), read from `meta.json` per subdirectory.
     pub fn list(&self) -> Vec<HuntMeta> {
-        let inner = self.0.lock().unwrap();
+        let inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let entries = match fs::read_dir(&inner.base) {
             Ok(e) => e,
             Err(_) => return Vec::new(),
@@ -153,7 +233,15 @@ impl JournalStore {
     /// the next `append`/`current_hunt_id` starts a fresh hunt). No-op
     /// (returns `None`) if no hunt is currently active.
     pub fn close_hunt(&self) -> Option<String> {
-        let mut inner = self.0.lock().unwrap();
+        // I-3: recover from a poisoned mutex instead of propagating the
+        // panic. Capture is best-effort audit trail, not the source of
+        // truth — a prior panic under this lock (e.g. a filesystem fault)
+        // must not brick every subsequent journal call for the rest of the
+        // process lifetime and take the whole capture middleware down with
+        // it. The recovered guard may reflect a partially-updated `Inner`,
+        // but `Inner` only holds `base`/`current`, which are never
+        // partially mutated mid-operation.
+        let mut inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let id = inner.current.take()?;
         let dir = inner.base.join(&id);
         if let Some(mut meta) = Self::read_meta(&dir) {
@@ -165,7 +253,7 @@ impl JournalStore {
 
     /// Reads a hunt's meta + full event log. `None` if the hunt is unknown.
     pub fn read(&self, id: &str) -> Option<(HuntMeta, Vec<HuntEvent>)> {
-        let inner = self.0.lock().unwrap();
+        let inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let dir = inner.base.join(id);
         let meta = Self::read_meta(&dir)?;
         let events = Self::read_events(&dir);
@@ -200,8 +288,16 @@ impl JournalStore {
     }
 
     fn write_meta(dir: &Path, meta: &HuntMeta) {
-        let data = serde_json::to_string_pretty(meta).expect("journal: serialize HuntMeta");
-        fs::write(Self::meta_path(dir), data).expect("journal: write meta.json");
+        Self::try_write_meta(dir, meta).expect("journal: write meta.json");
+    }
+
+    /// Fallible twin of `write_meta` (I-3), used by `append`'s best-effort
+    /// path so a filesystem fault is logged and dropped rather than
+    /// panicking under the store's lock.
+    fn try_write_meta(dir: &Path, meta: &HuntMeta) -> std::io::Result<()> {
+        let data = serde_json::to_string_pretty(meta)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        fs::write(Self::meta_path(dir), data)
     }
 
     /// Reads `events.jsonl`, tolerating a partial/unparseable last line.

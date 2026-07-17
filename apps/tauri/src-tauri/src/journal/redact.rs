@@ -2,7 +2,11 @@ use serde_json::Value;
 
 fn is_secret_key(k: &str) -> bool {
     let k = k.to_ascii_lowercase();
-    k == "azure_client_secret" || k.contains("secret") || k.contains("token") || k.contains("password")
+    k == "azure_client_secret"
+        || k == "azure_client_id"
+        || k.contains("secret")
+        || k.contains("token")
+        || k.contains("password")
 }
 
 /// Deep-clone `v`, replacing any secret-bearing field's value with "[REDACTED]".
@@ -39,6 +43,7 @@ mod tests {
         });
         let r = redact_secrets(&v);
         assert_eq!(r["azure_client_secret"], "[REDACTED]");
+        assert_eq!(r["azure_client_id"], "[REDACTED]");
         assert_eq!(r["nested"]["api_token"], "[REDACTED]");
         assert_eq!(r["list"][0]["password"], "[REDACTED]");
         assert_eq!(r["kql"], "SigninLogs | take 1"); // non-secret preserved

@@ -38,7 +38,6 @@ pub fn build_event(
     let kind = classify_kind(path).to_string();
     let params = redact_secrets(req_body);
     let (row_count, new_entities, new_relations) = extract_result_meta(resp_body);
-    let touched = extract_touched(path, resp_body);
 
     let resp_serialized = serde_json::to_string(resp_body).unwrap_or_default();
     let body_bytes = resp_serialized.len() as u64;
@@ -54,6 +53,15 @@ pub fn build_event(
     // place, so row_count and other counts derived from the redacted copy
     // still match.
     let safe_resp = redact_secrets(resp_body);
+
+    // I-2 fix: `Touched.nodes` clones whole node objects into the event
+    // written to events.jsonl, so it must be built from the redacted
+    // `safe_resp`, not the raw `resp_body` — otherwise a secret-keyed field
+    // on a touched node (e.g. a token column returned inline by
+    // /graph/neighbors) is persisted unredacted. `redact_secrets` only
+    // replaces secret-keyed values in place and preserves structure, so
+    // neighbor/path extraction still works correctly on the redacted copy.
+    let touched = extract_touched(path, &safe_resp);
 
     // Task B2: record what an LLM would actually pay to read this event —
     // the compact summary's token cost when one was produced (the measured
@@ -239,5 +247,45 @@ mod tests {
         );
         assert!(ev.result.summary.is_none());
         assert_eq!(ev.result.est_tokens, ev.result.body_bytes / 4);
+    }
+
+    #[test]
+    fn build_event_redacts_secret_fields_inside_touched_nodes() {
+        // I-2: `topology.touched` was built from the RAW response, so a
+        // secret-keyed field on a touched node (e.g. a token column
+        // returned inline by /graph/neighbors) was persisted unredacted
+        // into events.jsonl even though `result.summary` was already
+        // redacted. Assert the fix: touched nodes go through the same
+        // `redact_secrets` pass as the summary.
+        let resp = json!({
+            "entity": {"class": "User", "value": "a@b.com"},
+            "neighbors": [{
+                "edge": "Connect",
+                "node": {"class": "IP", "value": "1.1.1.1", "token": "LEAK-123"}
+            }]
+        });
+        let ev = build_event(
+            "/graph/neighbors",
+            "POST",
+            200,
+            10,
+            &Value::Null,
+            &resp,
+            GraphCounts { entities: 0, relations: 0 },
+            GraphCounts { entities: 0, relations: 0 },
+            "h#touched",
+        );
+
+        let touched = ev.topology.touched.as_ref().expect("touched present");
+        assert_eq!(touched.nodes.len(), 1);
+        let serialized = serde_json::to_string(&touched).unwrap();
+        assert!(
+            !serialized.contains("LEAK-123"),
+            "secret leaked into persisted touched.nodes: {serialized}"
+        );
+        assert!(
+            serialized.contains("[REDACTED]"),
+            "expected redact_secrets marker in persisted touched.nodes: {serialized}"
+        );
     }
 }

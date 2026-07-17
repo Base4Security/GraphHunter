@@ -5,7 +5,7 @@ const input = z.object({
   op: z
     .enum(["start", "list", "get", "export", "stats"])
     .describe(
-      "Discriminator. start: open a new hunt (rarely needed — the first captured API call already lazily opens one). list: summaries of every past hunt (id, label, timestamps, event/entity/relation counts). get: hunt metadata plus its events, as {meta, events} — use this for hunt context (label, timestamps, counts) alongside the event log. export: just that hunt's full ordered event array (the replayable hunt route/topology) as structured JSON — use this when you only need the events themselves, e.g. to reconstruct or replay a prior hunt. stats: per-hunt token accounting — {hunt_id, cumulative_est_tokens, event_count, by_kind} — the measured proof that journaling summaries instead of full response bodies is cheaper.",
+      "Discriminator. start: open a new hunt (rarely needed — the first captured API call already lazily opens one). list: summaries of every past hunt (id, label, timestamps, event/entity/relation counts). get: hunt metadata plus its events, as {meta, events} — use this for hunt context (label, timestamps, counts) alongside the event log. export: just that hunt's full ordered event array as structured JSON — an audit trail of the route taken (redacted params, status, topology deltas, token accounting per step), not the underlying data; use this to reconstruct what a prior hunt did, not to replay or re-materialize its results. stats: per-hunt token accounting — {hunt_id, cumulative_est_tokens, event_count, by_kind} — the measured proof that journaling summaries instead of full response bodies is cheaper.",
     ),
   label: z
     .string()
@@ -29,7 +29,7 @@ interface JournalHuntRecord {
 export const journal = defineTool({
   name: "journal",
   description:
-    "Read the append-only audit trail of past hunts — every API call made (redacted params, status, topology deltas), grouped by hunt. op=list to see past hunts cheaply, op=get to pull one hunt's metadata plus its full event log as {meta, events}, op=export to pull just the ordered event array (the replayable hunt route/topology) as structured JSON, op=stats to pull per-hunt token accounting (cumulative_est_tokens, event_count, by_kind) — the measured proof the journal path is cheaper than re-fetching full responses. Use this to RECONSTRUCT a prior hunt's findings instead of re-running the same queries.",
+    "Read the append-only audit trail of past hunts — every API call made (redacted params, status, topology deltas), grouped by hunt. op=list to see past hunts cheaply, op=get to pull one hunt's metadata plus its full event log as {meta, events}, op=export to pull just the ordered event array as structured JSON, op=stats to pull per-hunt token accounting (cumulative_est_tokens, event_count, by_kind) — the measured proof the journal path is cheaper than re-fetching full responses. This is an audit trail for RECONSTRUCTING what path a prior hunt took (which endpoints were called, in what order, with what topology deltas) — not a data replay: params are redacted and response bodies are stored as compact summaries (top rows / counts), not full results, so it cannot re-materialize a prior hunt's actual findings.",
   category: "hunt",
   version: 1,
   stability: "stable",
