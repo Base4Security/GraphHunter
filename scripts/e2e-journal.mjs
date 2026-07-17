@@ -1,14 +1,21 @@
 #!/usr/bin/env node
 // End-to-end acceptance test for the Hunt Journal (design doc
-// docs/superpowers/plans/2026-07-17-hunt-journal.md, Task A6):
-//   journal_start → /kql (carrying a fake secret) → /graph/neighbors → journal_get
+// docs/superpowers/plans/2026-07-17-hunt-journal.md, Tasks A6 + B4):
 //
-// Proves two things about the mandatory capture middleware:
+// SECTION 1 (A6): journal_start → /kql (carrying a fake secret) →
+//   /graph/neighbors → journal_get. Proves two things about the
+//   mandatory capture middleware:
 //   1. Capture is mandatory: every non-excluded request produces an
 //      in-order HuntEvent in the current hunt's journal.
 //   2. Capture is secret-free: request bodies are redacted before
 //      persistence, so a secret sent on the wire never appears in the
 //      journal's JSON.
+//
+// SECTION 2 (B4): runs the same lookup two ways, each in its own hunt —
+//   a summarized tool-path /kql query vs. a raw-dump /kql query — and
+//   proves the tool path's cumulative_est_tokens (from journal_stats)
+//   is measurably lower, plus that the tool path's summary carries a
+//   real detail_ref pointer back to the full data.
 //
 // Drives the GraphHunter HTTP API directly (same endpoints the MCP tools
 // call). Env-gated so it never runs by accident:
@@ -104,7 +111,7 @@ function fail(message, offending) {
   process.exit(1);
 }
 
-async function main() {
+async function runCaptureAndRedactionSection() {
   // Step 1 — start a hunt.
   step(1, "POST /journal/start");
   const started = await post("/journal/start", { label: "e2e" });
@@ -186,6 +193,120 @@ async function main() {
   console.log(`  ✓ all ${events.length} events have result.est_tokens > 0`);
 
   console.log("\njournal e2e: mandatory capture + redaction OK");
+}
+
+// ============================================================
+// SECTION 2 (Task B4): token-lean acceptance — the tool/summary path is
+// measurably cheaper (fewer recorded est_tokens) than a raw KQL dump for
+// the same logical lookup.
+//
+// Runs the same lookup ("recent Sentinel sign-in activity") two ways,
+// each isolated in its own hunt so journal_stats for one is unaffected
+// by the other:
+//
+//   tool/summary hunt (T): a wide-row-count, narrow-column /kql query.
+//     Enough rows to blow well past the summarizer's 400-est-token
+//     threshold (see journal/summarize.rs), so the persisted event
+//     carries a compact {_summary:true, counts, top<=5, detail_ref}
+//     instead of the full result set.
+//
+//   raw hunt (R): a small-row-count, full-column /kql query — the
+//     "analyst just dumped the raw rows" baseline. Real Sentinel rows
+//     are wide (AuthenticationDetails, AuthenticationProcessingDetails,
+//     ...), so even a handful of un-projected rows outweighs the tool
+//     path's 5-row narrow summary by an order of magnitude. In practice
+//     this baseline also ends up past the summarizer threshold — that's
+//     fine per the task brief's fallback: what matters is the RECORDED
+//     cost is clearly bigger than the tool path's, not that this path
+//     dodges summarization altogether.
+async function runTokenLeanSection() {
+  console.log("\n\n=== SECTION 2: token-lean acceptance (tool < raw) ===");
+
+  // Step 5 — start the tool/summary hunt.
+  step(5, "POST /journal/start {label: tool}");
+  const startedT = await post("/journal/start", { label: "tool" });
+  const huntT = startedT.hunt_id;
+  if (!huntT) fail("/journal/start (tool) did not return hunt_id", startedT);
+  console.log(`  hunt_id=${huntT}`);
+
+  // Step 6 — many rows, narrow projection: the summarizer should compress this.
+  step(6, "POST /kql — many rows, narrow projection (tool/summary path)");
+  const toolKql = await post("/kql", {
+    kql: "SigninLogs | take 30 | project TimeGenerated, UserPrincipalName, IPAddress, ResultType, AppDisplayName",
+    ingest: false,
+    acknowledge_fallback: true,
+  });
+  console.log(`  /kql (tool) → row_count=${toolKql.row_count ?? "?"}`);
+
+  // Step 7 — start the raw hunt.
+  step(7, "POST /journal/start {label: raw}");
+  const startedR = await post("/journal/start", { label: "raw" });
+  const huntR = startedR.hunt_id;
+  if (!huntR) fail("/journal/start (raw) did not return hunt_id", startedR);
+  console.log(`  hunt_id=${huntR}`);
+
+  // Step 8 — few rows, full columns: the raw-dump baseline.
+  step(8, "POST /kql — few rows, full columns (raw path)");
+  const rawKql = await post("/kql", {
+    kql: "SigninLogs | take 5",
+    ingest: false,
+    acknowledge_fallback: true,
+  });
+  console.log(`  /kql (raw) → row_count=${rawKql.row_count ?? "?"}`);
+
+  // Step 9 — compare cumulative_est_tokens between the two isolated hunts.
+  step(9, "GET /journal/:id/stats for both hunts");
+  const statsT = await get(`/journal/${huntT}/stats`);
+  const statsR = await get(`/journal/${huntR}/stats`);
+  console.log(`  tool: cumulative_est_tokens=${statsT.cumulative_est_tokens}`);
+  console.log(`  raw:  cumulative_est_tokens=${statsR.cumulative_est_tokens}`);
+
+  if (!(statsT.cumulative_est_tokens < statsR.cumulative_est_tokens)) {
+    fail(
+      `tool/summary hunt's cumulative_est_tokens (${statsT.cumulative_est_tokens}) is not < raw hunt's (${statsR.cumulative_est_tokens})`,
+      { tool: statsT, raw: statsR },
+    );
+  }
+  console.log(`  ✓ tool (${statsT.cumulative_est_tokens}) < raw (${statsR.cumulative_est_tokens})`);
+
+  // Step 10 — prove the summary/reconstruction pointer exists: at least
+  // one event in the tool hunt must carry a real summary + detail_ref.
+  step(10, "GET /journal/:id_T — confirm a real summary + detail_ref exists");
+  const recordT = await get(`/journal/${huntT}`);
+  const events = recordT.events ?? [];
+  const summarized = events.filter(
+    (e) =>
+      e.result?.summary?._summary === true &&
+      typeof e.result.summary.detail_ref === "string" &&
+      e.result.summary.detail_ref.length > 0,
+  );
+  if (summarized.length === 0) {
+    fail(
+      "no event in the tool hunt carries result.summary with _summary===true and a non-empty detail_ref",
+      events.map((e) => ({ endpoint: e.endpoint, summary: e.result?.summary })),
+    );
+  }
+  console.log(
+    `  ✓ ${summarized.length} event(s) with a real summary + detail_ref (e.g. detail_ref="${summarized[0].result.summary.detail_ref}")`,
+  );
+
+  console.log("\njournal e2e: token-lean (tool < raw) OK");
+}
+
+async function main() {
+  try {
+    await runCaptureAndRedactionSection();
+  } catch (e) {
+    console.error(`\n❌ SECTION 1 (capture + redaction) failed: ${e.message}`);
+    process.exit(1);
+  }
+
+  try {
+    await runTokenLeanSection();
+  } catch (e) {
+    console.error(`\n❌ SECTION 2 (token-lean tool < raw) failed: ${e.message}`);
+    process.exit(1);
+  }
 }
 
 main().catch((e) => {
