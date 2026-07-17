@@ -5,7 +5,7 @@ const input = z.object({
   op: z
     .enum(["start", "list", "get", "export"])
     .describe(
-      "Discriminator. start: open a new hunt (rarely needed — the first captured API call already lazily opens one). list: summaries of every past hunt (id, label, timestamps, event/entity/relation counts). get: one hunt's full route/topology — meta plus every captured event. export: that hunt's events as NDJSON text (mirrors on-disk events.jsonl).",
+      "Discriminator. start: open a new hunt (rarely needed — the first captured API call already lazily opens one). list: summaries of every past hunt (id, label, timestamps, event/entity/relation counts). get: hunt metadata plus its events, as {meta, events} — use this for hunt context (label, timestamps, counts) alongside the event log. export: just that hunt's full ordered event array (the replayable hunt route/topology) as structured JSON — use this when you only need the events themselves, e.g. to reconstruct or replay a prior hunt.",
     ),
   label: z
     .string()
@@ -27,7 +27,7 @@ interface JournalHuntRecord {
 export const journal = defineTool({
   name: "journal",
   description:
-    "Read the append-only audit trail of past hunts — every API call made (redacted params, status, topology deltas), grouped by hunt. op=list to see past hunts cheaply, op=get to pull one hunt's full route, op=export for its raw event log as NDJSON. Use this to RECONSTRUCT a prior hunt's findings instead of re-running the same queries.",
+    "Read the append-only audit trail of past hunts — every API call made (redacted params, status, topology deltas), grouped by hunt. op=list to see past hunts cheaply, op=get to pull one hunt's metadata plus its full event log as {meta, events}, op=export to pull just the ordered event array (the replayable hunt route/topology) as structured JSON. Use this to RECONSTRUCT a prior hunt's findings instead of re-running the same queries.",
   category: "hunt",
   version: 1,
   stability: "stable",
@@ -46,18 +46,21 @@ export const journal = defineTool({
     }
     // op === "export"
     if (!id) throw new Error("op=export requires id");
-    // The backend's POST /journal/export streams raw NDJSON bytes (one
-    // JSON object per line, matching events.jsonl on disk) so non-MCP
-    // callers get a wire format that is genuinely line-delimited JSON.
-    // The shared ApiClient (lib/api-client.ts) always JSON.parses the
-    // *entire* response body, which breaks on any multi-line NDJSON
-    // payload (i.e. any real hunt with more than one captured event)
-    // even though each individual line is valid JSON. Rather than
-    // special-case NDJSON parsing in the shared client for this one
-    // endpoint, reuse the already-JSON `GET /journal/:id` route and
-    // rebuild byte-identical NDJSON text here.
+    // The backend also exposes POST /journal/export, which streams raw
+    // NDJSON bytes (one JSON object per line, matching events.jsonl on
+    // disk) for non-MCP callers (curl, file consumers) that want a
+    // genuinely line-delimited wire format. That endpoint is unsuitable
+    // for MCP tool results: the shared ApiClient (lib/api-client.ts)
+    // always JSON.parses the entire response body (breaking on
+    // multi-line NDJSON), and even if it didn't, returning a joined
+    // NDJSON *string* would get re-escaped by the MCP content layer's
+    // JSON.stringify, forcing the LLM to un-escape and re-split it
+    // before use. Instead, reuse the already-JSON `GET /journal/:id`
+    // route and return the events array itself as structured JSON —
+    // the tool's `json` result format renders it cleanly with no
+    // escaping round-trip.
     const record = (await ctx.api.get(`/journal/${id}`)) as JournalHuntRecord;
-    return record.events.map((ev) => JSON.stringify(ev)).join("\n");
+    return record.events;
   },
 });
 

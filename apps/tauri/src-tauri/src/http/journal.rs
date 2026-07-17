@@ -85,7 +85,12 @@ pub(super) async fn handler_export(
         Some((_meta, events)) => {
             let lines: Vec<String> = events
                 .iter()
-                .map(|ev| serde_json::to_string(ev).unwrap_or_default())
+                .map(|ev| {
+                    serde_json::to_string(ev).unwrap_or_else(|e| {
+                        tracing::error!("journal export: failed to serialize event: {e}");
+                        format!("{{\"__journal_export_error\":\"{}\"}}", e)
+                    })
+                })
                 .collect();
             let text = lines.join("\n");
             ([(header::CONTENT_TYPE, "application/x-ndjson")], text).into_response()
