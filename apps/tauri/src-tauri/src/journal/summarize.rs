@@ -25,16 +25,67 @@ const MIN_PROJECTED_KEYS: usize = 8;
 /// high-signal fields, not every column that loosely matched a signal substring.
 const MAX_PROJECTED_KEYS: usize = 12;
 
-/// Ordered highest-value hunt columns. When a wide row's signal projection
-/// still exceeds MAX_PROJECTED_KEYS, these are kept FIRST (in this order),
-/// then remaining signal keys in original order, capped at MAX_PROJECTED_KEYS.
-/// Matched case-insensitively against the FULL key name (exact, lowercased).
-const HUNT_PRIORITY_KEYS: &[&str] = &[
+/// Ordered highest-value hunt columns for a table. When projecting a wide
+/// row, these are kept FIRST (in this order, and even if they don't match
+/// `is_signal_key`), then remaining slots are filled with generic signal
+/// matches in original column order, capped at MAX_PROJECTED_KEYS. Matched
+/// case-insensitively against the FULL key name (exact, lowercased).
+///
+/// Real Sentinel/AWS tables carry wildly different columns (SecurityEvent
+/// ~234, DeviceProcessEvents ~73, AWSCloudTrail ~53, ...) — a single
+/// identity-tuned list misses each table's real signal columns (e.g.
+/// SecurityEvent's `EventID` matches no generic signal substring).
+/// `priority_for_table` selects the right list per-row via the `Type` field.
+const IDENTITY_PRIORITY: &[&str] = &[
     "timegenerated", "userprincipalname", "userdisplayname", "ipaddress",
     "location", "resulttype", "resultdescription", "appdisplayname",
     "clientappused", "devicedetail", "riskstate", "status",
     "conditionalaccessstatus", "category", "identity", "operationname",
 ];
+
+const SECURITYEVENT_PRIORITY: &[&str] = &[
+    "timegenerated", "computer", "account", "accountdomain", "eventid",
+    "activity", "ipaddress", "clientipaddress", "logontype", "commandline",
+    "callerprocessname", "newprocessname", "targetusername", "subjectusername",
+];
+
+const CLOUDTRAIL_PRIORITY: &[&str] = &[
+    "timegenerated", "eventname", "eventsource", "eventtypename",
+    "useridentitytype", "useridentityarn", "useridentityusername",
+    "useridentityaccountid", "sourceipaddress", "awsregion", "errorcode",
+    "useragent",
+];
+
+const DEVICE_PRIORITY: &[&str] = &[
+    "timegenerated", "devicename", "accountname", "actiontype", "filename",
+    "folderpath", "processcommandline", "sha256", "initiatingprocessfilename",
+    "initiatingprocesscommandline", "initiatingprocessaccountname", "processid",
+];
+
+const NETFLOW_PRIORITY: &[&str] = &[
+    "timegenerated", "firewallname", "srcip", "srcport", "destip",
+    "destport", "proto", "appproto", "eventtype", "action",
+];
+
+const SYSLOG_PRIORITY: &[&str] = &[
+    "timegenerated", "computer", "hostname", "hostip", "facility",
+    "severitylevel", "processname", "syslogmessage",
+];
+
+/// Selects the priority column list for `table` (matched case-insensitively,
+/// full-name, against the row's `Type` field). Tables without a dedicated
+/// list fall back to `IDENTITY_PRIORITY`.
+fn priority_for_table(table: &str) -> &'static [&'static str] {
+    match table.to_lowercase().as_str() {
+        "signinlogs" | "aadnoninteractiveusersigninlogs" | "aadsignineventslogs" => IDENTITY_PRIORITY,
+        "securityevent" => SECURITYEVENT_PRIORITY,
+        "awscloudtrail" | "awscloudtrail_cl" => CLOUDTRAIL_PRIORITY,
+        "deviceprocessevents" | "deviceevents" | "devicenetworkevents" | "devicefileevents" => DEVICE_PRIORITY,
+        "awsnetworkfirewallflow" | "awsnetworkfirewallalert" => NETFLOW_PRIORITY,
+        "syslog" => SYSLOG_PRIORITY,
+        _ => IDENTITY_PRIORITY, // sensible default (same as the previous single generic list)
+    }
+}
 
 /// Key-name substrings (case-insensitive) that mark a column as hunt-relevant.
 const SIGNAL_KEY_SUBSTRINGS: &[&str] = &[
@@ -131,8 +182,17 @@ pub fn summarize(path: &str, resp: &Value, detail_ref: &str) -> Option<Value> {
 fn summarize_query(resp: &Value) -> (Value, Vec<Value>) {
     let rows = resp.get("rows").and_then(|v| v.as_array());
     let row_count = rows.map(|r| r.len()).unwrap_or(0);
+    // Log Analytics rows carry a `Type` field equal to the table name
+    // (e.g. "SecurityEvent", "AWSCloudTrail"). Detect it from the first row
+    // to pick the right per-table priority list for the whole batch.
+    let table = rows
+        .and_then(|r| r.first())
+        .and_then(|row| row.get("Type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let priority = priority_for_table(table);
     let top = rows
-        .map(|r| r.iter().take(TOP_N).map(trim_row).collect())
+        .map(|r| r.iter().take(TOP_N).map(|row| trim_row(row, priority)).collect())
         .unwrap_or_default();
     (json!({ "row_count": row_count }), top)
 }
@@ -142,14 +202,23 @@ fn summarize_query(resp: &Value) -> (Value, Vec<Value>) {
 /// bytes but no signal), and truncates over-long string values. Non-object
 /// rows (arrays, scalars) are returned unchanged.
 ///
-/// Wide rows (Sentinel/AAD logs carry ~74 columns, mostly Azure metadata
-/// such as TenantId, ResourceId, CorrelationId) often have zero empty
-/// values, so the drop-empty step alone doesn't touch them — the real
-/// token cost is column COUNT. If the surviving object still has more than
-/// `WIDE_ROW_KEYS` keys, it is projected down to hunt-relevant ("signal")
-/// columns; if that projection yields too few keys to be useful, an
-/// order-preserving fallback keeps the first `WIDE_ROW_KEYS` surviving keys.
-fn trim_row(row: &Value) -> Value {
+/// Wide rows (Sentinel/AAD/AWS tables carry anywhere from ~50 to ~230
+/// columns, mostly Azure/AWS metadata such as TenantId, ResourceId,
+/// CorrelationId) often have zero empty values, so the drop-empty step
+/// alone doesn't touch them — the real token cost is column COUNT. If the
+/// surviving object still has more than `WIDE_ROW_KEYS` keys, it is
+/// projected down to at most `MAX_PROJECTED_KEYS` columns:
+///
+/// 1. `priority` columns present in the row are kept first, in priority
+///    order — even if they don't match the generic `is_signal_key` filter
+///    (e.g. SecurityEvent's `EventID` is vital but matches no signal
+///    substring).
+/// 2. Remaining slots are filled with generic signal-matching columns, in
+///    original column order.
+/// 3. If that still yields fewer than `MIN_PROJECTED_KEYS` columns, an
+///    order-preserving fallback fills up to `MIN_PROJECTED_KEYS` from any
+///    remaining original columns, so a row is never emitted near-empty.
+fn trim_row(row: &Value, priority: &[&str]) -> Value {
     let map = match row {
         Value::Object(map) => map,
         other => return other.clone(),
@@ -174,57 +243,54 @@ fn trim_row(row: &Value) -> Value {
         return Value::Object(trimmed);
     }
 
-    let projected: Map<String, Value> = trimmed
-        .iter()
-        .filter(|(key, _)| is_signal_key(key))
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
+    let mut selection: Vec<String> = Vec::new();
 
-    if projected.len() >= MIN_PROJECTED_KEYS {
-        if projected.len() > MAX_PROJECTED_KEYS {
-            Value::Object(cap_to_priority_keys(projected))
-        } else {
-            Value::Object(projected)
+    // (a) Priority columns, in priority order, kept regardless of is_signal_key.
+    for p in priority {
+        if selection.len() >= MAX_PROJECTED_KEYS {
+            break;
         }
-    } else {
-        let fallback: Map<String, Value> = trimmed
-            .into_iter()
-            .take(WIDE_ROW_KEYS)
-            .collect();
-        Value::Object(fallback)
+        if let Some(key) = trimmed.keys().find(|k| k.to_lowercase() == *p) {
+            if !selection.iter().any(|s| s == key) {
+                selection.push(key.clone());
+            }
+        }
     }
-}
 
-/// Reduces an already signal-projected row down to at most `MAX_PROJECTED_KEYS`
-/// columns: `HUNT_PRIORITY_KEYS` present in `projected` are kept first (in
-/// priority order, matched case-insensitively against the full key name),
-/// then remaining projected keys are appended in their original order until
-/// the cap is reached. Values are preserved unchanged.
-fn cap_to_priority_keys(projected: Map<String, Value>) -> Map<String, Value> {
+    // (b) Generic signal fill, in original column order.
+    if selection.len() < MAX_PROJECTED_KEYS {
+        for key in trimmed.keys() {
+            if selection.len() >= MAX_PROJECTED_KEYS {
+                break;
+            }
+            if is_signal_key(key) && !selection.iter().any(|s| s == key) {
+                selection.push(key.clone());
+            }
+        }
+    }
+
+    // (c) Never emit a near-empty row: fall back to the first original
+    // columns (in order) until MIN_PROJECTED_KEYS is reached.
+    if selection.len() < MIN_PROJECTED_KEYS {
+        for key in trimmed.keys() {
+            if selection.len() >= MIN_PROJECTED_KEYS {
+                break;
+            }
+            if !selection.iter().any(|s| s == key) {
+                selection.push(key.clone());
+            }
+        }
+    }
+
+    selection.truncate(MAX_PROJECTED_KEYS);
+
     let mut result = Map::new();
-
-    for priority in HUNT_PRIORITY_KEYS {
-        if result.len() >= MAX_PROJECTED_KEYS {
-            break;
-        }
-        if let Some((key, value)) = projected
-            .iter()
-            .find(|(key, _)| key.to_lowercase() == *priority)
-        {
+    for key in &selection {
+        if let Some(value) = trimmed.get(key) {
             result.insert(key.clone(), value.clone());
         }
     }
-
-    for (key, value) in &projected {
-        if result.len() >= MAX_PROJECTED_KEYS {
-            break;
-        }
-        if !result.contains_key(key) {
-            result.insert(key.clone(), value.clone());
-        }
-    }
-
-    result
+    Value::Object(result)
 }
 
 fn summarize_traverse(resp: &Value) -> (Value, Vec<Value>) {
@@ -313,7 +379,7 @@ mod tests {
     #[test]
     fn trim_row_drops_empty_and_null_fields() {
         let row = json!({"a": "x", "empty": "", "nothing": null, "n": 42});
-        let trimmed = trim_row(&row);
+        let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         assert_eq!(trimmed, json!({"a": "x", "n": 42}));
     }
 
@@ -321,7 +387,7 @@ mod tests {
     fn trim_row_truncates_long_strings() {
         let long_value = "z".repeat(500);
         let row = json!({"field": long_value});
-        let trimmed = trim_row(&row);
+        let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         let kept = trimmed["field"].as_str().expect("field is a string");
         assert_eq!(kept.chars().count(), MAX_FIELD_CHARS + 1);
         assert!(kept.ends_with('…'));
@@ -401,6 +467,7 @@ mod tests {
     /// hunt-signal columns, mirroring a real SigninLogs row shape.
     fn wide_signin_row(i: usize) -> Value {
         json!({
+            "Type": "SigninLogs",
             "TenantId": "11111111-2222-3333-4444-555555555555",
             "ResourceId": format!("/tenants/t{i}/providers/Microsoft.aadiam"),
             "CorrelationId": format!("corr-{i}"),
@@ -440,7 +507,7 @@ mod tests {
         let obj = row.as_object().unwrap();
         assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
 
-        let trimmed = trim_row(&row);
+        let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
 
         let signal_keys = [
@@ -479,7 +546,7 @@ mod tests {
         let obj = row.as_object().unwrap();
         assert!(obj.len() <= WIDE_ROW_KEYS, "fixture must be narrow");
 
-        let trimmed = trim_row(&row);
+        let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
         assert_eq!(trimmed_obj.len(), 6);
         for key in obj.keys() {
@@ -487,6 +554,9 @@ mod tests {
         }
     }
 
+    /// No priority or signal matches at all: the projection should fall back
+    /// to the first MIN_PROJECTED_KEYS original keys rather than emit a
+    /// near-empty row.
     #[test]
     fn trim_row_falls_back_to_first_n_keys_when_no_signal_matches() {
         let mut map = Map::new();
@@ -496,16 +566,16 @@ mod tests {
         let row = Value::Object(map.clone());
         assert!(map.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
 
-        let trimmed = trim_row(&row);
+        let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
-        assert_eq!(trimmed_obj.len(), WIDE_ROW_KEYS);
+        assert_eq!(trimmed_obj.len(), MIN_PROJECTED_KEYS);
 
         let expected_first_keys: Vec<String> =
-            map.keys().take(WIDE_ROW_KEYS).cloned().collect();
+            map.keys().take(MIN_PROJECTED_KEYS).cloned().collect();
         for key in &expected_first_keys {
             assert!(
                 trimmed_obj.contains_key(key),
-                "fallback should keep first {WIDE_ROW_KEYS} original keys, missing {key}"
+                "fallback should keep first {MIN_PROJECTED_KEYS} original keys, missing {key}"
             );
         }
     }
@@ -598,7 +668,7 @@ mod tests {
         let obj = row.as_object().unwrap();
         assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
 
-        let trimmed = trim_row(&row);
+        let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
 
         assert_eq!(
@@ -635,7 +705,7 @@ mod tests {
         let obj = row.as_object().unwrap();
         assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
 
-        let trimmed = trim_row(&row);
+        let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
 
         assert_eq!(trimmed_obj.len(), MAX_PROJECTED_KEYS);
@@ -677,7 +747,7 @@ mod tests {
         assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
         assert!(signal_keys.len() < MAX_PROJECTED_KEYS);
 
-        let trimmed = trim_row(&row);
+        let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
 
         assert_eq!(
@@ -695,6 +765,7 @@ mod tests {
     /// telemetry width.
     fn wide_signin_row_45(i: usize) -> Value {
         let mut map = Map::new();
+        map.insert("Type".to_string(), json!("SigninLogs"));
         // 10 priority hunt columns.
         map.insert("TimeGenerated".to_string(), json!(format!("2026-07-14T12:{:02}:00Z", i % 60)));
         map.insert("UserPrincipalName".to_string(), json!(format!("user{i}@contoso.com")));
@@ -789,6 +860,162 @@ mod tests {
         assert!(
             projected_tokens <= untrimmed_tokens * 20 / 100,
             "projected ({projected_tokens}) should be at least 80% smaller than untrimmed ({untrimmed_tokens})"
+        );
+    }
+
+    /// Builds a wide (~40-key) SecurityEvent-shaped row: the SECURITYEVENT_PRIORITY
+    /// columns (incl. `EventID`, which matches no generic signal substring)
+    /// plus Azure-plumbing noise columns.
+    fn security_event_row(i: usize) -> Value {
+        json!({
+            "Type": "SecurityEvent",
+            "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+            "Computer": format!("WKSTN-{i:03}.contoso.com"),
+            "Account": format!("CONTOSO\\user{i}"),
+            "AccountDomain": "CONTOSO",
+            "EventID": 4688,
+            "Activity": "4688 - A new process has been created.",
+            "IPAddress": format!("10.0.{}.{}", i % 256, (i * 7) % 256),
+            "ClientIPAddress": format!("10.0.{}.{}", i % 256, (i * 3) % 256),
+            "LogonType": 3,
+            "CommandLine": format!("cmd.exe /c whoami-{i}"),
+            "CallerProcessName": "C:\\Windows\\explorer.exe",
+            "NewProcessName": "C:\\Windows\\System32\\cmd.exe",
+            "TargetUserName": format!("user{i}"),
+            "SubjectUserName": format!("user{i}"),
+            "TenantId": "11111111-2222-3333-4444-555555555555",
+            "ResourceId": "/subscriptions/x/resourceGroups/y",
+            "CorrelationId": format!("corr-{i}"),
+            "SourceSystem": "OpsManager",
+            "OperationVersion": "1.0",
+            "SubscriptionId": "sub-abc",
+            "AadTenantId": "aad-xyz",
+            "col_noise_1": "n1",
+            "col_noise_2": "n2",
+            "col_noise_3": "n3",
+            "col_noise_4": "n4",
+            "col_noise_5": "n5",
+            "col_noise_6": "n6",
+            "col_noise_7": "n7",
+            "col_noise_8": "n8",
+            "col_noise_9": "n9",
+            "col_noise_10": "n10",
+            "col_noise_11": "n11",
+            "col_noise_12": "n12",
+            "col_noise_13": "n13",
+            "col_noise_14": "n14",
+            "col_noise_15": "n15",
+            "col_noise_16": "n16",
+            "col_noise_17": "n17",
+            "col_noise_18": "n18",
+        })
+    }
+
+    /// Builds a wide AWSCloudTrail-shaped row: the CLOUDTRAIL_PRIORITY
+    /// columns plus Azure/AWS-plumbing noise columns.
+    fn cloudtrail_row(i: usize) -> Value {
+        json!({
+            "Type": "AWSCloudTrail",
+            "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+            "EventName": "AssumeRole",
+            "EventSource": "sts.amazonaws.com",
+            "EventTypeName": "AwsApiCall",
+            "UserIdentityType": "IAMUser",
+            "UserIdentityArn": format!("arn:aws:iam::123456789012:user/user{i}"),
+            "UserIdentityUserName": format!("user{i}"),
+            "UserIdentityAccountId": "123456789012",
+            "SourceIpAddress": format!("10.0.{}.{}", i % 256, (i * 7) % 256),
+            "AwsRegion": "us-east-1",
+            "ErrorCode": if i % 3 == 0 { "AccessDenied" } else { "" },
+            "UserAgent": "aws-cli/2.15.0",
+            "TenantId": "11111111-2222-3333-4444-555555555555",
+            "ResourceId": "/subscriptions/x/resourceGroups/y",
+            "CorrelationId": format!("corr-{i}"),
+            "SourceSystem": "AmazonWebServices",
+            "OperationVersion": "1.0",
+            "SubscriptionId": "sub-abc",
+            "AadTenantId": "aad-xyz",
+            "col_noise_1": "n1",
+            "col_noise_2": "n2",
+            "col_noise_3": "n3",
+            "col_noise_4": "n4",
+            "col_noise_5": "n5",
+            "col_noise_6": "n6",
+            "col_noise_7": "n7",
+            "col_noise_8": "n8",
+        })
+    }
+
+    #[test]
+    fn summarize_detects_securityevent_table_and_keeps_eventid_and_computer() {
+        let rows: Vec<Value> = (0..25).map(security_event_row).collect();
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#se").expect("should summarize");
+        let top = summary["top"].as_array().expect("top is an array");
+        let first = top[0].as_object().expect("row is an object");
+
+        assert!(first.contains_key("EventID"), "SecurityEvent priority list should keep EventID");
+        assert!(first.contains_key("Computer"), "SecurityEvent priority list should keep Computer");
+        assert!(!is_signal_key("EventID"), "EventID must not match the generic signal filter");
+
+        for noise_key in ["TenantId", "ResourceId", "CorrelationId", "col_noise_1"] {
+            assert!(!first.contains_key(noise_key), "noise key {noise_key} should be projected out");
+        }
+        assert!(first.len() <= MAX_PROJECTED_KEYS);
+    }
+
+    #[test]
+    fn summarize_detects_cloudtrail_table_with_its_own_columns() {
+        let rows: Vec<Value> = (0..25).map(cloudtrail_row).collect();
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#ct").expect("should summarize");
+        let top = summary["top"].as_array().expect("top is an array");
+        let first = top[0].as_object().expect("row is an object");
+
+        assert!(first.contains_key("EventName"), "CloudTrail priority list should keep EventName");
+        assert!(first.contains_key("SourceIpAddress"), "CloudTrail priority list should keep SourceIpAddress");
+
+        for signin_only_key in ["UserPrincipalName", "AppDisplayName", "ConditionalAccessStatus"] {
+            assert!(
+                !first.contains_key(signin_only_key),
+                "SigninLogs-only key {signin_only_key} should not appear in a CloudTrail projection"
+            );
+        }
+        assert!(first.len() <= MAX_PROJECTED_KEYS);
+    }
+
+    #[test]
+    fn summarize_unknown_table_falls_back_to_identity_default() {
+        let mut row = wide_signin_row(1);
+        row.as_object_mut()
+            .unwrap()
+            .insert("Type".to_string(), json!("SomethingElse"));
+        let rows: Vec<Value> = (0..25).map(|_| row.clone()).collect();
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#unk").expect("should summarize");
+        let top = summary["top"].as_array().expect("top is an array");
+        let first = top[0].as_object().expect("row is an object");
+
+        assert!(!first.is_empty(), "unknown-table row should still project a non-empty result");
+        assert!(first.len() <= MAX_PROJECTED_KEYS);
+    }
+
+    #[test]
+    fn trim_row_keeps_eventid_via_priority_bypass_of_signal_filter() {
+        let row = security_event_row(1);
+        assert!(!is_signal_key("EventID"), "EventID must not match is_signal_key");
+
+        let trimmed = trim_row(&row, SECURITYEVENT_PRIORITY);
+        let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
+        assert!(
+            trimmed_obj.contains_key("EventID"),
+            "priority list must keep EventID even though it fails the generic signal filter"
         );
     }
 
