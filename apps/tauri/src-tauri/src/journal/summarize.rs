@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde_json::{json, Map, Value};
 
 use super::interpret::classify_kind;
@@ -11,6 +13,9 @@ const TOP_N: usize = 5;
 
 /// Max characters kept for a single string field value in a `top` row before truncation.
 const MAX_FIELD_CHARS: usize = 200;
+
+/// Max distinct values reported per column in the aggregates.
+const AGG_TOP_N: usize = 3;
 
 /// Wide rows (Sentinel/AAD logs carry ~74 columns, mostly Azure metadata)
 /// are projected to hunt-relevant columns before storage. A row with more
@@ -164,22 +169,32 @@ pub fn summarize(path: &str, resp: &Value, detail_ref: &str) -> Option<Value> {
         return None;
     }
 
-    let (counts, top) = match kind {
+    let (counts, top, aggregates) = match kind {
         "query" => summarize_query(resp),
-        "traverse" => summarize_traverse(resp),
-        _ => (generic_counts(resp), Vec::new()),
+        "traverse" => {
+            let (counts, top) = summarize_traverse(resp);
+            (counts, top, Value::Object(Map::new()))
+        }
+        _ => (generic_counts(resp), Vec::new(), Value::Object(Map::new())),
     };
 
     let mut obj = Map::new();
     obj.insert("_summary".to_string(), Value::Bool(true));
     obj.insert("kind".to_string(), Value::String(kind.to_string()));
     obj.insert("counts".to_string(), counts);
+    let has_aggregates = matches!(&aggregates, Value::Object(map) if !map.is_empty());
+    if has_aggregates {
+        obj.insert("aggregates".to_string(), aggregates);
+    }
     obj.insert("top".to_string(), Value::Array(top));
     obj.insert("detail_ref".to_string(), Value::String(detail_ref.to_string()));
     Some(Value::Object(obj))
 }
 
-fn summarize_query(resp: &Value) -> (Value, Vec<Value>) {
+/// Builds the `query`-kind summary: `row_count`, the `top` sample rows, and
+/// (for responses with more than `TOP_N` rows) distribution `aggregates`
+/// over ALL rows for the columns `top[0]` was projected down to.
+fn summarize_query(resp: &Value) -> (Value, Vec<Value>, Value) {
     let rows = resp.get("rows").and_then(|v| v.as_array());
     let row_count = rows.map(|r| r.len()).unwrap_or(0);
     // Log Analytics rows carry a `Type` field equal to the table name
@@ -191,10 +206,81 @@ fn summarize_query(resp: &Value) -> (Value, Vec<Value>) {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let priority = priority_for_table(table);
-    let top = rows
+    let top: Vec<Value> = rows
         .map(|r| r.iter().take(TOP_N).map(|row| trim_row(row, priority)).collect())
         .unwrap_or_default();
-    (json!({ "row_count": row_count }), top)
+
+    // Only worth aggregating when `top` doesn't already show every row (the
+    // whole point of aggregates is to convey distribution across rows that
+    // didn't make it into the sample).
+    let aggregates = if row_count > TOP_N {
+        let columns: Vec<String> = top
+            .first()
+            .and_then(|v| v.as_object())
+            .map(|obj| obj.keys().cloned().collect())
+            .unwrap_or_default();
+        match rows {
+            Some(r) if !columns.is_empty() => aggregate_columns(r, &columns),
+            _ => Value::Object(Map::new()),
+        }
+    } else {
+        Value::Object(Map::new())
+    };
+
+    (json!({ "row_count": row_count }), top, aggregates)
+}
+
+/// Computes per-column value-frequency distribution over ALL of `rows` for
+/// each of `columns`, returning
+/// `{ "<col>": { "distinct": <n>, "top": [ {"value": <v>, "count": <c>}, ... ] } }`.
+///
+/// For each column: `Null` and empty-string values are skipped; other values
+/// are stringified (`Value::String(s)` as-is, everything else via
+/// `to_string()`) and truncated to `MAX_FIELD_CHARS` characters. `distinct`
+/// is the number of distinct (post-truncation) values seen; `top` holds the
+/// `AGG_TOP_N` most frequent, sorted by count descending then value
+/// ascending (a deterministic tiebreak — never relies on hashmap iteration
+/// order). A column with zero non-null/non-empty values across all rows is
+/// omitted from the result entirely.
+fn aggregate_columns(rows: &[Value], columns: &[String]) -> Value {
+    let mut result = Map::new();
+    for col in columns {
+        let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        for row in rows {
+            let value = match row.get(col) {
+                None | Some(Value::Null) => continue,
+                Some(Value::String(s)) if s.is_empty() => continue,
+                Some(Value::String(s)) => s.clone(),
+                Some(other) => other.to_string(),
+            };
+            let truncated = if value.chars().count() > MAX_FIELD_CHARS {
+                let head: String = value.chars().take(MAX_FIELD_CHARS).collect();
+                format!("{head}…")
+            } else {
+                value
+            };
+            *counts.entry(truncated).or_insert(0) += 1;
+        }
+
+        if counts.is_empty() {
+            continue;
+        }
+
+        let distinct = counts.len();
+        let mut entries: Vec<(String, u64)> = counts.into_iter().collect();
+        // Deterministic ordering: count descending, then value ascending to
+        // break ties (BTreeMap iteration is already value-ascending, but
+        // sort explicitly so the ordering doesn't silently depend on that).
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let top: Vec<Value> = entries
+            .into_iter()
+            .take(AGG_TOP_N)
+            .map(|(value, count)| json!({ "value": value, "count": count }))
+            .collect();
+
+        result.insert(col.clone(), json!({ "distinct": distinct, "top": top }));
+    }
+    Value::Object(result)
 }
 
 /// Compacts one representative row for `top`: drops fields whose value is
@@ -458,8 +544,12 @@ mod tests {
         let trimmed_tokens = est_tokens(&summary);
         let untrimmed_tokens = est_tokens(&untrimmed_summary);
         assert!(
-            trimmed_tokens <= untrimmed_tokens * 60 / 100,
-            "trimmed ({trimmed_tokens}) should be at least 40% smaller than untrimmed ({untrimmed_tokens})"
+            // Threshold loosened from 60% (40% smaller) to 75%: distribution
+            // aggregates over all 25 rows now ride along in the summary, so
+            // the margin over the untrimmed 5-row comparison is a bit
+            // narrower — still meaningfully smaller, just not as tight.
+            trimmed_tokens <= untrimmed_tokens * 75 / 100,
+            "trimmed ({trimmed_tokens}) should be at least 25% smaller than untrimmed ({untrimmed_tokens})"
         );
     }
 
@@ -606,8 +696,11 @@ mod tests {
         let projected_tokens = est_tokens(&summary);
         let untrimmed_tokens = est_tokens(&untrimmed_summary);
         assert!(
-            projected_tokens <= untrimmed_tokens * 40 / 100,
-            "projected ({projected_tokens}) should be at least 60% smaller than untrimmed ({untrimmed_tokens})"
+            // Threshold loosened from 40% (60% smaller) to 60%: see the
+            // comment on the analogous assertion above — aggregates add a
+            // bounded amount of distribution data over all 25 rows.
+            projected_tokens <= untrimmed_tokens * 60 / 100,
+            "projected ({projected_tokens}) should be at least 40% smaller than untrimmed ({untrimmed_tokens})"
         );
     }
 
@@ -858,8 +951,11 @@ mod tests {
         let projected_tokens = est_tokens(&summary);
         let untrimmed_tokens = est_tokens(&untrimmed);
         assert!(
-            projected_tokens <= untrimmed_tokens * 20 / 100,
-            "projected ({projected_tokens}) should be at least 80% smaller than untrimmed ({untrimmed_tokens})"
+            // Threshold loosened from 20% (80% smaller) to 35%: see the
+            // comment on the analogous assertion above — aggregates add a
+            // bounded amount of distribution data over all 25 rows.
+            projected_tokens <= untrimmed_tokens * 35 / 100,
+            "projected ({projected_tokens}) should be at least 65% smaller than untrimmed ({untrimmed_tokens})"
         );
     }
 
@@ -1032,5 +1128,140 @@ mod tests {
         assert_eq!(summary["kind"], json!("traverse"));
         assert_eq!(summary["counts"]["neighbor_count"], json!(50));
         assert_eq!(summary["detail_ref"], json!("hunt-x#2"));
+        // Traverse kind never computes aggregates: they're a `query`-kind concept.
+        assert!(summary.get("aggregates").is_none());
+    }
+
+    /// 25-row SigninLogs-shaped fixture with a controlled distribution:
+    /// `ResultType` is "50126" in 12 rows, "50097" in 8, "0" in 5 (12+8+5=25);
+    /// `UserPrincipalName` cycles through 7 distinct values.
+    fn signin_distribution_response() -> Value {
+        let rows: Vec<Value> = (0..25)
+            .map(|i| {
+                let result_type = if i < 12 {
+                    "50126"
+                } else if i < 20 {
+                    "50097"
+                } else {
+                    "0"
+                };
+                json!({
+                    "Type": "SigninLogs",
+                    "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+                    "UserPrincipalName": format!("user{}@contoso.com", i % 7),
+                    "IPAddress": format!("10.0.0.{i}"),
+                    "ResultType": result_type,
+                    "AppDisplayName": "Azure Portal",
+                })
+            })
+            .collect();
+        json!({ "rows": rows, "row_count": rows.len() })
+    }
+
+    #[test]
+    fn aggregates_report_distinct_counts_and_top_n_for_key_columns() {
+        let resp = signin_distribution_response();
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#agg1").expect("should summarize");
+
+        assert_eq!(summary["aggregates"]["ResultType"]["distinct"], json!(3));
+        assert_eq!(
+            summary["aggregates"]["ResultType"]["top"][0],
+            json!({"value": "50126", "count": 12})
+        );
+        assert_eq!(summary["aggregates"]["UserPrincipalName"]["distinct"], json!(7));
+    }
+
+    #[test]
+    fn aggregates_surface_dominant_actor_frequency() {
+        // 25-row AWSCloudTrail-shaped fixture where one UserIdentityArn value
+        // dominates 17/25 rows (68%) — the "dominant actor" needle.
+        let rows: Vec<Value> = (0..25)
+            .map(|i| {
+                let arn = if i < 17 {
+                    "arn:aws:iam::123456789012:user/dominant-actor".to_string()
+                } else {
+                    format!("arn:aws:iam::123456789012:user/user{i}")
+                };
+                json!({
+                    "Type": "AWSCloudTrail",
+                    "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
+                    "EventName": "AssumeRole",
+                    "UserIdentityArn": arn,
+                    "SourceIpAddress": format!("10.0.0.{i}"),
+                })
+            })
+            .collect();
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#agg2").expect("should summarize");
+
+        assert_eq!(summary["aggregates"]["UserIdentityArn"]["top"][0]["count"], json!(17));
+        assert_eq!(
+            summary["aggregates"]["UserIdentityArn"]["top"][0]["value"],
+            json!("arn:aws:iam::123456789012:user/dominant-actor")
+        );
+    }
+
+    #[test]
+    fn aggregate_columns_breaks_count_ties_by_value_ascending() {
+        let rows: Vec<Value> = vec![
+            json!({"col": "b"}),
+            json!({"col": "b"}),
+            json!({"col": "a"}),
+            json!({"col": "a"}),
+            json!({"col": "c"}),
+        ];
+        let agg = aggregate_columns(&rows, &["col".to_string()]);
+        let top = agg["col"]["top"].as_array().expect("top is an array");
+
+        // "a" and "b" tie at count=2; deterministic tiebreak is value ascending.
+        assert_eq!(top[0], json!({"value": "a", "count": 2}));
+        assert_eq!(top[1], json!({"value": "b", "count": 2}));
+        assert_eq!(top[2], json!({"value": "c", "count": 1}));
+    }
+
+    #[test]
+    fn aggregates_are_skipped_when_row_count_is_at_or_below_top_n() {
+        // Individually large rows so the fixture exceeds THRESHOLD even
+        // with only 4 rows (row_count <= TOP_N), so `top` alone should
+        // already show every row and aggregates would add nothing.
+        let long_value = "y".repeat(2000);
+        let rows: Vec<Value> = (0..4)
+            .map(|i| {
+                json!({
+                    "Type": "SigninLogs",
+                    "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i),
+                    "UserPrincipalName": format!("user{i}@contoso.com"),
+                    "ResultType": "0",
+                    "Filler": long_value.clone(),
+                })
+            })
+            .collect();
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(rows.len() <= TOP_N, "fixture row_count must be <= TOP_N");
+
+        let summary = summarize("/kql", &resp, "h#small").expect("should summarize");
+
+        assert!(summary.get("aggregates").is_none(), "small responses should have no aggregates field");
+        let top = summary["top"].as_array().expect("top is an array");
+        assert_eq!(top.len(), 4, "top should still show every row");
+    }
+
+    #[test]
+    fn aggregate_columns_truncates_long_values() {
+        let long_value = "z".repeat(500);
+        let rows = vec![json!({"col": long_value})];
+        let agg = aggregate_columns(&rows, &["col".to_string()]);
+        let top = agg["col"]["top"].as_array().expect("top is an array");
+
+        assert_eq!(top.len(), 1);
+        let kept = top[0]["value"].as_str().expect("value is a string");
+        assert_eq!(kept.chars().count(), MAX_FIELD_CHARS + 1);
+        assert!(kept.ends_with('…'));
+        assert_eq!(top[0]["count"], json!(1));
     }
 }
