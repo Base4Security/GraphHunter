@@ -21,6 +21,21 @@ const WIDE_ROW_KEYS: usize = 20;
 /// first N original keys so we never emit a near-empty row.
 const MIN_PROJECTED_KEYS: usize = 8;
 
+/// Hard cap on projected columns for a wide row — a hunter needs a handful of
+/// high-signal fields, not every column that loosely matched a signal substring.
+const MAX_PROJECTED_KEYS: usize = 12;
+
+/// Ordered highest-value hunt columns. When a wide row's signal projection
+/// still exceeds MAX_PROJECTED_KEYS, these are kept FIRST (in this order),
+/// then remaining signal keys in original order, capped at MAX_PROJECTED_KEYS.
+/// Matched case-insensitively against the FULL key name (exact, lowercased).
+const HUNT_PRIORITY_KEYS: &[&str] = &[
+    "timegenerated", "userprincipalname", "userdisplayname", "ipaddress",
+    "location", "resulttype", "resultdescription", "appdisplayname",
+    "clientappused", "devicedetail", "riskstate", "status",
+    "conditionalaccessstatus", "category", "identity", "operationname",
+];
+
 /// Key-name substrings (case-insensitive) that mark a column as hunt-relevant.
 const SIGNAL_KEY_SUBSTRINGS: &[&str] = &[
     "time",
@@ -166,7 +181,11 @@ fn trim_row(row: &Value) -> Value {
         .collect();
 
     if projected.len() >= MIN_PROJECTED_KEYS {
-        Value::Object(projected)
+        if projected.len() > MAX_PROJECTED_KEYS {
+            Value::Object(cap_to_priority_keys(projected))
+        } else {
+            Value::Object(projected)
+        }
     } else {
         let fallback: Map<String, Value> = trimmed
             .into_iter()
@@ -174,6 +193,38 @@ fn trim_row(row: &Value) -> Value {
             .collect();
         Value::Object(fallback)
     }
+}
+
+/// Reduces an already signal-projected row down to at most `MAX_PROJECTED_KEYS`
+/// columns: `HUNT_PRIORITY_KEYS` present in `projected` are kept first (in
+/// priority order, matched case-insensitively against the full key name),
+/// then remaining projected keys are appended in their original order until
+/// the cap is reached. Values are preserved unchanged.
+fn cap_to_priority_keys(projected: Map<String, Value>) -> Map<String, Value> {
+    let mut result = Map::new();
+
+    for priority in HUNT_PRIORITY_KEYS {
+        if result.len() >= MAX_PROJECTED_KEYS {
+            break;
+        }
+        if let Some((key, value)) = projected
+            .iter()
+            .find(|(key, _)| key.to_lowercase() == *priority)
+        {
+            result.insert(key.clone(), value.clone());
+        }
+    }
+
+    for (key, value) in &projected {
+        if result.len() >= MAX_PROJECTED_KEYS {
+            break;
+        }
+        if !result.contains_key(key) {
+            result.insert(key.clone(), value.clone());
+        }
+    }
+
+    result
 }
 
 fn summarize_traverse(resp: &Value) -> (Value, Vec<Value>) {
@@ -487,6 +538,257 @@ mod tests {
         assert!(
             projected_tokens <= untrimmed_tokens * 40 / 100,
             "projected ({projected_tokens}) should be at least 60% smaller than untrimmed ({untrimmed_tokens})"
+        );
+    }
+
+    /// Builds a wide (~40-key) row containing ALL 16 `HUNT_PRIORITY_KEYS`
+    /// (realistic casing/values) plus ~24 Azure-noise/extra-signal columns
+    /// that loosely match a signal substring (Authentication*, Risk*,
+    /// ConditionalAccess*, *Name) but are not in the priority allowlist.
+    fn all_priority_plus_noise_row() -> Value {
+        json!({
+            // 16 HUNT_PRIORITY_KEYS, in order, realistic casing.
+            "TimeGenerated": "2026-07-14T12:00:00Z",
+            "UserPrincipalName": "user@contoso.com",
+            "UserDisplayName": "Contoso User",
+            "IPAddress": "10.0.0.5",
+            "Location": "US",
+            "ResultType": "50126",
+            "ResultDescription": "Invalid password",
+            "AppDisplayName": "Azure Portal",
+            "ClientAppUsed": "Browser",
+            "DeviceDetail": "{\"deviceId\":\"abc\"}",
+            "RiskState": "atRisk",
+            "Status": "Failure",
+            "ConditionalAccessStatus": "success",
+            "Category": "SignInLogs",
+            "Identity": "user@contoso.com",
+            "OperationName": "Sign-in activity",
+            // ~24 Azure-noise / extra-signal columns (not in the allowlist).
+            "AuthenticationDetails": "[{\"authenticationStepDateTime\":\"2026-07-14T12:00:00Z\"}]",
+            "AuthenticationRequirement": "singleFactorAuthentication",
+            "AuthenticationMethodsUsed": "Password",
+            "AuthenticationProcessingDetails": "[{\"key\":\"value\"}]",
+            "RiskLevelAggregated": "none",
+            "RiskLevelDuringSignIn": "none",
+            "RiskDetail": "none",
+            "RiskEventTypes": "[]",
+            "ConditionalAccessPolicies": "[]",
+            "ConditionalAccessStatusDetail": "notApplied",
+            "TokenIssuerName": "contoso.onmicrosoft.com",
+            "ServicePrincipalName": "graph-api",
+            "ServicePrincipalId": "sp-0001",
+            "ManagedIdentityName": "mi-0001",
+            "AppliedConditionalAccessPolicies": "[]",
+            "AuthenticationContextClassReferences": "[]",
+            "ClientCredentialType": "none",
+            "UserAgentDetail": "Mozilla/5.0",
+            "UserTypeDetail": "Member",
+            "AccountDisplayName": "Contoso User",
+            "ActorUserPrincipalName": "actor@contoso.com",
+            "TargetUserName": "target@contoso.com",
+            "SignInIdentifier": "sid-0001",
+            "ErrorReasonDetail": "none",
+        })
+    }
+
+    #[test]
+    fn trim_row_caps_wide_row_to_priority_columns() {
+        let row = all_priority_plus_noise_row();
+        let obj = row.as_object().unwrap();
+        assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
+
+        let trimmed = trim_row(&row);
+        let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
+
+        assert_eq!(
+            trimmed_obj.len(),
+            MAX_PROJECTED_KEYS,
+            "wide row with many signal matches should compress to exactly MAX_PROJECTED_KEYS columns"
+        );
+
+        for key in ["IPAddress", "ResultType", "UserPrincipalName"] {
+            assert!(trimmed_obj.contains_key(key), "expected priority key {key} to survive the cap");
+        }
+
+        for key in ["AuthenticationDetails", "TokenIssuerName"] {
+            assert!(
+                !trimmed_obj.contains_key(key),
+                "lower-priority noise key {key} should be dropped by the cap"
+            );
+        }
+    }
+
+    #[test]
+    fn trim_row_priority_beats_original_key_order() {
+        let mut map = Map::new();
+        // 20 early, non-priority signal columns (all match "auth").
+        for n in 1..=20 {
+            map.insert(
+                format!("AuthenticationDetail{n:02}"),
+                json!(format!("auth-detail-{n}")),
+            );
+        }
+        // A priority column placed LAST in original key order.
+        map.insert("IPAddress".to_string(), json!("10.0.0.9"));
+        let row = Value::Object(map);
+        let obj = row.as_object().unwrap();
+        assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
+
+        let trimmed = trim_row(&row);
+        let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
+
+        assert_eq!(trimmed_obj.len(), MAX_PROJECTED_KEYS);
+        assert!(
+            trimmed_obj.contains_key("IPAddress"),
+            "priority key IPAddress must survive the cap despite sitting late in original key order"
+        );
+        assert!(
+            !trimmed_obj.contains_key("AuthenticationDetail20"),
+            "a late (in original order) non-priority signal field should be dropped by the cap"
+        );
+    }
+
+    #[test]
+    fn trim_row_under_cap_projection_is_unchanged() {
+        let mut map = Map::new();
+        // Exactly 10 signal-matching columns (< MAX_PROJECTED_KEYS).
+        let signal_keys = [
+            "TimeGenerated",
+            "UserPrincipalName",
+            "IPAddress",
+            "ResultType",
+            "AppDisplayName",
+            "Location",
+            "ClientAppUsed",
+            "RiskState",
+            "Status",
+            "Category",
+        ];
+        for key in signal_keys {
+            map.insert(key.to_string(), json!(format!("{key}-value")));
+        }
+        // Filler columns that match no signal substring, pushing the row wide.
+        for n in 1..=15 {
+            map.insert(format!("col_noise_{n}"), json!(format!("n{n}")));
+        }
+        let row = Value::Object(map);
+        let obj = row.as_object().unwrap();
+        assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
+        assert!(signal_keys.len() < MAX_PROJECTED_KEYS);
+
+        let trimmed = trim_row(&row);
+        let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
+
+        assert_eq!(
+            trimmed_obj.len(),
+            signal_keys.len(),
+            "projection under the cap should be returned unchanged"
+        );
+        for key in signal_keys {
+            assert!(trimmed_obj.contains_key(key), "missing signal key {key}");
+        }
+    }
+
+    /// Builds a wide (~45-key) SigninLogs-like row: 10 priority hunt columns
+    /// plus 35 Azure-noise / extra-signal columns, mirroring realistic wide
+    /// telemetry width.
+    fn wide_signin_row_45(i: usize) -> Value {
+        let mut map = Map::new();
+        // 10 priority hunt columns.
+        map.insert("TimeGenerated".to_string(), json!(format!("2026-07-14T12:{:02}:00Z", i % 60)));
+        map.insert("UserPrincipalName".to_string(), json!(format!("user{i}@contoso.com")));
+        map.insert("IPAddress".to_string(), json!(format!("10.0.{}.{}", i % 256, (i * 7) % 256)));
+        map.insert("ResultType".to_string(), json!(if i % 3 == 0 { "50126" } else { "0" }));
+        map.insert("AppDisplayName".to_string(), json!("Azure Portal"));
+        map.insert("Location".to_string(), json!("US"));
+        map.insert("ClientAppUsed".to_string(), json!("Browser"));
+        map.insert("RiskState".to_string(), json!("none"));
+        map.insert("Status".to_string(), json!("Success"));
+        map.insert("Category".to_string(), json!("SignInLogs"));
+
+        // 35 Azure-noise / extra-signal columns.
+        let noise_fields: [(&str, &str); 35] = [
+            ("TenantId", "11111111-2222-3333-4444-555555555555"),
+            ("ResourceId", "/tenants/t/providers/Microsoft.aadiam"),
+            ("CorrelationId", "corr-id-0001"),
+            ("SourceSystem", "Azure AD"),
+            ("OperationVersion", "1.0"),
+            ("OriginalRequestIds", "req-0001"),
+            ("SubscriptionId", "sub-abc"),
+            ("AadTenantId", "aad-xyz"),
+            ("AuthenticationDetails", "[{\"authenticationStepDateTime\":\"2026-07-14T12:00:00Z\",\"authenticationMethod\":\"Password\",\"authenticationStepResultDetail\":\"First factor requirement satisfied by password\",\"succeeded\":true}]"),
+            ("AuthenticationRequirement", "singleFactorAuthentication"),
+            ("AuthenticationMethodsUsed", "Password"),
+            ("AuthenticationProcessingDetails", "[{\"key\":\"Root Key Type\",\"value\":\"Unknown\"},{\"key\":\"Is CA Compliant\",\"value\":\"False\"},{\"key\":\"ProcessingTimeInMilliseconds\",\"value\":\"37\"},{\"key\":\"Legacy TLS (TLS 1.0, 1.1, 3DES)\",\"value\":\"False\"},{\"key\":\"Autologon Type\",\"value\":\"None\"}]"),
+            ("AuthenticationAppDeviceDetails", "[]"),
+            ("AuthenticationContextClassReferences", "[{\"id\":\"c1\",\"detail\":\"Multifactor authentication\"}]"),
+            ("RiskLevelAggregated", "none"),
+            ("RiskLevelDuringSignIn", "none"),
+            ("RiskDetail", "none"),
+            ("RiskEventTypes", "[\"unfamiliarFeatures\",\"anonymizedIPAddress\"]"),
+            ("RiskEventTypesV2", "[\"unfamiliarFeatures\",\"anonymizedIPAddress\"]"),
+            ("ConditionalAccessPolicies", "[{\"id\":\"p1\",\"displayName\":\"Require MFA for all users\",\"enforcedGrantControls\":[\"Mfa\"],\"result\":\"success\"},{\"id\":\"p2\",\"displayName\":\"Block legacy authentication\",\"enforcedGrantControls\":[\"Block\"],\"result\":\"notApplied\"}]"),
+            ("ConditionalAccessStatusDetail", "notApplied"),
+            ("AppliedConditionalAccessPolicies", "[{\"id\":\"p1\",\"displayName\":\"Require MFA for all users\",\"result\":\"success\",\"enforcedGrantControls\":[\"Mfa\"],\"enforcedSessionControls\":[]},{\"id\":\"p2\",\"displayName\":\"Block legacy authentication\",\"result\":\"notApplied\",\"enforcedGrantControls\":[\"Block\"],\"enforcedSessionControls\":[]}]"),
+            ("TokenIssuerName", "contoso.onmicrosoft.com"),
+            ("TokenIssuerType", "AzureAD"),
+            ("ServicePrincipalName", "graph-api"),
+            ("ServicePrincipalId", "sp-0001"),
+            ("ManagedIdentityName", "mi-0001"),
+            ("ClientCredentialType", "none"),
+            ("UserAgentDetail", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0"),
+            ("UserTypeDetail", "Member"),
+            ("AccountDisplayName", "Contoso User Account Display Name"),
+            ("ActorUserPrincipalName", "actor@contoso.com"),
+            ("TargetUserName", "target@contoso.com"),
+            ("SignInIdentifier", "sid-0001"),
+            ("ErrorReasonDetail", "The user could not be authenticated due to an invalid password or expired credential state on the account"),
+        ];
+        for (key, value) in noise_fields {
+            map.insert(key.to_string(), json!(value));
+        }
+        Value::Object(map)
+    }
+
+    #[test]
+    fn summarize_query_compresses_realistic_45_column_signin_payload() {
+        let rows: Vec<Value> = (0..25).map(wide_signin_row_45).collect();
+        let resp = json!({ "rows": rows, "row_count": rows.len() });
+        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+
+        let summary = summarize("/kql", &resp, "h#1").expect("should summarize");
+
+        let top = summary["top"].as_array().expect("top is an array");
+        for row in top {
+            let obj = row.as_object().expect("row is an object");
+            assert!(
+                obj.len() <= MAX_PROJECTED_KEYS,
+                "projected row should have at most MAX_PROJECTED_KEYS columns, got {}",
+                obj.len()
+            );
+        }
+
+        let untrimmed_top: Vec<Value> = resp["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(5)
+            .cloned()
+            .collect();
+        let untrimmed = json!({
+            "_summary": true,
+            "kind": "query",
+            "counts": summary["counts"].clone(),
+            "top": untrimmed_top,
+            "detail_ref": "h#1",
+        });
+
+        let projected_tokens = est_tokens(&summary);
+        let untrimmed_tokens = est_tokens(&untrimmed);
+        assert!(
+            projected_tokens <= untrimmed_tokens * 20 / 100,
+            "projected ({projected_tokens}) should be at least 80% smaller than untrimmed ({untrimmed_tokens})"
         );
     }
 
