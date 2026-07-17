@@ -4,6 +4,7 @@ pub mod error;
 pub mod evtx;
 pub mod format_registry;
 pub mod helpers;
+pub mod journal;
 mod http;
 pub mod scoring;
 pub mod sentinel_connector;
