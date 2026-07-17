@@ -4,6 +4,7 @@
 //! this root owns `HttpState`, the auth middleware, and router assembly.
 
 use axum::{
+    body::{to_bytes, Body},
     extract::{FromRef, Request, State},
     http::StatusCode,
     middleware::Next,
@@ -12,9 +13,11 @@ use axum::{
     Json, Router,
 };
 use std::sync::Arc;
+use std::time::Instant;
 use subtle::ConstantTimeEq;
 use tower_http::cors::{CorsLayer, Any};
 
+use crate::journal::event::GraphCounts;
 use crate::AppState;
 use graph_hunter_api::GraphHunterApi;
 
@@ -98,6 +101,103 @@ async fn auth_middleware(
         )
             .into_response(),
     }
+}
+
+/// Paths the mandatory journal capture skips: free-standing/liveness
+/// endpoints and the journal's own read API (capturing reads of the
+/// journal would just spam the journal with itself).
+fn journal_capture_skips(path: &str) -> bool {
+    path == "/" || path == "/health" || path == "/metrics" || path.starts_with("/journal")
+}
+
+/// Cap on how many bytes `capture` will buffer from a request/response
+/// body via `to_bytes`. Matches the `DefaultBodyLimit` cap applied lower
+/// in the stack (see `build_app`) — `to_bytes` requires its own explicit
+/// limit regardless of that layer.
+const CAPTURE_BODY_LIMIT: usize = 10 * 1024 * 1024;
+
+/// Above this size, skip JSON-parsing the response body for the
+/// interpreter (`extract_touched`/`row_count`/etc). The raw bytes are
+/// still forwarded to the client untouched; only the journal's view of
+/// a huge response degrades to `Value::Null`, per the task brief.
+const CAPTURE_PARSE_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Cheap current-session graph fingerprint (entity/relation counts).
+/// Returns zeros if no session is loaded or the graph lock is poisoned —
+/// the journal's mandatory core (path, kind, redacted params, status,
+/// est_tokens) does not depend on this being accurate.
+fn graph_counts(api: &GraphHunterApi) -> GraphCounts {
+    api.sessions()
+        .current_session()
+        .and_then(|s| {
+            s.graph.read().ok().map(|g| GraphCounts {
+                entities: g.entity_count() as u64,
+                relations: g.relation_count() as u64,
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Mandatory hunt-journal capture middleware (Task A4). Buffers the
+/// request body (rebuilding the request so the real handler still sees
+/// it), reads graph counts before/after, runs the handler, buffers the
+/// response body (rebuilding the response so the client still sees it),
+/// and appends a redacted `HuntEvent` to the current hunt.
+///
+/// Registered *inside* `auth_middleware` (see `build_app`) so it only
+/// runs for authenticated, resolved requests — unauthorized probes never
+/// get journaled.
+async fn capture(
+    State(app): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path().to_string();
+    if journal_capture_skips(&path) {
+        return next.run(request).await;
+    }
+    let method = request.method().to_string();
+
+    // Buffer the request body; best-effort JSON (non-JSON/undecodable ->
+    // Null). Rebuild the request from the buffered bytes so the real
+    // handler downstream still gets a fully-formed body.
+    let (parts, body) = request.into_parts();
+    let req_bytes = to_bytes(body, CAPTURE_BODY_LIMIT).await.unwrap_or_default();
+    let req_json: serde_json::Value =
+        serde_json::from_slice(&req_bytes).unwrap_or(serde_json::Value::Null);
+    let request = Request::from_parts(parts, Body::from(req_bytes));
+
+    let before = graph_counts(&api);
+    let started = Instant::now();
+    let response = next.run(request).await;
+    let dur_ms = started.elapsed().as_millis() as u64;
+    let after = graph_counts(&api);
+    let status = response.status().as_u16();
+
+    // Buffer the response body the same way. Cap JSON parsing separately
+    // from the buffering limit: a huge-but-legitimate response (e.g. a
+    // large export) still gets forwarded to the client byte-for-byte,
+    // it just isn't interpreted for row_count/touched in the journal.
+    let (resp_parts, resp_body) = response.into_parts();
+    let resp_bytes = to_bytes(resp_body, CAPTURE_BODY_LIMIT).await.unwrap_or_default();
+    let resp_json: serde_json::Value = if resp_bytes.len() <= CAPTURE_PARSE_LIMIT {
+        serde_json::from_slice(&resp_bytes).unwrap_or(serde_json::Value::Null)
+    } else {
+        serde_json::Value::Null
+    };
+
+    let mut event = crate::journal::capture::build_event(
+        &path, &method, status, dur_ms, &req_json, &resp_json, before, after,
+    );
+    // build_event derives body_bytes/est_tokens from resp_json, which is
+    // Null for oversized bodies; correct body_bytes to the real wire size
+    // regardless (est_tokens stays a best-effort estimate in that case).
+    event.result.body_bytes = resp_bytes.len() as u64;
+    app.journal.append(event);
+
+    tracing::debug!("journal: captured {} {} -> {} ({} ms)", method, path, status, dur_ms);
+    Response::from_parts(resp_parts, Body::from(resp_bytes))
 }
 
 /// Build the API router (shared by run and run_async).
@@ -194,6 +294,12 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
             .allow_origin(Any)
             .allow_methods(Any)
             .allow_headers(Any))
+        // `capture` is added *before* `auth_middleware` here, which makes
+        // it the layer auth's `next.run()` calls into — i.e. capture only
+        // sees requests that already passed authentication. Needs the
+        // full `HttpState` (not just `Arc<AppState>`) so it can also pull
+        // `Arc<GraphHunterApi>` for the graph-count fingerprint.
+        .layer(axum::middleware::from_fn_with_state(state.clone(), capture))
         .layer(axum::middleware::from_fn_with_state(state.app.clone(), auth_middleware))
         .layer(axum::middleware::from_fn(log_requests))
         .with_state(state)

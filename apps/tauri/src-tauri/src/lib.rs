@@ -202,12 +202,24 @@ pub fn run() {
         }
     }
 
+    // Hunt journal (Task A2/A4): append-only per-hunt event log under
+    // `<data>/GraphHunter/journals/<hunt_id>/`. Falls back to the OS temp
+    // dir on platforms where `dirs::data_dir()` returns `None` — the
+    // journal must always have somewhere to write since capture is
+    // mandatory (unlike the optional drift/DLQ/mapping stores above).
+    let journal_base = dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("GraphHunter")
+        .join("journals");
+    let journal = Arc::new(journal::store::JournalStore::new(journal_base));
+
     let app_state = Arc::new(state::AppState {
         sessions: api.sessions().map_handle(),
         current_session_id: api.sessions().current_handle(),
         app_handle: app_handle_slot.clone(),
         last_mcp_subgraph: RwLock::new(None),
         api_token,
+        journal,
     });
     let http_port = std::env::var("GRAPHHUNTER_API_PORT")
         .ok()
