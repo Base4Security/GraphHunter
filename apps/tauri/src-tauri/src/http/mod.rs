@@ -422,6 +422,7 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
         .route("/journal/export", post(journal::handler_export))
         .route("/journal/:id", get(journal::handler_get))
         .route("/journal/:id/stats", get(journal::handler_stats))
+        .route("/journal/:id/expand", post(journal::handler_expand))
         .fallback(misc::fallback_404)
         // 10 MB cap on request bodies. Hunt payloads are small (a DSL string
         // plus maybe a note); anything larger is almost certainly malformed

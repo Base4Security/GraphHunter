@@ -61,6 +61,74 @@ test("contract: journal op=stats calls GET /journal/:id/stats and returns it as-
   assert.deepEqual(result, stats);
 });
 
+// Task expand: op=expand is the L2 "reconstruct" layer — re-runs a hunt's
+// stored KQL filtered to rows matching a summary value, cheaply.
+test("contract: journal tool accepts op=expand", () => {
+  const journal = registry.find((t) => t.name === "journal");
+  assert.ok(journal, "journal tool present in registry");
+
+  const withIdAndValue = journal?.inputSchema.safeParse({
+    op: "expand",
+    id: "hunt-123",
+    value: "10.0.0.5",
+  });
+  assert.ok(withIdAndValue?.success, "op=expand with id+value is a valid input");
+
+  const withColumnAndLimit = journal?.inputSchema.safeParse({
+    op: "expand",
+    id: "hunt-123",
+    value: "10.0.0.5",
+    column: "SrcIp",
+    limit: 10,
+  });
+  assert.ok(
+    withColumnAndLimit?.success,
+    "op=expand with column+limit is a valid input",
+  );
+});
+
+test("contract: journal op=expand calls POST /journal/:id/expand with value/column/limit", async () => {
+  const journal = registry.find((t) => t.name === "journal");
+  assert.ok(journal, "journal tool present in registry");
+
+  const expandResult = {
+    hunt_id: "hunt-123",
+    kql: "SecurityEvent | take 10",
+    match: { column: "SrcIp", value: "10.0.0.5" },
+    matched: 1,
+    total_rows: 10,
+    rows: [{ SrcIp: "10.0.0.5", Computer: "host1" }],
+  };
+
+  const noopLogger: Logger = {
+    info() {},
+    warn() {},
+    error() {},
+    tool() {},
+    api() {},
+  };
+  const fakeApi: ApiClient = {
+    async get() {
+      throw new Error("unexpected GET in op=expand test");
+    },
+    async post(path: string, body: unknown) {
+      assert.equal(path, "/journal/hunt-123/expand");
+      assert.deepEqual(body, { value: "10.0.0.5", column: "SrcIp", limit: 10 });
+      return expandResult;
+    },
+  };
+  const ctx: ToolContext = { api: fakeApi, logger: noopLogger, requestId: "test" };
+
+  const result = await journal!.execute(ctx, {
+    op: "expand",
+    id: "hunt-123",
+    value: "10.0.0.5",
+    column: "SrcIp",
+    limit: 10,
+  });
+  assert.deepEqual(result, expandResult);
+});
+
 // Regression for the "op=export returns an escaped NDJSON string" finding:
 // the MCP content layer JSON.stringifies whatever `execute` returns, so a
 // joined-string return value would force the LLM to un-escape and re-split
