@@ -149,6 +149,20 @@ impl JournalStore {
             .collect()
     }
 
+    /// Marks the current hunt closed (sets `closed_at`, clears `current` so
+    /// the next `append`/`current_hunt_id` starts a fresh hunt). No-op
+    /// (returns `None`) if no hunt is currently active.
+    pub fn close_hunt(&self) -> Option<String> {
+        let mut inner = self.0.lock().unwrap();
+        let id = inner.current.take()?;
+        let dir = inner.base.join(&id);
+        if let Some(mut meta) = Self::read_meta(&dir) {
+            meta.closed_at = Some(now_millis());
+            Self::write_meta(&dir, &meta);
+        }
+        Some(id)
+    }
+
     /// Reads a hunt's meta + full event log. `None` if the hunt is unknown.
     pub fn read(&self, id: &str) -> Option<(HuntMeta, Vec<HuntEvent>)> {
         let inner = self.0.lock().unwrap();
@@ -230,5 +244,29 @@ mod tests {
         ev.endpoint = "/graph/neighbors".into();
         store.append(ev);
         assert_eq!(store.list().len(), 1); // one lazily-created hunt
+    }
+
+    #[test]
+    fn close_hunt_sets_closed_at_and_next_append_starts_new_hunt() {
+        let store = JournalStore::new(tmp());
+        let id1 = store.start_hunt(Some("first".into()));
+
+        let closed_id = store.close_hunt();
+        assert_eq!(closed_id, Some(id1.clone()));
+        let (meta1, _) = store.read(&id1).expect("hunt exists");
+        assert!(meta1.closed_at.is_some());
+
+        // close_hunt on an already-closed store (no current hunt) is a no-op.
+        assert_eq!(store.close_hunt(), None);
+
+        // The next append lazily starts a brand-new hunt, not id1.
+        let mut ev = HuntEvent::default();
+        ev.endpoint = "/search".into();
+        store.append(ev);
+        let id2 = store.current_hunt_id();
+        assert_ne!(id2, id1);
+        let (meta2, events2) = store.read(&id2).expect("hunt exists");
+        assert_eq!(events2.len(), 1);
+        assert!(meta2.closed_at.is_none());
     }
 }

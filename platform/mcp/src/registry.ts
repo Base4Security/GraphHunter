@@ -18,6 +18,7 @@ import { huntTools } from "./tools/hunt/index.js";
 import { catalogTools } from "./tools/catalog/index.js";
 import { tagsTools } from "./tools/tags/index.js";
 import { notesTools } from "./tools/notes/index.js";
+import { journalTools } from "./tools/journal/index.js";
 import { scoresTools } from "./tools/scores/index.js";
 import { reviewTools } from "./tools/review/index.js";
 import { ingestTools } from "./tools/ingest/index.js";
@@ -34,6 +35,7 @@ export const registry: Tool[] = [
   ...catalogTools,
   ...tagsTools,
   ...notesTools,
+  ...journalTools,
   ...scoresTools,
   ...reviewTools,
   ...ingestTools,

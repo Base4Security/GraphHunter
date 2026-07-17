@@ -32,6 +32,7 @@ mod helpers;
 mod hunt;
 mod ingest;
 mod invariants;
+mod journal;
 mod misc;
 mod notes;
 mod siem;
@@ -379,6 +380,11 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
         .route("/sentinel/pause", post(siem::handler_sentinel_pause))
         .route("/sentinel_status", get(siem::handler_sentinel_status))
         .route("/metrics", get(misc::handler_metrics))
+        .route("/journal/start", post(journal::handler_start))
+        .route("/journal/close", post(journal::handler_close))
+        .route("/journal/list", get(journal::handler_list))
+        .route("/journal/export", post(journal::handler_export))
+        .route("/journal/:id", get(journal::handler_get))
         .fallback(misc::fallback_404)
         // 10 MB cap on request bodies. Hunt payloads are small (a DSL string
         // plus maybe a note); anything larger is almost certainly malformed
