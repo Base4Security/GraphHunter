@@ -589,7 +589,7 @@ El modelo declarado de la superficie de ingesta, canal por canal, con la secció
     "provenance_stability": {"fidelity": "degraded", "context": "mapping_edit", "witness_type": "future_behavior", "note": "export-time ProvenanceCtx reads current mapping for already-ingested relations - retroactive contamination (S4, labeled inference)", "fix": "Fase B: journal freezes provenance at ingest"}
   },
   "queries_transversal": [
-    {"id": "loss_reconstruction", "requires": ["completeness_flag", "skip_diagnostics"]},
+    {"id": "loss_reconstruction", "requires": ["completeness_flag", "ingestion_time", "provenance_stability", "skip_diagnostics"]},
     {"id": "exhaustiveness_marking", "requires": ["completeness_flag", "ingest_completeness", "source_coverage"]}
   ]
 }
