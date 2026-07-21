@@ -1074,7 +1074,276 @@ haga resize normal más allá de la capacidad pre-reservada — la ingesta no
 se rechaza ni se trunca por esta constante.
 
 ## S6. Integración Sentinel y sidecar
-_Pendiente: se completa en la Tarea 5._
+
+### Metodología
+
+Se leyeron íntegramente `platform/sources/src/lib.rs` (trait `LogSource`),
+`log_analytics.rs`, `data_lake.rs`, `defender_xdr.rs`, `quota.rs`,
+`platform/siem/src/sentinel.rs`, `sentinel_streaming.rs`, `elastic.rs`,
+`docs/decisions/2026-05-26-sidecar-integration.md`,
+`platform/api/src/sentinel_connector.rs`,
+`platform/api/src/operations/sentinel.rs` (completo),
+`apps/tauri/src-tauri/src/commands/sentinel.rs`,
+`apps/tauri/src-tauri/src/http/siem.rs`, y los tools MCP
+`platform/mcp/src/tools/sentinel/{query,seed,schema,status}.ts` +
+`platform/mcp/src/lib/api-client.ts` + `platform/mcp/src/index.ts`, más
+greps de wiring (`sidecar_manager`, `sidecar`, `externalBin`, credenciales
+Azure en `platform/mcp/src`).
+
+**Hallazgo metodológico previo, coherente con S2 y S5.** Existen **tres
+superficies Sentinel distintas**, no una: (1) el conector en vivo wireado
+(`platform/api/src/sentinel_connector.rs` + `platform/siem/src/sentinel_streaming.rs`
++ `operations/sentinel.rs`) — HTTP directo con `reqwest`, es el único camino
+que efectivamente mueve datos de Sentinel hoy; (2) la nueva abstracción
+`LogSource`/`platform/sources` (Fase 3 del plan de streaming) — código real,
+probado, pero **no instanciada en ningún camino de producción**, la misma
+conclusión que S5 estableció para el pipeline `SourcePoller`/`ParserTask`/`GraphWriter`
+del que `LogSource` es la capa de fuentes; (3) el sidecar .NET, del que **no
+existe fuente trackeada** (ver S2), y que — verificado en esta tarea — tampoco
+tiene ningún punto de wiring del lado Rust/Tauri.
+
+### 1. Ubicación de todas las llamadas a Sentinel/Azure
+
+| Módulo | API de Azure que toca | Invocador (quién lo llama) | Estado |
+|---|---|---|---|
+| `platform/siem/src/sentinel_streaming.rs::HttpSentinelTransport` (`sentinel_streaming.rs:53-157`) | `POST https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token` (`:78-81`, client-credentials) + `POST https://api.loganalytics.io/v1/workspaces/{ws}/query` (`:129-132`) | `platform/api/src/sentinel_connector.rs::polling_loop` (`:176-233`, vía `token_cache.get_or_refresh` + `transport.execute_query`) | **Real, wireado** — es el conector en vivo (streaming por polling) |
+| `platform/siem/src/sentinel.rs::run_sentinel_query`/`get_azure_token`/`execute_log_analytics_query` (`sentinel.rs:74-164`, `reqwest::blocking`) | mismos dos endpoints que arriba, síncronos | `platform/api/src/operations/sentinel.rs::run_kql` (`:385-387`, dentro de `spawn_blocking`), y transitivamente `run_hunting_template` (`:884-914`, delega a `run_kql`) | **Real, wireado** — camino ad-hoc/one-shot desde comandos Tauri y MCP (`sentinel_query`) |
+| `graph_hunter_siem::HttpSentinelTransport::execute_query` (mismo transporte que la fila 1) | `POST .../query` | `operations/sentinel.rs::hydrate_node_filtered_with` (`:1024`, invocado por `seed_from_ioc`/`node_enrich`) y `discover_schema`/`graph_propose`/`graph_build` (vía `run_kql_rows`, definida más abajo en el mismo archivo, no leída línea a línea en esta tarea pero con la misma firma `SentinelTransport`) | **Real, wireado** — enriquecimiento on-demand + discover/propose/build |
+| `platform/sources/src/log_analytics.rs::LogAnalyticsSource` (`log_analytics.rs:152-303,345-499`) | `POST {endpoint}/v1/workspaces/{ws}/query` vía `HttpClient` trait (no `reqwest` directo) | Ningún caller de producción — solo sus propios tests (`log_analytics.rs:526-796`) y, transitivamente, el smoke test Tauri (`azure_streaming_smoke.rs`, ver S5) si se construye ahí | **Código real, NO wireado** (parte de la superficie 2) |
+| `platform/sources/src/data_lake.rs::DataLakeV2Source` | `POST https://api.securityplatform.microsoft.com/lake/kql/v2/rest/query` — **nunca se ejecuta**: la doc del módulo (`data_lake.rs:1-23`) dice explícitamente "STUB IMPLEMENTATION" y ambos métodos de datos devuelven `SourceError::Fatal` incondicionalmente (`:92-114`) | Ningún caller de producción | **Stub deliberado, no wireado** |
+| `platform/sources/src/defender_xdr.rs::DefenderXdrSource` (`defender_xdr.rs:117-379`) | `POST https://api.security.microsoft.com/api/advancedhunting/run` | Ningún caller de producción — solo sus tests | **Código real, NO wireado** (parte de la superficie 2) |
+| `sidecar/dotnet/GraphHunter.Sentinel.Sidecar` (.NET, gRPC per el contrato `sentinel_sidecar.proto` reconstruido de los stubs, ver S2) | Desconocido — **no verificable**: no hay `.cs`/`.csproj` fuente trackeado, así que no hay forma de leer qué API de Azure invocaría | Ninguno confirmado del lado Rust — ver punto 3 de abajo | **[no verificado]: sin fuente, sin wiring localizado** |
+
+Ninguna fila queda sin invocador conocido: las cinco filas "reales" (Rust)
+tienen un caller citado con `path:line`, y las dos filas "no wireadas"
+(`log_analytics.rs`, `defender_xdr.rs`) declaran explícitamente que su único
+consumidor son sus propios tests — consistente con el hallazgo transversal
+de S5 de que la superficie `LogSource`/`platform/sources` completa está
+dormida en producción. La fila del sidecar se marca **[no verificado]** por
+ausencia de fuente, no se inventa un invocador.
+
+### 2. El trait `LogSource` completo: qué cubre y qué le falta a un futuro `SourceConnector`
+
+Firma citada, `platform/sources/src/lib.rs:274-327`:
+
+```rust
+#[async_trait]
+pub trait LogSource: Send + Sync {
+    fn source_id(&self) -> &str;
+    fn kind(&self) -> SourceKind;
+    fn available_tables(&self) -> &[&'static str];
+    async fn check_auth(&self) -> Result<(), SourceError>;
+    async fn query_scoped(
+        &self,
+        scope: QueryScope,
+        cancel: CancellationToken,
+    ) -> Result<ChunkStream, SourceError>;
+    async fn poll_since(
+        &self,
+        table: &str,
+        watermark: Watermark,
+        cancel: CancellationToken,
+    ) -> Result<PollStream, SourceError>;
+}
+```
+
+**Lo que ya cubre** (mapeado a los cuatro huecos que el brief pide
+verificar):
+
+- **`capabilities()` — NO existe, ni con ese nombre ni equivalente.** No
+  hay ningún método en el trait que declare, en runtime, qué puede hacer
+  una fuente concreta (soporta backfill, soporta `poll_since`, tablas
+  opcionales vs. obligatorias, límites de tasa propios). Lo más cercano es
+  `available_tables()` (`lib.rs:288`), que solo enumera tablas, no
+  capacidades de query. La consecuencia es visible en el propio código:
+  `DataLakeV2Source` (el stub) implementa el trait completo pero sus dos
+  métodos de datos siempre fallan en runtime (`data_lake.rs:92-114`) — un
+  caller que itere `Vec<Arc<dyn LogSource>>` no tiene forma de preguntar
+  "¿esta fuente realmente sirve datos?" antes de invocarla; debe intentar
+  la llamada y interpretar el `SourceError::Fatal` resultante.
+- **Backfill explícito — NO existe como operación separada.** El trait
+  solo tiene `query_scoped` (drill-down puntual acotado a una entidad +
+  ventana) y `poll_since` (avance incremental por watermark, `lib.rs:311-326`).
+  No hay un tercer método tipo `backfill(range, table)` para "traer todo lo
+  que ocurrió en esta ventana histórica, sin acotar a una entidad ni a un
+  watermark en curso". El propio doc de `poll_since` (`lib.rs:312-320`)
+  dice que "si no hay data nueva, el stream termina inmediatamente — el
+  loop externo es responsable de dormir y reinvocar" — es decir, backfill
+  masivo tendría que simularse invocando `poll_since` repetidamente con un
+  watermark manual, no es una operación de primera clase.
+- **Id nativo del evento — NO existe en ningún tipo del trait.** `RawChunk`
+  (`lib.rs:182-201`) carga bytes crudos + `table` + `encoding` +
+  `fetched_at` + `watermark_candidate`; no hay un campente `native_event_id`
+  ni nada equivalente al `_id`/`RecordId` que Log Analytics o Defender XDR
+  devuelven por fila. La deduplicación de eventos (si se necesitara) tendría
+  que reconstruirse del lado del parser, después de decodificar `rows`, no
+  antes — el trait no expone un identificador estable por evento a nivel de
+  transporte.
+- **`event_time` vs `ingestion_time` — parcialmente presente, asimétrico.**
+  `RawChunk.fetched_at` (`lib.rs:192-194`, epoch-ms) es la única noción de
+  tiempo de ingesta que el trait modela, y es responsabilidad del
+  **transporte** (se computa con `now_epoch_ms()` en cada implementación,
+  p. ej. `log_analytics.rs:305-311`, `defender_xdr.rs:193-199`), no del
+  trait en sí. El `event_time` real (`TimeGenerated`/`Timestamp` de cada
+  fila) vive **dentro** de `rows: Bytes` sin decodificar — el trait no lo
+  extrae ni lo tipa; ver punto 4 más abajo para lo que pasa con esta
+  distinción río abajo, en el parser y el motor de grafos.
+
+**Conclusión:** el trait cubre bien el *transporte* (auth, paginación,
+watermark, backpressure vía streams) pero deja sin resolver exactamente los
+cuatro huecos que el brief anticipaba, y ninguno de los dos —
+`capabilities()`/backfill explícito — tiene ni siquiera un stub o comentario
+`// TODO` en el código leído; son ausencias silenciosas, no deuda declarada.
+
+### 3. El sidecar .NET
+
+**Qué hace (según la única fuente disponible: la nota de decisión, no
+código).** `docs/decisions/2026-05-26-sidecar-integration.md:10-11` lo
+describe como un "Sentinel Sidecar escrito en .NET 8 (proceso separado,
+comunicación vía IPC con el host Tauri)". Los 13 stubs generados por
+protobuf documentados en S2 (`SentinelSidecar.cs`, `SentinelSidecarGrpc.cs`)
+confirman que el protocolo real es **gRPC** (no stdio JSON-RPC como sugiere
+otra parte de la misma nota de decisión — ver discrepancia abajo), generado
+desde un contrato `sentinel_sidecar.proto` que no está en el árbol
+trackeado (S2). El propósito funcional (qué haría el sidecar frente a
+Sentinel) no es verificable: sin `.cs`/`.csproj` de mano, no hay forma de
+leer qué endpoints de Azure invocaría ni qué lógica de KQL/polling
+implementaría — se marca **[no verificado]: sin fuente**.
+
+**Discrepancia de protocolo dentro de la propia nota de decisión.** La
+sección 4.2 del decision doc (`2026-05-26-sidecar-integration.md:144-149`)
+describe la comunicación como "IPC (stdio JSON-RPC)" y basa el argumento
+legal de "mere aggregation" de la GPL-FAQ en que el sidecar corre como
+"proceso separado" lanzado con `tauri-plugin-shell`/`Command::new`. Pero
+los stubs `.cs` generados (S2) son inequívocamente gRPC (`SentinelSidecarGrpc.cs`,
+encabezado "Generated by the protocol buffer compiler"). Ambos hechos no
+son necesariamente contradictorios (gRPC puede correr sobre un socket local
+entre dos procesos separados, lo cual seguiría calificando como "mere
+aggregation" bajo el mismo argumento legal), pero el texto de la nota
+mezcla dos descripciones de transporte distintas sin reconciliarlas — se
+reporta como inconsistencia documental, no como hallazgo de código.
+
+**Por qué proceso separado (justificación GPL).** La nota lo explica en
+detalle (`2026-05-26-sidecar-integration.md:124-149`): el proyecto es
+GPL-3.0, pero varios NuGets que el sidecar consumiría (`Microsoft.Azure.Kusto.Language`,
+paquetes `Azure.*`, el runtime .NET 8 self-contained) están bajo Microsoft
+Software License Terms, no OSI-aprobada. Si el sidecar estuviera *linkeado
+estáticamente* al host Rust/Tauri, la GPL-3.0 trataría la combinación como
+obra derivada y exigiría relicenciar todo el binario combinado bajo GPL —
+incompatible con los términos de Microsoft. Ejecutarlo como proceso
+separado que se comunica por IPC lo hace, según la FAQ de la GPL citada en
+la nota ("Mere aggregation"), un agregado de dos programas independientes,
+cada uno con su propia licencia — de ahí la obligación arquitectónica de
+mantenerlo fuera del proceso del host.
+
+**Estado real del fuente — corrige la premisa del brief de esta tarea, en
+la misma dirección que S2 ya corrigió la premisa de la Tarea 1.** El brief
+de esta tarea (heredado del brief de la Tarea 1) pide citar `git branch -a`
+para las ramas `feat/sp*-sentinel-*` sin mergear. **S2 ya ejecutó
+exactamente ese comando** (`git branch -a --list "*sentinel*"`) y su
+salida fue **vacía** — ninguna de las 4 ramas que
+`docs/decisions/2026-05-26-sidecar-integration.md:20-27` enumera
+explícitamente por nombre y SHA (`feat/sp1-sentinel-sidecar-foundation`,
+`feat/sp2-alt-polling-differential`, `feat/sp3-kql-parser-offline`,
+`feat/sp4-sentinel-management`) existe hoy en `git branch -a` ni en
+`git ls-remote --heads origin/public`. Esta tarea no repite el comando
+(ya verificado en S2) pero sí señala la implicación adicional: la nota de
+decisión, fechada 2026-05-26, describe un estado de 4 branches "con
+tracking en origin" que **ya no está presente** — o esas ramas fueron
+borradas/squasheadas tras mergear (sin que el merge resultante sea
+localizable: `git log --all --oneline -- sidecar/` tampoco devuelve nada,
+per S2), o el estado que describe la nota nunca llegó a materializarse tal
+cual en el remoto observable hoy. En cualquier caso, **hoy no hay fuente
+`.cs`/`.csproj` en ningún ref accesible**, solo los 13 stubs generados bajo
+`obj/` (S2) — el sidecar es, para efectos de este assessment, código que
+no se puede auditar.
+
+**Wiring del lado Rust/Tauri y qué pasa cuando falla — no hay `sidecar_manager`
+en ningún lugar.** El brief pide citar `sidecar_manager` para describir la
+degradación ante fallo. Se buscó exhaustivamente:
+
+```
+grep -rn "sidecar_manager" --include="*.rs" .    →  0 resultados en todo el repo
+grep -rin "sidecar"        apps/tauri/src-tauri/src  →  solo comentarios en
+                                                          state.rs:5,27 ("sidecar"
+                                                          usado como metáfora del
+                                                          AppState de Tauri, sin
+                                                          relación con el .NET sidecar)
+grep -in "externalBin|sidecar" apps/tauri/src-tauri/tauri.conf.json → 0 resultados
+```
+
+No existe ningún `externalBin` en `tauri.conf.json`, ningún
+`Command::new`/`tauri_plugin_shell` que lance el binario del sidecar, ni
+ningún módulo Rust que hable el protocolo gRPC hacia él. Los únicos
+artefactos relacionados con el sidecar en el working tree son binarios
+(`apps/tauri/src-tauri/binaries/graphhunter-sentinel-sidecar.{dll,exe,deps.json}`,
+gitignorados) — residuos de un build .NET previo, no un componente que la
+app Tauri invoque en ningún camino de código trackeado. **Conclusión: no
+hay degradación que describir porque no hay invocación que degradar** — el
+"qué pasa cuando falla" del brief no tiene respuesta de código porque el
+sidecar, en el estado actual del repo, nunca se lanza. Esto es coherente
+con el hallazgo del punto 1: la superficie Sentinel que efectivamente
+mueve datos hoy es el HTTP directo (`reqwest` contra Log Analytics vía
+`sentinel_connector.rs`/`operations/sentinel.rs`), no el sidecar — el
+sidecar, si algún día se landea (per el plan multi-PR de la sección 2 de
+la nota de decisión), sería una ruta adicional/alternativa, no la que la
+app usa hoy.
+
+### 4. `event_time` vs `ingestion_time`: ¿existe la distinción? ¿dónde se pierde?
+
+**Existe a nivel de tipo, pero se pierde en la práctica para todo el
+camino de ingesta que Sentinel usa.** Los dos campos existen en el motor
+de grafos (ya documentado en S3 §4): `Relation.timestamp`/`CompactRelation.timestamp`
+(`event_time`, el instante que el log reporta) y
+`CompactRelation.ingested_at_delta` (`ingestion_time`, pensado para la API
+MVCC "qué sabía el grafo en el instante T", `relation.rs:104-106`).
+
+- **`event_time` sí se extrae correctamente para Sentinel.**
+  `SentinelJsonParser::extract_timestamp` (`core/graph-engine/src/sentinel.rs:96-109`)
+  parsea `TimeGenerated` o, si falta, `Timestamp` (el campo que usan las
+  tablas Defender XDR) vía `parse_timestamp` (`sentinel.rs:55-71`, acepta
+  varios formatos ISO 8601) y ese valor alimenta `Relation::new(..., timestamp)`
+  en cada uno de los ~15 parsers de eventos del archivo (p. ej.
+  `sentinel.rs:249,296,303,324,417,472,522,554`). Si el campo falta o no
+  parsea, se emite un `eprintln!` de warning (`sentinel.rs:103,108`) y el
+  evento se descarta (no hay entrada en `ParseStats.skip_reasons` para este
+  caso específico — es un `eprintln!` a stderr, no contabilizado).
+- **`ingestion_time` se descarta sistemáticamente para el camino que
+  Sentinel usa.** Todo dato de Sentinel entra al grafo vía
+  `graph.insert_triples(...)` — confirmado en los tres call sites
+  productivos: `sentinel_connector.rs:256` (polling loop en vivo),
+  `operations/sentinel.rs:488` (`run_kql`, ingest ad-hoc) y
+  `operations/sentinel.rs:800` (`graph_build`), más `insert_triples`
+  también dentro de `hydrate_node_filtered_with` (`operations/sentinel.rs:1033`,
+  usado por `seed_from_ioc`/`node_enrich`). **`insert_triples`
+  (`core/graph-engine/src/graph.rs:3086-3152`) hardcodea
+  `ingested_at_delta: 0` en la construcción del `CompactRelation`
+  (`graph.rs:3141`)** — no `encode_ingested_at(now_seconds())`, sino la
+  constante `0`, literalmente. `insert_raw_events` (`graph.rs:3160-3244`,
+  usado por el pipeline de parsers de alto rendimiento, no por Sentinel)
+  hace exactamente lo mismo (`graph.rs:3230: ingested_at_delta: 0`), igual
+  que `ingest_logs_with_policy` (`graph.rs:2586-2660`, ver `graph.rs:2646`)
+  e `ingest_logs_chunked` (`graph.rs:2948-3046`, ver `graph.rs:3012`).
+  **El único call site que sí computa el valor real** es `add_relation`
+  (`graph.rs:423-466`, línea `458: ingested_at_delta: encode_ingested_at(now_seconds())`)
+  — una API de una sola relación a la vez que ningún camino de Sentinel
+  invoca (confirmado por grep de `.add_relation(` en todo el repo: sus
+  callers de producción están fuera de `operations/sentinel.rs` y
+  `sentinel_connector.rs`; el resto de los ~40 archivos que la usan son
+  tests/benches).
+- **Consecuencia:** para toda arista que entra al grafo vía Sentinel (en
+  vivo, ad-hoc KQL, hydratación de nodo, o el graph_build de propuestas),
+  `event_time` es correcto pero `ingestion_time` es una constante `0`
+  indistinguible entre sí para todas las aristas de todos los datasets —
+  la distinción del brief "¿existe?" es: existe el campo y el mecanismo
+  (`add_relation` lo demuestra), pero **se pierde específicamente en el
+  camino masivo (`insert_triples`/`insert_raw_events`/`ingest_logs*`) que
+  es exactamente el que toda ingesta real (Sentinel incluida) usa**. Es el
+  mismo patrón de "función helper correcta, call site equivocado" que S3
+  documentó para la idempotencia de aristas (`source_poller.rs:29` vs. la
+  ausencia real de dedup) — el mecanismo MVCC de `ingested_at_delta`
+  existe en el tipo y en un solo call site, pero no en los que importan
+  en producción.
 
 ## S7. Inventario exhaustivo de KQL
 _Pendiente: se completa en la Tarea 6._
@@ -1086,7 +1355,238 @@ _Pendiente: se completa en la Tarea 7._
 _Pendiente: se completa en la Tarea 7._
 
 ## S10. Errores, reintentos y autenticación
-_Pendiente: se completa en la Tarea 5._
+
+### Metodología
+
+Continuación directa de S6: mismos archivos ya leídos íntegramente
+(`sentinel_connector.rs`, `operations/sentinel.rs`, `sentinel_streaming.rs`,
+`sentinel.rs`, `platform/sources/src/{lib,log_analytics,defender_xdr,quota,backoff}.rs`),
+más `apps/tauri/src-tauri/src/http/siem.rs` completo y los tools MCP
+`platform/mcp/src/tools/sentinel/{query,seed}.ts` + `lib/api-client.ts` +
+`index.ts`. Grep exhaustivo de credenciales Azure sobre todo
+`platform/mcp/src`:
+
+```
+grep -rn "azure_tenant_id|azure_client_id|azure_client_secret|workspace_id" platform/mcp/src
+  → 0 resultados en las 26 fuentes .ts del servidor MCP
+```
+
+### 1. Errores y reintentos: política por fuente
+
+**Hallazgo transversal: hay dos políticas de reintento completamente
+separadas y no unificadas — una vieja (wireada) y una nueva (dormida).**
+
+**(A) Camino en vivo wireado — `sentinel_connector.rs::polling_loop`
+(`platform/api/src/sentinel_connector.rs:106-373`).** Es el único lugar
+del repo donde Sentinel tiene un loop de reintento real ejecutándose en
+producción:
+
+- **Backoff:** exponencial manual, no la librería reusable de
+  `platform/sources::backoff` (esa es parte de la superficie 2, dormida —
+  ver S6). Fórmula (`sentinel_connector.rs:202-205`):
+  `base = 2^consecutive_errors.min(8)`, capado en
+  `MAX_BACKOFF_SECS = 300` (`:35`), con jitter multiplicativo uniforme en
+  `[0.5, 1.0]` (`:204`). `consecutive_errors` se resetea a `0` tras
+  **cualquier** poll exitoso de **cualquier** tabla (`:302`), no por
+  tabla — un error en una tabla dispara backoff para el ciclo completo del
+  conector, no solo para esa tabla.
+- **`Retry-After`: NO se honra en el camino en vivo.**
+  `HttpSentinelTransport::execute_query` (`sentinel_streaming.rs:122-156`)
+  trata cualquier status no-2xx igual: `format!("query failed: {} {}", status, body)`
+  (`:147-150`) — un 429 con `Retry-After: 30` produce el mismo string de
+  error genérico que un 500 o un 400; no hay ninguna rama que extraiga el
+  header. El backoff que sigue (2^n con jitter) es ciego al valor real que
+  el servidor pidió esperar.
+- **Circuit breaker: solo para auth, no para el resto de errores.**
+  `MAX_AUTH_FAILURES = 3` (`:38`) — tras 3 fallos consecutivos
+  clasificados como auth (`e.contains("401") || e.contains("403") || e.contains("token")`,
+  `:183`), el conector se detiene por completo (`Disconnected`, `:193-195`)
+  y exige reconexión manual del analista (`sentinel_connect` de nuevo). Para
+  cualquier otro tipo de error (network, schema, 429, 5xx) **no hay
+  circuit breaker** — el loop reintenta indefinidamente con el backoff
+  exponencial descrito arriba, sin límite de intentos ni de tiempo total.
+- **`run_kql`/`discover_schema`/`graph_propose`/`graph_build`/`hydrate_node_*`
+  (`operations/sentinel.rs`, camino ad-hoc/one-shot): CERO reintentos.**
+  Cada uno hace una única llamada HTTP (vía `run_sentinel_query` en
+  `spawn_blocking` para `run_kql`, o `transport.execute_query` para
+  hydratación) y, si falla, propaga el error inmediatamente como
+  `ApiError::Upstream` (`operations/sentinel.rs:390-393`) o
+  `tracing::warn!` sin abortar el resto de tablas (hydratación,
+  `:1039,1041,1046,1048`, per-tabla best-effort). No hay backoff, no hay
+  `Retry-After`, no hay circuit breaker en este camino — es responsabilidad
+  del caller (UI/MCP) decidir si reintentar.
+- **Errores hacia DLQ vs pérdida — el camino Sentinel nunca escribe al
+  DLQ.** Se grepeó `record_dead_letter`/`record_parse_skips`/`dead_letter`
+  sobre `operations/sentinel.rs`: **0 resultados**. Esto es consistente con
+  el hallazgo de S5 (`platform/api/src/operations/dlq.rs`, wireado en
+  `lib.rs:155-175`): el DLQ solo se alimenta desde los caminos síncronos de
+  archivo (`load_data`/`load_data_with_config`, `ingestion.rs:433,755`).
+  Para Sentinel, dos clases de pérdida silenciosa distinta: (a) filas que
+  el parser no logra convertir a triples — `polling_loop` las detecta
+  (`if triples.is_empty()`, `sentinel_connector.rs:244-252`) y emite un
+  evento `sentinel-error` a la UI, pero **no las persiste en ningún
+  lado** — no hay bytes crudos retenidos, se pierden; (b) fallos de
+  `graph.insert_triples` ("Spill store error", `:273-280`) — también solo
+  emitido como evento, la porción de filas de esa tabla en ese ciclo de
+  poll se pierde (el watermark de esa tabla no avanza si `next_query_start`
+  no llegó a computarse, pero las filas ya extraídas del response no se
+  reintentan ni se guardan).
+
+**(B) Camino nuevo `LogSource`/`platform/sources` — dormido, no invocado
+en producción (ver S6 y S5).** Aquí sí existe una taxonomía de error
+disciplinada y honrada:
+
+- `SourceError` (`platform/sources/src/lib.rs:208-236`) distingue `Auth`,
+  `Throttled(Duration)`, `Timeout`, `Truncated`, `Schema(String)`,
+  `Network(String)`, `Fatal(String)` — siete variantes con semántica de
+  reintento documentada en cada doc-comment (`:209-235`).
+  `log_analytics.rs::map_http_status_to_source_error` (`:501-510`) y su
+  equivalente en `defender_xdr.rs` (`:381-390`) **sí** parsean
+  `Retry-After` del response (`resp.retry_after()`,
+  `http_client.rs:141-147`, solo forma delta-seconds) y lo empaquetan en
+  `SourceError::Throttled(retry_after.unwrap_or(Duration::from_secs(60)))`.
+- El `QuotaLimiter` (`platform/sources/src/quota.rs`) es un token-bucket
+  por `(source_kind, tenant_id)` con soporte de penalización explícita por
+  `Retry-After` (`penalize()`, `:120-134`, extiende pero nunca acorta una
+  penalización existente) y quotas documentadas por superficie
+  (`quota.rs:8-14`): Log Analytics 200/30s, Defender XDR ~45/60s, Data Lake
+  120/60s conservador. **Ninguno de estos límites se aplica hoy al camino
+  (A)** — `HttpSentinelTransport`/`run_sentinel_query` no instancian ni
+  consultan ningún `QuotaLimiter`; es exclusivo de la superficie 2.
+- Métricas: `PollerMetricsSnapshot` (citado en S5, `source_poller.rs:222-232`)
+  expone `circuit_state`/`circuit_open_skips`/`consecutive_failures` — pero,
+  igual que el resto de la superficie 2, solo alcanzable desde tests.
+
+**Tabla resumen por fuente:**
+
+| Fuente | Camino en producción hoy | Backoff | `Retry-After` | Circuit breaker | DLQ |
+|---|---|---|---|---|---|
+| Log Analytics (polling en vivo) | `sentinel_connector.rs` | 2^n·jitter, cap 300s, reset global | No honrado (tratado como error genérico) | Solo 3-strike auth | No — pérdida silenciosa (evento UI) |
+| Log Analytics (ad-hoc KQL / discover / propose / build / hydrate) | `operations/sentinel.rs` | Ninguno | No aplica (sin retry) | Ninguno | No |
+| Defender XDR / Data Lake v2 / Log Analytics (vía `LogSource`) | Ninguno — superficie dormida | N/A (no ejecuta) | Parseado y modelado (`SourceError::Throttled`) pero nunca alcanzado en runtime | N/A | N/A |
+| Elasticsearch (`platform/siem/src/elastic.rs`) | `run_elastic_query`, mismo patrón síncrono que `sentinel.rs` | Ninguno (no leído en detalle; mismo `reqwest::blocking` sin retry visible en las líneas revisadas) | No | No | No |
+
+### 2. Autenticación: dónde viven las credenciales, quién las conoce
+
+**Dónde viven.** Cuatro variables `AZURE_*` (`AZURE_TENANT_ID`,
+`AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_WORKSPACE_ID`) leídas del
+entorno de proceso del **host Tauri/Rust** vía `std::env::var` en múltiples
+puntos: `platform/siem/src/sentinel.rs:82-85` (fallback de
+`run_sentinel_query` cuando no se pasa `auth` explícito),
+`operations/sentinel.rs:52-61` (`env_or`, usado por `run_kql`,
+`discover_schema`, `graph_build`, `sentinel_connect`) y
+`operations/sentinel.rs:85-94` (`resolve_azure_creds`, usado por
+`seed_from_ioc`/`node_enrich`, **sin** posibilidad de override explícito —
+solo env). No hay keyring ni almacén cifrado de credenciales en ningún
+archivo leído — es texto plano en variables de entorno del proceso, más
+opcionalmente un archivo `.env` (mencionado en el mensaje de error de
+`env_or`, `operations/sentinel.rs:58: "not set in .env"`).
+
+**También se pueden pasar explícitos desde la UI, por request.** Los DTOs
+`SentinelConnectRequest`/`RunKqlRequest`/`SchemaDiscoverRequest`/
+`GraphProposeRequest`/`GraphBuildRequest` aceptan campos opcionales
+`azure_tenant_id`/`azure_client_id`/`azure_client_secret`/`workspace_id`
+que, si no están vacíos, **ganan sobre el env var** (`env_or`,
+`operations/sentinel.rs:52-61`: `if !explicit.is_empty() { return Ok(explicit) }`).
+El HTTP handler correspondiente (`apps/tauri/src-tauri/src/http/siem.rs`)
+expone estos mismos campos como `Option<String>` con `#[serde(default)]`
+en `RunKqlBody` (`:17-38`), `SchemaDiscoverBody` (`:73-93`),
+`GraphProposeBody` (`:127-145`) y `GraphBuildBody` (`:178-195`) — es decir,
+la UI del frontend Tauri **sí puede** enviar credenciales explícitas por
+request en vez de depender solo del env del proceso. `sentinel_check_env`
+(`operations/sentinel.rs:296-314`) existe exactamente para que esa UI
+autopueble el formulario, devolviendo el secreto enmascarado
+(`azure_client_secret_masked`, `:301-306`) sin exponerlo completo.
+**Excepción notable:** `SeedBody` (`http/siem.rs:228-234`) y
+`NodeEnrichBody` (`:264-275`) — los endpoints HTTP para `sentinel_seed`/
+`node_enrich` — **no tienen ningún campo de credenciales Azure en su
+struct**; para esos dos, la única fuente posible es
+`resolve_azure_creds()` leyendo el env del proceso host, sin excepción.
+
+**¿El MCP conoce credenciales de Azure? Respuesta: NO — con evidencia
+directa, no por ausencia de prueba.**
+
+1. **Grep exhaustivo sobre las 26 fuentes `.ts` del servidor MCP
+   (`platform/mcp/src/**`) para `azure_tenant_id|azure_client_id|azure_client_secret|workspace_id`:
+   0 resultados.** Ninguno de los nombres de campo que transportan
+   credenciales Azure aparece en ningún archivo del proceso MCP.
+2. **El tool `sentinel_query`** (`platform/mcp/src/tools/sentinel/query.ts:43-50`)
+   construye el body que envía a `POST /kql` únicamente con
+   `{ kql, ingest, lookback, max_rows, dataset, acknowledge_fallback }`
+   (`:44-49`) — ningún campo de credencial.
+3. **El tool `sentinel_seed`** (`platform/mcp/src/tools/sentinel/seed.ts:26-29`)
+   envía `{ entity_type, value, lookback }` a `POST /sentinel/seed` — y,
+   como se documentó arriba, ese endpoint HTTP (`SeedBody`) ni siquiera
+   tiene un slot para credenciales: aunque el MCP quisiera pasarlas, no
+   habría dónde ponerlas.
+4. **El único "token" que el cliente HTTP del MCP conoce es el bearer de
+   la API local de GraphHunter, no un token de Azure AD.**
+   `ApiClientConfig` (`platform/mcp/src/lib/api-client.ts:17-22`) tiene un
+   campo `token: string` que `authHeaders()` (`:28-29`) convierte en
+   `Authorization: Bearer <token>` — pero ese token autentica al MCP
+   **contra el propio servidor HTTP local de GraphHunter**
+   (`cfg.baseUrl`, por defecto `http://127.0.0.1:37891`), no contra Azure.
+   Confirmado por el origen de ese valor: `platform/mcp/src/index.ts:21-22`
+   —
+   ```ts
+   const API_BASE = process.env.GRAPHHUNTER_API_URL || "http://127.0.0.1:37891";
+   const API_TOKEN = process.env.GRAPHHUNTER_API_TOKEN || "";
+   ```
+   Los únicos env vars que el proceso MCP lee son
+   `GRAPHHUNTER_API_URL`/`GRAPHHUNTER_API_TOKEN`/`GRAPHHUNTER_MCP_DEBUG`
+   (`:21-24`) y `GH_MCP_ENRICH` (`:47`) — ningún `AZURE_*`.
+5. **Conclusión mecánica:** el proceso Node.js del MCP es un cliente HTTP
+   puro del backend Tauri/Rust; nunca recibe, construye ni reenvía
+   credenciales Azure. Cuando un analista invoca `sentinel_query`/
+   `sentinel_seed` desde el MCP, las credenciales que efectivamente se
+   usan son las que el **host Rust** ya tiene resueltas de su propio
+   entorno de proceso (`AZURE_*` env vars) — el MCP corre en un proceso
+   Node separado (paquete npm independiente, S2) sin acceso compartido a
+   ese entorno, y su superficie de tool no expone ningún parámetro por el
+   cual una credencial Azure podría transitar desde el LLM/MCP hacia el
+   backend. Esto responde el criterio de aceptación 25.2 del encargo con
+   evidencia directa de código, no por inferencia.
+
+### 3. Throttling: el quota limiter por tenant y sus métricas
+
+`QuotaLimiter` (`platform/sources/src/quota.rs:35-179`) es un token-bucket
+con refill fraccional por segundo y penalización explícita:
+
+- **Construcción:** `QuotaLimiter::new(capacity, refill_per_second)`
+  (`:59-70`) arranca con el bucket lleno (primeras `capacity` llamadas sin
+  espera). Configs documentadas por superficie (`:8-14`, comentario de
+  módulo): Log Analytics `(200, 200.0/30.0)`, Defender XDR `(45, 45.0/60.0)`,
+  Data Lake v2 `(120, 2.0)` conservador (no hay número oficial de
+  Microsoft, es una estimación del propio equipo).
+- **`try_acquire`/`acquire`:** no-bloqueante vs. bloqueante
+  (`:78-115`) — `acquire()` hace `loop { try_acquire() ... sleep(wait) }`
+  hasta obtener token, cancelable por el caller envolviendo en
+  `tokio::select!` con un `CancellationToken` (comentario de doc, no
+  forzado por el tipo).
+- **`penalize(duration)` (`:120-134`):** para cuando el servidor responde
+  429 con `Retry-After`. Extiende una penalización existente si la nueva
+  es más tardía, nunca la acorta (`:126-129`, test
+  `penalize_extends_but_does_not_shrink`), y drena el bucket a `0` al
+  aplicar la penalización — "belt-and-suspenders" para no permitir un
+  burst apenas expire la ventana (`:130-133`).
+- **Métricas expuestas:** `available()` (`:137-142`, cuenta de tokens
+  actual, para dashboards) y `penalty_remaining()` (`:146-156`, `Option<Duration>`
+  si hay penalización activa). Ambos son getters puros — no hay un
+  emisor de eventos/métricas Prometheus-style conectado a ellos en el
+  código leído; quedarían disponibles para que un caller los exponga, pero
+  ningún caller de producción los consulta (consistente con el punto 1
+  arriba: `QuotaLimiter` es exclusivo de la superficie `LogSource`
+  dormida).
+- **No aplica al camino en producción.** Como ya se estableció en S5 y se
+  reafirma en el punto 1 de esta sección: el conector en vivo
+  (`sentinel_connector.rs`) y el camino ad-hoc (`operations/sentinel.rs`)
+  no instancian ningún `QuotaLimiter` — el único mecanismo de throttling
+  que corre hoy contra Azure real es el backoff exponencial genérico del
+  polling loop (2A arriba), que reacciona a *cualquier* error de la misma
+  forma, no específicamente a 429/quota. En la práctica, esto significa
+  que GraphHunter hoy puede exceder la cuota real de Log Analytics (200
+  queries/30s) sin que ningún limitador local lo prevenga proactivamente —
+  solo reacciona después de que Azure ya devolvió el error.
 
 ## S11. Tests existentes (Sentinel, parsers, búsqueda, MCP)
 _Pendiente: se completa en la Tarea 8._
