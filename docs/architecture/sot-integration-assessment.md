@@ -1399,6 +1399,13 @@ espejo sin lógica, falso positivo del patrón, o test).
 | `kql_escape` | `core/graph-engine/src/sentinel.rs:1281` | Genera — escapa `"`/`\` para interpolar un valor en un literal KQL | Recolección (sanitización de entrada, no semántica) | Conector |
 | `build_hydration_kql` | `core/graph-engine/src/sentinel.rs:1294-1310` | Genera `"{table} | {time_filter} | {col1==v or col2==v...} | take {take}"` | Recolección: selección de tabla + filtro de tiempo (precondición: `time_filter` debe empezar con `where`, línea 1291) + predicado de columna + paginación (`take`). Sin `join`/`summarize`. | Conector — es la primitiva de hidratación on-demand que usa `platform/api/src/operations/sentinel.rs:1023` |
 
+**Archivos de `core/graph-engine` sin fila propia (excluidos con motivo):**
+
+| Archivo | Motivo de exclusión |
+|---|---|
+| `core/graph-engine/src/analytics.rs:2276` | Comentario de doc sobre `find_paths` ("chains that in KQL would need repeated joins are one precomputed walk here") — comparación de prosa, no genera/ejecuta KQL |
+| `core/graph-engine/src/watermark_store.rs:20,96` | Comentarios de doc: `:20` sobre el formato `last_timestamp` ("ISO-8601 for KQL"), `:96` sobre `WatermarkKey` ("KQL sources leave it empty"); ninguno genera ni ejecuta KQL |
+
 ### Tabla exhaustiva — transporte Sentinel (`platform/siem`, `platform/sources`)
 
 | Función/símbolo | Archivo:línea | Genera o ejecuta | Propósito | Destino Fase A |
@@ -1409,6 +1416,12 @@ espejo sin lógica, falso positivo del patrón, o test).
 | `LogAnalyticsSource::build_scoped_query` / `build_poll_query` / `escape_kql` | `platform/sources/src/log_analytics.rs:188,221,334` | Genera `"{table} | where TimeGenerated between (...)  | order by TimeGenerated asc | take {cap}"` (scoped) y `"{table} | where TimeGenerated > {wm} | order by TimeGenerated asc | take {cap}"` (poll) | Recolección — mismo patrón que `KqlQueryBuilder` pero sobre el trait `HttpClient` en vez de `reqwest` directo | Conector — es la abstracción `LogSource` (Fase 3 del plan de streaming); **S6 ya estableció que no tiene ningún invocador de producción**, solo sus propios tests (`log_analytics.rs:526-796`) — candidata natural al `SourceConnector` de Fase A, pero hoy dormida |
 | `DefenderXdrSource::build_scoped_query` / `build_poll_query` / `escape_kql` | `platform/sources/src/defender_xdr.rs:147,172,216` | Mismo patrón que la fila anterior, con `Timestamp` en vez de `TimeGenerated` (comentario `:13-14`, verificado en test `:448` que confirma la ausencia de `TimeGenerated`) | Recolección | Conector — mismo estado que la fila anterior: código real, **no wireado en producción** (S6) |
 | `DataLakeV2Source` (stub) | `platform/sources/src/data_lake.rs:4,20,53,98` | Ninguno ejecutable — la doc del módulo dice explícitamente "NOT the full end-to-end KQL v2 impl" (`:4`) y ambos métodos de datos son `SourceError::Fatal` incondicional (per S6, `:92-114`) | N/A (stub) | Conector — reservado para el `KQL v2 REST` endpoint (`:20`), pendiente de implementación real |
+
+**Archivos de `platform/siem`/`platform/sources` sin fila propia (excluidos con motivo):**
+
+| Archivo | Motivo de exclusión |
+|---|---|
+| `platform/sources/src/lib.rs:62,101,130` | Comentarios de doc del trait `LogSource`: `:62` sobre `SourceKind::DataLakeV2` ("Sentinel Data Lake v2 KQL endpoint"), `:101` sobre `QueryScope` ("KQL \`where\` clause"), `:130` sobre `max_rows_per_table` ("KQL \`take\`"); ninguno genera ni ejecuta KQL — son referencias descriptivas en la definición del trait que un futuro `SourceConnector` implementará |
 
 ### Tabla exhaustiva — orquestación (`platform/api`)
 
@@ -1516,14 +1529,19 @@ Se re-corrió el barrido del Step 1 (comando 1: `kql` case-insensitive sobre
 `platform/mcp/src` (comando 2). Reconciliación fila por fila contra las
 tablas y exclusiones de arriba:
 
-- **Core (3/3 archivos clasificados):** `analytics.rs` y `watermark_store.rs`
-  son exclusión (comentario), `sentinel.rs` tiene 2 filas.
-- **Platform (30/30 archivos clasificados):** 20 con fila propia (algunas
+- **Core (3/3 archivos clasificados):** `analytics.rs:2276` y
+  `watermark_store.rs:20,96` son exclusión (comentario), `sentinel.rs` tiene
+  2 filas.
+- **Platform (30/30 archivos clasificados):** 19 con fila propia (algunas
   con múltiples símbolos, como `operations/sentinel.rs` con 14 filas),
-  5 exclusiones documentadas en `platform/api`, 3 exclusiones en
-  `platform/mcp` (`metrics.ts`, `graph-recent-pivots.ts`,
-  `entity-extractor.ts`), 2 exclusiones de test (`journal-registered.test.ts`,
-  `content.test.ts`).
+  5 exclusiones documentadas en `platform/api` (`format_registry.rs`,
+  `dto/v1/graph_ops.rs`, `dto/v1/geoip.rs`, `operations/graph_meta.rs`,
+  `operations/schema.rs`), 3 exclusiones en `platform/mcp` (`metrics.ts`,
+  `graph-recent-pivots.ts`, `entity-extractor.ts`), 1 exclusión en
+  `platform/sources` (`lib.rs:62,101,130` — comentarios de doc del trait
+  `LogSource`; corregido tras revisión, ver nota abajo), 2 exclusiones de
+  test (`journal-registered.test.ts`, `content.test.ts`). Total: 19 + 5 + 3
+  + 1 + 2 = 30.
 - **Apps (18/18 archivos clasificados):** 15 con fila propia, 3 exclusiones
   documentadas (`journal/store.rs`, `journal/redact.rs`, `journal/capture.rs`).
 - **Idiom-only del comando 2 (4/4 archivos clasificados):** `node/enrich.ts`
@@ -1536,6 +1554,19 @@ tablas y exclusiones de arriba:
 **Cero archivos sin clasificar.** Los 55 archivos del universo (51 del
 comando 1 + 4 nuevos del comando 2) están o bien en una tabla con al menos
 una fila, o bien en una lista de exclusión con motivo explícito.
+
+**Nota de corrección (post-revisión):** una primera versión de esta sección
+omitía `platform/sources/src/lib.rs` — el archivo coincide con el barrido
+`kql` case-insensitive (comentarios de doc en `:62`, `:101`, `:130` sobre el
+trait `LogSource`) pero no tenía fila ni exclusión, dejando el conteo
+"30/30" técnicamente incorrecto (29/30 real). Se verificaron las tres líneas
+citadas por el revisor (`grep -n`/lectura directa) y se agregó como
+exclusión en la tabla de `platform/siem`/`platform/sources`; el conteo de
+esta sección ya refleja las 30 filas correctas. También se verificó la cita
+de `build_kql_ioc_set`: el texto `"paste into an Azure Sentinel hunting
+query"` está en `export.rs:625` (confirmado con `grep -n` y lectura directa
+con numeración de línea), no en `:624` como se señaló en la revisión — la
+cita original de esta sección (`:625`) era correcta y se deja sin cambios.
 
 ### Síntesis: recolección vs. semántica de hipótesis, y destino en Fase A
 
