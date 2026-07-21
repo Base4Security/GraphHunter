@@ -2504,9 +2504,10 @@ datos en un reinicio del pipeline de ingesta).
 el caso 19 es el único de los cuatro respaldado por tres tests distintos en
 vez de uno) y **24 no tienen ninguna** — incluyendo los tres casos de
 reinicio (10-12), ambos casos de tardanza (8-9), tombstone (14), corrección
-(13), backfill (16), paginación (3-4-17), y los tres casos que requieren
-infraestructura que hoy no existe (`GraphDelta`/runtime incremental para 25;
-conector JSONL para 27; Domain API consumida por MCP para 26). Ninguno de
+(13), backfill (16), paginación (3-4-17), y los tres casos sin soporte hoy
+(`GraphDelta`/runtime incremental inexistentes para 25; conector JSONL
+inexistente para 27; y para 26, aunque los tres transportes ya convergen en
+`GraphHunterApi::run_hunt` (S9 §3), ningún test los compara entre sí). Ninguno de
 los 28 tiene cobertura **completa** en el sentido del encargo (test
 dedicado, con ese nombre y esa semántica exacta) — los 4 "parciales" cubren
 un fragmento de la semántica del caso desde un test que existe por otra
