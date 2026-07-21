@@ -1076,9 +1076,6 @@ se rechaza ni se trunca por esta constante.
 ## S6. Integración Sentinel y sidecar
 _Pendiente: se completa en la Tarea 5._
 
-## S6. Integración Sentinel y sidecar
-_Pendiente: se completa en la Tarea 5._
-
 ## S7. Inventario exhaustivo de KQL
 _Pendiente: se completa en la Tarea 6._
 
