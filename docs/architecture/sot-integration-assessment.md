@@ -1605,10 +1605,526 @@ cita original de esta sección (`:625`) era correcta y se deja sin cambios.
   a eliminar (ver S6 para el estado "no wireado" de esas dos).
 
 ## S8. Superficie del servidor MCP
-_Pendiente: se completa en la Tarea 7._
+
+### Metodología
+
+Inventario de código (no ejecución): `platform/mcp/src/tools` (recursivo),
+`platform/mcp/src/resources`, y el árbol de registro
+(`registry.ts` → `server.ts` → `index.ts`). Los 51 tools listados abajo son
+exactamente los que `registry.ts` concatena; se verificó sumando el tamaño
+de cada array de namespace (`sessionTools`(1) + `graphTools`(14) +
+`nodeTools`(7) + `huntTools`(4) + `catalogTools`(1) + `tagsTools`(1) +
+`notesTools`(1) + `journalTools`(1) + `scoresTools`(1) + `reviewTools`(1) +
+`ingestTools`(11) + `sentinelTools`(5) + `enrichTools`(1) + `exportTools`(1)
++ `publishTools`(1) = **51**) contra un grep independiente del patrón
+`name:\s*"` sobre `platform/mcp/src/tools/**` (también 51 coincidencias,
+`platform/mcp/src/tools/sentinel/schema.ts` aporta 2: `schema_discover` y su
+alias deprecado `sentinel_schema`). Esta cifra de 51 es consistente con
+S10, que ya citó "76 fuentes .ts" para todo `platform/mcp/src` (tools +
+resources + lib + entrypoint), verificado de nuevo aquí con
+`find platform/mcp/src -name "*.ts" | wc -l` → `76`.
+
+Cross-referencia con S7: la tabla "servidor MCP" de S7
+(`sot-integration-assessment.md:1462-1493`) ya estableció que **todos** los
+tools MCP son clientes HTTP puros del backend Rust local
+(`ctx.api.post/get(...)`, `platform/mcp/src/lib/api-client.ts`) — ninguno
+construye texto KQL en TypeScript. La tabla de abajo no repite ese análisis
+línea por línea; para cada tool indica el endpoint HTTP invocado y, cuando
+ese endpoint ejecuta o genera KQL según S7 o S6, lo señala con "→ ver S7".
+El grep de `registerPrompt|server\.prompt|\.prompt\(` sobre
+`platform/mcp/src` dio **0 resultados** — el servidor no expone ningún MCP
+*prompt*, solo *tools* y *resources* (ver punto 2).
+
+### 1. Tabla completa de tools MCP
+
+Todos invocan `ctx.api.<method>(<path>, ...)` (`platform/mcp/src/lib/api-client.ts`),
+es decir HTTP hacia el servidor local de GraphHunter (`http://127.0.0.1:37891`
+por defecto, `index.ts:21`) — nunca KQL directo ni una librería de dominio
+in-process. La columna "Invoca" cita el path HTTP; "Clasificación" indica si
+ese path, aguas abajo, toca KQL (citando la fila de S7 correspondiente) o es
+grafo/dominio puro.
+
+**Namespace `session` (`tools/session/`)**
+
+| Tool | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `session_check` | `session/check.ts:5` | `GET /health` (`:14`) | Dominio puro (liveness) |
+
+**Namespace `graph` (`tools/graph/`, 14 tools)**
+
+| Tool | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `graph_summary` | `graph/summary.ts:5` | `GET /graph_summary` (`:14`) | Dominio puro |
+| `graph_entity_types` | `graph/entity_types.ts:15` | `GET /entity_type_counts` o `GET /entity_types` (`:24-25`, según `with_counts`) | Dominio puro |
+| `graph_relation_schema` | `graph/relation_schema.ts:5` | `GET /relation_schema` (`:14`) | Dominio puro |
+| `graph_subnet_analysis` | `graph/subnet_analysis.ts:6` | `GET /subnet_analysis` (`:15`) | Dominio puro (analytics, no Sentinel) |
+| `graph_temporal_heatmap` | `graph/temporal_heatmap.ts:16` | `GET /temporal_heatmap` (`:27`) | Dominio puro |
+| `graph_datasets` | `graph/datasets.ts:5` | `GET /datasets` (`:14`) | Dominio puro |
+| `graph_path_nodes` | `graph/path_nodes.ts:5` | `GET /path_nodes` (`:14`) | Dominio puro |
+| `graph_heavy_edges` | `graph/heavy_edges.ts:12` | `GET /heavy_edges` (`:25`) | Dominio puro |
+| `graph_channel_behavior` | `graph/channel_behavior.ts:14` | `GET /channel_behavior` (`:29`) | Dominio puro |
+| `graph_propose` | `graph/propose.ts:29` | `POST /graph/propose` (`:42`) | **KQL** — genera propuesta de `materialization_kql` → ver S7 fila `build_proposals`/`materialization_kql` (`operations/sentinel.rs:1839-1844`) y fila MCP `graphPropose.execute` (S7:1473) |
+| `graph_build` | `graph/build.ts:25` | `POST /graph/build` (`:38`) | **KQL** — ejecuta el `materialization_kql` aprobado → ver S7 fila `graph_build` (`operations/sentinel.rs:716-746`) y fila MCP `graphBuild.execute` (S7:1474) |
+| `graph_neighbors` | `graph/neighbors.ts:29` | `POST /graph/neighbors` (`:42`) | Dominio puro — S7 ya cita la descripción del tool (`:31`) como "pura lectura de grafo, sin round-trip a Sentinel" (S7:1476) |
+| `graph_path` | `graph/path.ts:32` | `POST /graph/path` (`:46`) | Dominio puro — ídem, "Pure graph read — no Sentinel round-trip" citado en S7:1475 |
+| `graph_anomaly` | `graph/anomaly.ts:23` | `POST /graph/anomaly` (`:36`) | Dominio puro (scoring del motor) |
+
+**Namespace `node` (`tools/node/`, 7 tools)**
+
+| Tool | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `node_get` | `node/get.ts:10` | `GET /node_details` (`:19`) | Dominio puro |
+| `node_score_explanation` | `node/score_explanation.ts:9` | `GET /explain_score` (`:18`) | Dominio puro |
+| `node_search` | `node/search.ts:11` | `GET /search` (`:23`) | Dominio puro |
+| `node_expand` | `node/expand.ts:35` | `GET /expand` o `GET /expand_grouped` (`:52`); con `live=true` (solo `mode=raw`) añade `params.live="true"` (`:47-49`) | Mixto: sin `live`, dominio puro; con `live=true` dispara hidratación en vivo — el mismo mecanismo `expand_node_live` de S7 (`operations/graph_ops.rs:646-679`, tabla "orquestación", genera `time_filter` vía `TimeWindow::kql_filter()`). Este archivo no contiene los idioms de KQL que buscó el grep de S7 (por eso no aparece en la tabla MCP de S7), pero el endpoint que invoca sí es KQL de recolección fija, no analista |
+| `node_events` | `node/events.ts:32` | `GET /events_for_node` (sin paginar, `:42`) o `GET /events_paginated` (`:50`) | Dominio puro |
+| `node_subgraph` | `node/subgraph.ts:42` | `POST /export_subgraph` (`output=file`, `:52-56`) o `POST /subgraph` (`output=inline`, `:59-63`) | Dominio puro |
+| `node_enrich` | `node/enrich.ts:32` | `POST /node/enrich` (`:46`) | **KQL** — hidratación filtrada vía `hydrate_node_filtered_with` → S7 fila `nodeEnrich.execute` (S7:1472) y fila `node_enrich` (`operations/sentinel.rs:1173-1241`) |
+
+**Namespace `hunt` (`tools/hunt/`, 4 tools)**
+
+| Tool | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `hunt_parse` | `hunt/parse.ts:13` | `POST /parse_dsl` (`:22`) | Dominio puro (parser DSL) |
+| `hunt_run` | `hunt/run.ts:22` | `POST /run_hunt` (`:37`) | Dominio puro — **motor de grafos** (`GraphHunterApi::run_hunt`); ver criterio 25.11 en S9 |
+| `hunt_results` | `hunt/results.ts:18` | `GET /hunt_results` (`:32`) | Dominio puro |
+| `hunt_diff` | `hunt/diff.ts:15` | `POST /diff_hunts` (`:24`) | Dominio puro |
+
+**Namespace `catalog` (`tools/catalog/`, 1 tool)**
+
+| Tool | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `catalog_get` | `catalog/get.ts:15` | `GET /catalog` o `GET /catalog/status` (`:27`, según `include`), + `GET /catalog/diagnostics` (`:32`, si `include` contiene `diagnostics`) | Dominio puro (catálogo MITRE ATT&CK) |
+
+**Namespace `tags` (`tools/tags/index.ts`, 1 tool compuesto)**
+
+| Tool (op) | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `tags` (op=add) | `tags/index.ts:36,45-48` | `POST /tag` (`:48`) | Dominio puro |
+| `tags` (op=remove) | `tags/index.ts:50-53` | `POST /untag` (`:53`) | Dominio puro |
+| `tags` (op=list) | `tags/index.ts:55-58` | `GET /tags` (`:58`) | Dominio puro |
+
+**Namespace `notes` (`tools/notes/index.ts`, 1 tool compuesto)**
+
+| Tool (op) | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `notes` (op=add) | `notes/index.ts:20,30-32` | `POST /notes` (`:32`) | Dominio puro |
+| `notes` (op=list) | `notes/index.ts:33-34` | `GET /notes/list` (`:34`) | Dominio puro |
+
+**Namespace `journal` (`tools/journal/index.ts`, 1 tool compuesto, 5 ops)**
+
+| Tool (op) | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `journal` (op=start) | `journal/index.ts:49,59-60` | `POST /journal/start` (`:60`) | Dominio puro |
+| `journal` (op=list) | `journal/index.ts:62-63` | `GET /journal/list` (`:63`) | Dominio puro |
+| `journal` (op=get) | `journal/index.ts:65-68` | `GET /journal/:id` (`:67`) | Dominio puro |
+| `journal` (op=stats) | `journal/index.ts:69-72` | `GET /journal/:id/stats` (`:71`) | Dominio puro |
+| `journal` (op=expand) | `journal/index.ts:73-77` | `POST /journal/:id/expand` (`:76`) | **KQL, acotado** — el handler (`http/journal.rs:169-246`, ya citado en S7:1500) re-ejecuta vía `api.run_kql` el KQL **ya almacenado** de ese hunt; el body del tool solo lleva `{value, column, limit}` (sin campo KQL), y el filtrado post-resultado es Rust puro (`filter_rows`, `journal.rs:145-162`). No es el analista escribiendo KQL nuevo — ver veredicto §2 abajo |
+| `journal` (op=export) | `journal/index.ts:78-94` | `GET /journal/:id` (`:93`, reutiliza el mismo endpoint que op=get y devuelve solo `record.events`) | Dominio puro — el comentario (`:80-92`) documenta por qué el tool NO usa el endpoint separado `POST /journal/export` (streaming NDJSON incompatible con el content layer del MCP) |
+
+**Namespace `scores` (`tools/scores/recompute.ts`, 1 tool)**
+
+| Tool | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `scores_recompute` | `scores/recompute.ts:6` | `POST /compute_scores` (`:15`) | Dominio puro |
+
+**Namespace `review` (`tools/review/index.ts`, 1 tool compuesto)**
+
+| Tool (op) | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `review` (op=approve) | `review/index.ts:27,37-39` | `POST /agentic_review_approve` (`:39`) | Dominio puro (ingesta) |
+| `review` (op=reject) | `review/index.ts:41-45` | `POST /agentic_review_reject` (`:45`) | Dominio puro |
+| `review` (op=list) | `review/index.ts:47-50` | `POST /agentic_review_list` (`:50`) | Dominio puro |
+
+**Namespace `ingest` (`tools/ingest/`, 11 tools)**
+
+| Tool | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `ingest_negotiate` | `ingest/negotiate.ts:26` | `POST /ingest_negotiate` (`:39`) | Dominio puro |
+| `ingest_parser_generate` | `ingest/parser_generate.ts:20` | `POST /parser_generate` (`:32`) | Dominio puro |
+| `ingest_canonical_map` | `ingest/canonical_map.ts:15` | `POST /canonical_map` (`:26`) | Dominio puro |
+| `ingest_regression_test` | `ingest/regression_test.ts:23` | `POST /mapping_regression_test` (`:34`) | Dominio puro |
+| `ingest_invariants_live` | `ingest/invariants_live.ts:16` | `POST /check_invariants` (`:27`) | Dominio puro |
+| `ingest_invariants_hypothetical` | `ingest/invariants_hypothetical.ts:25` | `POST /invariant_check_hypothetical` (`:36`) | Dominio puro — S7 marca `:27` de este archivo como falso positivo del grep de KQL (la palabra inglesa "project", no la keyword) |
+| `ingest_schema_drift` | `ingest/schema_drift.ts:15` | `POST /schema_drift_detect` (`:26`) | Dominio puro |
+| `ingest_dead_letters` (op=list) | `ingest/dead_letters.ts:55,65-71` | `POST /list_dead_letters` (`:71`) | Dominio puro |
+| `ingest_dead_letters` (op=purge) | `ingest/dead_letters.ts:73-85` | `POST /purge_dead_letters` (`:85`) | Dominio puro |
+| `ingest_dead_letters` (op=retry) | `ingest/dead_letters.ts:87-91` | `POST /reingest_dead_letter` (`:91`) | Dominio puro |
+| `ingest_fetch_shared_mappings` | `ingest/fetch_shared_mappings.ts:21` | `POST /fetch_shared_mappings` (`:34`) | Dominio puro |
+| `ingest_publish_mapping` | `ingest/publish_mapping.ts:14` | `POST /publish_mapping` (`:25`) | Dominio puro |
+| `ingest_pcap_preview` | `ingest/pcap_preview.ts:35` | `POST /pcap_preview` (`:44`) | Dominio puro |
+
+(`ingest/field_config_schema.ts` no es un tool — exporta `fieldConfigSchema`,
+un `z.object` compartido por `ingest_negotiate`/`ingest_publish_mapping`/
+`ingest_canonical_map`; no tiene `name`/`execute` propios, `field_config_schema.ts:3-6`.)
+
+**Namespace `sentinel` (`tools/sentinel/`, 5 tools)**
+
+| Tool | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `sentinel_seed` | `sentinel/seed.ts:17` | `POST /sentinel/seed` (`:28`) | **KQL** — hidratación cold-start vía `hydrate_node_with`/`seed_from_ioc` → ver S7 fila `nodeEnrich.execute`-análoga `sentinel_seed.execute` (S7:1775-1779, sección S10) y fila `seed_from_ioc_with`/`seed_from_ioc` (`operations/sentinel.rs:1084,1111-1168`) |
+| `schema_discover` | `sentinel/schema.ts:51-59` (stability: `experimental`) | `POST /sentinel/schema` (`:48`) | **KQL, caso límite** — dispara `usage_kql`/`sample_kql` (S7: `operations/sentinel.rs:577-582,616-621`), que agregan (`summarize`) pero solo metadata de descubrimiento de tablas, no semántica de hipótesis (documentado así en S7) |
+| `sentinel_schema` | `sentinel/schema.ts:64-73` (stability: `deprecated`, alias pre-rename) | mismo `execute`/mismo `POST /sentinel/schema` que `schema_discover` (`:38-48`) | Igual que arriba — alias deprecado, no endpoint distinto |
+| `sentinel_query` | `sentinel/query.ts:35` | `POST /kql` (`:49`) | **KQL libre — escape hatch** → S7 fila `sentinelQuery.execute` (S7:1471): reenvía el texto de `query` (línea 6 del input) completamente libre a `run_kql`. Ver veredicto §2 abajo |
+| `sentinel_status` | `sentinel/status.ts:7` | `GET /sentinel_status` (`:16`) | Dominio puro (estado del conector, no ejecuta KQL) |
+
+**Namespace `enrich` (`tools/enrich.ts`, 1 tool)**
+
+| Tool | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `enrich` (target_type=ip) | `enrich.ts:18,27-29` | `POST /enrich_ip` (`:29`) | Dominio puro (GeoIP); `target_type` `domain`/`hash`/`url` lanzan `NotImplemented` en TS sin llamar a la API (`:31-33`) |
+
+**Namespace `export` (`tools/export.ts`, 1 tool compuesto)**
+
+| Tool (kind/format) | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `export` (kind=hunt, format=sigma) | `export.ts:59,86-96` | `POST /save_hypothesis_as_sigma` (`:92`) | Dominio puro (compila DSL a Sigma, no toca Sentinel) |
+| `export` (kind=hunt, format≠sigma) | `export.ts:97-105` | `POST /export_hunt_results` (`:102`) | Dominio puro |
+| `export` (kind=iocs) | `export.ts:107-112` | `POST /export_iocs` (`:110`) | **KQL como formato de salida** cuando `format="kql_ioc_set"` (`export.ts:15`) → S7 fila `exportTool` (S7:1477) y `build_kql_ioc_set` (`operations/export.rs:603`): genera un snippet KQL para pegar en Sentinel, no lo ejecuta — "fuera de alcance del conector" per S7 |
+| `export` (kind=ocsf) | `export.ts:113-118` | `POST /export_ocsf` (`:116`) | Dominio puro |
+
+**Namespace `publish` (`tools/publish.ts`, 1 tool compuesto)**
+
+| Tool (target) | Archivo:línea | Invoca | Clasificación |
+|---|---|---|---|
+| `publish` (target=sentinel_watchlist) | `publish.ts:62,73-84` | `POST /publish_iocs_to_sentinel` (`:84`) | Dominio puro (push de IoCs ya tageados, no genera/ejecuta KQL) |
+| `publish` (target=jira\|servicenow) | `publish.ts:86-100` | `POST /file_ticket` (`:100`) | Dominio puro |
+
+**Total: 51 tools** (contando cada `op`/`kind`/`format` de los 8 tools
+compuestos — `tags`, `notes`, `journal`, `review`, `ingest_dead_letters`,
+`export`, `publish`, `schema_discover`/`sentinel_schema` — como una sola
+fila de registro cada uno, que es como los cuenta `registry.ts`).
+
+### 2. Resources y prompts expuestos
+
+**Resources (`platform/mcp/src/resources/`, 3 + 1 agregador):**
+
+| Resource | URI | Archivo:línea | Contenido |
+|---|---|---|---|
+| Registrador | — | `resources/index.ts:12-20` | `registerResources` llama a los 3 de abajo y devuelve sus URIs; no es un resource propio |
+| Resumen de grafo | `graph://summary` | `resources/graph-summary.ts:4-21` | Totales por tipo, fuentes ingeridas con frescura, datasets activos, hunts activos, pivots recientes (`client.getSummary`, timeout 800ms). Descripción explícita: "Read this at the start of any hunting conversation" (`:6-9`) |
+| Hunts activos | `graph://active-hunts` | `resources/graph-active-hunts.ts:4-24` | `active_hunts` del mismo `GraphStateClient.getSummary()` — resultados DFS cacheados por ejecución |
+| Pivots recientes | `graph://recent-pivots` | `resources/graph-recent-pivots.ts:4-24` | Últimas 20 entidades añadidas vía `sentinel_seed` o expandidas vía `node_expand`; la descripción (`:6-8`) sugiere explícitamente preferir `node_expand` sobre "generating a fresh KQL" para entradas con `expanded=false` |
+
+Los tres comparten el mismo `GraphStateClient` (HTTP hacia el backend local,
+mismo patrón que los tools) y degradan a `{error: "graph_summary unavailable"}`
+o listas vacías si el timeout de 800ms se agota, sin romper el registro
+(`graph-summary.ts:14-16`, `graph-active-hunts.ts:12-13`,
+`graph-recent-pivots.ts:12-13`).
+
+**Prompts: ninguno.** Grep `registerPrompt|server\.prompt|\.prompt\(` sobre
+todo `platform/mcp/src` → **0 resultados**. El servidor MCP de GraphHunter
+expone únicamente `tools` (51) y `resources` (3); no usa la primitiva
+`prompts` del protocolo MCP.
+
+### 3. Veredicto por tool contra la regla de diseño (spec §2)
+
+La regla ("Regla principal de diseño",
+`docs/superpowers/specs/2026-07-21-sot-integration-design.md:51-61`):
+
+- **La fuente responde:** ¿qué eventos están disponibles?
+- **GraphHunter (el motor) responde:** ¿qué significan esos eventos en el
+  modelo causal y qué caminos satisfacen una hipótesis?
+- **El MCP responde:** ¿qué operaciones del motor debe invocar el agente?
+- KQL vive únicamente dentro del conector de Sentinel y solo para
+  recolección — nunca para definir la semántica final de una hipótesis
+  (`:58-61`).
+
+**Veredicto general (47 de 51 tools cumplen sin matices):** cada tool MCP
+de la tabla del punto 1, salvo las tres excepciones abajo, hace exactamente
+lo que la regla le asigna al MCP — reenvía un `POST`/`GET` con parámetros
+tipados a un endpoint de dominio (`platform/api`), sin decidir él mismo qué
+significa el grafo ni construir texto de consulta. Esto es consistente con
+la conclusión de S7 (`sot-integration-assessment.md:1464-1467`): "Todos los
+tools MCP son clientes HTTP... ninguno construye el texto KQL."
+
+**Violación real de la regla: `sentinel_query`.** Es el único tool cuyo
+parámetro de entrada (`query`, `sentinel/query.ts:6`, ya citado en S7:1471)
+es texto KQL completamente libre que el analista/LLM redacta y que la
+capa de dominio ejecuta casi sin filtrar (S7 ya estableció que el único
+gate, `kql_graph_advisory`/`extract_propose_payload`, detecta proyección de
+columnas de tipo entidad, no agregación/joins — S7:1433,1591-1593). Esto
+permite que, a través del MCP, alguien defina la semántica de una hipótesis
+(`join`/`summarize` arbitrarios) **fuera** del motor de grafos — exactamente
+lo que la regla prohíbe ("nunca para definir la semántica final de una
+hipótesis"). Es una violación conocida y deliberada: el propio diseño la
+llama *escape hatch*, la mantiene logueada (journal captura `/kql`,
+`http/mod.rs:405-406,419-425`) y S7 ya la marca como "fuera del conector de
+Fase A" (S7:1593-1596). No es un hallazgo nuevo; este veredicto lo confirma
+desde el ángulo de la superficie MCP.
+
+**Zona gris, no violación: `journal` (op=expand).** Reutiliza el mismo
+mecanismo de ejecución (`api.run_kql`, `http/journal.rs:199-210`) pero está
+acotado: el tool no acepta un campo de KQL en su input (`journal/index.ts:4-42`,
+solo `value`/`column`/`limit`), y re-ejecuta el KQL **ya almacenado y
+aprobado** de ese hunt — el filtrado adicional por valor ocurre en Rust
+puro (`filter_rows`, `journal.rs:145-162`), no en KQL nuevo. No permite al
+agente introducir semántica nueva vía el MCP; hereda la clasificación de
+"recolección" del KQL ya ejecutado previamente, no la de hipótesis nueva.
+
+**Sin violación, caso de exportación: `export` (kind=iocs,
+format=kql_ioc_set).** Genera un snippet KQL como **artefacto de salida**
+para que el analista lo pegue manualmente en Sentinel
+(`build_kql_ioc_set`, S7:1449,1477) — nunca se ejecuta contra Sentinel
+desde GraphHunter ni define la semántica de ninguna hipótesis del sistema.
+Fuera del alcance de la regla (no es una consulta).
+
+**Casos límite de recolección, consistentes con la regla:**
+`node_enrich`/`sentinel_seed` (hidratación de forma fija,
+`hydrate_node_with`/`hydrate_node_filtered_with`), `graph_propose`/
+`graph_build` (materialización deliberadamente sin agregación — nota de
+diseño citada en S7:2035-2042/1439), `schema_discover`/`sentinel_schema`
+(descubrimiento de metadata de tablas, agregación documentada como
+excepción explícita en S7:1437,1581-1586) y `node_expand` con `live=true`
+(hidratación en vivo vía `expand_node_live`). Los cinco tocan KQL aguas
+abajo, pero siempre KQL de **recolección** (selección de tabla, filtro de
+tiempo, proyección, paginación) generado server-side con forma fija — el
+MCP nunca decide esa forma, solo pasa parámetros tipados (`lookback`,
+`tables`, `max_rows`, etc.), cumpliendo la regla.
+
+**El motor decide, no el MCP: `hunt_run`/`catalog_get`.** `hunt_run` reenvía
+la hipótesis DSL del analista a `GraphHunterApi::run_hunt`
+(`platform/api/src/operations/hunt.rs:101`) — es el motor, no el MCP ni
+KQL, quien decide "qué caminos satisfacen la hipótesis", exactamente el
+reparto de responsabilidad que la regla exige. `catalog_get` solo lee un
+catálogo de hipótesis pre-construidas (MITRE ATT&CK); no ejecuta ni decide
+nada.
 
 ## S9. API HTTP y comandos Tauri
-_Pendiente: se completa en la Tarea 7._
+
+### Metodología
+
+Lectura completa de `apps/tauri/src-tauri/src/http/mod.rs` (501 líneas,
+router Axum) y `http/journal.rs` (312 líneas). Grep
+`invoke_handler|generate_handler` sobre `apps/tauri/src-tauri/src/` → único
+resultado en `lib.rs:250` (`invoke_handler(tauri::generate_handler![...])`,
+bloque `lib.rs:250-369`). Conteo de comandos Tauri verificado con
+`grep -rEn "pub (async )?fn cmd_" apps/tauri/src-tauri/src/commands/ | wc -l`
+→ **102**, y con un conteo separado del bloque `generate_handler!` (102
+líneas `commands::...` entre `lib.rs:250` y `:369`) — ambos coinciden.
+Grep `GraphHunterApi` sobre `platform/api/src/lib.rs`, `platform/mcp/src/`
+y `apps/tauri/src-tauri/src/` confirma el patrón de S7/S10: el struct vive
+en `platform/api/src/lib.rs:117-119` (comentario `:110-116`: "Cada método es
+la única implementación autoritativa de su operación — los transportes no
+contienen lógica de negocio"); el MCP nunca lo importa directamente (solo
+vía HTTP, `ApiClient`); Tauri lo inyecta como `State<Arc<GraphHunterApi>>`
+en 76 sitios de `commands/*.rs` (`grep -n "State<Arc<GraphHunterApi>>" ... | wc -l`).
+
+### 1. Rutas HTTP completas
+
+**Autenticación:** `auth_middleware` (`http/mod.rs:72-105`) exige
+`Authorization: Bearer <api_token>` (comparación de tiempo constante,
+`subtle::ConstantTimeEq`, `:92-96`) en **todas** las rutas excepto 4,
+exentas explícitamente en `mod.rs:81`: **`/`, `/health`, `/metrics`,
+`/v1/schema`**. El comentario de código (`:78-80`) documenta por qué
+`/metrics` está exento: los scrapers de Prometheus típicamente no envían
+bearer tokens, y el server solo escucha en localhost por defecto. Además,
+`journal_capture_skips` (`:110-112`) excluye de la captura obligatoria del
+journal (no de la auth) a `/`, `/health`, `/metrics` y cualquier ruta que
+empiece con `/journal` — para no journalear las propias lecturas del
+journal.
+
+`build_app` (`mod.rs:337-445`) registra **86 líneas `.route(...)`**, de las
+cuales 4 pares son alias con slash final del mismo handler
+(`/subgraph`+`/subgraph/`, `/run_hunt`+`/run_hunt/`, `/notes`+`/notes/`,
+`/kql`+`/kql/`) → **82 paths únicos**. Todas las rutas abajo requieren
+Bearer salvo las 4 marcadas "NO" en la columna Auth. La columna
+"Clasificación" cruza contra S7 cuando el handler toca KQL.
+
+| Método | Path | Handler (módulo) | Auth | Clasificación |
+|---|---|---|---|---|
+| GET | `/` | `misc::handler_api_root` (`mod.rs:340`) | NO | Infra |
+| GET | `/health` | `misc::handler_health` (`:341`) | NO | Infra (usado por `session_check` MCP) |
+| GET | `/v1/schema` | `misc::handler_schema` (`:342`) | NO | Infra (schema de la API) |
+| GET | `/metrics` | `misc::handler_metrics` (`:418`) | NO | Infra (Prometheus) |
+| GET | `/entity_types` | `graph::handler_entity_types` (`:343`) | Sí | Dominio puro |
+| GET | `/relation_schema` | `graph::handler_relation_schema` (`:344`) | Sí | Dominio puro (usado por `graph_relation_schema` MCP) |
+| GET | `/explain_score` | `hunt::handler_explain_score` (`:345`) | Sí | Dominio puro (usado por `node_score_explanation` MCP) |
+| GET | `/search` | `graph::handler_search` (`:346`) | Sí | Dominio puro (usado por `node_search` MCP) |
+| GET | `/expand` | `graph::handler_expand` (`:347`) | Sí | Mixto — hidratación en vivo si `live=true` (ver S8, `node_expand`) |
+| GET | `/node_details` | `graph::handler_node_details` (`:348`) | Sí | Dominio puro (usado por `node_get` MCP) |
+| POST | `/subgraph` (+`/subgraph/`) | `graph::handler_subgraph` (`:349-350`) | Sí | Dominio puro (usado por `node_subgraph` MCP, `output=inline`) |
+| GET | `/events_for_node` | `graph::handler_events_for_node` (`:351`) | Sí | Dominio puro (usado por `node_events` MCP) |
+| POST | `/run_hunt` (+`/run_hunt/`) | `hunt::handler_run_hunt` (`:352-353`) | Sí | Dominio puro — **motor** (`api.run_hunt`, ver criterio 25.11 abajo); usado por `hunt_run` MCP y `cmd_run_hunt` Tauri |
+| GET | `/hunt_results` | `hunt::handler_hunt_results` (`:354`) | Sí | Dominio puro (usado por `hunt_results` MCP) |
+| POST | `/diff_hunts` | `hunt::handler_diff_hunts` (`:355`) | Sí | Dominio puro (usado por `hunt_diff` MCP) |
+| POST | `/notes` (+`/notes/`) | `notes::handler_create_note` (`:356-357`) | Sí | Dominio puro (usado por `notes` op=add MCP) |
+| GET | `/notes/list` | `notes::handler_list_notes` (`:358`) | Sí | Dominio puro (usado por `notes` op=list MCP) |
+| GET | `/notes/:id` | `notes::handler_get_note_by_id` (`:359`) | Sí | Dominio puro — **sin consumidor MCP** (solo alcanzable hoy vía la ruta HTTP; el tool `notes` no expone op=get) |
+| GET | `/graph_summary` | `graph::handler_graph_summary` (`:360`) | Sí | Dominio puro (usado por `graph_summary` MCP y el resource `graph://summary` vía `GraphStateClient`) |
+| GET | `/graph/summary` | `graph_meta::handler_graph_summary` (`:361`) | Sí | Dominio puro — ruta **distinta** de `/graph_summary`; **sin consumidor MCP** identificado (ningún tool de la tabla S8 la invoca) |
+| POST | `/graph/overlap` | `graph_meta::handler_graph_overlap` (`:362`) | Sí | Dominio puro — **sin consumidor MCP**; S7 la cita (`operations/graph_meta.rs:328`) como receptora de entidades ya extraídas de un resultado KQL por el llamador, sin tocar KQL ella misma |
+| GET | `/entity_type_counts` | `graph::handler_entity_type_counts` (`:363`) | Sí | Dominio puro (usado por `graph_entity_types` MCP, `with_counts=true`) |
+| GET | `/temporal_heatmap` | `anomaly::handler_temporal_heatmap` (`:364`) | Sí | Dominio puro (usado por `graph_temporal_heatmap` MCP) |
+| GET | `/subnet_analysis` | `anomaly::handler_subnet_analysis` (`:365`) | Sí | Dominio puro (usado por `graph_subnet_analysis` MCP) |
+| POST | `/enrich_ip` | `anomaly::handler_enrich_ip` (`:366`) | Sí | Dominio puro (usado por `enrich` MCP) |
+| GET | `/catalog` | `catalog::handler_catalog` (`:367`) | Sí | Dominio puro (usado por `catalog_get` MCP, `include=[]`) |
+| GET | `/catalog/status` | `catalog::handler_catalog_with_status` (`:368`) | Sí | Dominio puro (usado por `catalog_get` MCP, `include` contiene `status`) |
+| GET | `/catalog/diagnostics` | `catalog::handler_catalog_diagnostics` (`:369`) | Sí | Dominio puro (usado por `catalog_get` MCP, `include` contiene `diagnostics`) |
+| POST | `/tag` | `tags::handler_tag_entity` (`:370`) | Sí | Dominio puro (usado por `tags` op=add MCP) |
+| POST | `/untag` | `tags::handler_untag_entity` (`:371`) | Sí | Dominio puro (usado por `tags` op=remove MCP) |
+| GET | `/tags` | `tags::handler_list_tagged` (`:372`) | Sí | Dominio puro (usado por `tags` op=list MCP) |
+| POST | `/export_iocs` | `export::handler_export_iocs` (`:373`) | Sí | Ver S8 — `kql_ioc_set` es formato de salida, no ejecución (usado por `export` kind=iocs MCP) |
+| POST | `/publish_iocs_to_sentinel` | `export::handler_publish_iocs_to_sentinel` (`:374`) | Sí | Dominio puro (usado por `publish` target=sentinel_watchlist MCP y `cmd_publish_iocs_to_sentinel` Tauri) |
+| POST | `/save_hypothesis_as_sigma` | `export::handler_save_hypothesis_as_sigma` (`:375`) | Sí | Dominio puro (usado por `export` kind=hunt,format=sigma MCP y `cmd_save_hypothesis_as_sigma` Tauri) |
+| POST | `/file_ticket` | `export::handler_file_ticket` (`:376`) | Sí | Dominio puro (usado por `publish` target=jira\|servicenow MCP y `cmd_file_ticket` Tauri) |
+| GET | `/datasets` | `misc::handler_list_datasets` (`:377`) | Sí | Dominio puro (usado por `graph_datasets` MCP) |
+| GET | `/path_nodes` | `graph::handler_path_nodes` (`:378`) | Sí | Dominio puro (usado por `graph_path_nodes` MCP) |
+| POST | `/export_subgraph` | `export::handler_export_subgraph` (`:379`) | Sí | Dominio puro (usado por `node_subgraph` MCP, `output=file`) |
+| POST | `/export_ocsf` | `export::handler_export_ocsf` (`:380`) | Sí | Dominio puro (usado por `export` kind=ocsf MCP) |
+| POST | `/check_invariants` | `invariants::handler_check_invariants` (`:381`) | Sí | Dominio puro (usado por `ingest_invariants_live` MCP) |
+| POST | `/ingest_negotiate` | `ingest::handler_ingest_negotiate` (`:382`) | Sí | Dominio puro (usado por `ingest_negotiate` MCP) |
+| POST | `/pcap_preview` | `ingest::handler_pcap_preview` (`:383`) | Sí | Dominio puro (usado por `ingest_pcap_preview` MCP y `cmd_pcap_preview` Tauri) |
+| POST | `/canonical_map` | `ingest::handler_canonical_map` (`:384`) | Sí | Dominio puro (usado por `ingest_canonical_map` MCP) |
+| POST | `/parser_generate` | `ingest::handler_parser_generate` (`:385`) | Sí | Dominio puro (usado por `ingest_parser_generate` MCP) |
+| POST | `/schema_drift_detect` | `ingest::handler_schema_drift_detect` (`:386`) | Sí | Dominio puro (usado por `ingest_schema_drift` MCP) |
+| POST | `/mapping_regression_test` | `ingest::handler_mapping_regression_test` (`:387`) | Sí | Dominio puro (usado por `ingest_regression_test` MCP) |
+| POST | `/invariant_check_hypothetical` | `invariants::handler_invariant_check_hypothetical` (`:388`) | Sí | Dominio puro (usado por `ingest_invariants_hypothetical` MCP) |
+| POST | `/agentic_review_list` | `agentic::handler_agentic_review_list` (`:389`) | Sí | Dominio puro (usado por `review` op=list MCP) |
+| POST | `/agentic_review_approve` | `agentic::handler_agentic_review_approve` (`:390`) | Sí | Dominio puro (usado por `review` op=approve MCP) |
+| POST | `/agentic_review_reject` | `agentic::handler_agentic_review_reject` (`:391`) | Sí | Dominio puro (usado por `review` op=reject MCP) |
+| POST | `/list_dead_letters` | `dlq::handler_list_dead_letters` (`:392`) | Sí | Dominio puro (usado por `ingest_dead_letters` op=list MCP) |
+| POST | `/reingest_dead_letter` | `dlq::handler_reingest_dead_letter` (`:393`) | Sí | Dominio puro (usado por `ingest_dead_letters` op=retry MCP) |
+| POST | `/purge_dead_letters` | `dlq::handler_purge_dead_letters` (`:394`) | Sí | Dominio puro (usado por `ingest_dead_letters` op=purge MCP) |
+| POST | `/publish_mapping` | `ingest::handler_publish_mapping` (`:395`) | Sí | Dominio puro (usado por `ingest_publish_mapping` MCP) |
+| POST | `/fetch_shared_mappings` | `ingest::handler_fetch_shared_mappings` (`:396`) | Sí | Dominio puro (usado por `ingest_fetch_shared_mappings` MCP) |
+| POST | `/parse_dsl` | `hunt::handler_parse_dsl` (`:397`) | Sí | Dominio puro (usado por `hunt_parse` MCP y `cmd_parse_dsl` Tauri) |
+| GET | `/events_paginated` | `graph::handler_events_paginated` (`:398`) | Sí | Dominio puro (usado por `node_events` MCP, paginado) |
+| GET | `/expand_grouped` | `graph::handler_expand_grouped` (`:399`) | Sí | Dominio puro (usado por `node_expand` MCP, `mode=grouped`) |
+| GET | `/heavy_edges` | `graph::handler_heavy_edges` (`:400`) | Sí | Dominio puro (usado por `graph_heavy_edges` MCP) |
+| GET | `/channel_behavior` | `graph::handler_channel_behavior` (`:401`) | Sí | Dominio puro (usado por `graph_channel_behavior` MCP) |
+| POST | `/export_hunt_results` | `export::handler_export_hunt_results` (`:402`) | Sí | Dominio puro (usado por `export` kind=hunt MCP) |
+| POST | `/enable_anomaly_scoring` | `anomaly::handler_enable_anomaly_scoring` (`:403`) | Sí | Dominio puro — **sin consumidor MCP**; `hunt_run.ts:24` documenta explícitamente que este "latch" quedó reemplazado por el parámetro `scoring` per-call, "no longer load-bearing" |
+| POST | `/compute_scores` | `anomaly::handler_compute_scores` (`:404`) | Sí | Dominio puro (usado por `scores_recompute` MCP y `cmd_compute_scores` Tauri) |
+| POST | `/kql` (+`/kql/`) | `siem::handler_run_kql` (`:405-406`) | Sí | **KQL libre — escape hatch** (S7:1498, `http/siem.rs:42-71`, delega en `api.run_kql`); usado por `sentinel_query` MCP y `cmd_run_kql` Tauri |
+| POST | `/node/enrich` | `siem::handler_node_enrich` (`:407`) | Sí | **KQL** de hidratación (usado por `node_enrich` MCP) |
+| POST | `/sentinel/seed` | `siem::handler_seed_from_ioc` (`:408`) | Sí | **KQL** de hidratación cold-start (usado por `sentinel_seed` MCP) |
+| POST | `/sentinel/schema` | `siem::handler_discover_schema` (`:409`) | Sí | **KQL** de discovery (usado por `schema_discover`/`sentinel_schema` MCP) |
+| POST | `/graph/propose` | `siem::handler_graph_propose` (`:410`) | Sí | **KQL** de propuesta de materialización (usado por `graph_propose` MCP) |
+| POST | `/graph/build` | `siem::handler_graph_build` (`:411`) | Sí | **KQL** ejecutado (usado por `graph_build` MCP) |
+| POST | `/graph/neighbors` | `graph::handler_graph_neighbors` (`:412`) | Sí | Dominio puro — lectura pura de grafo (usado por `graph_neighbors` MCP) |
+| POST | `/graph/path` | `graph::handler_graph_path` (`:413`) | Sí | Dominio puro — ídem (usado por `graph_path` MCP) |
+| POST | `/graph/anomaly` | `graph::handler_graph_anomaly` (`:414`) | Sí | Dominio puro (usado por `graph_anomaly` MCP) |
+| POST | `/sentinel/resume` | `siem::handler_sentinel_resume` (`:415`) | Sí | Dominio puro — **sin consumidor MCP** (solo `cmd_sentinel_resume` Tauri) |
+| POST | `/sentinel/pause` | `siem::handler_sentinel_pause` (`:416`) | Sí | Dominio puro — **sin consumidor MCP** (solo `cmd_sentinel_pause` Tauri) |
+| GET | `/sentinel_status` | `siem::handler_sentinel_status` (`:417`) | Sí | Dominio puro (usado por `sentinel_status` MCP) |
+| POST | `/journal/start` | `journal::handler_start` (`:419`) | Sí | Dominio puro (usado por `journal` op=start MCP) |
+| POST | `/journal/close` | `journal::handler_close` (`:420`) | Sí | Dominio puro — **sin consumidor MCP** (el tool `journal` no expone op=close) |
+| GET | `/journal/list` | `journal::handler_list` (`:421`) | Sí | Dominio puro (usado por `journal` op=list MCP) |
+| POST | `/journal/export` | `journal::handler_export` (`:422`) | Sí | Dominio puro — **sin consumidor MCP** (streaming NDJSON; `journal/index.ts:80-92` documenta por qué el tool usa `/journal/:id` en su lugar) |
+| GET | `/journal/:id` | `journal::handler_get` (`:423`) | Sí | Dominio puro (usado por `journal` op=get **y** op=export MCP) |
+| GET | `/journal/:id/stats` | `journal::handler_stats` (`:424`) | Sí | Dominio puro (usado por `journal` op=stats MCP) |
+| POST | `/journal/:id/expand` | `journal::handler_expand` (`:425`, cuerpo en `journal.rs:169-246`) | Sí | **KQL acotado** — re-ejecuta el KQL ya almacenado del hunt vía `api.run_kql` (`journal.rs:197-210`); usado por `journal` op=expand MCP. Ver veredicto S8 §2 |
+| — | (fallback) | `misc::fallback_404` (`:426`) | Sí (auth corre antes del fallback) | Infra |
+
+### 2. Comandos Tauri registrados y su operación `GraphHunterApi`
+
+El bloque `invoke_handler(tauri::generate_handler![...])` (`lib.rs:250-369`)
+registra **102 comandos**, uno por función `#[tauri::command]` en
+`apps/tauri/src-tauri/src/commands/*.rs` (verificado 1:1 — 85 `pub fn cmd_`
++ 17 `pub async fn cmd_` = 102). La inmensa mayoría delega en un único
+método de `GraphHunterApi` (el "façade canónico", `platform/api/src/lib.rs:110-119`);
+un pequeño grupo (`perf`, `memory`, `ingest_status`, `azure_streaming_smoke`,
+`cmd_preview_hunting_template`) no toca `GraphHunterApi` en absoluto — son
+introspección de proceso o renderizado puro. Tabla por archivo:
+
+**`commands/session.rs` (6):** `cmd_create_session`→`api.create_session`(`:26`) · `cmd_list_sessions`→`api.list_sessions()`(`:34`) · `cmd_load_session`(`:43`, async)→`api.load_session`(`:48`) · `cmd_save_session`(`:58`, async)→`api.save_session`(`:63`) · `cmd_delete_session`→`api.delete_session`(`:73`) · `cmd_get_current_session`→`api.get_current_session()`(`:81`).
+
+**`commands/entity.rs` (18):** `cmd_get_entity_types_in_graph`→`api.get_entity_types_in_graph`(`:30`) · `cmd_get_entity_types_for_node_neighbours`→`api.get_entity_types_for_node_neighbours`(`:67`) · `cmd_get_entity_type_counts`→`api.get_entity_type_counts`(`:78`) · `cmd_get_relation_schema`→`api.get_relation_schema`(`:44`) · `cmd_explain_score`→`api.explain_score`(`:55`) · `cmd_get_entities_by_type`→`api.get_entities_by_type`(`:87`) · `cmd_get_entities_by_type_paginated`→`api.get_entities_by_type_paginated`(`:101`) · `cmd_get_node_ids_by_relation_type`→`api.get_node_ids_by_relation_type`(`:115`) · `cmd_get_path_nodes`→`api.get_path_nodes`(`:128`) · `cmd_add_path_node`→`api.add_path_node`(`:137`) · `cmd_remove_path_node`→`api.remove_path_node`(`:149`) · `cmd_get_notes`→`api.get_notes`(`:160`) · `cmd_create_note`→`api.create_note`(`:173`) · `cmd_update_note`→`api.update_note`(`:187`) · `cmd_delete_note`→`api.delete_note`(`:200`) · `cmd_tag_entity`→`api.tag_entity`(`:219`) · `cmd_untag_entity`→`api.untag_entity`(`:237`) · `cmd_list_tagged`→`api.list_tagged`(`:250`).
+
+**`commands/ingestion.rs` (5):** `cmd_preview_ingest`→`api.preview_ingest`(`:27`) · `cmd_pcap_preview`→`api.pcap_preview`(`:42`) · `cmd_load_data`→`api.load_data`(`:54`) · `cmd_load_data_streaming`→`api.load_data_streaming`(`:92`) · `cmd_ingest_siem`(async)→`api.ingest_siem`(`:69`).
+
+**`commands/dataset.rs` (4):** `cmd_list_datasets`→`api.list_datasets`(`:20`) · `cmd_remove_dataset`→`api.remove_dataset`(`:31`) · `cmd_rename_type_in_dataset`→`api.rename_type_in_dataset`(`:47`) · `cmd_dataset_entity_types`→`api.dataset_entity_types`(`:61`).
+
+**`commands/graph_ops.rs` (17):** `cmd_get_graph_stats`→`api.get_graph_stats`(`:34`) · `cmd_run_hunt`→`api.run_hunt`(`:49-62`, ver criterio 25.11 abajo) · `cmd_run_hunt_batch`→`api.run_hunt_batch`(`:92`) · `cmd_get_hunt_page`→`api.get_hunt_page`(`:110`) · `cmd_diff_hunts`→`api.diff_hunts`(`:139`) · `cmd_get_subgraph`→`api.get_subgraph`(`:189`) · `cmd_search_entities`→`api.search_entities`(`:208`) · `cmd_expand_node`(async)→`api.expand_node_live`/`api.expand_node`(`:243,245`, según `live`) · `cmd_get_node_details`→`api.get_node_details`(`:283`) · `cmd_get_graph_summary`→`api.get_graph_summary`(`:296`) · `cmd_compute_scores`→`api.compute_scores`(`:307`) · `cmd_get_events_for_node`→`api.get_events_for_node`(`:155`) · `cmd_get_events_paginated`→`api.get_events_paginated`(`:171`) · `cmd_expand_node_grouped`→`api.expand_node_grouped`(`:260`) · `cmd_get_simd_isa`→`api.runtime_info().simd_isa`(`:342`) · `cmd_preview_fields`→`api.preview_fields`(`:318`) · `cmd_load_data_with_config`→`api.load_data_with_config`(`:330`).
+
+**`commands/dsl.rs` (5):** `cmd_parse_dsl`→`api.parse_dsl`(`:65`) · `cmd_get_catalog`→`api.get_catalog()`(`:73`) · `cmd_get_catalog_with_status`→`api.get_catalog_with_status`(`:84`) · `cmd_get_catalog_diagnostics`→`api.get_catalog_diagnostics()`(`:93`) · `cmd_load_catalog_hypothesis`→`api.load_catalog_hypothesis`(`:102`).
+
+**`commands/ai_commands.rs` (9):** `cmd_ai_check_config`→`api.ai_check_config()`(`:25`) · `cmd_ai_set_key`→`api.ai_set_key`(`:33`) · `cmd_ai_set_provider`→`api.ai_set_provider`(`:45`) · `cmd_ai_propose_hypothesis`(async, `:56`) · `cmd_ai_analyze_graph`(async)→`api.ai_analyze_graph`(`:79`) · `cmd_ai_analyze_graph_conversation`(async)→`api.ai_analyze_graph_conversation`(`:98`) · `cmd_ai_chat`(async)→`api.ai_chat`(`:115`) · `cmd_ai_clear_conversation`→`api.ai_clear_conversation`(`:126`) · `cmd_ai_get_conversation`→`api.ai_get_conversation`(`:135`).
+
+**`commands/analytics.rs` (13):** `cmd_get_temporal_heatmap`→`api.get_temporal_heatmap`(`:36`) · `cmd_get_timeline_data`→`api.get_timeline_data`(`:50`) · `cmd_compute_betweenness`→`api.compute_betweenness`(`:62`) · `cmd_compute_pagerank`→`api.compute_pagerank`(`:78`) · `cmd_compute_composite_scores`→`api.compute_composite_scores`(`:99`) · `cmd_compact`→`api.compact`(`:115`) · `cmd_test_http_api`→`api.test_http_api()`(`:128`) · `cmd_enable_anomaly_scoring`→`api.enable_anomaly_scoring`(`:139`) · `cmd_update_anomaly_weights`→`api.update_anomaly_weights`(`:152`) · `cmd_get_anomaly_config`→`api.get_anomaly_config`(`:164`) · `cmd_load_gnn_model`→`api.load_gnn_model`(`:177`) · `cmd_compute_gnn_scores`→`api.compute_gnn_scores`(`:188`) · `cmd_gnn_model_status`→`api.gnn_model_status()`(`:198`).
+
+**`commands/export.rs` (4):** `cmd_export_subgraph`→`api.export_subgraph`(`:26`) · `cmd_export_hunt_results`→`api.export_hunt_results`(`:45`) · `cmd_export_iocs`→`api.export_iocs`(`:84`) · `cmd_export_ocsf`→`api.export_ocsf`(`:66`).
+
+**`commands/invariants.rs` (1):** `cmd_check_invariants`→`api.check_invariants`(`:19`).
+
+**`commands/sentinel_publish.rs` (1):** `cmd_publish_iocs_to_sentinel`(async)→`api.publish_iocs_to_sentinel`(`:32`).
+
+**`commands/sigma_save.rs` (1):** `cmd_save_hypothesis_as_sigma`→`api.save_hypothesis_as_sigma`(`:27`).
+
+**`commands/ticket_file.rs` (1):** `cmd_file_ticket`(async)→`api.file_ticket`(`:31`).
+
+**`commands/perf.rs` (1):** `cmd_get_perf_status`(`perf.rs:54`) → **sin `GraphHunterApi`** (no toma `api: State<...>`; lee flags de proceso).
+
+**`commands/ingest_status.rs` (3):** `cmd_get_ingest_engine_status`(`:60`) → **sin `GraphHunterApi`** · `cmd_debug_emit_synthetic_llm_proposal`(`:257`) → **sin `GraphHunterApi`** (usa `tauri::AppHandle` para emitir eventos sintéticos) · `cmd_request_llm_proposal`(async, `:130`) → toma `api: State<Arc<GraphHunterApi>>` pero orquesta directamente `negotiate_field_config`/`default_backend` (`platform/api/operations/negotiation`, `local_llm`) en vez de llamar a un único método `GraphHunterApi::*`.
+
+**`commands/memory.rs` (1):** `cmd_get_memory_status`(`memory.rs:54`) → **sin `GraphHunterApi`** (telemetría de memoria del proceso).
+
+**`commands/azure_streaming_smoke.rs` (1):** `cmd_azure_streaming_smoke_test`(async, `:172`) → **sin `GraphHunterApi`** (smoke test del plan de streaming, marcado `#[allow(deprecated)]` en su registro, `lib.rs:364-365`).
+
+**`commands/enrichment.rs` (2):** `cmd_enrich_ip`(async)→`api.enrich_ip`(`:24`) · `cmd_get_subnet_analysis`→`api.get_subnet_analysis`(`:34`).
+
+**`commands/sentinel.rs` (9):** `cmd_sentinel_connect`(async, `:29`)→`api.sentinel_connect`(`:33`) · `cmd_sentinel_disconnect`(async, `:40`)→`api.sentinel_disconnect()`(`:43`) · `cmd_sentinel_status`→`api.sentinel_status()`(`:51`) · `cmd_sentinel_resume`→`api.sentinel_resume()`(`:57`) · `cmd_sentinel_pause`→`api.sentinel_pause()`(`:63`) · `cmd_sentinel_check_env`→`api.sentinel_check_env()`(`:80`) · `cmd_run_kql`(async, `:69`)→`api.run_kql`(`:73`) · `cmd_run_hunting_template`(async, `:87`)→`api.run_hunting_template`(`:91`) · `cmd_preview_hunting_template`(`:100-108`) → **sin `GraphHunterApi`**: llama directo a la función libre `preview_hunting_template(template, &window)` (Rust, sin `api: State<...>` en la firma), coherente con S7 (`operations/sentinel.rs:2043-2109`, `cmd_preview_hunting_template` en S7:1503).
+
+**Reconciliación del conteo:** por archivo, 6 (`session`) + 18 (`entity`) +
+5 (`ingestion`) + 4 (`dataset`) + 17 (`graph_ops`) + 5 (`dsl`) + 9
+(`ai_commands`) + 13 (`analytics`) + 4 (`export`) + 1 (`invariants`) + 1
+(`sentinel_publish`) + 1 (`sigma_save`) + 1 (`ticket_file`) + 1 (`perf`) +
+3 (`ingest_status`) + 1 (`memory`) + 1 (`azure_streaming_smoke`) + 2
+(`enrichment`) + 9 (`sentinel`) = **102**, igual al total registrado en
+`lib.rs:252-368`. De esos 102: **95** delegan en una única llamada
+`api.<método>(...)` claramente identificada arriba; **6** no tocan
+`GraphHunterApi` en absoluto (`cmd_get_perf_status`,
+`cmd_get_ingest_engine_status`, `cmd_debug_emit_synthetic_llm_proposal`,
+`cmd_get_memory_status`, `cmd_azure_streaming_smoke_test`,
+`cmd_preview_hunting_template`); y **1** (`cmd_request_llm_proposal`) sí
+recibe `State<Arc<GraphHunterApi>>` pero orquesta directamente varias
+piezas de más bajo nivel (`negotiate_field_config`, `default_backend`) en
+vez de delegar en un único método de la fachada — 95 + 6 + 1 = 102.
+
+### 3. Criterio 25.11 — ¿invocan frontend y MCP el mismo código del core para hipótesis?
+
+**Respuesta: SÍ**, con evidencia directa de ambas rutas de código:
+
+1. **Ruta frontend:** `apps/tauri/src/components/HypothesisBuilder.tsx:213`
+   invoca `invoke<HuntResults>("cmd_run_hunt", ...)`, que Tauri despacha a
+   `cmd_run_hunt` (`apps/tauri/src-tauri/src/commands/graph_ops.rs:42-67`).
+   Ese comando parsea el JSON de la hipótesis y llama
+   `api.run_hunt(RunHuntRequest { session: None, hypothesis, time_window,
+   max_results: Some(10_000), scoring: None, dedup_mode: None })`
+   (`graph_ops.rs:49-62`).
+2. **Ruta MCP:** el tool `hunt_run` (`platform/mcp/src/tools/hunt/run.ts:22-43`)
+   reenvía `{hypothesis_dsl, scoring}` a `POST /run_hunt`
+   (`run.ts:37-41`), que el router Axum despacha a
+   `hunt::handler_run_hunt` (`apps/tauri/src-tauri/src/http/hunt.rs:95-123`).
+   Ese handler parsea el DSL (`graph_hunter_core::parse_dsl`, `:100-104`) y
+   llama `api_clone.run_hunt(graph_hunter_api::dto::hunt::RunHuntRequest {
+   session: None, hypothesis: hypothesis_for_search, time_window: None,
+   max_results: Some(10_000), scoring, dedup_mode: None })`
+   (`hunt.rs:113-120`).
+
+**Ambas rutas convergen en la misma función:** `GraphHunterApi::run_hunt`
+(`platform/api/src/operations/hunt.rs:94,101`, único `impl` del método en
+todo el crate — verificado con `grep -n "pub fn run_hunt\b" platform/api/src`
+→ una sola coincidencia). No hay dos implementaciones del motor de
+búsqueda de hipótesis; hay un solo método autoritativo
+(`platform/api/src/lib.rs:114-116`: "Each method is the single
+authoritative implementation of its operation — transports contain no
+business logic") invocado desde dos transportes distintos (comando Tauri
+directo vs. HTTP vía MCP).
+
+**La única diferencia es un campo del request, no el código ejecutado:**
+`cmd_run_hunt` siempre pasa `scoring: None` (semántica v1: decide el
+scorer *sticky* de la sesión — comentario explícito
+`graph_ops.rs:55-58`: "Tauri command keeps v1 semantics — sticky session
+scorer decides. The MCP `hunt.run` is the path that exposes the per-call
+override"), mientras que `handler_run_hunt` reenvía el `scoring` que trae
+el body del tool MCP (`hunt.rs:109,118`, per-call override — ver también
+`hunt_run.ts:17`: "Replaces the stateful `enable_anomaly_scoring` latch").
+Es una diferencia de **parámetro de invocación**, no de implementación:
+mismo dispatcher del planner, mismo motor de grafos, mismo camino de
+scoring dentro de `run_hunt` (`operations/hunt.rs:101-133`) para ambos
+transportes.
 
 ## S10. Errores, reintentos y autenticación
 
