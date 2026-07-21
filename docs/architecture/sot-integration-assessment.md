@@ -1100,7 +1100,13 @@ probado, pero **no instanciada en ningún camino de producción**, la misma
 conclusión que S5 estableció para el pipeline `SourcePoller`/`ParserTask`/`GraphWriter`
 del que `LogSource` es la capa de fuentes; (3) el sidecar .NET, del que **no
 existe fuente trackeada** (ver S2), y que — verificado en esta tarea — tampoco
-tiene ningún punto de wiring del lado Rust/Tauri.
+tiene ningún punto de wiring del lado Rust/Tauri. El cliente Rust que hablaría
+con ese sidecar tampoco existe como código: `crates/sentinel-sidecar-client`
+(nombrado explícitamente aquí porque S6 depende de esa ausencia, no solo de
+citarla de pasada) no tiene `Cargo.toml` ni `src/` — el directorio contiene
+únicamente una carpeta `target/` residual (caché de build), per el inventario
+de S2 (a); no hay, por lo tanto, ni el lado .NET ni el lado Rust del sidecar
+disponibles para auditar.
 
 ### 1. Ubicación de todas las llamadas a Sentinel/Azure
 
@@ -1323,7 +1329,20 @@ MVCC "qué sabía el grafo en el instante T", `relation.rs:104-106`).
   usado por el pipeline de parsers de alto rendimiento, no por Sentinel)
   hace exactamente lo mismo (`graph.rs:3230: ingested_at_delta: 0`), igual
   que `ingest_logs_with_policy` (`graph.rs:2586-2660`, ver `graph.rs:2646`)
-  e `ingest_logs_chunked` (`graph.rs:2948-3046`, ver `graph.rs:3012`).
+  e `ingest_logs_chunked` (`graph.rs:2948-3046`, ver `graph.rs:3012`). Un
+  grep dedicado de `ingested_at_delta` sobre todo `graph.rs` encuentra un
+  **quinto** sitio, fuera del camino de ingesta pero con el mismo patrón:
+  `compact_before` (`graph.rs:3371-…`), al reconstruir el store tras
+  compactar aristas viejas, también reconstruye cada `CompactRelation` con
+  `ingested_at_delta: 0` (`graph.rs:3451`) — es decir, incluso una arista
+  que alguna vez hubiera tenido un `ingested_at_delta` real (vía
+  `add_relation`) lo pierde si el grafo pasa por una compactación. Con este
+  quinto sitio, el conteo verificado de construcciones de `CompactRelation`
+  que hardcodean `ingested_at_delta: 0` es **cinco** (`graph.rs:2646, 3012,
+  3141, 3230, 3451`), no tres — la cifra "tres" más abajo se refiere
+  específicamente a los call sites de Sentinel que invocan `insert_triples`
+  (una función distinta de estos cinco sitios de construcción), no a este
+  conteo de hardcodeos.
   **El único call site que sí computa el valor real** es `add_relation`
   (`graph.rs:423-466`, línea `458: ingested_at_delta: encode_ingested_at(now_seconds())`)
   — una API de una sola relación a la vez que ningún camino de Sentinel
@@ -1368,7 +1387,7 @@ más `apps/tauri/src-tauri/src/http/siem.rs` completo y los tools MCP
 
 ```
 grep -rn "azure_tenant_id|azure_client_id|azure_client_secret|workspace_id" platform/mcp/src
-  → 0 resultados en las 26 fuentes .ts del servidor MCP
+  → 0 resultados en las 76 fuentes .ts del servidor MCP
 ```
 
 ### 1. Errores y reintentos: política por fuente
@@ -1506,8 +1525,10 @@ struct**; para esos dos, la única fuente posible es
 **¿El MCP conoce credenciales de Azure? Respuesta: NO — con evidencia
 directa, no por ausencia de prueba.**
 
-1. **Grep exhaustivo sobre las 26 fuentes `.ts` del servidor MCP
-   (`platform/mcp/src/**`) para `azure_tenant_id|azure_client_id|azure_client_secret|workspace_id`:
+1. **Grep exhaustivo sobre las 76 fuentes `.ts` del servidor MCP
+   (`platform/mcp/src/**`, conteo verificado con
+   `find platform/mcp/src -name "*.ts" | wc -l` → `76`) para
+   `azure_tenant_id|azure_client_id|azure_client_secret|workspace_id`:
    0 resultados.** Ninguno de los nombres de campo que transportan
    credenciales Azure aparece en ningún archivo del proceso MCP.
 2. **El tool `sentinel_query`** (`platform/mcp/src/tools/sentinel/query.ts:43-50`)
