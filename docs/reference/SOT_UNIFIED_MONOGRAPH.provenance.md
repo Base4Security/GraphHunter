@@ -7,6 +7,9 @@
 - **SHA256:** `7bb1f56fc41ef3fc7dd7eca780aa5018cd1563e8ce63ac283dd9176fccb83eff`
 - **Copiada:** 2026-07-21, para el diseño
   `docs/superpowers/specs/2026-07-21-sot-integration-design.md`.
+- **Nota:** el `.gitignore` de este repo excluye PDFs, así que la copia
+  vive sólo en el working tree. En un clone fresco, regenerarla copiando
+  el archivo desde la fuente canónica y verificando el SHA256 de arriba.
 - Esta copia es de referencia; ante cualquier discrepancia manda la
   release congelada del repo `sot`. La v2.0 quedó archivada (hash
   `fecbf9…`) y no debe usarse como referencia.
