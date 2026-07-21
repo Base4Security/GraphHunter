@@ -2431,7 +2431,7 @@ datos en un reinicio del pipeline de ingesta).
 | **Parsers** (~244 tests, 6 crates) | `core/graph-engine/tests/parsers.rs` (59, multi-vendor + fast-paths Sysmon/Sentinel), `platform/parsers/src/*` (72: cognito 9, fortigate 18, forti_analyzer 17, haproxy 10, iis_w3c 18), `platform/vrl` (16), `platform/canonical` (47: incl. `provenance.rs` 3, `project/mod.rs` 18), `platform/dsl` (30), `platform/constrained-decode` (20) | Mapeo campo-a-campo por vendor, VRL end-to-end contra 3 formatos, hash/id/versión determinista de `ProvenanceCtx` (`provenance.rs:135-156`), semántica DSL v1 + roundtrip idempotente (proptest) | Ningún test ejercita **cambio de versión** del normalizador sobre eventos ya procesados (case 21) — `provenance.rs` prueba que el hash es determinista, no que una versión nueva reinterprete o no reinterprete datos viejos |
 | **Búsqueda/matcher** (~182 tests) | `core/graph-engine/src/{lftj,lftj_query,planner,khop_reach,yannakakis,semijoin}` (120), `tests/{graph_pattern,search_entities,k4_lftj_dispatch,m1_planner_dispatch,expand_fallback,path_dedup}` (32), `src/invariants/*` (30) | Enumeración LFTJ/k-clique, monotonía causal single-source (`tests.rs:516`), `search_allows_same_timestamp` (`tests.rs:554`, case 5 parcial), predicados de forma (P1-Pn) | Nada sobre hipótesis temporal **a través de dos fuentes** con reloj potencialmente desalineado (case 24); nada sobre equivalencia incremental-vs-rebuild a nivel de grafo completo (case 25) — sólo existe a nivel de un índice interno (`khop_reach.rs:752`, descartado arriba) |
 | **MCP** (45 tests, todos "contract") | `platform/mcp/tests/**` (ver metodología) | Forma del registry, parseo Zod de inputSchema, passthrough de summary, sync de versión de schema | **Cero** de los 28 casos — ningún test ejecuta una tool contra un backend real; ninguno compara resultado MCP vs REST vs core (case 26) |
-| **Ingest pipeline** (~185 tests) | `core/graph-engine/src/ingest/*` (95: cancellation 12, coverage 15, enrichment 9, enrichment_cache 13, overflow 11, parser_task 7, source_poller 6, writer 7, metrics 7, batch 2, channels 3, graph_access 3), `watermark_store.rs` (9), `dlq/mod.rs` (5), `platform/api/tests/dlq_smoke.rs` (3) + `operations/dlq.rs` (8), `operations/ingestion.rs` (6), `platform/sources/{quota,backoff,http_client,http_token_fetcher,token_storage,token_cache,lib}` (46) | Backpressure de canales (`raw_channel_blocks_when_full`), circuit breaker (`poller_opens_circuit_after_n_failures`, `source_poller.rs:717`), watermark no avanza en error (`poller_forwards_source_error_without_advancing_watermark`, `:615`), roundtrip SQLite de watermarks/source_status/enrichment_audit, 429→`Throttled` con `Retry-After` (case 19 parcial: `log_analytics.rs:708`, `defender_xdr.rs:578`, `http_client.rs:407`) | **104 de estos 185 tests (SourcePoller+ParserTask+GraphWriter+SqliteWatermarkStore) prueban un subsistema dormido en producción (S5)** — cuentan como cobertura de código pero no como evidencia de comportamiento del pipeline real (`load_data_streaming`/`sentinel_connector`). Nada sobre tombstone, corrección de evento, ni reinicio en las tres ventanas exactas que pide el encargo (cases 10-12) |
+| **Ingest pipeline** (~185 tests) | `core/graph-engine/src/ingest/*` (95: cancellation 12, coverage 15, enrichment 9, enrichment_cache 13, overflow 11, parser_task 7, source_poller 6, writer 7, metrics 7, batch 2, channels 3, graph_access 3), `watermark_store.rs` (9), `dlq/mod.rs` (5), `platform/api/tests/dlq_smoke.rs` (3) + `operations/dlq.rs` (8), `operations/ingestion.rs` (6), `platform/sources/{quota,backoff,http_client,http_token_fetcher,token_storage,token_cache,lib}` (46) | Backpressure de canales (`raw_channel_blocks_when_full`), circuit breaker (`poller_opens_circuit_after_n_failures`, `source_poller.rs:717`), watermark no avanza en error (`poller_forwards_source_error_without_advancing_watermark`, `:615`), roundtrip SQLite de watermarks/source_status/enrichment_audit, 429→`Throttled` con `Retry-After` (case 19 parcial: `log_analytics.rs:708`, `defender_xdr.rs:578`, `http_client.rs:407`) | **104 de estos 185 tests (todo el subsistema `ingest/*` + `watermark_store`) prueban un subsistema dormido en producción (S5)** — cuentan como cobertura de código pero no como evidencia de comportamiento del pipeline real (`load_data_streaming`/`sentinel_connector`). Nada sobre tombstone, corrección de evento, ni reinicio en las tres ventanas exactas que pide el encargo (cases 10-12) |
 
 ### Mapeo de los 28 casos (encargo §19)
 
@@ -2466,17 +2466,18 @@ datos en un reinicio del pipeline de ingesta).
 | 27 | Conector JSONL = grafo equivalente a Sentinel | **Ninguna** | El conector JSONL no existe como código (grep de `JSONL`/`jsonl_source`/`jsonl_connector` en `platform/sources`: 0 resultados) — no hay nada que testear todavía |
 | 28 | Consulta sobre rango incompleto marcada no exhaustiva | **Ninguna** | Sin campo `possibly_incomplete` en ningún DTO (grep, 0 resultados) — consistente con S5 §5 y con el §7 del spec ("viola hoy no presentar datos incompletos como exhaustivos") |
 
-**Resumen:** de los 28 casos, **5 tienen cobertura parcial** (1, 5, 19, 22 —
-y 19 con tres tests distintos) y **23 no tienen ninguna** — incluyendo los
-tres casos de reinicio (10-12), ambos casos de tardanza (8-9), tombstone
-(14), corrección (13), backfill (16), paginación (3-4-17), y los tres casos
-que requieren infraestructura que hoy no existe (`GraphDelta`/runtime
-incremental para 25; conector JSONL para 27; Domain API consumida por MCP
-para 26). Ninguno de los 28 tiene cobertura **completa** en el sentido del
-encargo (test dedicado, con ese nombre y esa semántica exacta) — los 5
-"parciales" cubren un fragmento de la semántica del caso desde un test que
-existe por otra razón (p. ej. `search_allows_same_timestamp` es un test del
-motor de búsqueda temporal, no un test de ingesta diseñado para el caso 5).
+**Resumen:** de los 28 casos, **4 tienen cobertura parcial** (1, 5, 19, 22;
+el caso 19 es el único de los cuatro respaldado por tres tests distintos en
+vez de uno) y **24 no tienen ninguna** — incluyendo los tres casos de
+reinicio (10-12), ambos casos de tardanza (8-9), tombstone (14), corrección
+(13), backfill (16), paginación (3-4-17), y los tres casos que requieren
+infraestructura que hoy no existe (`GraphDelta`/runtime incremental para 25;
+conector JSONL para 27; Domain API consumida por MCP para 26). Ninguno de
+los 28 tiene cobertura **completa** en el sentido del encargo (test
+dedicado, con ese nombre y esa semántica exacta) — los 4 "parciales" cubren
+un fragmento de la semántica del caso desde un test que existe por otra
+razón (p. ej. `search_allows_same_timestamp` es un test del motor de
+búsqueda temporal, no un test de ingesta diseñado para el caso 5).
 
 ## S12. Suposiciones de Azure filtradas al resto del código
 
