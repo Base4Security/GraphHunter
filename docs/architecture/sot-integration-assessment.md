@@ -2363,10 +2363,224 @@ con refill fraccional por segundo y penalización explícita:
   solo reacciona después de que Azure ya devolvió el error.
 
 ## S11. Tests existentes (Sentinel, parsers, búsqueda, MCP)
-_Pendiente: se completa en la Tarea 8._
+
+### Metodología
+
+`rg` no está en el PATH de esta tarea (mismo hallazgo que S7); se usó el tool
+`Grep`. **Corrección al propio comando del brief:** el patrón
+`#\[test\]|#\[tokio::test\]` del brief sub-cuenta porque no matchea
+`#[tokio::test(flavor = "current_thread")]` (paréntesis con argumentos) — el
+patrón real que se corrió es `#\[test\]|#\[tokio::test(\(|\])`. La diferencia
+es material: con el patrón literal del brief, `source_poller.rs` y
+`watermark_store.rs` (todos sus tests son `#[tokio::test(flavor = ...)]`)
+cuentan **0** tests; con el patrón corregido cuentan 6 y 9 respectivamente.
+Se recorrieron ambos conteos (`core/`, `platform/`, `crates/`) con el patrón
+corregido; `crates/` da 0 en ambos casos (consistente con S2: sin
+`Cargo.toml`/`src/` trackeado bajo `crates/`). Se detectó y descartó
+manualmente 1 falso positivo (`core/graph-engine/Cargo.toml:107`, un
+comentario que menciona `#[tokio::test(start_paused = true)]`, no código).
+Total bruto tras la corrección: **930 tests** en 77 archivos bajo `core/`,
+**751 tests** en 100 archivos bajo `platform/`, **0** bajo `crates/`. Estas
+cifras son de grep (declaraciones `#[test]`/`#[tokio::test(...)]`), no de
+`cargo test` ejecutado — no se corrió la suite (fuera de alcance de esta
+tarea, que es de inventario/lectura).
+
+Para el MCP (`platform/mcp/tests/`, TypeScript, `node:test`), se contó
+`^\s*(it|test)\(` por archivo: **45 tests** en 11 archivos (`content.test.ts`:4,
+`contract/context-enricher.test.ts`:4, `contract/entity-extractor.test.ts`:6,
+`contract/footer-composer.test.ts`:5, `contract/journal-registered.test.ts`:6,
+`contract/metrics.test.ts`:4, `contract/nudge-composer.test.ts`:8,
+`contract/schema.test.ts`:2, `contract/schema-version-sync.test.ts`:2,
+`contract/summary-passthrough.test.ts`:3, `perf/bisection.test.ts`:1). No hay
+tests bajo `platform/mcp/src/` (el único archivo con "test" en el nombre,
+`src/tools/ingest/regression_test.ts`, es una *tool definition* que ejecuta
+comparaciones VRL en runtime, no un archivo de tests — 0 `it`/`test(`).
+**Todos los 45 son "contract tests"**: el encabezado de
+`journal-registered.test.ts:1-6` los describe explícitamente como "a cheap,
+always-on structural check rather than a live-server assertion (those are
+gated behind `GRAPHHUNTER_CONTRACT_TEST`)" — verifican forma del registry y
+parseo de schema Zod, ninguno ejecuta una tool end-to-end contra un
+`GraphHunterApi`/grafo real.
+
+**Regla de admisión aplicada al mapeo de los 28 casos:** un test cuenta como
+cobertura sólo si ejercita la semántica exacta del caso, no un vecino de
+nombre similar. Se descartaron explícitamente por ese criterio, tras leer el
+cuerpo del test: `sentinel_deduplication` (`core/graph-engine/src/tests.rs:3144`,
+prueba interning de entidades + que dos eventos con **distinto** timestamp
+producen dos relaciones — no reprocesamiento del mismo lote);
+`snapshot_replace_by_dataset_is_idempotent` (`graph.rs:3691`, "idempotente"
+se refiere a que reemplazar-por-dataset no pierde aristas de otro dataset,
+no a reinserción del mismo lote); `delta_update_after_new_edge_matches_full_rebuild`
+(`khop_reach.rs:752`, invalidación/rebuild de un índice interno de
+alcanzabilidad, no equivalencia incremental-vs-rebuild a nivel de grafo);
+`ttl_expiry_evicts_on_read` (`ingest/enrichment_cache.rs:246`, TTL de una
+cache de enriquecimiento on-demand, no expiración de ventana de retención de
+datos); `search_enforces_causal_monotonicity` (`tests.rs:516`, monotonía
+causal de una sola fuente implícita, no hipótesis a través de dos fuentes
+con posible desfase de reloj); `resume_phase_preserves_live_tail_else_ready`
++ `finalize_guard_restores_phase_on_early_exit` (`operations/ingestion.rs:1678,1694`,
+máquina de estados de fase de sesión para la UI — protege contra quedar
+varado en `Finalizing` tras un error, no contra pérdida/duplicación de
+datos en un reinicio del pipeline de ingesta).
+
+### Tabla por área
+
+| Área | Módulos (tests) | Qué cubren | Gaps evidentes |
+|---|---|---|---|
+| **Sentinel** (83 tests, 8 módulos, 3 superficies per S6) | `core/graph-engine/src/sentinel.rs` (8), `platform/siem/src/sentinel.rs` (3), `platform/siem/src/sentinel_streaming.rs` (5), `platform/sources/src/log_analytics.rs` (11), `defender_xdr.rs` (8), `data_lake.rs` (5, stub), `platform/api/src/operations/sentinel.rs` (39), `sentinel_publish.rs` (4) | Parseo de `TimeGenerated`/`Timestamp` (~15 tipos de evento), construcción/guardas de KQL, mapeo 429→`Throttled`/401→`Auth` en el transporte (`log_analytics.rs:708,736`, `defender_xdr.rs:578`), clasificación de columnas para `graph_propose`/`graph_build`, hidratación de nodo | **El camino que efectivamente mueve datos hoy tiene casi cero tests propios:** `sentinel_connector.rs::polling_loop` (el único wireado en producción, per S6) tiene **1 solo test** (`paused_loop_issues_no_queries_until_resumed`, `sentinel_connector.rs:456`) — no cubre avance de watermark, reinicio, ni reintentos dentro del loop en vivo. Los 104 tests de `SourcePoller`/`watermark_store` (ver fila Ingest) prueban un pipeline paralelo **no instanciado en producción** (S5) |
+| **Parsers** (~244 tests, 6 crates) | `core/graph-engine/tests/parsers.rs` (59, multi-vendor + fast-paths Sysmon/Sentinel), `platform/parsers/src/*` (72: cognito 9, fortigate 18, forti_analyzer 17, haproxy 10, iis_w3c 18), `platform/vrl` (16), `platform/canonical` (47: incl. `provenance.rs` 3, `project/mod.rs` 18), `platform/dsl` (30), `platform/constrained-decode` (20) | Mapeo campo-a-campo por vendor, VRL end-to-end contra 3 formatos, hash/id/versión determinista de `ProvenanceCtx` (`provenance.rs:135-156`), semántica DSL v1 + roundtrip idempotente (proptest) | Ningún test ejercita **cambio de versión** del normalizador sobre eventos ya procesados (case 21) — `provenance.rs` prueba que el hash es determinista, no que una versión nueva reinterprete o no reinterprete datos viejos |
+| **Búsqueda/matcher** (~182 tests) | `core/graph-engine/src/{lftj,lftj_query,planner,khop_reach,yannakakis,semijoin}` (120), `tests/{graph_pattern,search_entities,k4_lftj_dispatch,m1_planner_dispatch,expand_fallback,path_dedup}` (32), `src/invariants/*` (30) | Enumeración LFTJ/k-clique, monotonía causal single-source (`tests.rs:516`), `search_allows_same_timestamp` (`tests.rs:554`, case 5 parcial), predicados de forma (P1-Pn) | Nada sobre hipótesis temporal **a través de dos fuentes** con reloj potencialmente desalineado (case 24); nada sobre equivalencia incremental-vs-rebuild a nivel de grafo completo (case 25) — sólo existe a nivel de un índice interno (`khop_reach.rs:752`, descartado arriba) |
+| **MCP** (45 tests, todos "contract") | `platform/mcp/tests/**` (ver metodología) | Forma del registry, parseo Zod de inputSchema, passthrough de summary, sync de versión de schema | **Cero** de los 28 casos — ningún test ejecuta una tool contra un backend real; ninguno compara resultado MCP vs REST vs core (case 26) |
+| **Ingest pipeline** (~185 tests) | `core/graph-engine/src/ingest/*` (95: cancellation 12, coverage 15, enrichment 9, enrichment_cache 13, overflow 11, parser_task 7, source_poller 6, writer 7, metrics 7, batch 2, channels 3, graph_access 3), `watermark_store.rs` (9), `dlq/mod.rs` (5), `platform/api/tests/dlq_smoke.rs` (3) + `operations/dlq.rs` (8), `operations/ingestion.rs` (6), `platform/sources/{quota,backoff,http_client,http_token_fetcher,token_storage,token_cache,lib}` (46) | Backpressure de canales (`raw_channel_blocks_when_full`), circuit breaker (`poller_opens_circuit_after_n_failures`, `source_poller.rs:717`), watermark no avanza en error (`poller_forwards_source_error_without_advancing_watermark`, `:615`), roundtrip SQLite de watermarks/source_status/enrichment_audit, 429→`Throttled` con `Retry-After` (case 19 parcial: `log_analytics.rs:708`, `defender_xdr.rs:578`, `http_client.rs:407`) | **104 de estos 185 tests (SourcePoller+ParserTask+GraphWriter+SqliteWatermarkStore) prueban un subsistema dormido en producción (S5)** — cuentan como cobertura de código pero no como evidencia de comportamiento del pipeline real (`load_data_streaming`/`sentinel_connector`). Nada sobre tombstone, corrección de evento, ni reinicio en las tres ventanas exactas que pide el encargo (cases 10-12) |
+
+### Mapeo de los 28 casos (encargo §19)
+
+| # | Caso | Cobertura | Cita |
+|---|---|---|---|
+| 1 | Lote procesado una vez | Parcial | `ingest_logs_populates_graph`, `sentinel_ingest_populates_graph` (`core/graph-engine/src/tests.rs:1481,3128`) — verifican conteo de entidades/relaciones tras un solo `ingest_logs`, no hay aserción de "exactamente una vez" más allá de eso |
+| 2 | Mismo lote dos veces | **Ninguna** | Consistente con S3: no existe chequeo de existencia/dedup en `insert_triples`/`push_to_streaming`. `sentinel_deduplication` (`tests.rs:3144`) es un falso amigo — descartado arriba, prueba dos eventos con timestamp *distinto* |
+| 3 | Lote dividido en varias páginas | **Ninguna** | Sin test `multi_chunk`/`split_across`/`page_split` en todo el repo (grep dedicado, 0 resultados) |
+| 4 | Varias páginas unidas en un lote | **Ninguna** | Mismo grep que (3), 0 resultados |
+| 5 | Eventos con igual timestamp | Parcial | `search_allows_same_timestamp` (`core/graph-engine/src/tests.rs:554`) |
+| 6 | Igual origen/destino, distinta identidad | **Ninguna** | Sin test de colisión de clave de dedup `(src,dst,ts,rel,metadata_offset)` con identidades distintas; `sentinel_deduplication` no aplica (ver descarte arriba) |
+| 7 | Eventos fuera de orden | **Ninguna** (para ingesta) | `out_of_order_timestamps_rejected` y sus 3 variantes (`lftj_query.rs:1825,1977,2196,2317`) son guardas de **enumeración de joins** (rechazan un plan mal ordenado), no tolerancia del pipeline de ingesta a eventos que llegan fuera de orden |
+| 8 | Tardío dentro del margen | **Ninguna** | Grep de `late\|tardio\|tardy` sobre todo el repo: 0 resultados — no existe el concepto de margen de tardanza en el código |
+| 9 | Tardío fuera del margen | **Ninguna** | Mismo grep que (8) |
+| 10 | Reinicio antes de confirmar checkpoint | **Ninguna** | `persists_across_open` (`watermark_store.rs:556`) sólo prueba que un valor ya seteado sobrevive un reopen — no simula un crash entre `send` y `set` |
+| 11 | Reinicio después de persistir y antes de aplicar delta | **Ninguna** | No existe `GraphDelta` (S4/spec §4) — el escenario no es representable hoy |
+| 12 | Reinicio después de aplicar delta y antes de confirmar | **Ninguna** | Mismo motivo que (11); S5 documenta el escenario de crash como "hoy teórico" porque el pipeline no corre en producción |
+| 13 | Corrección de evento | **Ninguna** | Sin campo ni test de "correction"/"corrige" en ningún `.rs` del repo |
+| 14 | Tombstone | **Ninguna** | Grep de `tombstone` (case-insensitive) sobre todo `*.rs`: 0 archivos — el concepto no existe en el código, ni como tipo ni como comentario |
+| 15 | Expiración de ventana | **Ninguna** | `ttl_expiry_evicts_on_read` (`ingest/enrichment_cache.rs:246`) es TTL de cache de enriquecimiento, no expiración de ventana de retención de datos del grafo — descartado arriba |
+| 16 | Backfill superpuesto | **Ninguna** | Sin `backfill`/`overlap` en `platform/sources` (grep dedicado, 0 resultados); consistente con S6: no existe operación `backfill()` separada en `LogSource` |
+| 17 | Cambio de página sin cambio de timestamp | **Ninguna** | Sin test de paginación en `platform/sources` en absoluto (grep de `page\|pagination\|paginat`, 0 resultados) |
+| 18 | Error de red | **Ninguna** | Sólo hay *configuración* de timeout (`with_request_timeout`/`with_timeout`, `log_analytics.rs:141`, `defender_xdr.rs:111`, `http_client.rs:118`) — ningún test simula fallo de conexión/DNS/timeout real |
+| 19 | Throttling | Parcial | `query_scoped_maps_429_to_throttled_with_retry_after` (`log_analytics.rs:708`), `query_scoped_maps_429_to_throttled` (`defender_xdr.rs:578`), `retry_after_parses_delta_seconds` (`http_client.rs:407`) — cubren el mapeo 429→`SourceError::Throttled` en el transporte; no cubren la interacción con el circuit breaker del poller en vivo |
+| 20 | Respuesta parcial de Sentinel | **Ninguna** | Sin test de fila/página truncada o incompleta en `log_analytics.rs`/`sentinel.rs`/`sentinel_streaming.rs` |
+| 21 | Cambio de versión del normalizador | **Ninguna** | `schema_version_is_pinned_at_one_until_deliberately_bumped` (`platform/api/src/operations/graph_meta.rs:711`) es sobre la versión del **schema del DTO de la API**, no sobre reinterpretación de eventos ya normalizados bajo una versión de normalizador distinta |
+| 22 | Dos fuentes, misma entidad | Parcial | `cross_source_domain_entity_merges_across_zeek_and_pcap` (`platform/api/src/ingestors/mod.rs:324`) — inserta un edge Zeek DNS y uno PCAP y confirma que el `Domain` compartido no duplica el `StrId` |
+| 23 | Colisión de PID reutilizado | **Ninguna** | Sin test de reutilización de PID; `process_activity_carries_pid_and_cmdline` (`platform/canonical/src/project/mod.rs:524`) sólo prueba que el campo `pid` se parsea, no colisión de identidad |
+| 24 | Hipótesis temporal sobre dos fuentes | **Ninguna** | `search_enforces_causal_monotonicity` (`tests.rs:516`) es de una sola fuente implícita — descartado arriba |
+| 25 | Equivalencia incremental contra rebuild tras cada lote | **Ninguna** | No existe `GraphDelta` ni runtime incremental con contrato de equivalencia (spec §4); `delta_update_after_new_edge_matches_full_rebuild` (`khop_reach.rs:752`) es de un índice interno, no del estado observable del grafo — descartado arriba |
+| 26 | Misma hipótesis desde MCP/REST/core | **Ninguna** | El MCP no consume `GraphHunterApi` para hipótesis (genera KQL propio, S6/spec §1); los tests "parity" existentes (`platform/api/tests/parity/{dto_shapes,scenarios}.rs`) comparan forma de DTO vs llamada directa al API, no MCP vs REST vs core |
+| 27 | Conector JSONL = grafo equivalente a Sentinel | **Ninguna** | El conector JSONL no existe como código (grep de `JSONL`/`jsonl_source`/`jsonl_connector` en `platform/sources`: 0 resultados) — no hay nada que testear todavía |
+| 28 | Consulta sobre rango incompleto marcada no exhaustiva | **Ninguna** | Sin campo `possibly_incomplete` en ningún DTO (grep, 0 resultados) — consistente con S5 §5 y con el §7 del spec ("viola hoy no presentar datos incompletos como exhaustivos") |
+
+**Resumen:** de los 28 casos, **5 tienen cobertura parcial** (1, 5, 19, 22 —
+y 19 con tres tests distintos) y **23 no tienen ninguna** — incluyendo los
+tres casos de reinicio (10-12), ambos casos de tardanza (8-9), tombstone
+(14), corrección (13), backfill (16), paginación (3-4-17), y los tres casos
+que requieren infraestructura que hoy no existe (`GraphDelta`/runtime
+incremental para 25; conector JSONL para 27; Domain API consumida por MCP
+para 26). Ninguno de los 28 tiene cobertura **completa** en el sentido del
+encargo (test dedicado, con ese nombre y esa semántica exacta) — los 5
+"parciales" cubren un fragmento de la semántica del caso desde un test que
+existe por otra razón (p. ej. `search_allows_same_timestamp` es un test del
+motor de búsqueda temporal, no un test de ingesta diseñado para el caso 5).
 
 ## S12. Suposiciones de Azure filtradas al resto del código
-_Pendiente: se completa en la Tarea 8._
+
+### Metodología
+
+Mismos comandos del brief, adaptados a `Grep` (case-insensitive). Conteos
+verificados por archivo (no sólo por directorio):
+
+```
+azure|TimeGenerated|workspace_id|tenant_id|log_analytics  (*.rs, -i)
+  core/                    → 101 hits, 19 archivos
+  platform/api/src/        → 231 hits, 9 archivos
+  platform/canonical/src/  → 0 hits
+  platform/dsl/src/        → 0 hits
+  apps/                    → 117 hits, 10 archivos
+azure|sentinel  (*.ts, -i)
+  platform/mcp/src/lib/    → 14 hits, 4 archivos
+```
+
+Total: **463 hits en 42 archivos** fuera de `platform/sources`/`platform/siem`/sidecar.
+**`platform/canonical/src/` y `platform/dsl/src/` dan CERO hits** — el "sobre
+canónico" y el DSL de hipótesis están, hoy, efectivamente libres de tipos o
+nombres de campo específicos de Azure; es la única capa no-frontera que ya
+cumple el criterio de aceptación §8 ("core sin dependencia de Azure") para
+esta muestra de términos. Cada hit se clasifica abajo por archivo (unidad
+tratable dado el volumen); dentro de un archivo clasificado, todos sus hits
+comparten el mismo veredicto salvo que se indique lo contrario.
+
+### Clasificación — `core/` (101 hits, 19 archivos)
+
+Todos estos son **fuera de frontera por definición** (el brief excluye
+`platform/sources`/`platform/siem`/sidecar, no `core/`): el motor de grafos
+mismo conoce nombres de campo y conceptos de Azure.
+
+| Archivo (hits) | Qué suposición codifica | Costo de remover |
+|---|---|---|
+| `src/sentinel.rs` (11) | `SentinelJsonParser` — parser dedicado a `TimeGenerated`/`Timestamp` y ~15 tipos de evento Sentinel, vive en `core/graph-engine`, no en `platform/sources` | **Alto pero ya delimitado**: es un módulo entero con nombre explícito; moverlo a un normalizador versionado (Bloque 2-B) es principalmente mover código, no rediseñarlo — el propio spec ya lo asume (§4, fila Normalizer) |
+| `src/watermark_store.rs` (17) | `WatermarkKey`/tabla SQLite con columnas `tenant_id`/`workspace_id` como parte del **modelo de checkpoint del core**, no de un conector | Medio: `tenant_id`/`workspace_id` funcionan hoy como un partition-key genérico de 2 componentes; renombrar a algo como `partition_scope: Vec<(String,String)>` o `source_namespace` no cambia la lógica, sólo el nombre — pero toca las 9 firmas de test y el schema SQL (`watermark_store.rs:283-291`) |
+| `src/ingest/source_poller.rs` (9) | `PollerConfig.tenant_id`/`workspace_id` — el poller genérico (no un conector concreto) tiene estos campos en su config | Medio: mismo patrón que arriba; el poller ya es agnóstico de transporte (habla `LogSource`), sólo la config nombra estos dos campos Azure-shaped |
+| `src/ingest/metrics.rs` (8) | Métricas de cuota **por `(source_kind, tenant_id)`**, justificado en comentario como "Azure enforces them at the tenant level" (`metrics.rs:40-41`) — el comentario mismo asume Azure como la única fuente con cuotas por tenant | Bajo: renombrar `tenant_id` a `scope_id`/`quota_key` no cambia semántica; el comentario debe generalizarse a "algunas fuentes limitan por scope" |
+| `src/lib.rs` (2) | `pub use graph_hunter_sources::log_analytics::{...}` — el crate `core/graph-engine` **re-exporta públicamente** tipos de `log_analytics` (incl. `AzureTokenCache`) como parte de su API pública | Bajo-medio: es un re-export, no lógica; moverlo detrás de un feature flag o a un módulo `sentinel_compat` no rompe el contrato si los callers ya importan por el path completo |
+| `src/geoip.rs` (2) | Comentario + código que reconoce que "Azure SigninLogs pone códigos ISO-3166 alpha-2" y normaliza ese caso especial dentro del geoip genérico | Bajo: es un caso especial documentado dentro de una función general, no un módulo separado — extraerlo a una tabla de quirks por-fuente es un refactor pequeño |
+| `src/generic.rs` (1) | `"timegenerated"` como uno de los alias reconocidos para "campo timestamp" en el parser JSON genérico (`generic.rs:203`) | Bajo: es una entrada más en una lista de alias case-insensitive; ya convive con `"utctime"`/`"eventtime"` de otras fuentes — no es una suposición estructural, es una lista de sinónimos |
+| `src/preview.rs` (1) | `TimeGenerated` hardcodeado como columna a excluir de la vista previa de campos | Bajo: una entrada en una lista de columnas "skip", mismo patrón que arriba |
+| `src/ingest/mod.rs` (2) | Comentarios de diseño ("Phase 4 of the Azure streaming plan", "stop calling Azure") — documentación, no código | Ninguno — son comentarios; no hay nada que remover funcionalmente |
+| `src/ingest/enrichment.rs` (1), `enrichment_cache.rs` (2) | Comentarios ("the *click an IP, fetch its Azure ...*", "before hitting Azure") describiendo el propósito del módulo de enriquecimiento on-demand en términos de Azure | Bajo: comentarios; el código mismo (`EnrichmentCache`) es genérico por firma |
+| `src/parser.rs` (1) | Comentario: "Added in Phase 4 of the Azure streaming plan" | Ninguno — comentario |
+| `src/service_classifier.rs` (2) | Entrada de tabla `normalized: "azure"` para clasificar el servicio "Microsoft Azure" en metadata de puerto/servicio | Ninguno — esto es correcto y esperado: una tabla de clasificación de servicios de red *debe* poder nombrar "azure" como un servicio real, igual que nombra "aws"/"gcp"; no es una suposición estructural sobre la fuente de datos |
+| `tests/parsers.rs` (3), `tests/catalog_golden.rs` (2), `tests/dsl_predicates.rs` (1), `src/tests.rs` (34), `gnn/src/{gnn_bridge,aad_training_export}.rs` (2) | Fixtures de test que usan datos con forma Sentinel/Azure AD para ejercitar `SentinelJsonParser` (ya un módulo legítimo del core) y el catálogo de hunts | **Descartado** — son datos de prueba para un parser que el propio spec reconoce como parte del core (§4: "extensión namespaced... un tipo Azure entra como subtipo"), no una suposición nueva que remover; `aad_training_export.rs` documenta explícitamente en su primera línea que convierte dumps de Azure AD, es un exportador con ese propósito declarado |
+
+### Clasificación — `platform/api/src/` (231 hits, 9 archivos)
+
+Este es el hallazgo más caro: la **Domain API** (`GraphHunterApi`, que el
+spec §4 marca como "ya existe, transport-agnostic" y que el criterio de
+aceptación §8 exige que "MCP y frontend consuman") tiene, hoy, módulos
+enteros acoplados a Azure por nombre de variable de entorno.
+
+| Archivo (hits) | Qué suposición codifica | Costo de remover |
+|---|---|---|
+| `operations/sentinel.rs` (133), `dto/v1/sentinel.rs` (44), `sentinel_publish.rs` (25), `sentinel_connector.rs` (3) | Ya documentado exhaustivamente en S6 §1 — `run_kql`/`discover_schema`/`graph_propose`/`graph_build`/`hydrate_node`/publish-to-Watchlist leen 4 env vars `AZURE_*` y hablan HTTP directo. **No se re-deriva aquí**, se cuenta como "dentro del alcance ya auditado" — el costo de remover es el de la Fase A completa del Bloque 2 (mover tras el conector), no un fix puntual | Alto — es la Fase A del plan, ya dimensionada en el spec §5 |
+| `operations/graph_ops.rs` (13) | `resolve_azure_creds` vive dentro de `graph_ops.rs` (módulo genérico de operaciones de grafo, no de Sentinel) — lee `AZURE_WORKSPACE_ID`/`AZURE_TENANT_ID`/`AZURE_CLIENT_ID`/`AZURE_CLIENT_SECRET` directamente para construir credenciales que alimentan una función de grafo genérica | Medio: la función ya está aislada (`graph_ops.rs:676-718`) — extraerla a un trait `CredentialsProvider` implementado por el conector Sentinel es un refactor de una función, no de todo el archivo |
+| `operations/ingestion.rs` (8) | Una rama del ingest genérico (`load_data`/similar, `ingestion.rs:514-541`) lee `workspace_id`/`azure_tenant_id`/`azure_client_id`/`azure_client_secret` de los params de request y llama `graph_hunter_siem::run_sentinel_query` directamente, dentro del módulo de ingesta genérico | Medio-alto: es una rama condicional dentro de la función de ingesta central; separarla requiere que `ingestion.rs` dependa de una abstracción `SourceConnector` en vez de la función concreta de `siem` |
+| `operations/export.rs` (2), `operations/schema.rs` (1), `operations/sigma.rs` (2) | Cadenas de documentación/schema ("Publish tagged IoCs as an Azure Sentinel Watchlist", comentario de exportador CSV) — describen un formato de salida con nombre Azure, no leen credenciales ni ejecutan queries | Bajo: son strings descriptivas de un formato de exportación que legítimamente se llama "Sentinel Watchlist" (es un formato de archivo real de terceros, no una suposición de arquitectura) |
+
+### Clasificación — `apps/` (117 hits, 10 archivos)
+
+| Archivo (hits) | Qué suposición codifica | Costo de remover |
+|---|---|---|
+| `tauri/src-tauri/src/http/siem.rs` (33) | Tres DTOs HTTP casi idénticos con campos `workspace_id`/`azure_tenant_id`/`azure_client_id`/`azure_client_secret` directamente en la capa HTTP (`siem.rs:21-27,76-82,130-136,181-187`), para un endpoint que se llama genéricamente `siem.rs` | Medio: son structs de deserialización; cambiar a un DTO `ConnectorCredentials { source_kind, fields: HashMap<String,String> }` es mecánico pero toca 3 handlers |
+| `tauri/src-tauri/src/journal/summarize.rs` (47) | El summarizer de journal **genérico** (usado para resumir cualquier tool call, no sólo Sentinel) tiene un allowlist hardcodeado de ~25 nombres de columna Azure/Sentinel (`timegenerated`, `accountdomain`, `eventid`, etc., `summarize.rs:49-81`) para decidir qué columnas mostrar en el resumen de una respuesta ancha | Medio-alto: es la lógica central de resumen de journal, no un módulo Sentinel-específico — el allowlist debería venir de un `capabilities()`/schema declarado por el conector (mismo gap de S6 §2), no vivir hardcodeado en el journal |
+| `cli/src/commands.rs` (7) | El CLI parsea `workspace_id`/`azure_tenant_id`/`azure_client_id`/`azure_client_secret` directamente de los params de un comando genérico y llama `crate::siem::run_sentinel_query` | Medio: mismo patrón que `ingestion.rs` arriba — el CLI debería hablar a través de la misma abstracción de conector, no a `siem::run_sentinel_query` por nombre |
+| `journal/redact.rs` (8), `journal/capture.rs` (6) | El sistema de redacción de secretos del journal (usado para **todas** las tool calls) tiene `azure_client_secret`/`azure_client_id` como nombres de clave reconocidos explícitamente (`redact.rs:5-6`) | Bajo: es una lista de nombres de clave sensibles — agregar el equivalente para un futuro conector JSONL/otro SIEM es una línea más, no un rediseño; el mecanismo de redacción ya es genérico (matchea por nombre de clave, no por tipo de fuente) |
+| `http/journal.rs` (4) | DTO con campos `azure_tenant_id`/`azure_client_id`/`azure_client_secret` en la capa de journal HTTP | Bajo — mismo patrón que `http/siem.rs`, menor superficie |
+| `tauri/src-tauri/src/lib.rs` (2), `commands/mod.rs` (1) | Registro del comando `cmd_azure_streaming_smoke_test` (ya documentado en S5 como smoke test explícito) | **Descartado** — ya cubierto en S5, es un smoke test declarado como tal, no una suposición oculta |
+| `commands/azure_streaming_smoke.rs` (7), `commands/sentinel_publish.rs` (2) | Ya documentado en S5/S6 | **Descartado** — mismo motivo que arriba |
+
+### Clasificación — `platform/mcp/src/lib/` (14 hits, 4 archivos, TypeScript)
+
+Estos son baratos y de alto valor de señal: módulos **genéricos** de soporte
+del MCP (no herramientas Sentinel) que conocen el nombre literal
+`"sentinel_query"`/`"sentinel_"`.
+
+| Archivo (hits) | Qué suposición codifica | Costo de remover |
+|---|---|---|
+| `context-enricher.ts` (1) | La lógica genérica de enriquecimiento de contexto decide si sugerir "overlap" comprobando `tool === "sentinel_query"` (`context-enricher.ts:42`) | Bajo: reemplazar el chequeo por nombre por una propiedad declarada en el registro de la tool (p. ej. `category === "query"` o una capability `supportsIngestOverlap`) — ya existe `ToolCategory` (`types.ts`) como candidato |
+| `nudge-composer.ts` (6) | El compositor de "nudges" (sugerencias de siguiente paso) tiene ramas explícitas para `"sentinel_query"` y `"sentinel_seed"` (`nudge-composer.ts:9-12,24,44`) | Bajo-medio: son 2-3 ramas de un `switch`/`case`; migrarlas a metadata de tool (`nextStepHint`) es un refactor local a este archivo |
+| `metrics.ts` (6) | La métrica que mide "GraphHunter usado como proxy delgado de Sentinel KQL" cuenta `tool_calls[sentinel_query] / total` y usa el prefijo literal `"sentinel_"` para detectar cualquier tool relacionada (`metrics.ts:4,11,59-82`) | Bajo: el prefijo por nombre es frágil (un futuro conector JSONL no tendría prefijo `sentinel_`) pero barato de generalizar a una lista de categorías declaradas |
+| `types.ts` (1) | `ToolCategory` incluye el literal `"sentinel"` como una de sus categorías (`types.ts:32`) | Bajo: es exactamente el tipo de extensión namespaced que el spec §6.3 ya autoriza ("un tipo Azure entra como subtipo mientras la categoría canónica sigue siendo genérica") — no es necesariamente un defecto, pero es la raíz de la que penden los 3 archivos de arriba: si `ToolCategory` tuviera una categoría más genérica ("external_query") con `"sentinel"` como subtipo, los otros tres módulos podrían dejar de matchear por string literal |
+
+### Resumen de hits
+
+463 hits totales en 42 archivos: **101 en `core/`** (todos fuera de
+frontera por definición del brief), **231 en `platform/api/src/`** (el
+hallazgo más caro — incluye la Domain API), **117 en `apps/`**, **14 en
+`platform/mcp/src/lib/`**. De los 42 archivos, **7 se descartan
+explícitamente** (ya cubiertos por S5/S6 o son datos de fixture/tablas de
+clasificación legítimas: `core/graph-engine/src/service_classifier.rs`,
+`tests/*.rs` de core, `gnn/src/aad_training_export.rs`,
+`apps/tauri/src-tauri/src/lib.rs`, `commands/mod.rs`,
+`commands/azure_streaming_smoke.rs`, `commands/sentinel_publish.rs`) y **2
+directorios dan cero** (`platform/canonical/src/`, `platform/dsl/src/`,
+confirmando que esa capa ya cumple el criterio §8 para esta muestra de
+términos). Los hits restantes se clasifican todos con costo estimado
+bajo/medio/alto — ninguno queda sin veredicto.
 
 ## S13. Diagrama textual: arquitectura actual
 _Pendiente: se completa en la Tarea 9._
