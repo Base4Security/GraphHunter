@@ -40,6 +40,32 @@ timestamp,source_ip,target_ip,user
 }
 
 #[test]
+fn csv_parser_maps_mde_timeline_export_headers() {
+    // Trimmed-down M365 Defender machine-timeline export: Title Case
+    // headers with spaces. Before separator normalization every column
+    // fell through canonical matching and the file produced zero triples.
+    let csv = "\
+Event Time,Computer Name,Action Type,File Name,Account Name,Remote IP,Remote Port,Process Command Line
+2026-06-18T15:56:13.736,arlmldcc44714js.lomanegra.root,ProcessCreated,updater.exe,system,52.229.170.60,443,\"\"\"updater.exe\"\" --system\"
+2026-06-18T15:57:01.100,arlmldcc44714js.lomanegra.root,ConnectionSuccess,chrome.exe,jperez,142.250.79.14,443,
+";
+    let triples = CsvParser.parse(csv);
+    assert!(
+        !triples.is_empty(),
+        "MDE timeline CSV must map to graph triples, got none"
+    );
+    let mut entity_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (src, _, dst) in &triples {
+        entity_ids.insert(src.id.clone());
+        entity_ids.insert(dst.id.clone());
+    }
+    // The remote IPs and the host must surface as graph entities.
+    assert!(entity_ids.iter().any(|id| id.contains("52.229.170.60")));
+    assert!(entity_ids.iter().any(|id| id.contains("142.250.79.14")));
+    assert!(entity_ids.iter().any(|id| id.contains("arlmldcc44714js")));
+}
+
+#[test]
 fn csv_parser_empty_input_yields_empty() {
     assert!(CsvParser.parse("").is_empty());
     assert!(CsvParser.parse("   \n\t\n").is_empty());
@@ -663,6 +689,83 @@ fn canonical_field_recognizes_audit_log_semantics() {
     assert_eq!(GenericParser::canonical_field("country"), Some("location"));
     assert_eq!(GenericParser::canonical_field("severity"), Some("severity"));
     assert_eq!(GenericParser::canonical_field("message"), Some("message"));
+}
+
+#[test]
+fn canonical_field_recognizes_mde_timeline_spaced_headers() {
+    // The M365 Defender portal timeline export ("Logs_<from>_<to>.csv")
+    // emits the same DeviceEvents columns as the advanced-hunting API but
+    // in Title Case with spaces ("Remote IP" vs "RemoteIP"). Exact
+    // lowercase matching missed all of them, so every column defaulted to
+    // Metadata and the graph came out empty.
+    assert_eq!(
+        GenericParser::canonical_field("Event Time"),
+        Some("timestamp")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Account Name"),
+        Some("source_user")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Remote IP"),
+        Some("target_ip")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Local IP"),
+        Some("source_ip")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Computer Name"),
+        Some("source_host")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Remote Computer Name"),
+        Some("target_ip")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Process Command Line"),
+        Some("command_line")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Initiating Process Command Line"),
+        Some("command_line")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Folder Path"),
+        Some("target_file")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Initiating Process File Name"),
+        Some("source_process")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Initiating Process Parent File Name"),
+        Some("parent_process")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Registry Key"),
+        Some("target_registry")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Remote Url"),
+        Some("target_url")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Remote Port"),
+        Some("target_port")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Local Port"),
+        Some("source_port")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Sha256"),
+        Some("target_hash")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Action Type"),
+        Some("action")
+    );
 }
 
 #[test]

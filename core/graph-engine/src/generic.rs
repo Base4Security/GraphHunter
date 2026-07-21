@@ -197,8 +197,31 @@ pub struct NormalizedEvent {
 
 impl GenericParser {
     /// Maps a field name (case-insensitive) to a canonical name.
+    ///
+    /// Portal exports (e.g. the M365 Defender machine-timeline CSV) emit
+    /// Title Case headers with spaces ("Remote IP") for the same columns
+    /// the API exports as "RemoteIP". Rather than duplicating every alias
+    /// per separator style, the lookup retries with separators collapsed
+    /// ("remote ip" → "remoteip") and with spaces as underscores
+    /// ("event time" → "event_time").
     pub fn canonical_field(name: &str) -> Option<&'static str> {
-        match name.to_lowercase().as_str() {
+        let lower = name.to_lowercase();
+        if let Some(c) = Self::canonical_field_exact(&lower) {
+            return Some(c);
+        }
+        if lower.contains(' ') || lower.contains('-') {
+            let collapsed: String = lower.chars().filter(|c| *c != ' ' && *c != '-').collect();
+            if let Some(c) = Self::canonical_field_exact(&collapsed) {
+                return Some(c);
+            }
+            let underscored = lower.replace([' ', '-'], "_");
+            return Self::canonical_field_exact(&underscored);
+        }
+        None
+    }
+
+    fn canonical_field_exact(name: &str) -> Option<&'static str> {
+        match name {
             // Timestamp
             "timestamp" | "utctime" | "timegenerated" | "eventtime" | "time" | "date"
             | "datetime" | "@timestamp" | "event_time" | "log_time" => Some("timestamp"),
@@ -237,9 +260,8 @@ impl GenericParser {
             // Source IP
             "sourceip" | "src_ip" | "source_ip" | "srcip" | "ipaddress" | "ip_address" | "ip"
             | "client_ip_address" | "clientip" | "client_ip" | "callerip" | "caller_ip"
-            | "src_addr" | "sourceaddress" | "clientaddress" | "sourceipaddress" => {
-                Some("source_ip")
-            }
+            | "src_addr" | "sourceaddress" | "clientaddress" | "sourceipaddress" | "localip"
+            | "local_ip" => Some("source_ip"),
 
             // Target IP (also used for client connecting IPs in RDP/TerminalServices)
             "destinationip" | "dst_ip" | "dest_ip" | "target_ip" | "dstip" | "remoteip"
@@ -250,9 +272,8 @@ impl GenericParser {
             // Source host
             "computer" | "hostname" | "devicename" | "source_host" | "src_host" | "host"
             | "machine" | "workstation" | "device_name" | "agent_hostname" | "clientmachine"
-            | "machinename" | "workstationname" | "servername" | "sourceworkstation" => {
-                Some("source_host")
-            }
+            | "machinename" | "workstationname" | "servername" | "sourceworkstation"
+            | "computername" => Some("source_host"),
 
             // Target host (map to target_ip for graph connectivity)
             "destination"
@@ -261,6 +282,7 @@ impl GenericParser {
             | "targetcomputer"
             | "remotehost"
             | "remotemachine"
+            | "remotecomputername"
             | "destinationhostname" => Some("target_ip"),
 
             // Source process
@@ -360,7 +382,7 @@ impl GenericParser {
             // Action / event semantics — metadata that hints at the
             // relation type but does not itself produce an entity.
             "action" | "event_type" | "eventtype" | "event_action" | "eventaction" | "activity"
-            | "activity_type" => Some("action"),
+            | "activity_type" | "actiontype" => Some("action"),
 
             // Outcome / result — skipped by default but reserved for
             // future enrichment (e.g. failed-auth cluster detection).
