@@ -773,7 +773,308 @@ brief, con dos matices verificados.**
    lectura de código, no como comportamiento confirmado por un test.
 
 ## S5. Pipeline de ingesta, persistencia y almacenamiento local
-_Pendiente: se completa en la Tarea 4._
+
+### Metodología
+
+Se leyeron íntegramente `core/graph-engine/src/ingest/{mod,source_poller,parser_task,
+writer,channels,batch,overflow,coverage,metrics,cancellation}.rs`,
+`core/graph-engine/src/ingest/graph_access.rs`, `core/graph-engine/src/watermark_store.rs`,
+`core/graph-engine/src/dlq/mod.rs`, `platform/api/src/operations/dlq.rs`,
+`platform/api/src/operations/ingestion.rs` (completo hasta la constante
+`WHOLE_FILE_PARSE_LIMIT` y el bloque de guards en las líneas ~900-1500),
+`platform/api/src/state/persistence.rs`, `platform/api/src/state/session_binary.rs`,
+`platform/api/src/operations/session.rs` (save/load/delete), `platform/sources/src/quota.rs`,
+`core/graph-engine/src/drift/store.rs` y `core/graph-engine/src/mapping_library/mod.rs`,
+más los greps pedidos (adaptados a la herramienta Grep) y verificaciones de wiring:
+
+```
+rg -n "watermark|checkpoint" core/graph-engine/src/ingest/ --type rust
+rg -n "sqlite|rusqlite|app_data|session" platform/api/src/ core/graph-engine/src/ --type rust -i
+rg -n "WHOLE_FILE_PARSE_LIMIT|MAX_PREALLOC_|CRITICAL_MEMORY_MB|stopped_early" platform/api/src/operations/ingestion.rs
+rg -n "SourcePoller::new|GraphWriter::new|ParserTask::new|SqliteWatermarkStore::open\(|OverflowStore::open\(|IngestCancelTree" --glob "*.rs" .
+rg -l "std::fs::|tokio::fs::" core/graph-engine/src/ platform/api/src/
+```
+
+**Hallazgo metodológico previo, transversal a las 5 preguntas: existen DOS
+pipelines de ingesta distintos, no uno.** (1) `load_data_streaming`
+(`platform/api/src/operations/ingestion.rs:827-…`), el pipeline
+mmap + batch-de-líneas que corre hoy en background thread y es el que
+efectivamente mueve bytes cuando un analista carga un archivo — wireado y en
+uso. (2) El pipeline de canales tokio `SourcePoller → ParserTask → GraphWriter`
+de `core/graph-engine/src/ingest/*` (el que describen `mod.rs` y las preguntas
+del brief sobre tamaños de canal/checkpoints/circuit breaker) — código real,
+completo, con tests unitarios exhaustivos, pero **no instanciado en ningún
+camino de ejecución real**. Verificado exhaustivamente: `SourcePoller::new`,
+`GraphWriter::new`, `ParserTask::new`, `IngestCancelTree::new` y el
+constructor con archivo real `SqliteWatermarkStore::open(path)` (no
+`open_in_memory`) **no tienen ningún call site fuera de sus propios tests
+`#[cfg(test)]`**, con una única excepción: `apps/tauri/src-tauri/src/commands/
+azure_streaming_smoke.rs`, que el propio encabezado del archivo
+(`azure_streaming_smoke.rs:1-28`) documenta como un smoke test que ejercita
+las primitivas *"without hitting Azure, without real HTTP, and without
+touching the session's real GraphHunter"*, y que lista explícitamente como
+**no cubierto**: *"Full `SourcePoller` cycle (needs persistent WatermarkStore
++ live source)"* (`azure_streaming_smoke.rs:25`). Ese comando ni siquiera usa
+un directorio de sesión real para `OverflowStore`: abre un
+`tempfile::tempdir()` desechable (`azure_streaming_smoke.rs:501-508`).
+Confirmación adicional: el propio doc de `GraphAccess` (el trait que el
+`GraphWriter` necesita para escribir al grafo real) dice que el implementor
+de producción vive en *"Phase 5 in `app/src-tauri/src/ingest`"*
+(`core/graph-engine/src/ingest/graph_access.rs:15-16`) — ese directorio
+**no existe** en el árbol actual (`find apps/tauri/src-tauri/src -iname
+"*ingest*"` solo devuelve `commands/ingestion.rs`, `commands/ingest_status.rs`
+y `http/ingest.rs`, todos parte del pipeline (1), no del (2)). Esto no
+invalida las respuestas de abajo — el código y sus constantes son reales y
+se citan tal cual — pero cualquier lectura debe entender que describen un
+subsistema completo y probado que hoy está **dormido**, no el camino que
+efectivamente ingiere datos en la app.
+
+### 1. Topología del pipeline streaming: tamaños de canal y backpressure
+
+Topología (`core/graph-engine/src/ingest/mod.rs:8-21`): `SourcePoller` (uno
+por fuente) → canal `raw_tx` → `ParserTask` (uno por fuente) → canal
+`parsed_tx` → `GraphWriter` único compartido entre todas las fuentes →
+`RwLock<GraphHunter>`.
+
+**Tamaños de canal — el claim del spec "bounded 4 / bounded 8" queda
+CONFIRMADO literalmente, no aproximado:**
+
+```rust
+pub const DEFAULT_RAW_CAPACITY: usize = 4;     // channels.rs:44
+pub const DEFAULT_PARSED_CAPACITY: usize = 8;  // channels.rs:47
+```
+
+(`core/graph-engine/src/ingest/channels.rs:44,47`). El razonamiento de
+dimensionamiento está documentado en el propio archivo
+(`channels.rs:19-33`): una página cruda de Log Analytics puede pesar
+~50 MB (500K filas × ~100 B), así que `4 × 50 MB = 200 MB` de cola cruda
+por fuente en el peor caso; un `ParsedBatch` pesa ~12 MB (25K triples ×
+~500 B), así que `8 × 12 MB ≈ 100 MB`. Tres fuentes concurrentes (LA, Data
+Lake, Defender XDR) en estado estable encolan ~1 GB total, "well under the
+2 GB streaming-backend memory budget" (`channels.rs:29-33`). Ambos
+constructores clampan la capacidad a mínimo 1 (`raw_channel`/`parsed_channel`,
+`channels.rs:64-73`), y un caller puede pasar una capacidad explícita
+distinta del default por fuente.
+
+**Semántica de backpressure — bloquea, no descarta, confirmado.**
+`channels.rs:14-17` y `mod.rs:23-32` documentan que ambos canales son
+`tokio::sync::mpsc::channel(N)`: `sender.send().await` **bloquea** cuando el
+canal está lleno — esa es la señal de backpressure. La cadena documentada:
+si el `GraphWriter` se atrasa, `parsed_tx.send` de `ParserTask` bloquea →
+`raw_rx.recv` del `ParserTask` se atasca → `raw_tx.send` del `SourcePoller`
+bloquea → el poller deja de llamar a Azure. Nunca se descartan datos salvo
+que el receptor se cierre explícitamente (`channels.rs:16-17`). Verificado
+por test: `raw_channel_blocks_when_full` (`channels.rs:100-110`) — con
+capacidad 1, un segundo `try_send` falla mientras el primer mensaje no se
+drena; drenar uno libera espacio para el siguiente `try_send`.
+
+**Un solo `GraphWriter`, no uno por fuente** (`mod.rs:34-45`,
+`writer.rs:9-16`): el `RwLock` del grafo se toma exclusivamente en escritura;
+un writer único serializa el acceso y cede el lock entre chunks
+(`tokio::task::yield_now().await`, `writer.rs:202-204`) para que lectores
+(hunts, enrichment on-demand) tengan progreso acotado. El propio comentario
+lo marca como **apuesta no medida** (`mod.rs:42-45`, `writer.rs:13-15`): si
+telemetría de producción mostrara el writer saturado (>80% CPU), Phase 5
+añadiría sharding — pero como se documenta arriba, esta ruta (2) no está en
+producción hoy, así que esa telemetría no existe.
+
+### 2. Ciclo de vida de una sesión: qué va a SQLite, qué a JSON, rutas de app-data
+
+**Directorio raíz de app-data:** `dirs::data_dir().join("GraphHunter").join("sessions")`
+(`platform/api/src/state/persistence.rs:14-18`), creado por `ensure_session_dir`
+(`persistence.rs:22-26`). En Windows resuelve a `%APPDATA%\GraphHunter\sessions`
+(comentario `persistence.rs:11-12`).
+
+**Archivo por sesión — un solo archivo, no una carpeta:**
+`{sessions_dir}/{session_id}.json` (`persistence.rs:51-54`), con
+`session_id` validado contra `[A-Za-z0-9_-]{1,128}` para bloquear path
+traversal / inyección de NUL (`persistence.rs:34-48`, ver tests
+`reject_path_traversal`/`reject_nul_byte`, `persistence.rs:93-96,109-111`).
+
+**El nombre `.json` es engañoso: el contenido real es binario desde
+"Heavy-logs #3".** `save_session_blocking` (`platform/api/src/operations/
+session.rs:249-391`) siempre escribe el formato binario `GHS1`
+(magic `b"GHS1"`, `state/session_binary.rs:57-63`): un header
+JSON-encoded (tolerante a cambios de schema, versión 2,
+`session_binary.rs:29-30,42-44`) seguido de registros de entidades y
+relaciones bincode-encoded, cada uno con longitud explícita
+(`session_binary.rs:25-40`), escritos en streaming — memoria pico acotada a
+los buffers del writer/reader (unos pocos MB), independiente del tamaño de
+la sesión (`session_binary.rs:1-16`, motivado por una sesión EVTX de 28 GB /
+~100M entidades que con el loader JSON antiguo materializaba ~10 GB
+transitorios). El load path sniffa los primeros 4 bytes: `GHS1` → loader
+binario; cualquier otra cosa → loader JSON legacy (`session_binary.rs:18-23`)
+— sesiones viejas en JSON real siguen cargando, pero todo save nuevo migra a
+binario transparentemente, sin configuración de usuario.
+
+**No hay SQLite para el grafo de la sesión en sí** — ni entidades ni
+relaciones se particionan nunca en una base de datos; es siempre este único
+archivo (binario o JSON legacy) por `session_id`. SQLite se usa solo para
+dos almacenes **adyacentes y separados**, ambos wireados en el arranque de
+Tauri (`apps/tauri/src-tauri/src/lib.rs:126-175`):
+
+- **`DriftStore`** — ruta única compartida `<data>/GraphHunter/sessions/
+  drift.sqlite` (`lib.rs:134-138`), tablas `drift_batches`/`drift_field_tags`
+  (`core/graph-engine/src/drift/store.rs:9-13,25-45`). **Discrepancia
+  doc-vs-wiring:** el propio comentario del módulo dice *"records those
+  snapshots to a per-session SQLite file"* (`drift/store.rs:4-6`), pero el
+  wiring real usa **un solo archivo compartido por todas las sesiones**, no
+  uno por `session_id` — mismo patrón de discrepancia doc/código que S3
+  documentó para otras partes del sistema.
+- **DLQ** — no es SQLite, son shards JSONL bajo el directorio único
+  compartido `<data>/GraphHunter/sessions/dlq/` (`lib.rs:155-175`); ver
+  detalle en la pregunta 4.
+
+**El almacén de watermarks SQLite (`watermark_store.rs`) nunca se abre con
+una ruta real fuera de sus propios tests.** El doc del módulo afirma que
+vive en *"`<session_dir>/ops.sqlite`"* (`watermark_store.rs:11-12`), pero
+`SqliteWatermarkStore::open(path)` (el constructor file-backed, distinto de
+`open_in_memory()`) **no tiene ningún call site fuera del propio
+`#[cfg(test)]` de `watermark_store.rs`** (`watermark_store.rs:563,572`) —
+verificado por grep exhaustivo en todo el repo. Consistente con el hallazgo
+de la Metodología: hoy la app nunca crea un `ops.sqlite` real.
+
+**Artefacto legacy muerto encontrado:** `remove_session_files`
+(`operations/session.rs:693-700`) sigue limpiando un directorio sidecar
+legacy `{sessions_dir}/{id}/`, cuyo fixture de test nombra un archivo
+`sentinel_watermarks.json` (`operations/session.rs:894-905`) — pero un grep
+de `sentinel_watermarks` en todo el repo solo devuelve esa referencia de
+test/limpieza; no existe ningún escritor de ese archivo en el árbol actual.
+Es deuda de borrado retrocompatible, no un mecanismo activo.
+
+**Descartar una sesión** (`delete_session`, `operations/session.rs:401-417`)
+es un borrado real de disco (el archivo `.json`-nombrado más el sidecar
+legacy si existe), no un archivado ni soft-delete; un `remove_file` fallido
+ahora se propaga como error en vez de tragarse silenciosamente
+(`operations/session.rs:916-929`, test `remove_session_files_propagates_
+real_errors`).
+
+### 3. Checkpoints/watermarks: avance, crash entre `send` y persistencia, gap del circuit breaker
+
+**Cuándo avanza el watermark.** En `poll_one_table`
+(`source_poller.rs:309-385`): por cada `(chunk, new_wm)` exitoso del stream,
+primero se reenvía el chunk (`raw_tx.send(Ok(chunk)).await`, línea 353) y
+**solo después**, si `new_wm != current_wm` (se descartan ecos no-op de la
+fuente, línea 364), se persiste vía `watermarks.set(&key, &new_wm)` (línea
+365); el contador `watermark_advances` solo se incrementa si el `set` tuvo
+éxito (365-369). Errores de la fuente **nunca** avanzan el watermark
+(`source_poller.rs:33-37`; test `poller_forwards_source_error_without_
+advancing_watermark`, `source_poller.rs:615-682`, confirma
+`watermark_advances == 0`).
+
+**Crash entre `send` y persistencia — claim ya verificado y CORREGIDO en
+S3, citado aquí sin volver a derivarlo.** El comentario de
+`source_poller.rs:24-31` documenta explícitamente el orden (persistencia
+del watermark ocurre DESPUÉS de que el envío al canal retorna) y afirma que
+un crash en ese intervalo es seguro porque *"the graph insertion is
+idempotent at the `(src_sid, dst_sid, timestamp, rel_type_tag,
+metadata_offset)` level"*. **S3 §3 de este mismo documento** (citando
+`graph.rs:788-796`, `streaming.rs:1339-1379`, `streaming.rs:195-221`) ya
+estableció que esa afirmación es **incorrecta**: no existe ningún chequeo de
+existencia/deduplicación en el pipeline de inserción de aristas —
+`push_to_streaming`/`append_edge_checked`/`NeighborList::push` son appends
+incondicionales. Se cita esa conclusión aquí sin repetir la evidencia
+completa: la consecuencia directa para el escenario de esta pregunta es que
+un crash entre el `send` del chunk y el `watermarks.set` correspondiente, al
+reiniciar, re-poll desde el watermark viejo y **re-inserta aristas
+duplicadas reales en el grafo**, no un riesgo puramente documental. Nota de
+alcance: este escenario de crash-recovery es hoy teórico en el sentido de
+que el pipeline que lo protagoniza (`SourcePoller` + `SqliteWatermarkStore`
+persistente) no corre en ningún camino real de la app (ver Metodología) — el
+único ejercicio de un `SqliteWatermarkStore` file-backed es su propio test
+`persists_across_open` (`watermark_store.rs:556-577`).
+
+**Circuit breaker y su gap de cobertura.** `CircuitBreaker`
+(`source_poller.rs:76-133`) abre tras `circuit_max_failures` fallas
+consecutivas (default `DEFAULT_CIRCUIT_MAX_FAILURES: u32 = 5`,
+`source_poller.rs:58`), con backoff inicial `DEFAULT_CIRCUIT_BACKOFF_BASE =
+1 s` (línea 61) que dobla por cada falla extra, capado en
+`MAX_CIRCUIT_BACKOFF = 5 * 60 s` (línea 64). Mientras está abierto,
+`poll_one_table` retorna de inmediato sin llamar `poll_since` en absoluto
+(`source_poller.rs:309-315`, contado en `circuit_open_skips`) — confirmado
+por el test `poller_opens_circuit_after_n_failures`
+(`source_poller.rs:717-808`): el call count de la fuente deja de crecer
+mientras el circuito está abierto.
+
+- **El gap real:** `DataCoverage::record` (`ingest/coverage.rs:108-122`)
+  solo se alimenta con filas que efectivamente llegaron a insertarse en el
+  grafo. Mientras el circuito está abierto no fluye ningún dato para esa
+  fuente, así que no se puebla ningún bucket para esa ventana de tiempo.
+  `DataCoverage::gaps()` (`coverage.rs:169-198,264-286`) reportaría esa
+  ventana como un gap de cobertura **indistinguible** de "la fuente upstream
+  genuinamente no tuvo eventos" — el propio propósito documentado del
+  módulo es justo evitar esa ambigüedad para el analista
+  (`coverage.rs:1-10`: *"the analyst needs to know whether the hypothesis
+  genuinely didn't match OR whether we never ingested data"*), pero ni
+  `SourcePoller` ni `DataCoverage` cruzan la señal de circuito-abierto contra
+  los buckets de cobertura — no hay ningún campo/anotación que distinga
+  "gap por breaker" de "gap por fuente vacía". El único lugar donde el
+  estado del circuito es observable es `PollerMetricsSnapshot`
+  (`circuit_state`/`circuit_open_skips`/`consecutive_failures`,
+  `source_poller.rs:222-232`), un snapshot de métricas aparte que
+  `DataCoverage` no consulta.
+
+### 4. Almacenamiento local: inventario exhaustivo de "precursores de journal"
+
+| # | Artefacto | Ruta | Formato | Estado |
+|---|---|---|---|---|
+| 1 | Grafo de sesión | `{data}/GraphHunter/sessions/{id}.json` | Binario `GHS1` (o JSON legacy) | **Real, wireado** (ver §2) |
+| 2 | Spill de aristas | tempdir / dir externo vía `with_spill_dir_and_budget` (`streaming.rs:533-551`) | archivo ordenado por timestamp, mmap de vuelta | **Real, activo por defecto** (ya documentado en S3 §5, `streaming.rs:500-527,1178-1215`, `graph.rs:244-247`; citado aquí solo como ítem del inventario, no re-derivado) |
+| 3 | Overflow de ingesta | `<session_dir>/ingest_overflow/pending_<ts>_<ctr>.json` (`ingest/overflow.rs:52-53,245-257`) | JSON (no CBOR, pese al plan §8 — justificado en `overflow.rs:22-26`: evitar una dep nueva) | **Código completo, cero call sites productivos** — `OverflowStore::open` solo se llama desde sus propios tests y desde el smoke test Tauri con un `tempfile::tempdir()` desechable (`azure_streaming_smoke.rs:501-508`), nunca desde un `<session_dir>` real |
+| 4 | DLQ | `<data>/GraphHunter/sessions/dlq/dlq_<ts>_<ctr>.jsonl` (`dlq/mod.rs:9,37-42`) | JSONL, shard rota a 10 000 registros u 8 MiB (`SHARD_MAX_RECORDS`/`SHARD_MAX_BYTES`, `dlq/mod.rs:41-42`) | **Real, wireado** en el arranque (`lib.rs:155-175`) — pero solo alimentado por los caminos síncronos `load_data`/`load_data_with_config` (`record_parse_skips` en `ingestion.rs:433,755`); el camino background `load_data_streaming` (línea-por-línea, el que de hecho procesa archivos grandes) **nunca llama** `record_parse_skips`/`record_dead_letter` — sus filas descartadas no llegan al DLQ, ver §5 |
+| 5 | Watermarks + source_status + enrichment_audit | doc-claimed `<session_dir>/ops.sqlite` (`watermark_store.rs:11-12`) | SQLite (tablas `watermarks`/`source_status`/`enrichment_audit`, `watermark_store.rs:283-316`) | **No wireado** — `SqliteWatermarkStore::open(path)` sin call sites fuera de sus propios tests (ver §2) |
+| 6 | Drift de parseo | `<data>/GraphHunter/sessions/drift.sqlite` (único, compartido) (`lib.rs:134-138`) | SQLite (`drift_batches`/`drift_field_tags`, `drift/store.rs:25-45`) | **Real, wireado**, pese a que el doc del módulo dice "per-session" (ver §2) |
+| 7 | Mapping library | `<data>/mapping_library/mappings.jsonl` (`mapping_library/mod.rs:19-23`) | JSONL append-only, un `PublishedMapping` por línea | **Real, wireado** — pero fuera del alcance estricto de "journal de ingesta cruda": guarda `FieldConfig`/VRL/provenance aprobados, no eventos crudos; incluido aquí solo por completitud del cruce `std::fs`/`tokio::fs` del Paso 3 |
+| 8 | Sidecar legacy de sesión | `{sessions_dir}/{id}/` (p. ej. `sentinel_watermarks.json`) | — | **Muerto** — solo referenciado por el código de limpieza (`operations/session.rs:693-700,894-905`); ningún escritor activo (ver §2) |
+
+**Justificación de cada hit no listado del cruce `rg -l "std::fs|tokio::fs"
+core/graph-engine/src/ platform/api/src/`:**
+
+- `core/graph-engine/src/tests.rs` — fixtures de test, no I/O de producción.
+- `core/graph-engine/src/planner.rs:896` — `std::fs::read_to_string` lee un
+  archivo de calibración de benchmark (solo lectura, ajeno a ingesta/sesión).
+- `core/graph-engine/src/catalog/loader.rs` — lee YAML del catálogo de
+  hunts desde `$GRAPHHUNTER_CATALOG_DIR`/`~/.graphhunter/catalog/`
+  (`catalog/loader.rs:6-8`), solo lectura; es catálogo de patrones de hunt,
+  no datos ingeridos.
+- `platform/api/src/operations/ingestion.rs` — ya cubierto como el pipeline
+  principal (fila 1); sus usos adicionales de `std::fs`/`mmap` abren el
+  **archivo fuente del usuario** para lectura (`ingestion.rs:1171-1177,
+  1464-1467`), no almacenamiento propio de la app.
+- `platform/api/src/operations/graph_ops.rs:66` — `preview_fields` abre el
+  archivo fuente del usuario para muestrear nombres de campo (solo lectura,
+  archivo de entrada, no almacenamiento de la app).
+- `platform/api/src/pcap.rs`, `pcap_preview.rs`, `evtx.rs`,
+  `ingestors/mod.rs`, `ingestors/zeek.rs`, `ingestors/suricata.rs`,
+  `ingestors/netflow.rs` — todos hacen `File::open`/`metadata()` sobre el
+  archivo fuente que el usuario está ingiriendo (magic-byte sniffing,
+  tamaño, parseo); son lecturas de entrada, no artefactos que la app
+  persista. Sus bloques `#[cfg(test)]` además escriben fixtures temporales
+  desechables para los tests del propio ingestor, no escrituras de
+  producción.
+
+### 5. Truncamientos: guards con valores exactos y señal que queda
+
+| Guard | Valor exacto | Cita | Qué pasa al activarse | Señal que queda |
+|---|---|---|---|---|
+| `WHOLE_FILE_PARSE_LIMIT` | 512 MB (`512 * 1024 * 1024`) | `ingestion.rs:81`, comentario `:74-80` | Rama "whole-file" (JSON no line-delimited): archivo por encima del límite se **rechaza entero** (`ingestion.rs:1452-1463`), no se trunca — la rama ni siquiera arranca | `Err(String)` con mensaje accionable, propagado como evento `IngestError` (`dto/v1/ingestion.rs:150-154`); no hay ingesta parcial |
+| `CRITICAL_MEMORY_MB` | 256 MB, solo Windows (`#[cfg(target_os = "windows")]`, `ingestion.rs:69-70`) | `ingestion.rs:70`, chequeo en `:1350-1391` vía `GlobalMemoryStatusEx` cada ~20 batches | En la rama streaming línea-por-línea: si RAM física disponible < 256 MB, `stopped_early = true` y se rompe el loop (`:1380-1388`); el batch final (líneas tras el último `\n`) se **salta explícitamente** (`:1401`: *"the remaining data could be gigabytes and would OOM"*) — esas filas finales se pierden silenciosamente del grafo | Solo `tracing::warn!` (`:1381-1384`). **Verificado exhaustivamente (grep de `stopped_early` en todo el archivo, 4 ocurrencias, todas en `:1187-1401`): la variable es local al closure de ingesta y nunca se copia a ningún campo de sesión ni al DTO `LoadResult`/`IngestComplete`** (`dto/v1/ingestion.rs:73-146`, sin campo `truncated`/`stopped_early`) — el operador no tiene ninguna señal en la UI, solo el log |
+| `CRITICAL_MEMORY_MB` en Linux/macOS | — | El bloque completo está gateado tras `#[cfg(target_os = "windows")]` (`ingestion.rs:69-70,1351`) | El guard **no existe** fuera de Windows — no hay chequeo de memoria crítica equivalente | Ninguna — no aplica |
+| `MAX_INGEST_LINES` | `usize::MAX` (`ingestion.rs:930`) | Comparación en `:1199` | **Nunca se activa en la práctica** — haría falta un archivo con más de `usize::MAX` líneas; el guard queda vestigial/deshabilitado pese a que el código (`stopped_early = true` + warning, `:1200-1206`) sigue wireado para él | N/A (inalcanzable) — corrección si el spec asumía un tope de líneas activo hoy |
+| Cuotas Azure (`QuotaLimiter`) | Log Analytics 200/30 s; Defender XDR ~45/60 s; Sentinel Data Lake conservador 120/60 s (`platform/sources/src/quota.rs:8-14`) | `quota.rs:55-97,99-115` | **No es un truncamiento**: `acquire()` bloquea/duerme (`quota.rs:99-115`) hasta que hay token o expira la penalización de un 429 (`penalize()`, `:120-134`); ninguna fila se descarta jamás | No aplica señal de pérdida — se distingue deliberadamente de los guards de arriba porque no hay pérdida de datos. Nota de alcance: el `QuotaLimiter` es real y probado pero solo alcanzable desde tests de `ingest/metrics.rs`, no desde ningún poller corriendo en producción (ver Metodología) |
+
+**Aclaración adicional — no son truncamientos:** `MAX_PREALLOC_ENTITIES =
+2_000_000` y `MAX_PREALLOC_RELATIONS = 4_000_000` (`ingestion.rs:63,65`)
+solo acotan el tamaño de la heurística de **pre-allocation** de capacidad
+(`.min(MAX_PREALLOC_ENTITIES)`/`.min(MAX_PREALLOC_RELATIONS)`,
+`ingestion.rs:1141-1147`) para no sobre-reservar memoria cuando el estimado
+por tamaño de archivo resulta exagerado; un archivo que produce más
+entidades/relaciones que esos topes simplemente hace que el `Vec` interno
+haga resize normal más allá de la capacidad pre-reservada — la ingesta no
+se rechaza ni se trunca por esta constante.
+
+## S6. Integración Sentinel y sidecar
+_Pendiente: se completa en la Tarea 5._
 
 ## S6. Integración Sentinel y sidecar
 _Pendiente: se completa en la Tarea 5._
