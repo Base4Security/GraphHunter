@@ -247,9 +247,10 @@ nombre real se resuelve vía `meta_store`, ver `graph.rs:650-659`).
 
 **Entidad en memoria — `Entity`** (`core/graph-engine/src/entity.rs:30-60`):
 struct con `id: String`, `entity_type: EntityType`, `score: f64`,
-`metadata: HashMap<String, String>`, `dataset_id: Option<Arc<str>>` y tres
-métricas de centralidad (`degree_score`, `betweenness`, `pagerank_score`,
-`rarity_score`). `PartialEq`/`Hash` están implementados manualmente
+`metadata: HashMap<String, String>`, `dataset_id: Option<Arc<str>>`, tres
+métricas de centralidad (`degree_score`, `betweenness`, `pagerank_score`) y
+una señal de rareza (`rarity_score`, el espejo invertido de `degree_score`,
+no una métrica de centralidad). `PartialEq`/`Hash` están implementados manualmente
 (`entity.rs:100-112`) para comparar solo por `id`, no por el resto de campos.
 
 **Relación "rica" — `Relation`** (`core/graph-engine/src/relation.rs:26-45`):
@@ -376,8 +377,9 @@ punto del pipeline de inserción**:
 - `push_to_streaming` (`graph.rs:788-796`) solo transmuta `CompactRelation` a
   `StreamEdge` y llama `self.streaming.append_edge_checked(...)`
   — ninguna comprobación de duplicados.
-- `append_edge_checked` → `try_append_edge` → `append_edge_inner`
-  (`streaming.rs:1339-1379`) toma el slot del vértice origen y llama
+- `append_edge_checked` (`streaming.rs:1339-1345`) → `try_append_edge`
+  (`streaming.rs:1319-1336`) → `append_edge_inner` (`streaming.rs:1347-1379`)
+  toma el slot del vértice origen y llama
   `guard.push(edge)` (o inserta en la posición ordenada del *tail* si el
   grafo ya está finalizado) — un `push`/`insert` incondicional en el `Vec`/
   `SmallVec`/`tail` del vértice, sin buscar si ya existe una arista con el
@@ -2494,7 +2496,7 @@ datos en un reinicio del pipeline de ingesta).
 | 23 | Colisión de PID reutilizado | **Ninguna** | Sin test de reutilización de PID; `process_activity_carries_pid_and_cmdline` (`platform/canonical/src/project/mod.rs:524`) sólo prueba que el campo `pid` se parsea, no colisión de identidad |
 | 24 | Hipótesis temporal sobre dos fuentes | **Ninguna** | `search_enforces_causal_monotonicity` (`tests.rs:516`) es de una sola fuente implícita — descartado arriba |
 | 25 | Equivalencia incremental contra rebuild tras cada lote | **Ninguna** | No existe `GraphDelta` ni runtime incremental con contrato de equivalencia (spec §4); `delta_update_after_new_edge_matches_full_rebuild` (`khop_reach.rs:752`) es de un índice interno, no del estado observable del grafo — descartado arriba |
-| 26 | Misma hipótesis desde MCP/REST/core | **Ninguna** | El MCP no consume `GraphHunterApi` para hipótesis (genera KQL propio, S6/spec §1); los tests "parity" existentes (`platform/api/tests/parity/{dto_shapes,scenarios}.rs`) comparan forma de DTO vs llamada directa al API, no MCP vs REST vs core |
+| 26 | Misma hipótesis desde MCP/REST/core | **Ninguna** | No existe ningún test que ejecute la misma hipótesis por los tres transportes (MCP, REST, core) y compare resultados (consistente con S9 §3); los tests "parity" existentes (`platform/api/tests/parity/{dto_shapes,scenarios}.rs`) comparan forma de DTO vs llamada directa al API, no MCP vs REST vs core |
 | 27 | Conector JSONL = grafo equivalente a Sentinel | **Ninguna** | El conector JSONL no existe como código (grep de `JSONL`/`jsonl_source`/`jsonl_connector` en `platform/sources`: 0 resultados) — no hay nada que testear todavía |
 | 28 | Consulta sobre rango incompleto marcada no exhaustiva | **Ninguna** | Sin campo `possibly_incomplete` en ningún DTO (grep, 0 resultados) — consistente con S5 §5 y con el §7 del spec ("viola hoy no presentar datos incompletos como exhaustivos") |
 
@@ -2793,7 +2795,7 @@ riesgos), en la tabla suplementaria.
 | 2 | Raw Event Journal | "No existe. Sólo `ingest/overflow.rs` (shutdown) y DLQ (filas fallidas)" | **confirmada** | El journal no existe: correcto (S5). Matiz que endurece el gap: los dos precursores que el spec cita son **más débiles** de lo que sugiere — `overflow.rs` tiene **0 call sites productivos** (test-only + smoke test con tempdir desechable) y el DLQ solo se alimenta desde los caminos **síncronos** `load_data`/`load_data_with_config`; el camino background `load_data_streaming` que procesa archivos grandes nunca escribe al DLQ (S5). |
 | 3 | Normalizer | "Parcial: `platform/canonical` (OCSF + `ProvenanceCtx` con mapping id/version/hash)" | **matizada** | `platform/canonical`/`platform/vrl` existen, pero la proyección OCSF + `ProvenanceCtx` corre **solo en tiempo de export**, no de ingesta (único call site: `export.rs`) (S4). `mapping_version` es un **placeholder** (`1` para parsers hand-written; la versión del *compilador* VRL, no del `FieldConfig` del usuario) — no versiona la edición del mapping (S4). Hallazgo no documentado: editar el mapping tras un ingest **contamina retroactivamente** la `ProvenanceCtx` de export de aristas ya insertadas (S4, etiquetado inferencia de lectura de código). |
 | 4 | GraphDelta | "No existe; `insert_raw_events` muta directo. **Clave dedup implícita** `(src,dst,ts,rel,metadata_offset)`" | **corregida** | **NO hay dedup alguno** en ningún punto del pipeline de inserción de aristas — `push_to_streaming`/`append_edge_checked`/`NeighborList::push` son appends incondicionales; la "clave dedup implícita" era **solo un comentario aspiracional** (`source_poller.rs:29`, `ingest_adapter.rs:43`), no un invariante implementado (S3). Consecuencia: multiplicidad de aristas **SÍ** (dos tripletas idénticas coexisten); reingesta tras crash **duplica aristas reales** (S3/S5). |
-| 5 | Incremental Runtime | "Parcial: `SourcePoller → ParserTask → GraphWriter`, watermarks, circuit breaker, backpressure, `coverage.rs`" | **corregida** | El subsistema es real y está exhaustivamente testeado (~104 tests) **pero DORMIDO y SIN CABLEAR**: `SourcePoller::new`/`GraphWriter::new`/`ParserTask::new`/`SqliteWatermarkStore::open(path)` no tienen call sites fuera de sus tests; el impl de producción de `GraphAccess` ("Phase 5 in `app/src-tauri/src/ingest`") **no existe** en el árbol (S5). No es "parcial existente" sino "completo pero apagado". Además `ingested_at_delta` se hardcodea a `0` en los 5 sitios de construcción de `CompactRelation`; solo el `add_relation` no usado lo computa (S6). |
+| 5 | Incremental Runtime | "Parcial: `SourcePoller → ParserTask → GraphWriter`, watermarks, circuit breaker, backpressure, `coverage.rs`" | **corregida** | El subsistema es real y está exhaustivamente testeado (~104 tests) **pero DORMIDO y SIN CABLEAR**: `SourcePoller::new`/`GraphWriter::new`/`ParserTask::new`/`SqliteWatermarkStore::open(path)` no tienen call sites fuera de sus tests; el impl de producción de `GraphAccess` ("Phase 5 in `app/src-tauri/src/ingest`") **no existe** en el árbol (S5). No es "parcial existente" sino "completo pero apagado". Además `ingested_at_delta` se hardcodea a `0` en los 5 sitios de construcción de `CompactRelation`; solo `add_relation` lo computa, y ningún camino de ingesta/Sentinel lo usa (S6) — sí tiene invocadores de producción fuera de ingesta: restauración de sesión (`platform/api/src/operations/session.rs:521,588`), carga de snapshot (`core/graph-engine/src/graph.rs:2802`) y `agentic_drift.rs:599`. |
 | 6 | Domain API | "Ya existe: `GraphHunterApi`, transport-agnostic. Gap: el MCP no la consume para hipótesis; genera KQL propio" | **matizada** | `GraphHunterApi` existe y es transport-agnostic (S9). El gap está **parcialmente resuelto**: para hipótesis, el MCP **SÍ** consume la Domain API — `hunt_run` (MCP) y `cmd_run_hunt` (frontend) convergen en el único `GraphHunterApi::run_hunt` (criterio 25.11 = SÍ, S9); el MCP no conoce credenciales Azure (S10). El KQL "propio" del MCP es de **recolección** server-side + el escape hatch `sentinel_query` (S7/S8), no la semántica de hipótesis. Matiz que encarece la Fase A: la propia Domain API arrastra **231 hits `AZURE_*`/`TimeGenerated`** en `platform/api` (S12). |
 | 7 | Cobertura/completitud | "Parcial: `DataCoverage`/`CoverageGap`, métricas drift" | **matizada** | Los tipos existen, pero: (a) `DataCoverage` solo se alimenta de filas que llegaron al grafo y **no distingue** un gap por circuit-breaker de "fuente genuinamente vacía" (S5); (b) todo el subsistema vive en el pipeline dormido (S5); (c) **ningún DTO expone `possibly_incomplete`** ni `coverage_start/end`/`source_watermarks`/`normalizer_versions`/`graph_snapshot_id` — el sistema hoy no puede marcar una respuesta como no exhaustiva (S11 caso 28, coherente con spec §7). |
 
