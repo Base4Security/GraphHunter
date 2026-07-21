@@ -8,6 +8,13 @@
   fuente canónica: repo `sot`, `docs/monograph/v2.0/frozen/monograph-v2.1.pdf`).
 - **Contraparte en el repo sot:** `validation/graphhunter/` (auditoría de
   suficiencia, entrada de la serie External Systems Validation).
+- **Referencia adicional:** paper "SOT-VM: An Executable Implementation of
+  Sufficient Observer Theory, with a Processor Architecture" v1.1 — copia
+  en `docs/reference/sot-vm-v1.1.pdf` (SHA256
+  `2ef39749dd889a00c8a3c5e02d83cd71d0eaa7f6b6bf067d4884d4d2ccdf4434`;
+  fuente: Desktop del autor, sin release congelada en el repo sot; el
+  código SOT-VM no está disponible localmente — la referencia es el
+  paper). Usos en este diseño: ver §5-bis.
 
 ## 1. Problema
 
@@ -192,6 +199,40 @@ entidades, relaciones, multiplicidad, identidades, metadata, índices,
 vecindarios, resultados de hipótesis y k-hop, orden temporal, procedencia
 y ventanas, con reporte de diferencias legible. En producción: apagado,
 muestreado, o sobre réplica pequeña.
+
+## 5-bis. Aportes de SOT-VM (paper v1.1) a este diseño
+
+SOT-VM aporta patrones ya trabajados que este diseño adopta como guía (el
+código SOT-VM no está disponible; se adoptan los patrones, no el código):
+
+1. **Bloque 1 — vocabulario de testigos:** SOT-VM distingue testigo de
+   comportamiento (la observación base ya no determina un behavior) de
+   testigo de comportamiento futuro (la insuficiencia aparece sólo bajo
+   contextos). El runner de la auditoría clasifica sus veredictos
+   `InsufficientWithWitness` con esa taxonomía. Su ejemplo trabajado
+   *staged-exfil* (32 estados → 11 bloques, repair de 2 bits, estado
+   latente que el compilador debe sintetizar) es plantilla de modelado
+   para hipótesis de hunting.
+2. **Bloque 2, Fase C — validación por traducción:** el checker de SOT-VM
+   descarga las obligaciones recomputando y comparando contra el modelo
+   concreto, independientemente de cómo el compilador produjo el módulo;
+   la base de confianza es el checker + la referencia, no el compilador.
+   El modo incremental-vs-rebuild adopta ese framing: el rebuild es la
+   referencia, el runtime incremental es el "compilador" no confiable, y
+   el comparador es la base de confianza. Además, el chequeo central de
+   SOT-VM es la **ecuación de descenso** verificada en cada par
+   estado-contexto — cubre historias de toda longitud por inducción, más
+   fuerte que replay acotado. Análogo aquí: verificar la conmutación de
+   un paso (aplicar-delta vs rebuild-de-prefijo) por lote, que es
+   exactamente "la propiedad de un paso elevada a todos los prefijos".
+3. **ADR — monotonía de contrato/contexto (Thm 7.2):** refinar etiquetas o
+   añadir contextos sólo refina el observador. Da la historia sana para la
+   evolución del catálogo: agregar hipótesis nuevas a B nunca invalida la
+   suficiencia relativa ya certificada hacia atrás — sólo puede exigir más.
+4. **Disciplina de claims — Tabla 1 de SOT-VM:** cada resultado etiquetado
+   proved / Coq-checked / implemented / tested / proposed. Los documentos
+   de este programa (assessment, ADRs, auditoría) replican esa etiqueta
+   por afirmación de garantía.
 
 ## 6. Decisiones fijadas
 
