@@ -7,7 +7,39 @@
   lo no verificado se marca **[no verificado]** con razón.
 
 ## S1. Resumen ejecutivo
-_Pendiente: se completa en la Tarea 9._
+
+Este assessment (Bloque 0) verificó el spec §4 contra código real. Los cinco
+hallazgos que cambian decisiones del Bloque 1:
+
+1. **El pipeline de streaming que el spec cuenta como "parcial existente" está
+   DORMIDO.** `SourcePoller → ParserTask → GraphWriter`, `LogSource`,
+   watermarks, circuit breaker y `coverage.rs` son código real con ~104 tests,
+   pero **0 call sites productivos**: solo los ejercita un smoke test. El
+   camino que mueve datos hoy es el HTTP directo `reqwest` (polling en vivo con
+   1 test + ingesta de archivo). "Fase A es mover, no crear" aplica al KQL y a
+   la Domain API, **no** al journal ni al runtime incremental (S5/S15).
+
+2. **No existe dedup de aristas en absoluto.** La "clave dedup implícita" del
+   spec era solo un comentario aspiracional; la inserción es append-only, la
+   multiplicidad se preserva por ausencia de chequeo y una reingesta tras crash
+   **duplica aristas reales**. El `GraphDelta` idempotente es construcción
+   nueva, y le falta un id de evento nativo sobre el cual deduplicar (S3/S6/S15).
+
+3. **El sidecar .NET no existe en ningún lado.** No hay branches
+   `feat/sp*-sentinel-*`, ni `.cs`/`.csproj` trackeado, falta el
+   `sentinel_sidecar.proto`, y hay 0 wiring Rust/Tauri. El spec §7 parte de una
+   premisa falsa; el Bloque 1 decide de cero (S2/S6/S16).
+
+4. **La convergencia de la Domain API ya está parcialmente lograda.** Frontend
+   y MCP convergen en el único `GraphHunterApi::run_hunt` (criterio 25.11 = SÍ)
+   y el MCP no conoce credenciales Azure — pero `platform/api` arrastra 231
+   hits `AZURE_*`, así que la Fase D es corta y la Fase A debe desacoplar la
+   propia Domain API (S9/S10/S12/S15).
+
+5. **La cobertura de tests arranca casi en cero:** 4/28 casos parciales,
+   24/28 ninguno; `ingested_at_delta` hardcodeado a 0 pierde event-time vs
+   ingestion-time; ningún DTO puede marcar una respuesta como no exhaustiva.
+   La auditoría de suficiencia debe priorizar estos huecos (S6/S11/S16).
 
 ## S2. Estructura del workspace (crates, paquetes, módulos)
 
@@ -2584,13 +2616,272 @@ términos). Los hits restantes se clasifican todos con costo estimado
 bajo/medio/alto — ninguno queda sin veredicto.
 
 ## S13. Diagrama textual: arquitectura actual
-_Pendiente: se completa en la Tarea 9._
+
+Construido únicamente con componentes citados en S2–S12. Marca los cinco
+puntos de pérdida del spec §1 como `(L1)…(L5)`, más dos hallazgos del Bloque 0
+que el diagrama original del spec no conocía: la falta total de dedup de
+aristas `(L1')` y la pérdida de `ingested_at_delta` `( ! )`. El pipeline de
+streaming dormido se dibuja aparte con `[··]` para distinguirlo de lo que
+efectivamente mueve datos hoy.
+
+```
+LEYENDA:  [==] wireado / mueve datos hoy    [··] código real pero DORMIDO
+          (L#) punto de pérdida del spec §1    ( ! ) hallazgo Bloque 0
+
+CAMINO (a) — BATCH / ARCHIVO → PARSERS → GRAFO   (el que mueve bytes hoy) [==]
+=============================================================================
+  Archivo del analista
+        |
+   cmd_load_data_streaming (Tauri) ──► load_data_streaming (platform/api, S5)
+        |                              [background thread, mmap + batch-de-líneas]
+        v
+  Auto-detección (S4):   INGESTOR_REGISTRY (magic bytes)     FORMAT_REGISTRY (ext+detect)
+                         EVTX/PCAP/Zeek/Suricata/NetFlow      Sysmon/Sentinel/Generic/CSV/
+                                |                              Forti*/IIS/Cognito/HAProxy
+                                └───────────────┬─────────────────────┘
+        (L2) skips silenciosos: fast-paths      (L3) sanitize_field_config /
+             Sysmon/Sentinel dejan drift /           auto_field_config_for: campos no
+             skip_reasons / skipped_samples          mapeados → Metadata o descartados
+             vacíos (S4)                              como candidatos a nodo (S4)
+                                |
+                                v
+        insert_raw_events / insert_triples (core/graph-engine, S3)
+                                |
+   (L1)  dedup de ENTIDAD por string-id exacto + merge FirstWriteWins (S3)
+   (L1') NO existe dedup de ARISTA — append incondicional; multiplicidad SÍ (S3)
+   ( ! ) ingested_at_delta hardcodeado 0 (5 sitios) → event_time vs ingestion_time
+         se pierde en todo camino masivo (S6)
+                                |
+                                v
+        GraphHunter store (streaming.rs: CompactRelation / NeighborList)
+                                |
+   (L4)  guards: 512 MB whole-file (rechazo entero); CRITICAL_MEMORY_MB →
+         stopped_early (corta a mitad, solo warn, sin señal a la UI);
+         MAX_INGEST_LINES = usize::MAX (guard muerto) (S5)
+                                |
+        auto-spill a disco (armado 1M aristas por defecto, tempdir/mmap) (S3/S5)
+                                v
+        Sesión = 1 archivo binario GHS1  ({id}.json)   (NO SQLite para el grafo;
+        drift.sqlite es un archivo SEPARADO y compartido entre sesiones) (S5)
+
+  Consumo de hipótesis:  GraphHunterApi.run_hunt
+                            ◄── cmd_run_hunt (frontend Tauri)
+                            ◄── POST /run_hunt ◄── hunt_run (MCP)
+                         Ambos convergen en el mismo método — criterio 25.11 = SÍ (S9)
+
+CAMINO (b) — MCP → KQL → SENTINEL   (puentea el motor de grafos) [==]
+====================================================================
+  LLM / agente
+      |
+  sentinel_query (MCP) ──► POST /kql ──► run_kql (operations/sentinel.rs) ──►
+      |  [texto KQL libre = semántica de hipótesis FUERA del motor;               |
+      |   única violación de la regla de diseño, S7/S8]                           v
+      |                                                    run_sentinel_query (reqwest)
+      |                                                              |
+      |                                                              v
+      +── graph_propose / graph_build / node_enrich /       Azure Log Analytics
+          sentinel_seed / schema_discover                   ▲ creds AZURE_* leídas
+          → KQL de RECOLECCIÓN server-side (forma fija)      │ por el host Rust;
+          → insert_triples → MISMO store del camino (a)      │ el MCP NO las conoce (S10)
+                                                             │
+  Polling en vivo (wireado, 1 solo test, S6/S11):           │
+     sentinel_connector.rs::polling_loop ──► KqlQueryBuilder::build (siem) ──►
+        HttpSentinelTransport ──► Azure ──► insert_triples
+        backoff 2^n·jitter (Retry-After NO honrado); circuit breaker SOLO auth (S10)
+
+PIPELINE DE STREAMING DORMIDO  [··]  (código real + ~104 tests, 0 call sites productivos)
+=======================================================================================
+  LogSource (platform/sources): LogAnalytics / DataLakeV2 (stub) / DefenderXDR   [··]
+      |   capabilities() NO existe (ni TODO); backfill NO existe; sin id nativo (S6)
+      v
+  SourcePoller ─raw(4)─► ParserTask ─parsed(8)─► GraphWriter ─► RwLock<GraphHunter>  [··]
+      |   backpressure BLOQUEA, no descarta (S5)
+   (L5) coverage gaps por watermark/circuit-breaker INDISTINGUIBLES de "fuente vacía";
+        overflow al apagar (OverflowStore) — 0 call sites productivos (S5)
+      |
+  SqliteWatermarkStore (ops.sqlite) [··] nunca se abre con ruta real fuera de tests (S5)
+  QuotaLimiter (Retry-After modelado) [··] jamás alcanzado en runtime (S10)
+      |
+  Único contacto real: apps/.../commands/azure_streaming_smoke.rs (smoke test, S5)
+
+SIDECAR .NET   [ausente]
+========================
+  sidecar/dotnet → SIN fuente trackeada (.cs/.csproj); solo 13 stubs gRPC bajo obj/;
+  falta sentinel_sidecar.proto; 0 branches feat/sp*-sentinel-*; 0 wiring Rust/Tauri
+  (sidecar_manager: 0 hits en todo el repo).  [no verificado: sin fuente que auditar] (S2/S6)
+```
 
 ## S14. Diagrama textual: arquitectura objetivo
-_Pendiente: se completa en la Tarea 9._
+
+Cadena prescrita por el spec §4, anotada componente por componente con el
+símbolo existente que lo implementará o "construcción nueva", en consistencia
+con los veredictos de S15.
+
+```
+ANOTACIÓN:  [EX] símbolo existente reutilizable    [EX··] existe pero dormido/parcial
+            [NEW] construcción nueva               [FIX] existe y hay que corregir/acotar
+
+  SourceConnector
+     [EX··] trait LogSource (platform/sources) — existe pero DORMIDO (S6 · S15 fila 1)
+     [NEW]  capabilities() (append-only, orden, IDs estables, backfill,
+            tiempos evento/ingesta, checkpoints) — hoy ni stub ni // TODO (S6)
+     [NEW]  rutear archivos locales por la misma abstracción + conector JSONL (S6)
+        |
+        v
+  Raw Event Journal
+     [NEW]  construcción nueva — el gap más grande y prerequisito del invariante
+            (S15 fila 2). Precursores hoy INSUFICIENTES: overflow.rs (0 call sites
+            productivos), DLQ (solo caminos síncronos), mapping_library.jsonl (S5)
+        |
+        v
+  Normalizer
+     [EX··] platform/canonical (OCSF + ProvenanceCtx) + platform/vrl — pero SOLO
+            en tiempo de EXPORT, no de ingesta (S4 · S15 fila 3)
+     [NEW]  versionado end-to-end real (mapping_version hoy es placeholder=1 /
+            versión del compilador, no del FieldConfig) (S4)
+     [NEW]  sin reinterpretación silenciosa (hoy la ProvenanceCtx de export se
+            contamina retroactivamente al editar el mapping) (S4)
+        |
+        v
+  GraphDelta
+     [NEW]  contrato idempotente — NO existe dedup alguno hoy; la "clave implícita
+            (src,dst,ts,rel,metadata_offset)" del spec era solo un comentario
+            aspiracional (S3 · S15 fila 4)
+     [NEW]  identidad de arista distinta de la tripleta lógica; preservar multiplicidad
+        |
+        v
+  Incremental Graph Runtime
+     [EX··] SourcePoller→ParserTask→GraphWriter + watermarks + circuit breaker +
+            backpressure + coverage.rs — REAL y probado pero SIN CABLEAR (S5 · S15 fila 5)
+     [NEW]  contrato + tests de equivalencia incremental-vs-rebuild (0 hoy)
+     [NEW]  ingested_at_delta real (hoy hardcodeado 0 en 5 sitios de construcción) (S6)
+        |
+        v
+  Domain API
+     [EX]   GraphHunterApi (platform/api), transport-agnostic (S9);
+            criterio 25.11 = SÍ: frontend y MCP ya convergen en run_hunt (S9)
+     [NEW]  desacoplar de Azure: 231 hits AZURE_*/TimeGenerated en platform/api (S12);
+            mover el KQL analítico tras el conector
+        |
+        v
+  MCP
+     [EX]   51 tools / 3 resources, clientes HTTP puros del backend local;
+            NO conoce credenciales Azure (S8 · S10)
+     [FIX]  sentinel_query = escape hatch, única violación de la regla de diseño (S7/S8)
+
+  (transversal)  Cobertura / completitud
+     [EX··] DataCoverage / CoverageGap + métricas drift existen pero dormidos (S5)
+     [NEW]  propagar a respuestas: coverage_start/end, source_watermarks,
+            possibly_incomplete (hoy AUSENTE en todo DTO), missing_sources,
+            normalizer_versions, graph_snapshot_id (S11 caso 28)
+```
 
 ## S15. Verificación de la tabla de reconciliación del spec §4
-_Pendiente: se completa en la Tarea 9._
+
+La tabla del spec §4 (`docs/superpowers/specs/2026-07-21-sot-integration-design.md:109-117`)
+se reproduce fila por fila con veredicto **confirmada / corregida / matizada**,
+citando la sección S* que sostiene la evidencia. Toda discrepancia hallada en
+las Tareas 2–8 aparece aquí: las de la propia tabla §4, abajo; las que
+contradicen supuestos del spec fuera de la tabla (§1 puntos de pérdida, §7
+riesgos), en la tabla suplementaria.
+
+### Tabla §4 — componentes de la arquitectura objetivo
+
+| # | Componente | Estado según spec §4 | Veredicto | Corrección / matiz y evidencia |
+|---|---|---|---|---|
+| 1 | SourceConnector | "Ya existe: trait `LogSource` con Log Analytics, Data Lake, Defender XDR" | **matizada** | Existe como código, pero **DORMIDO**: 0 call sites productivos de `LogSource`, solo tests + el smoke test Tauri; el camino que mueve datos hoy es el HTTP directo `reqwest`, no `LogSource` (S6). `capabilities()` no existe **ni como stub ni como `// TODO`**, y `backfill` tampoco es operación de primera clase — son ausencias silenciosas (S6). Data Lake v2 es un stub que falla incondicionalmente (S6). |
+| 2 | Raw Event Journal | "No existe. Sólo `ingest/overflow.rs` (shutdown) y DLQ (filas fallidas)" | **confirmada** | El journal no existe: correcto (S5). Matiz que endurece el gap: los dos precursores que el spec cita son **más débiles** de lo que sugiere — `overflow.rs` tiene **0 call sites productivos** (test-only + smoke test con tempdir desechable) y el DLQ solo se alimenta desde los caminos **síncronos** `load_data`/`load_data_with_config`; el camino background `load_data_streaming` que procesa archivos grandes nunca escribe al DLQ (S5). |
+| 3 | Normalizer | "Parcial: `platform/canonical` (OCSF + `ProvenanceCtx` con mapping id/version/hash)" | **matizada** | `platform/canonical`/`platform/vrl` existen, pero la proyección OCSF + `ProvenanceCtx` corre **solo en tiempo de export**, no de ingesta (único call site: `export.rs`) (S4). `mapping_version` es un **placeholder** (`1` para parsers hand-written; la versión del *compilador* VRL, no del `FieldConfig` del usuario) — no versiona la edición del mapping (S4). Hallazgo no documentado: editar el mapping tras un ingest **contamina retroactivamente** la `ProvenanceCtx` de export de aristas ya insertadas (S4, etiquetado inferencia de lectura de código). |
+| 4 | GraphDelta | "No existe; `insert_raw_events` muta directo. **Clave dedup implícita** `(src,dst,ts,rel,metadata_offset)`" | **corregida** | **NO hay dedup alguno** en ningún punto del pipeline de inserción de aristas — `push_to_streaming`/`append_edge_checked`/`NeighborList::push` son appends incondicionales; la "clave dedup implícita" era **solo un comentario aspiracional** (`source_poller.rs:29`, `ingest_adapter.rs:43`), no un invariante implementado (S3). Consecuencia: multiplicidad de aristas **SÍ** (dos tripletas idénticas coexisten); reingesta tras crash **duplica aristas reales** (S3/S5). |
+| 5 | Incremental Runtime | "Parcial: `SourcePoller → ParserTask → GraphWriter`, watermarks, circuit breaker, backpressure, `coverage.rs`" | **corregida** | El subsistema es real y está exhaustivamente testeado (~104 tests) **pero DORMIDO y SIN CABLEAR**: `SourcePoller::new`/`GraphWriter::new`/`ParserTask::new`/`SqliteWatermarkStore::open(path)` no tienen call sites fuera de sus tests; el impl de producción de `GraphAccess` ("Phase 5 in `app/src-tauri/src/ingest`") **no existe** en el árbol (S5). No es "parcial existente" sino "completo pero apagado". Además `ingested_at_delta` se hardcodea a `0` en los 5 sitios de construcción de `CompactRelation`; solo el `add_relation` no usado lo computa (S6). |
+| 6 | Domain API | "Ya existe: `GraphHunterApi`, transport-agnostic. Gap: el MCP no la consume para hipótesis; genera KQL propio" | **matizada** | `GraphHunterApi` existe y es transport-agnostic (S9). El gap está **parcialmente resuelto**: para hipótesis, el MCP **SÍ** consume la Domain API — `hunt_run` (MCP) y `cmd_run_hunt` (frontend) convergen en el único `GraphHunterApi::run_hunt` (criterio 25.11 = SÍ, S9); el MCP no conoce credenciales Azure (S10). El KQL "propio" del MCP es de **recolección** server-side + el escape hatch `sentinel_query` (S7/S8), no la semántica de hipótesis. Matiz que encarece la Fase A: la propia Domain API arrastra **231 hits `AZURE_*`/`TimeGenerated`** en `platform/api` (S12). |
+| 7 | Cobertura/completitud | "Parcial: `DataCoverage`/`CoverageGap`, métricas drift" | **matizada** | Los tipos existen, pero: (a) `DataCoverage` solo se alimenta de filas que llegaron al grafo y **no distingue** un gap por circuit-breaker de "fuente genuinamente vacía" (S5); (b) todo el subsistema vive en el pipeline dormido (S5); (c) **ningún DTO expone `possibly_incomplete`** ni `coverage_start/end`/`source_watermarks`/`normalizer_versions`/`graph_snapshot_id` — el sistema hoy no puede marcar una respuesta como no exhaustiva (S11 caso 28, coherente con spec §7). |
+
+**Recuento de la tabla §4 (7 filas):** confirmada **1** · corregida **2** · matizada **4**.
+
+### Tabla suplementaria — discrepancias fuera de la tabla §4
+
+| Supuesto del spec (o del encargo) | Veredicto | Evidencia |
+|---|---|---|
+| §7: "el sidecar .NET tiene su fuente en 4 branches sin mergear `feat/sp*-sentinel-*`" | **corregida** | No existen tales branches (`git branch -a --list "*sentinel*"` vacío, ni en `origin`/`public`); **no hay fuente `.cs`/`.csproj` trackeada** en ningún ref; solo 13 stubs gRPC bajo `obj/`; falta el `sentinel_sidecar.proto` que los generó; **0 wiring** Rust/Tauri (`sidecar_manager` 0 hits) (S2/S6). |
+| §1 L1: dedup de entidades + merge de metadata | **confirmada** | Dedup de vértice por string-id exacto; merge `FirstWriteWins` por defecto; `entity_type` del primer evento queda fijado (S3). Corrección adicional: para **aristas** no hay dedup en absoluto (fila 4 arriba). |
+| §1 L2: fast-paths Sysmon/Sentinel no registran diagnóstico de skip | **confirmada** | Las dos únicas impls nativas dejan `drift`/`skip_reasons`/`skipped_samples` vacíos; el comentario del call site (`ingestion.rs:1295-1296`) lo refleja mejor que el docstring del trait (S4). |
+| §1 L3: sanitización de field-config degrada/descarta candidatos a nodo | **confirmada** | `sanitize_field_config`/`auto_field_config_for` fuerzan campos no reconocidos a `Metadata`, unidireccional y con pérdida (S4). |
+| §1 L4: truncamientos por límites | **confirmada** | 512 MB whole-file (rechazo entero), `CRITICAL_MEMORY_MB` → `stopped_early` (solo Windows). Matiz: `stopped_early` **nunca llega a la UI** (solo `tracing::warn!`, ausente en el DTO); `MAX_INGEST_LINES = usize::MAX` es un guard **muerto** (S5). |
+| §1 L5: gaps de cobertura por watermark/circuit breaker; overflow al apagar | **confirmada** | El breaker deja buckets de cobertura indistinguibles de "fuente vacía". Matiz: todo esto vive en el pipeline **dormido**; `OverflowStore` no se instancia en producción (S5). |
+| Encargo 25.2: ¿el MCP conoce credenciales Azure? | **confirmada (NO)** | 0 hits de nombres de credencial Azure en las 76 fuentes `.ts`; el único token del MCP es el bearer contra el backend local (S10). |
+| Regla de diseño §2 (KQL solo para recolección) | **confirmada** | Única violación: `sentinel_query` (texto KQL libre = semántica de hipótesis vía MCP); es un escape hatch deliberado y logueado (S7/S8). El inventario KQL cubre ~51/55 archivos con la KQL de hipótesis deliberadamente de-agregada por comentario en código (S7). |
+| Encargo §19: cobertura de los 28 casos de test | **matizada** | 4 parciales (casos 1, 5, 19, 22) / 24 sin cobertura; los casos 11/12/25/26/27 requieren infraestructura que hoy no existe (`GraphDelta`, runtime incremental cableado, conector JSONL, Domain API consumida por MCP) (S11). |
 
 ## S16. Riesgos y preguntas abiertas para el Bloque 1
-_Pendiente: se completa en la Tarea 9._
+
+Entrada directa al ADR (`ADR-SOT-source-independent-ingestion.md`) y a la
+auditoría de suficiencia (`sot/validation/graphhunter/`).
+
+**R1 — Fuente del sidecar .NET: no existe en ningún lado.** El spec §7 asume
+que el fuente vive en 4 branches `feat/sp*-sentinel-*` por mergear; S2/S6
+verificaron que **esos branches no existen** (ni local ni en `origin`/`public`),
+que **no hay `.cs`/`.csproj` trackeado** y que **falta el `sentinel_sidecar.proto`**
+que generó los 13 stubs gRPC residuales bajo `obj/`. Pregunta abierta para
+el Bloque 1: ¿se reconstruye el sidecar desde cero (recuperando o
+re-escribiendo el `.proto`), se descarta a favor del HTTP directo `reqwest`
+que ya funciona (S6), o se posterga? La decisión de licencia GPL que motivó
+el proceso separado (S6) sigue en pie, pero no hay código que auditar hoy.
+Sin resolverlo, la Fase A no puede decidir si el conector Sentinel es
+in-process o out-of-process.
+
+**R2 — La realidad NO-dedup no soporta el requisito de multiplicidad del
+GraphDelta tal como el spec lo imagina.** El spec (fila GraphDelta) asume una
+"clave dedup implícita" cercana; S3 probó que **no hay dedup alguno** y que la
+multiplicidad se preserva por *ausencia* de chequeo, no por diseño. El
+`GraphDelta` idempotente que pide el spec §5 (Fase C) es, por tanto,
+**construcción nueva**, no la formalización de un invariante existente.
+Pregunta abierta: ¿la identidad de arista para idempotencia se define sobre
+`(src,dst,ts,rel,metadata_offset)` (la clave del comentario aspiracional) o
+hace falta un id de evento nativo — que el trait `LogSource` **hoy no expone**
+(S6)? Sin id nativo estable, el at-least-once + idempotencia local del spec §3
+no tiene sobre qué clave deduplicar.
+
+**R3 — Dónde anclar `capabilities()`.** No existe hoy, ni siquiera como stub
+(S6). El trait `LogSource` cubre bien el transporte (auth, watermark,
+backpressure) pero le faltan exactamente las cuatro señales que el spec §4
+enumera (append-only, orden, IDs estables, backfill, tiempos evento/ingesta,
+checkpoints). Pregunta abierta: ¿`capabilities()` como método del trait
+`LogSource`, o como una struct de metadata declarativa que el conector
+publica? El acoplamiento por-string a `"sentinel_query"`/`"sentinel_"` en
+módulos genéricos del MCP y del journal (S12: `context-enricher.ts`,
+`nudge-composer.ts`, `metrics.ts`, `journal/summarize.rs` con su allowlist de
+~25 columnas Azure hardcodeadas) sugiere que `capabilities()` debe alimentar
+también a esas capas, no solo al pipeline de ingesta.
+
+**R4 — Qué debe priorizar la auditoría de suficiencia.** Con 4/28 casos con
+cobertura parcial y 24/28 sin ninguna (S11), la auditoría del Bloque 1 debería
+marcar `InsufficientWithWitness` al menos para: (a) los tres puntos de pérdida
+silenciosa L2/L3/L4 confirmados (skips de fast-path, degradación de
+field-config, `stopped_early` sin señal a la UI) — el spec §7 ya los anticipa
+como hallazgo esperado; (b) la pérdida de `event_time` vs `ingestion_time`
+(`ingested_at_delta = 0` en 5 sitios, S6), que rompe cualquier hipótesis que
+dependa de distinguir cuándo ocurrió un evento de cuándo se ingirió; (c) la
+imposibilidad de marcar respuestas como no exhaustivas (sin `possibly_incomplete`,
+S11 caso 28).
+
+**R5 — Precursores de journal/checkpoint que hoy son solo de test.** El
+invariante del spec §3 (rebuild desde journal) descansa sobre precursores que
+S5 mostró **no cableados en producción**: `ops.sqlite` nunca se abre con ruta
+real fuera de tests; `OverflowStore` tiene 0 call sites productivos; el
+pipeline `SourcePoller`/watermarks entero está dormido. Riesgo: el Bloque 2-B
+no puede "extender" estos precursores porque, en la práctica, no corren —
+habrá que cablearlos y probarlos como si fueran nuevos, y el estimado de
+esfuerzo del spec ("Fase A es mover, no crear") aplica al KQL y a la Domain
+API, pero **no** al journal ni al runtime incremental, que son trabajo de
+construcción real.
+
+**R6 — Contaminación retroactiva de la procedencia.** La `ProvenanceCtx` de
+export se re-deriva del `field_config` **actual** del dataset (S4); editar el
+mapping tras un ingest desalinea silenciosamente el `mapping_hash`/
+`mapping_version` de aristas ya insertadas. El "sobre canónico versionado sin
+reinterpretación silenciosa" del spec §5 (Fase B) debe cerrar exactamente
+este hueco. No hay test que lo ejercite hoy — pregunta abierta: ¿se congela la
+procedencia en tiempo de ingesta (retención del payload crudo o de un
+snapshot del mapping) para que el journal pueda reproducir la interpretación
+original?
