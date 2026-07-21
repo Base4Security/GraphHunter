@@ -1365,7 +1365,213 @@ MVCC "qué sabía el grafo en el instante T", `relation.rs:104-106`).
   en producción.
 
 ## S7. Inventario exhaustivo de KQL
-_Pendiente: se completa en la Tarea 6._
+
+### Metodología
+
+`rg` no está disponible en el PATH del entorno de esta tarea; el barrido se
+hizo con el tool `Grep` (mismo motor ripgrep por debajo), reproduciendo los
+tres comandos del brief:
+
+1. `kql` (case-insensitive) sobre `core/`, `platform/`, `apps/`, `crates/`,
+   filtrado a `*.rs|*.ts|*.tsx|*.js` → **51 archivos** (3 en `core/`, 30 en
+   `platform/`, 18 en `apps/`, 0 en `crates/`).
+2. Los idioms KQL (`TimeGenerated|SecurityEvent|SigninLogs|
+   DeviceProcessEvents|summarize|project |\| where |let `) sobre
+   `platform/mcp/src/*.ts` → 6 archivos; 4 de ellos no estaban ya en (1):
+   `server.ts`, `tools/node/enrich.ts`, `tools/ingest/invariants_hypothetical.ts`,
+   `lib/api-client.ts`.
+3. `kql` (case-insensitive) directo sobre los 5 archivos ya verificados en el
+   spec §1 (`sentinel/query.ts`, `graph/{propose,build,path,neighbors}.ts`) —
+   los 5 ya estaban cubiertos por (1).
+
+Universo total: **55 archivos** (51 + 4). `crates/sentinel-sidecar-client`
+se verificó aparte (0 coincidencias de `kql` en todo el directorio) — consistente
+con S6, que documenta que ese crate no tiene `Cargo.toml` ni `src/` propio.
+
+Cada archivo del universo aparece abajo como fila de tabla (función/símbolo
+con genera/ejecuta real) o como exclusión justificada (comentario, tipo
+espejo sin lógica, falso positivo del patrón, o test).
+
+### Tabla exhaustiva — motor de grafos (`core/graph-engine`)
+
+| Función/símbolo | Archivo:línea | Genera o ejecuta | Propósito | Destino Fase A |
+|---|---|---|---|---|
+| `kql_escape` | `core/graph-engine/src/sentinel.rs:1281` | Genera — escapa `"`/`\` para interpolar un valor en un literal KQL | Recolección (sanitización de entrada, no semántica) | Conector |
+| `build_hydration_kql` | `core/graph-engine/src/sentinel.rs:1294-1310` | Genera `"{table} | {time_filter} | {col1==v or col2==v...} | take {take}"` | Recolección: selección de tabla + filtro de tiempo (precondición: `time_filter` debe empezar con `where`, línea 1291) + predicado de columna + paginación (`take`). Sin `join`/`summarize`. | Conector — es la primitiva de hidratación on-demand que usa `platform/api/src/operations/sentinel.rs:1023` |
+
+### Tabla exhaustiva — transporte Sentinel (`platform/siem`, `platform/sources`)
+
+| Función/símbolo | Archivo:línea | Genera o ejecuta | Propósito | Destino Fase A |
+|---|---|---|---|---|
+| `run_sentinel_query` (query por defecto) | `platform/siem/src/sentinel_streaming.rs:69-90` | Ejecuta `"SecurityEvent | where TimeGenerated > ago(24h) | take 10000"` cuando `query` viene vacía | Recolección — tabla fija + ventana de tiempo + `take` | Conector — transporte HTTP síncrono del camino ad-hoc (S6 fila 2) |
+| `KqlQueryBuilder::build` | `platform/siem/src/sentinel.rs:223-253` | Genera `"{table} | {where TimeGenerated ...} | order by TimeGenerated asc | take {batch_size}"`; resuelve el filtro de tiempo por prioridad watermark > `initial_time_window_filter` > `ago(24h)` (comentario `:228-233`) | Recolección — es el corazón del polling en vivo: tabla + watermark + `order by` + `take`. Sin `join`/`summarize` (confirmado en tests `sentinel.rs:363-405`). | Conector — llamado desde `platform/api/src/sentinel_connector.rs:221` (ver fila siguiente); éste es el mecanismo real detrás de S6 |
+| `platform/siem/src/lib.rs` | `lib.rs:12` | Ninguno — solo reexporta `HttpSentinelTransport, KqlQueryBuilder, SentinelPollingConfig, SentinelTokenCache` | N/A | Exclusión: archivo de reexport, sin lógica propia |
+| `LogAnalyticsSource::build_scoped_query` / `build_poll_query` / `escape_kql` | `platform/sources/src/log_analytics.rs:188,221,334` | Genera `"{table} | where TimeGenerated between (...)  | order by TimeGenerated asc | take {cap}"` (scoped) y `"{table} | where TimeGenerated > {wm} | order by TimeGenerated asc | take {cap}"` (poll) | Recolección — mismo patrón que `KqlQueryBuilder` pero sobre el trait `HttpClient` en vez de `reqwest` directo | Conector — es la abstracción `LogSource` (Fase 3 del plan de streaming); **S6 ya estableció que no tiene ningún invocador de producción**, solo sus propios tests (`log_analytics.rs:526-796`) — candidata natural al `SourceConnector` de Fase A, pero hoy dormida |
+| `DefenderXdrSource::build_scoped_query` / `build_poll_query` / `escape_kql` | `platform/sources/src/defender_xdr.rs:147,172,216` | Mismo patrón que la fila anterior, con `Timestamp` en vez de `TimeGenerated` (comentario `:13-14`, verificado en test `:448` que confirma la ausencia de `TimeGenerated`) | Recolección | Conector — mismo estado que la fila anterior: código real, **no wireado en producción** (S6) |
+| `DataLakeV2Source` (stub) | `platform/sources/src/data_lake.rs:4,20,53,98` | Ninguno ejecutable — la doc del módulo dice explícitamente "NOT the full end-to-end KQL v2 impl" (`:4`) y ambos métodos de datos son `SourceError::Fatal` incondicional (per S6, `:92-114`) | N/A (stub) | Conector — reservado para el `KQL v2 REST` endpoint (`:20`), pendiente de implementación real |
+
+### Tabla exhaustiva — orquestación (`platform/api`)
+
+Esta es la capa más grande: `platform/api/src/operations/sentinel.rs` concentra
+la mayoría del KQL generado/ejecutado del sistema.
+
+| Función/símbolo | Archivo:línea | Genera o ejecuta | Propósito | Destino Fase A |
+|---|---|---|---|---|
+| `run_kql` | `operations/sentinel.rs:320-533` | Ejecuta **KQL arbitraria** provista por el analista/LLM contra Log Analytics (vía `run_sentinel_query`, `:385-387`) | **Semántica de hipótesis** — el texto es libre; nada impide `join`/`summarize` escritos por quien llama. El único control es el §4.7 fallback gate (`extract_propose_payload`/`kql_graph_advisory`, ver abajo), que bloquea el modo *inspect* si detecta proyección de columnas de tipo entidad, no si detecta agregación | **Escape hatch** — es el endpoint `/kql` completo |
+| `apply_time_window_sugar` | `operations/sentinel.rs:1395-1412` | Genera — antepone `where TimeGenerated > ...` al KQL del analista solo si no lo trae ya (idempotente) | Recolección (azúcar sintáctica de ventana de tiempo) | Escape hatch (parte de `run_kql`) |
+| `extract_take_limit` | `operations/sentinel.rs:1419-1437` | Ninguno — parsea (no genera) el último `take N` del KQL ya escrito, por regex de posición | Recolección (metadata de paginación para el cap de visualización) | Escape hatch (parte de `run_kql`) |
+| `kql_graph_advisory` / `extract_propose_payload` | `operations/sentinel.rs:1991-2029` | Ninguno — heurística de texto sobre el KQL del analista (detecta `project`/columnas de tipo entidad) para decidir el fallback gate §4.7 | Gate de recolección vs. hipótesis: nudge hacia `graph_propose`, no genera KQL nuevo | Escape hatch (parte de `run_kql`) |
+| `discover_schema` — `usage_kql` | `operations/sentinel.rs:577-582` | Genera y ejecuta `"Usage | {time_filter} | summarize IngestionMB = sum(Quantity), LastIngested = max(TimeGenerated) by DataType | where IngestionMB >= {min_mb} | order by IngestionMB desc"` | **Caso límite documentado**: usa `summarize`, pero es metadata de descubrimiento de schema (qué tablas existen y cuánto ingresan), no correlación entre entidades — no es semántica de hipótesis de hunt | Conector (discovery), con nota explícita de que usa agregación |
+| `discover_schema` — `sample_kql` | `operations/sentinel.rs:616-621` | Genera y ejecuta `"{name} | {time_filter} | take {sample_rows}"` por tabla, para clasificar campos (`classify_table_fields`) | Recolección (muestreo) | Conector |
+| `build_proposals` — `materialization_kql` | `operations/sentinel.rs:1839-1844` | Genera `"{table}\n| {time_filter}\n| project {fields}"` | **Recolección deliberada** — comentario explícito `render_hunting_template` (`:2035-2042`, aplica también aquí por diseño): las plantillas materializadoras **no agregan a propósito** para que el motor de grafos, no KQL, haga la correlación | Conector |
+| `estimate_probe_kql` | `operations/sentinel.rs:1759-1776` | Genera y ejecuta `"{materialization_kql}\n| summarize Rows = count(), Entities = dcount({anchor})"` | Estimación de costo/tamaño antes de `graph_build` — usa `summarize` pero solo para un conteo agregado de fila/entidad distinta, no para definir relaciones | Conector (probe de costo), con la misma nota de agregación que `usage_kql` |
+| `graph_build` (dispatch de `materialization_kql`) | `operations/sentinel.rs:716-746` | Ejecuta el `materialization_kql` de la propuesta aprobada vía `run_kql_rows` | Recolección (ver fila `build_proposals`) | Conector |
+| `render_hunting_template` / `run_hunting_template` / `preview_hunting_template` | `operations/sentinel.rs:884-914, 2043-2109` | Genera 4 plantillas fijas (`FailedLogonBurst`, `LateralMovement`, `EncodedPowerShell`, `SuspiciousDns`) con `where`/`project`/`order by`/`take`; ejecuta vía `run_kql` (`:901`) | Recolección deliberada — comentario `:2035-2042`: versiones anteriores usaban `summarize` y se cambiaron explícitamente para no pre-cazar en KQL. **Nota**: `SuspiciousDns` (`:2096`) usa `extend Tld = tolower(extract(@"\.([a-z]+)$", 1, Name))` — una columna derivada (regex + lowercase), sigue siendo proyección de fila, no correlación entre entidades | Conector (plantillas de recolección temática) |
+| `hydrate_node_with` / `hydrate_node_filtered_with` (llama `build_hydration_kql`) | `operations/sentinel.rs:924,946,1023` | Ejecuta, por tabla mapeada, el KQL de `build_hydration_kql` (core) | Recolección | Conector |
+| `seed_from_ioc_with` / `seed_from_ioc` | `operations/sentinel.rs:1084,1111-1168` | Delega en `hydrate_node_with` | Recolección (cold-start) | Conector |
+| `node_enrich` | `operations/sentinel.rs:1173-1241` | Delega en `hydrate_node_filtered_with` con filtro de tablas/`max_rows` | Recolección | Conector |
+| `run_kql_rows` / `cap_kql_rows` | `operations/sentinel.rs:1379-1390,1443-1452` | `run_kql_rows` ejecuta un KQL ya construido; `cap_kql_rows` solo trunca filas ya devueltas (JSON), no toca KQL | Recolección / post-proceso, respectivamente | Conector (helpers internos) |
+| `expand_node_live` | `operations/graph_ops.rs:646-679` | Genera `time_filter` vía `TimeWindow::kql_filter()` y delega en la hidratación en vivo | Recolección | Conector |
+| `TimeWindow::kql_filter` / `as_kql` | `platform/api/src/dto/v1/sentinel.rs:36,62-66` | Genera la cláusula `"where TimeGenerated > ago({lookback})"` o `datetime(...)` | Recolección (DTO compartido por todos los call sites de arriba) | Conector (tipo compartido) |
+| `build_kql_ioc_set` | `operations/export.rs:603-...` | Genera un snippet KQL (`let IPs = datatable(...)[...]`) como **formato de exportación** ("paste into an Azure Sentinel hunting query", `:625`) | No es ejecutado por GraphHunter ni define semántica de hipótesis del sistema — es un artefacto de salida para que el analista lo pegue en Sentinel | **Fuera de alcance del conector** — permanece como función de exportación de IOCs, no interactúa con Sentinel |
+| polling loop (`KqlQueryBuilder::build` + `execute_query`) | `platform/api/src/sentinel_connector.rs:221-269` | Ejecuta, por tabla configurada, el KQL de `KqlQueryBuilder::build` (siem) | Recolección — confirma el camino sync/polling de S6 | Conector |
+
+**Archivos de `platform/api` sin fila propia (excluidos con motivo):**
+
+| Archivo | Motivo de exclusión |
+|---|---|
+| `platform/api/src/format_registry.rs:7` | Mención en comentario a `cmd_run_kql`; sin código que genere/ejecute KQL |
+| `platform/api/src/dto/v1/graph_ops.rs:180` | Comentario de doc (`/// Time window for the hydration KQL`) sobre un campo `time_window`; el campo en sí es un DTO reenviado, no genera KQL |
+| `platform/api/src/dto/v1/geoip.rs:77` | Mensaje advisory textual (`"Raw KQL bypasses GraphHunter's correlated, persistent graph."`) mostrado al analista cuando el grafo está vacío; no genera ni ejecuta KQL |
+| `platform/api/src/operations/graph_meta.rs:328` | Comentario de doc sobre `post_graph_overlap` (recibe entidades ya extraídas de un resultado KQL por el llamador MCP); la función no toca KQL |
+| `platform/api/src/operations/schema.rs:264` | Entrada de un registro de endpoints (`ep("/export_iocs", ...)`) con texto descriptivo que menciona KQL; es un catálogo de documentación de API, no código que genere/ejecute KQL |
+
+### Tabla exhaustiva — servidor MCP (`platform/mcp/src`)
+
+Todos los tools MCP son clientes HTTP del backend Rust (`ctx.api.post(...)`);
+ninguno construye el texto KQL — eso ocurre en `platform/api` (tabla
+anterior). Consistente con S10 (el proceso MCP no conoce credenciales
+Azure).
+
+| Función/símbolo | Archivo:línea | Genera o ejecuta | Propósito | Destino Fase A |
+|---|---|---|---|---|
+| `sentinelQuery.execute` | `tools/sentinel/query.ts:34-50` | Reenvía el KQL libre del analista a `POST /kql` (`:44,49`) | **Semántica de hipótesis** — punto de entrada MCP del escape hatch; el texto de `query` (línea 6) es completamente libre | **Escape hatch** |
+| `nodeEnrich.execute` | `tools/node/enrich.ts:31-48` | Reenvía `{node_id, tables, lookback, max_rows, dataset}` a `POST /node/enrich` | Recolección (el KQL real se genera en `hydrate_node_filtered_with`, tabla `platform/api`) | Conector (passthrough) |
+| `graphPropose.execute` | `tools/graph/propose.ts:28-44` | Reenvía `selected_fields`/`lookback` a `POST /graph/propose`; la descripción (`:31`) menciona "materialization_kql" solo como referencia informativa | Recolección (metadata de propuesta) | Conector (passthrough) |
+| `graphBuild.execute` | `tools/graph/build.ts:24-40` | Reenvía `proposal_id`/`lookback`/`enrich`/`merge_mode` a `POST /graph/build` | Recolección | Conector (passthrough) |
+| `graphPath.execute` | `tools/graph/path.ts:31-48` | Reenvía `from_entity`/`to_entity`/etc. a `POST /graph/path`; la descripción (`:34`) solo **compara** la traversal con lo que "en KQL necesitaría varios joins" — no genera ni ejecuta KQL | N/A — "Pure graph read — no Sentinel round-trip" (cita textual `:34`) | N/A |
+| `graphNeighbors.execute` | `tools/graph/neighbors.ts:28-44` | Reenvía `entity`/`degree`/etc. a `POST /graph/neighbors`; la descripción (`:31`) también compara contra "otra KQL" solo en prosa | N/A — pura lectura de grafo, sin round-trip a Sentinel | N/A |
+| `exportTool` (kind=`iocs`, format=`kql_ioc_set`) | `tools/export.ts:6-16` | Reenvía `kind`/`format` (incluye la opción de string `'kql_ioc_set'`, línea 15) al backend; no genera el snippet KQL en TS | Recolección/exportación (ver `build_kql_ioc_set`) | Conector (passthrough hacia una función fuera de alcance del conector) |
+| `composeNudge` (case `sentinel_query`) | `lib/nudge-composer.ts:18-42` | Genera texto de advisory en inglés natural que **menciona** KQL ("Consider node_expand before another KQL", `:36`; "None of this KQL's entities...", `:40`) para orientar al LLM | N/A — nudge textual, no genera/ejecuta KQL | N/A |
+| `LONG_TEXT_KEYS` (incluye `"kql"`, `"kql_executed"`) | `lib/content.ts:66-74` | Declara claves de passthrough para que el sanitizador de respuestas MCP no trunque el eco del KQL ya ejecutado | N/A — infraestructura de sanitización, no genera/ejecuta | N/A (queda con el MCP, no forma parte del conector) |
+
+**Archivos de `platform/mcp/src` sin fila propia (excluidos con motivo):**
+
+| Archivo | Motivo de exclusión |
+|---|---|
+| `platform/mcp/src/lib/metrics.ts:4` | Comentario: contrasta "GraphHunter como grafo" vs. "proxy delgado sobre Sentinel KQL"; solo cuenta métricas de uso de tools, no toca KQL |
+| `platform/mcp/src/resources/graph-recent-pivots.ts:14` | Comentario de doc sobre el cap de filas de "resultados KQL enormes"; el recurso solo expone pivots pendientes de expandir, no genera/ejecuta KQL |
+| `platform/mcp/src/lib/entity-extractor.ts:14` | Comentario: "prefer expanding them over generating a fresh KQL"; la función extrae entidades de texto, no construye KQL |
+| `platform/mcp/src/server.ts:15,53` | Falso positivo del patrón `let ` (declaraciones genéricas `let requestCounter`, `let parsedInput`); no relacionado con KQL |
+| `platform/mcp/src/lib/api-client.ts:74,129` | Falso positivo del patrón `let ` (`let res: Response`); no relacionado con KQL |
+| `platform/mcp/src/tools/ingest/invariants_hypothetical.ts:27` | Falso positivo de la palabra inglesa "project" ("project the resulting triples"); no es la keyword KQL `project` |
+| `platform/mcp/tests/contract/journal-registered.test.ts:65,96` | Test — fixture con `kql: "SecurityEvent | take 10"` para verificar el registro del journal |
+| `platform/mcp/tests/content.test.ts:25,33` | Test — verifica que `kql_executed` sobrevive el passthrough de `LONG_TEXT_KEYS` |
+
+### Tabla exhaustiva — Tauri (`apps/tauri/src-tauri`, `apps/tauri/src`)
+
+| Función/símbolo | Archivo:línea | Genera o ejecuta | Propósito | Destino Fase A |
+|---|---|---|---|---|
+| `handler_run_kql` | `http/siem.rs:42-71` | Delega en `api.run_kql(...)` (`:48-59`) tras un timeout de 120s | Recolección de plumbing — delegación pura al escape hatch | Escape hatch |
+| ruta `/kql` | `http/mod.rs:405-406` | Registra `handler_run_kql` en el router Axum | N/A (routing) | Escape hatch (parte del server HTTP local) |
+| `handler_expand` | `http/journal.rs:169-246` | Re-ejecuta vía `api.run_kql` el KQL **ya almacenado** de un hunt (`:180-210`), luego filtra localmente por valor con `filter_rows` (no-KQL, `:232`) | Recolección (replay de una query ya aprobada; el filtrado post-hoc es Rust puro, no KQL) | Escape hatch (mismo mecanismo que `run_kql`, capa de journal) |
+| `cmd_run_kql` | `commands/sentinel.rs:69-74` | Delega en `api.run_kql(params)` | Recolección de plumbing | Escape hatch |
+| `cmd_run_hunting_template` | `commands/sentinel.rs:87-94` | Delega en `api.run_hunting_template(params)` | Recolección (plantilla fija) | Conector |
+| `cmd_preview_hunting_template` | `commands/sentinel.rs:100-104` | Delega en `preview_hunting_template` (Rust) para renderizar sin ejecutar — alimenta el toggle "ver KQL" | Recolección (solo render, sin round-trip) | Conector |
+| `cmd_export_iocs` | `commands/export.rs:78-84` | Delega en `api.export_iocs(...)` (incluye el formato `kql_ioc_set` → `build_kql_ioc_set`) | Ver fila `build_kql_ioc_set` | Fuera de alcance del conector |
+| `summarize_query` / `aggregate_columns` | `journal/summarize.rs:202-236,255-...` | Ninguno — agrega/post-procesa **filas ya devueltas** por `/kql` (JSON ya materializado) para compactar la entrada del journal (distribución de valores por columna) | No es KQL: es agregación en Rust sobre datos ya recolectados, para compactación de contexto LLM, no para definir hipótesis del hunt | N/A — vive en la capa de journal/observabilidad, no en el conector |
+| `classify_kind` (case `"/kql"` → `"query"`) | `journal/interpret.rs:5-31` | Ninguno — clasifica el endpoint por prefijo de path | N/A (routing/plumbing del journal) | N/A |
+| `AdhocKqlSection` + toggle "ver KQL" | `apps/tauri/src/components/ingest/SentinelConnectForm.tsx:417-577,807-873` | UI: un `<textarea>` (`:847-849`) donde el analista escribe KQL libre (placeholder de ejemplo `:849` incluye `where EventID == 4625`); el toggle "ver KQL" (`:552,572-577`) invoca `cmd_preview_hunting_template` (`:443-453`) | **Semántica de hipótesis** en el textarea libre (superficie de entrada sin restricción); recolección en el toggle de preview (solo muestra la plantilla ya renderizada) | Escape hatch (textarea) / Conector (preview de plantilla) |
+| `runAdhocKql` | `apps/tauri/src/components/DatasetsLeftPanel.tsx:394-433` | Invoca el comando Tauri `cmd_run_kql` (`:400-409`) con el texto libre del analista | **Semántica de hipótesis** — es el disparador frontend del escape hatch | Escape hatch |
+| invocación de `cmd_run_hunting_template` | `apps/tauri/src/components/DatasetsLeftPanel.tsx:450-480` | Invoca la plantilla predefinida y actualiza `lastKqlSummary` | Recolección | Conector |
+| `KqlPreview` | `apps/tauri/src/components/ActivityLogLeftPanel.tsx:10-58` | Muestra/copia el KQL ya ejecutado en el log de actividad (solo lectura) | N/A — observabilidad | N/A |
+| listener `"kql-executed"` | `apps/tauri/src/hooks/useSentinelEvents.ts:107-116` | Ninguno — escucha el evento emitido por el backend (`KqlQueryExecutedEvent`) y lo agrega al log | N/A — observabilidad | N/A |
+| opción de menú `kql_ioc_set` | `apps/tauri/src/components/ExportMenu.tsx:51` | UI: selecciona el string de formato `"kql_ioc_set"`; no genera KQL | N/A | Fuera de alcance del conector (passthrough) |
+| `KqlQueryExecutedEvent` / `KqlResult` (interfaces TS) | `apps/tauri/src/types.ts:718-735` | Tipos espejo del backend, sin lógica | N/A | N/A (tipos) |
+| `KqlQueryExecutedEvent` / `KqlResult` (structs Rust) | `apps/tauri/src-tauri/src/types.rs:106-113,117-124` | Tipos espejo, sin lógica | N/A | N/A (tipos) |
+| registro del comando `cmd_run_kql` | `apps/tauri/src-tauri/src/lib.rs:360` | Ninguno — registra el comando en el builder de Tauri | N/A | Escape hatch (parte del wiring) |
+
+**Archivos de `apps/tauri` sin fila propia (excluidos con motivo):**
+
+| Archivo | Motivo de exclusión |
+|---|---|
+| `apps/tauri/src-tauri/src/journal/store.rs:343,349,361` | `"/kql"` aparece solo como endpoint de ejemplo en tests; `JournalStore` es genérico por endpoint, sin lógica específica de KQL |
+| `apps/tauri/src-tauri/src/journal/redact.rs:38,49` | `redact_secrets` (`:13-29`) es genérico por clave (`secret`/`token`/`password`); `"kql"` solo aparece como dato de ejemplo en el test `redacts_azure_secret_and_tokenish_keys` |
+| `apps/tauri/src-tauri/src/journal/capture.rs:108-238` | `build_event` (`:27`) es genérico por endpoint; todas las coincidencias de `"kql"`/`"/kql"` están dentro de `#[cfg(test)]` |
+
+### Verificación de exhaustividad (Step 3)
+
+Se re-corrió el barrido del Step 1 (comando 1: `kql` case-insensitive sobre
+`core/`, `platform/`, `apps/`, `crates/`) más el barrido de idioms sobre
+`platform/mcp/src` (comando 2). Reconciliación fila por fila contra las
+tablas y exclusiones de arriba:
+
+- **Core (3/3 archivos clasificados):** `analytics.rs` y `watermark_store.rs`
+  son exclusión (comentario), `sentinel.rs` tiene 2 filas.
+- **Platform (30/30 archivos clasificados):** 20 con fila propia (algunas
+  con múltiples símbolos, como `operations/sentinel.rs` con 14 filas),
+  5 exclusiones documentadas en `platform/api`, 3 exclusiones en
+  `platform/mcp` (`metrics.ts`, `graph-recent-pivots.ts`,
+  `entity-extractor.ts`), 2 exclusiones de test (`journal-registered.test.ts`,
+  `content.test.ts`).
+- **Apps (18/18 archivos clasificados):** 15 con fila propia, 3 exclusiones
+  documentadas (`journal/store.rs`, `journal/redact.rs`, `journal/capture.rs`).
+- **Idiom-only del comando 2 (4/4 archivos clasificados):** `node/enrich.ts`
+  tiene fila propia; `server.ts`, `lib/api-client.ts` e
+  `ingest/invariants_hypothetical.ts` son falsos positivos documentados.
+- **`crates/` (0 archivos con KQL, confirmado):** `sentinel-sidecar-client`
+  no tiene código fuente propio (S6); no aporta filas ni exclusiones porque
+  no hay archivo `.rs`/`.ts` que grepear dentro de él.
+
+**Cero archivos sin clasificar.** Los 55 archivos del universo (51 del
+comando 1 + 4 nuevos del comando 2) están o bien en una tabla con al menos
+una fila, o bien en una lista de exclusión con motivo explícito.
+
+### Síntesis: recolección vs. semántica de hipótesis, y destino en Fase A
+
+- **KQL de recolección legítima** (mayoría de las filas): selección de
+  tabla, filtro `TimeGenerated`/watermark, `project` de columnas, `order by`,
+  `take`/paginación. Ejemplos: `KqlQueryBuilder::build`, `build_hydration_kql`,
+  `render_hunting_template`. El comentario de diseño en
+  `operations/sentinel.rs:2035-2042` documenta que esto es una decisión
+  **deliberada**: versiones anteriores de las plantillas usaban `summarize`
+  y se cambiaron explícitamente para no pre-cazar en KQL, dejando la
+  correlación al motor de grafos. Destino: **conector**.
+- **Casos límite con `summarize` que no son semántica de hipótesis de hunt**:
+  `usage_kql` (descubrimiento de volumen por tabla) y `estimate_probe_kql`
+  (conteo de costo antes de materializar). Ambos agregan, pero sobre
+  metadata operacional (cuántas filas/tablas hay), no sobre relaciones entre
+  entidades. Destino: **conector**, con la agregación documentada como
+  excepción explícita a la regla de "solo recolección".
+- **KQL que sí define semántica de hipótesis (viola la regla)**: únicamente
+  el texto libre que el analista escribe en el escape hatch —
+  `sentinel_query` (MCP) → `run_kql` (API) → `handler_run_kql`/`cmd_run_kql`
+  (Tauri) → `AdhocKqlSection`/`runAdhocKql` (frontend). Nada en el sistema
+  restringe ese texto a operadores de recolección; el único gate (§4.7,
+  `kql_graph_advisory`/`extract_propose_payload`) detecta proyección de
+  columnas de tipo entidad, no agregación o joins. Destino: **escape hatch**
+  — se mantiene como vía explícita y logueada (no se elimina, porque el
+  propio diseño §4.7 lo declara una salida deliberada), pero debe quedar
+  fuera del conector de Fase A y seguir marcado como tal en la UI/MCP.
+- **KQL generado como formato de salida, no de consulta**: `build_kql_ioc_set`
+  (exporta IOCs como snippet KQL para pegar en Sentinel). No ejecuta contra
+  Sentinel ni define hipótesis del sistema. Destino: **fuera de alcance del
+  conector** — permanece como función de exportación.
+- **Nada calificó para "eliminar"**: no se encontró KQL muerto, no
+  alcanzable, o redundante que debiera borrarse sin más — incluso el stub
+  `DataLakeV2Source` y las fuentes `LogSource` no wireadas (`log_analytics.rs`,
+  `defender_xdr.rs`) son candidatas activas al conector de Fase A, no código
+  a eliminar (ver S6 para el estado "no wireado" de esas dos).
 
 ## S8. Superficie del servidor MCP
 _Pendiente: se completa en la Tarea 7._
