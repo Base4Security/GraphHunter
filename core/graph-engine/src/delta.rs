@@ -4,8 +4,12 @@
 //! from the logical triple (src,rel,dst,ts), which cannot tell a re-ingested
 //! duplicate apart from two genuinely-repeated events. Applying a delta whose
 //! event_id was already applied is a no-op; this is what makes journal replay
-//! after a crash non-duplicating (design spec §11; closes the crash_reingest
-//! context of the edge_multiplicity channel).
+//! non-duplicating after a crash **within the current process/session** —
+//! e.g. a poller task that crashes and re-polls in the same running
+//! `GraphHunter` (design spec §11; closes the crash_reingest context of the
+//! edge_multiplicity channel). `applied_event_ids` lives only in memory, so a
+//! full process restart wipes it: cross-restart durability would require
+//! seeding `applied_event_ids` from the journal on startup (future work).
 
 use crate::parser::RawIngestEvent;
 

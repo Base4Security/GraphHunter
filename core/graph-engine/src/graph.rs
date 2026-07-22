@@ -166,7 +166,10 @@ pub struct GraphHunter {
     /// then both diverge as they take subsequent writes.
     pub(crate) mutation_version: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Event ids already applied via `apply_delta`, for idempotent journal
-    /// replay. Stored as 64-bit hashes of the event_id to stay compact.
+    /// replay. Stored as 64-bit hashes of the event_id to stay compact —
+    /// trades a (negligible but nonzero) hash-collision risk for memory
+    /// footprint; a collision would wrongly no-op a genuinely distinct
+    /// event_id. In-memory only: does not survive a process restart.
     applied_event_ids: std::collections::HashSet<u64>,
 }
 
