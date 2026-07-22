@@ -5,8 +5,8 @@ idempotente), `c032061` (acotar el claim de dedup-en-crash a within-process),
 `296374f`/`dbd0ab1` (`envelope_to_delta`), `42264d5` (`apply_batch_idempotent`
 + flag `GRAPHHUNTER_GRAPHDELTA`), `d8a5004` (`check_incremental_equivalence`),
 `5f4ee7f` (cableado en `ingest_siem` + los 3 sitios de streaming). Plan:
-`docs/superpowers/plans/2026-07-22-sot-block2-faseB-journal.md` (slice
-Fase C-1). Continúa `docs/architecture/journal.md` (Fase B), que dejó el
+`docs/superpowers/plans/2026-07-22-sot-block2-faseC1-graphdelta.md`.
+Continúa `docs/architecture/journal.md` (Fase B), que dejó el
 paso 8 del pipeline de 12 pasos ("generar deltas del grafo") sin construir
 y declaró la equivalencia incremental-vs-rebuild como `proposed`.
 Etiquetas de claim: `implemented` para `GraphDelta`/`apply_delta`, el flag
@@ -28,8 +28,15 @@ evento** de la **tripla lógica**:
 pub struct GraphDelta {
     pub event: RawIngestEvent,
     pub event_id: String,
+    pub dataset_id: Option<String>,
 }
 ```
+
+(`dataset_id` añadido en la ola de fixes de Fase C-1 final review: `apply_delta`
+llamaba a `insert_raw_events(vec![delta.event.clone()], None)`, descartando
+la atribución de dataset que el path directo sí preserva — `apply_delta`
+ahora pasa `delta.dataset_id.as_deref()`, y `envelope_to_delta` lo puebla
+desde `env.provenance.source_dataset_id`.)
 
 `event_id` (no `(src, rel, dst, ts)`) es la clave de aplicación: la
 tripla lógica no puede distinguir una re-ingesta genuina de un evento
@@ -60,7 +67,8 @@ pub fn envelope_to_delta(env: &CanonicalEnvelope) -> Option<GraphDelta> {
     if env.change_kind != ChangeKind::Insert { return None; }
     let event: RawIngestEvent = serde_json::from_str(&env.raw_payload).ok()?;
     let event_id = env.native_id.clone().unwrap_or_else(|| env.canonical_hash.clone());
-    Some(GraphDelta::new(event, event_id))
+    let dataset_id = Some(env.provenance.source_dataset_id.clone());
+    Some(GraphDelta::new(event, event_id, dataset_id))
 }
 ```
 
@@ -77,6 +85,40 @@ que es una función del **contenido** de la fila — dos filas byte-
 idénticas en vivo producen el mismo `canonical_hash` y por tanto el
 mismo `event_id`, indistinguibles como evento-repetido vs.
 evento-genuinamente-duplicado. Ver más abajo.
+
+**Corrección crítica (Fase C-1 final review, ola de fixes):** dado que
+`native_id` nunca se puebla en la práctica (`CanonicalEnvelope::new_insert`
+lo deja hardcodeado en `None` — ver `platform/canonical/src/envelope.rs:76`),
+`canonical_hash` es en realidad la ÚNICA clave de dedup que se ejercita, y
+`canonical_hash = sha256(raw_payload || mapping_hash)`. El `raw_payload` se
+construye en `build_batch_envelopes` (journal.rs) a partir de
+`RawIngestEvent`, que lleva 3 campos `HashMap<String, String>`
+(`core/graph-engine/src/parser.rs:42-52`). Serializar un `HashMap`
+directamente con `serde_json::to_string` emite las entradas en el orden de
+iteración del map, que es **no determinista entre instancias** (cada
+`HashMap` usa su propio `RandomState`) — así que un crash-and-repoll que
+re-parsea la MISMA fila de origen en HashMaps nuevos podía producir un JSON
+distinto y por tanto un `canonical_hash` distinto, y `apply_delta` NO
+deduplicaba el re-ingest real (el mismo tipo de error que Fase B cometió).
+Fix: `build_batch_envelopes` ahora llama a `canonical_raw_payload` (journal.rs),
+que serializa un struct sombra con `BTreeMap` en vez de `HashMap` para los 3
+campos de metadata — `BTreeMap` siempre itera en orden de clave, así que el
+JSON emitido es determinista sin importar el orden de inserción del
+`HashMap` de origen. (Un primer intento — round-trip vía `serde_json::Value`
+asumiendo que `serde_json::Map` es `BTreeMap` sin la feature `preserve_order`
+— se descartó: `evtx`, dependencia transitiva de este mismo build, activa
+`preserve_order`, con lo cual `Value::Object` es `IndexMap` aquí y preserva
+el orden no determinista de origen; verificado con `cargo tree -e features -i
+serde_json` y con el test fallando empíricamente antes de cambiar de
+enfoque.) Test: `canonical_serialization_is_stable_across_reparse` y
+`crash_reingest_reparse_of_the_same_row_does_not_duplicate_the_edge`
+(journal.rs) — construyen dos `RawIngestEvent` con el mismo contenido lógico
+pero `HashMap`s frescos con distinto orden de inserción, y verifican
+`canonical_hash` idéntico y `relation_count() == 1` tras aplicar ambos vía
+`apply_batch_idempotent`. Esto es lo que hace que el cierre "within-process"
+de `crash_reingest` (sección 5) sea genuinamente cierto — antes de este fix,
+el `event_id` no era estable ni siquiera dentro del mismo proceso frente a un
+re-parse real.
 
 ## 3. `apply_batch_idempotent` y el flag `GRAPHHUNTER_GRAPHDELTA`
 
