@@ -165,6 +165,9 @@ pub struct GraphHunter {
     /// gets the same version as the original at the clone moment,
     /// then both diverge as they take subsequent writes.
     pub(crate) mutation_version: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Event ids already applied via `apply_delta`, for idempotent journal
+    /// replay. Stored as 64-bit hashes of the event_id to stay compact.
+    applied_event_ids: std::collections::HashSet<u64>,
 }
 
 /// One entry in the schema cache: stores the fingerprint used to validate
@@ -214,6 +217,16 @@ pub(crate) fn should_finalize_parallel(
     }
 }
 
+/// Outcome of [`GraphHunter::apply_delta`]. `applied == false` means the
+/// delta's `event_id` had already been applied and the call was a no-op
+/// (no entities/edges were touched, counts are 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppliedOutcome {
+    pub applied: bool,
+    pub new_entities: usize,
+    pub new_relations: usize,
+}
+
 impl GraphHunter {
     /// Creates a new empty graph.
     pub fn new() -> Self {
@@ -247,6 +260,7 @@ impl GraphHunter {
             ),
             streaming_snapshot: std::sync::OnceLock::new(),
             mutation_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            applied_event_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -3238,6 +3252,42 @@ impl GraphHunter {
         }
 
         Ok((new_entities, new_relations))
+    }
+
+    /// Apply one [`crate::delta::GraphDelta`] idempotently. If the delta's
+    /// `event_id` was already applied, this is a no-op (no edge added).
+    /// Otherwise the event's edge is inserted (entity dedup via the
+    /// interner is unchanged) and the event_id recorded. Distinct event_ids
+    /// between the same entities coexist — edge multiplicity is preserved;
+    /// only exact event_id repeats are collapsed (design spec §11).
+    pub fn apply_delta(
+        &mut self,
+        delta: &crate::delta::GraphDelta,
+    ) -> Result<AppliedOutcome, GraphError> {
+        let key = Self::hash_event_id(&delta.event_id);
+        if self.applied_event_ids.contains(&key) {
+            return Ok(AppliedOutcome {
+                applied: false,
+                new_entities: 0,
+                new_relations: 0,
+            });
+        }
+        let (new_entities, new_relations) = self.insert_raw_events(vec![delta.event.clone()], None)?;
+        self.applied_event_ids.insert(key);
+        Ok(AppliedOutcome {
+            applied: true,
+            new_entities,
+            new_relations,
+        })
+    }
+
+    /// Hashes an `event_id` string to a compact 64-bit key for the
+    /// `applied_event_ids` set used by [`Self::apply_delta`].
+    fn hash_event_id(id: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut h);
+        h.finish()
     }
 
     /// Enables anomaly scoring with backfilling from existing data.

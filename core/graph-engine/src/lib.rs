@@ -5,6 +5,7 @@ pub mod benchmark;
 pub mod catalog;
 pub mod config;
 pub mod csv_parser;
+pub mod delta;
 pub mod dlq;
 pub mod drift;
 pub mod entity;
