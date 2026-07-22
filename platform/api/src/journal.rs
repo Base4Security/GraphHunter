@@ -172,23 +172,31 @@ pub(crate) fn build_batch_envelopes(
 ) -> Vec<CanonicalEnvelope> {
     let mut out = Vec::with_capacity(events.len() + skipped_samples.len());
     for ev in events {
-        // Prefer the verbatim source row (field_survival): unmapped fields survive
-        // in the journal. Fall back to the canonical triple serialization (C-1)
-        // when the parser did not capture a raw line. Both are deterministic, so the
-        // canonical_hash / dedup key stays stable across re-parse.
-        let raw = match &ev.raw_line {
-            Some(line) => line.clone(),
-            None => canonical_raw_payload(ev),
-        };
+        // raw_payload is ALWAYS the canonical, per-event serialization (C-1):
+        // it is what `envelope_to_delta` deserializes back into a
+        // `RawIngestEvent` (reconstruction) and what `canonical_hash` is
+        // derived from (identity/dedup). It must be distinct per event even
+        // when several events share one source row (e.g. a Sentinel 4688
+        // row yields 2 events) — using the shared raw line here would
+        // collapse their identity and destroy multiplicity (Fase C-2
+        // critical-fix wave, whole-phase final review).
+        //
+        // The verbatim source row (field_survival: unmapped fields survive)
+        // is journaled SEPARATELY in `raw_source_row`, which plays no part
+        // in identity or reconstruction.
+        let raw = canonical_raw_payload(ev);
         let prov = ProvenanceCtx::for_builtin_parser(parser_name, dataset_id, raw.as_bytes());
-        out.push(CanonicalEnvelope::new_insert(
-            source_id.to_string(),
-            source_kind.to_string(),
-            ev.timestamp,
-            now_ms,
-            raw,
-            prov,
-        ));
+        out.push(
+            CanonicalEnvelope::new_insert(
+                source_id.to_string(),
+                source_kind.to_string(),
+                ev.timestamp,
+                now_ms,
+                raw,
+                prov,
+            )
+            .with_source_row(ev.raw_line.clone()),
+        );
     }
     for (raw_row, reason) in skipped_samples {
         let prov = ProvenanceCtx::for_builtin_parser(parser_name, dataset_id, raw_row.as_bytes());
@@ -469,12 +477,22 @@ mod tests {
     }
 
     #[test]
-    fn inserted_envelope_uses_raw_line_when_present() {
+    fn inserted_envelope_carries_raw_line_in_source_row_not_payload() {
         let mut ev = sample_event(100); // reuse the module helper
         ev.raw_line = Some("{\"unmapped_field\":\"survives\"}".into());
         let envs = build_batch_envelopes("s", "la", "ds", "p", &[ev], &[], 1000);
-        // the inserted envelope's raw_payload is the raw line, not the triple JSON.
-        assert_eq!(envs[0].raw_payload, "{\"unmapped_field\":\"survives\"}");
+        // raw_source_row carries the verbatim raw line (field_survival)...
+        assert_eq!(
+            envs[0].raw_source_row.as_deref(),
+            Some("{\"unmapped_field\":\"survives\"}")
+        );
+        // ...while raw_payload stays the canonical per-event serialization
+        // (identity + reconstruction), NOT the raw line (Fase C-2 critical
+        // fix: raw_payload must never be the shared raw line).
+        assert_ne!(envs[0].raw_payload, "{\"unmapped_field\":\"survives\"}");
+        let back: graph_hunter_core::parser::RawIngestEvent =
+            serde_json::from_str(&envs[0].raw_payload).unwrap();
+        assert_eq!(back.timestamp, 100);
         // and it still round-trips as an Insert.
         assert_eq!(envs[0].change_kind, graph_hunter_canonical::ChangeKind::Insert);
     }
@@ -501,10 +519,18 @@ mod tests {
         for e in build_batch_envelopes("s", "la", "ds", "p", &[ev], &[], 1000) {
             store.append(&e).unwrap();
         }
-        // read the journal back and confirm the dropped field is recoverable.
+        // read the journal back and confirm the dropped field is recoverable
+        // from raw_source_row (decoupled from raw_payload, which stays the
+        // per-event serialization used for identity/reconstruction).
         let all = store.read_all().unwrap();
-        assert!(all[0].raw_payload.contains("dropped_by_mapping"));
-        assert!(all[0].raw_payload.contains("still_here"));
+        let source_row = all[0].raw_source_row.as_deref().unwrap();
+        assert!(source_row.contains("dropped_by_mapping"));
+        assert!(source_row.contains("still_here"));
+        // raw_payload itself must still deserialize back into the event
+        // (envelope_to_delta reconstruction is unaffected by field_survival).
+        let back: graph_hunter_core::parser::RawIngestEvent =
+            serde_json::from_str(&all[0].raw_payload).unwrap();
+        assert_eq!(back.timestamp, 100);
     }
 
     #[test]
@@ -628,6 +654,37 @@ mod tests {
         assert!(envelope_to_delta(&env).is_none());
     }
 
+    /// Regression (Fase C-2 critical-fix wave, whole-phase final review):
+    /// C-2 Task 4 briefly made `build_batch_envelopes` set `raw_payload =
+    /// ev.raw_line` when present — the raw source row, NOT a serialized
+    /// `RawIngestEvent`. `envelope_to_delta`'s
+    /// `serde_json::from_str::<RawIngestEvent>(&env.raw_payload)` then
+    /// failed to parse and silently returned `None`, so
+    /// `apply_batch_idempotent` inserted zero edges for any batch whose
+    /// events carried a raw_line — with GRAPHHUNTER_JOURNAL +
+    /// GRAPHHUNTER_GRAPHDELTA both on, reconstruction/replay went silently
+    /// empty. Decoupling raw_source_row from raw_payload fixes this:
+    /// raw_payload is once again always the per-event serialization, so
+    /// reconstruction succeeds even when raw_line is present.
+    #[test]
+    fn envelope_to_delta_reconstructs_even_when_raw_line_was_captured() {
+        let mut ev = sample_event(100);
+        ev.raw_line = Some("{\"src\":\"1.2.3.4\",\"extra\":\"field\"}".into());
+        let envs = build_batch_envelopes("s", "la", "ds", "p", &[ev], &[], 1000);
+        assert_eq!(envs.len(), 1);
+        // raw_source_row is populated (field_survival)...
+        assert!(envs[0].raw_source_row.is_some());
+        // ...but envelope_to_delta still succeeds (RED before the fix: this
+        // returned None because raw_payload held the raw line instead of a
+        // serialized RawIngestEvent).
+        let delta = envelope_to_delta(&envs[0]);
+        assert!(
+            delta.is_some(),
+            "envelope_to_delta must reconstruct a delta from a raw_line-carrying insert envelope"
+        );
+        assert_eq!(delta.unwrap().event.timestamp, 100);
+    }
+
     // ── graphdelta_enabled ───────────────────────────────────────────
 
     #[test]
@@ -668,6 +725,68 @@ mod tests {
         let (a2, s2) = apply_batch_idempotent(&mut g, &evs);
         assert_eq!((a2, s2), (0, 2));
         assert_eq!(g.relation_count(), 2); // no duplication
+    }
+
+    /// C-2 guard (Fase C-2 critical-fix wave, whole-phase final review): a
+    /// single source row can legitimately produce multiple DISTINCT events
+    /// that all share the same raw source line — e.g. a Sentinel 4688
+    /// process-create row yields both a User->Execute->Process and a
+    /// Parent->Execute->Child event (see
+    /// `sentinel_native_parse_shares_raw_line_across_multi_event_rows`).
+    /// C-2's broken `raw_payload = ev.raw_line` made both events serialize
+    /// to the IDENTICAL `raw_payload`, hence the IDENTICAL `canonical_hash`
+    /// (native_id is always None), so `apply_delta`'s identity dedup
+    /// silently collapsed the second event and multiplicity was destroyed.
+    /// RED before the fix: `relation_count()` would be 1. GREEN after: 2 —
+    /// `raw_payload` is per-event again while `raw_source_row` is shared.
+    #[test]
+    fn multiplicity_is_preserved_across_a_shared_multi_event_source_row() {
+        let shared_raw_line = "{\"EventID\":4688,\"row\":\"one-source-row-two-events\"}";
+        let mut e1 = sample_event(100);
+        e1.raw_line = Some(shared_raw_line.into());
+        let mut e2 = sample_event(100);
+        e2.dst_id = "host-2".into(); // a genuinely different event
+        e2.raw_line = Some(shared_raw_line.into());
+
+        let envs = build_batch_envelopes("s", "la", "ds", "p", &[e1, e2], &[], 1000);
+        assert_eq!(envs.len(), 2);
+        // Both envelopes share the same raw_source_row (the source row is
+        // shared)...
+        assert_eq!(envs[0].raw_source_row, envs[1].raw_source_row);
+        assert_eq!(envs[0].raw_source_row.as_deref(), Some(shared_raw_line));
+        // ...but their raw_payload (and therefore canonical_hash) differ,
+        // because they are distinct events.
+        assert_ne!(envs[0].raw_payload, envs[1].raw_payload);
+        assert_ne!(envs[0].canonical_hash, envs[1].canonical_hash);
+
+        use graph_hunter_core::graph::GraphHunter;
+        let mut g = GraphHunter::new();
+        let (applied, dup) = apply_batch_idempotent(&mut g, &envs);
+        assert_eq!((applied, dup), (2, 0));
+        assert_eq!(g.relation_count(), 2); // multiplicity preserved
+    }
+
+    /// C-1 guard (Fase C-2 critical-fix wave, whole-phase final review):
+    /// with GRAPHHUNTER_JOURNAL + GRAPHHUNTER_GRAPHDELTA both on, a batch of
+    /// raw_line-carrying insert envelopes must still reconstruct into graph
+    /// edges. RED before the fix: `envelope_to_delta` returned `None` for
+    /// every envelope (raw_payload held the raw line, not a serialized
+    /// RawIngestEvent), so `apply_batch_idempotent` silently applied 0
+    /// edges. GREEN after: raw_payload is the per-event serialization again.
+    #[test]
+    fn flags_on_reconstruction_is_non_empty_for_raw_line_carrying_batch() {
+        let mut e1 = sample_event(100);
+        e1.raw_line = Some("{\"row\":1}".into());
+        let mut e2 = sample_event(200);
+        e2.raw_line = Some("{\"row\":2}".into());
+        let envs = build_batch_envelopes("s", "la", "ds", "p", &[e1, e2], &[], 1000);
+
+        use graph_hunter_core::graph::GraphHunter;
+        let mut g = GraphHunter::new();
+        let (applied, dup) = apply_batch_idempotent(&mut g, &envs);
+        assert_eq!(applied, 2);
+        assert_eq!(dup, 0);
+        assert_eq!(g.relation_count(), 2);
     }
 
     // ── canonical_raw_payload (critical fix, Fase C-1 final review) ───

@@ -47,9 +47,24 @@ pub struct CanonicalEnvelope {
     pub cursor: Option<String>,
     pub normalizer_version: u32,
     pub canonical_hash: String,
-    /// The raw source row, verbatim. Kept so unmapped fields and skipped rows
-    /// remain reconstructable (field_survival, row_completeness).
+    /// The serialized event used for identity (`canonical_hash`, via
+    /// `compute_hash`) and reconstruction (`envelope_to_delta` deserializes
+    /// this back into a `RawIngestEvent`). For Insert envelopes this MUST be
+    /// per-event-distinct — see `raw_source_row` below for the verbatim
+    /// source row instead.
     pub raw_payload: String,
+    /// The verbatim/canonical source row, kept separately from `raw_payload`
+    /// so unmapped fields and skipped rows remain reconstructable
+    /// (field_survival, row_completeness) WITHOUT perturbing edge identity or
+    /// multiplicity. A single source row can produce multiple distinct
+    /// events (e.g. a Sentinel 4688 process-create row yields both a
+    /// User->Execute->Process and a Parent->Execute->Child event) that all
+    /// share the same `raw_source_row` but must still hash and dedup
+    /// independently via their own `raw_payload` (Fase C-2 critical-fix
+    /// wave, whole-phase final review). Deliberately excluded from
+    /// `compute_hash` — identity stays keyed on `raw_payload` alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_source_row: Option<String>,
     pub change_kind: ChangeKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
@@ -80,10 +95,20 @@ impl CanonicalEnvelope {
             normalizer_version: NORMALIZER_VERSION,
             canonical_hash,
             raw_payload,
+            raw_source_row: None,
             change_kind: ChangeKind::Insert,
             skip_reason: None,
             provenance,
         }
+    }
+
+    /// Attach the verbatim source row for field_survival (see
+    /// `raw_source_row`'s doc comment). Does NOT affect `canonical_hash` —
+    /// call this AFTER `new_insert`, whose hash is already computed from
+    /// `raw_payload` alone.
+    pub fn with_source_row(mut self, raw_source_row: Option<String>) -> Self {
+        self.raw_source_row = raw_source_row;
+        self
     }
 
     /// Mark this envelope as a skipped (unparseable) row, preserving its raw
