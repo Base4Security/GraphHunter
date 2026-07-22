@@ -1145,6 +1145,7 @@ impl SysmonJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         if let Some(parent_image) = event.parent_image {
@@ -1167,6 +1168,7 @@ impl SysmonJsonParser {
                 rel_type: RelationType::Spawn,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         Some(events)
@@ -1262,6 +1264,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Connect,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         });
         if let Some(image) = event.image {
             events.push(RawIngestEvent {
@@ -1274,6 +1277,7 @@ impl SysmonJsonParser {
                 rel_type: RelationType::Connect,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         Some(events)
@@ -1308,6 +1312,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Read,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1334,6 +1339,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Write,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1360,6 +1366,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Delete,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1392,6 +1399,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Execute,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1421,6 +1429,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Modify,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1447,6 +1456,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Write,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1473,6 +1483,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Delete,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1703,6 +1714,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Auth,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1739,6 +1751,7 @@ impl SysmonJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         if let Some(parent_name) = event.parent_process_name {
@@ -1757,6 +1770,7 @@ impl SysmonJsonParser {
                 rel_type: RelationType::Spawn,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         Some(events)
@@ -1781,6 +1795,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Delete,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1808,6 +1823,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Read,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1843,6 +1859,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Read,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1879,6 +1896,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Connect,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1908,6 +1926,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Execute,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 

@@ -3196,6 +3196,7 @@ impl GraphHunter {
                 rel_type,
                 rel_metadata,
                 timestamp,
+                raw_line: _,
             } = ev;
 
             let src_sid = self.interner.intern(&src_id);

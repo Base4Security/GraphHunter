@@ -640,6 +640,7 @@ impl SentinelJsonParser {
             rel_type: RelationType::Auth,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }]
     }
 
@@ -687,6 +688,7 @@ impl SentinelJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         if let Some(parent_name) = Self::extract_str(event, "ParentProcessName") {
@@ -705,6 +707,7 @@ impl SentinelJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         events
@@ -734,6 +737,7 @@ impl SentinelJsonParser {
             rel_type: RelationType::Read,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }]
     }
 
@@ -786,6 +790,7 @@ impl SentinelJsonParser {
             rel_type: RelationType::Auth,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }]
     }
 
@@ -830,6 +835,7 @@ impl SentinelJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         if let Some(parent) = Self::extract_str(event, "InitiatingProcessFileName") {
@@ -850,6 +856,7 @@ impl SentinelJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         events
@@ -905,6 +912,7 @@ impl SentinelJsonParser {
             rel_type: RelationType::Connect,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }]
     }
 
@@ -944,6 +952,7 @@ impl SentinelJsonParser {
             rel_type,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }]
     }
 
@@ -992,6 +1001,7 @@ impl SentinelJsonParser {
             rel_type: RelationType::Connect,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }]
     }
 

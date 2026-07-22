@@ -49,6 +49,13 @@ pub struct RawIngestEvent {
     pub rel_type: RelationType,
     pub rel_metadata: HashMap<String, String>,
     pub timestamp: i64,
+    /// The original source row, verbatim, when the parser captured it — so
+    /// fields the field-config mapping dropped before this triple existed stay
+    /// reconstructable from the journal (field_survival). None when the parser
+    /// did not capture it (those rows fall back to the triple serialization in
+    /// the journal). Not merged into the graph; journal-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_line: Option<String>,
 }
 
 impl RawIngestEvent {
@@ -66,6 +73,7 @@ impl RawIngestEvent {
             rel_type: rel.rel_type,
             rel_metadata: rel.metadata,
             timestamp: rel.timestamp,
+            raw_line: None,
         }
     }
 }
@@ -247,5 +255,34 @@ pub trait LogParser: Send + Sync {
             .map(RawIngestEvent::from_parsed_triple)
             .collect();
         (events, stats)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_ingest_event_carries_optional_raw_line() {
+        // A freshly-built event defaults raw_line to None (backward compatible).
+        let ev = RawIngestEvent {
+            src_id: "u".into(),
+            src_type: crate::types::EntityType::User,
+            src_metadata: Default::default(),
+            dst_id: "h".into(),
+            dst_type: crate::types::EntityType::Host,
+            dst_metadata: Default::default(),
+            rel_type: crate::types::RelationType::Auth,
+            rel_metadata: Default::default(),
+            timestamp: 100,
+            raw_line: None,
+        };
+        assert!(ev.raw_line.is_none());
+        // A serialized round-trip preserves an explicit raw_line.
+        let mut ev2 = ev.clone();
+        ev2.raw_line = Some("{\"orig\":1}".into());
+        let s = serde_json::to_string(&ev2).unwrap();
+        let back: RawIngestEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.raw_line.as_deref(), Some("{\"orig\":1}"));
     }
 }

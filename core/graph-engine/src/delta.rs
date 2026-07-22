@@ -57,6 +57,7 @@ mod tests {
             rel_type: RelationType::Auth,
             rel_metadata: HashMap::new(),
             timestamp: ts,
+            raw_line: None,
         }
     }
 
