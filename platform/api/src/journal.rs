@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use graph_hunter_canonical::{CanonicalEnvelope, ProvenanceCtx};
+use graph_hunter_core::delta::GraphDelta;
 use graph_hunter_core::parser::RawIngestEvent;
 
 const JOURNAL_FILE: &str = "journal.jsonl";
@@ -149,6 +150,21 @@ pub fn rebuild_from_journal(store: &JournalStore) -> std::io::Result<JournalReco
         }
     }
     Ok(JournalReconstruction { inserted, skipped, total })
+}
+
+/// Turn a canonical envelope back into an applicable GraphDelta. Insert
+/// envelopes carry a serialized RawIngestEvent in `raw_payload` (written by
+/// `journal_batch`); Skipped envelopes carry a raw source row and produce no
+/// edge, so they yield None. The event id is the source-native id when present
+/// (stable across re-ingest), else the canonical hash.
+pub fn envelope_to_delta(env: &CanonicalEnvelope) -> Option<GraphDelta> {
+    use graph_hunter_canonical::ChangeKind;
+    if env.change_kind != ChangeKind::Insert {
+        return None;
+    }
+    let event: RawIngestEvent = serde_json::from_str(&env.raw_payload).ok()?;
+    let event_id = env.native_id.clone().unwrap_or_else(|| env.canonical_hash.clone());
+    Some(GraphDelta::new(event, event_id))
 }
 
 #[cfg(test)]
@@ -324,5 +340,30 @@ mod tests {
         let payloads: Vec<_> = r.inserted.iter().chain(&r.skipped)
             .map(|e| e.raw_payload.clone()).collect();
         assert!(payloads.contains(&"skip-1".to_string()));
+    }
+
+    // ── envelope_to_delta ────────────────────────────────────────────
+
+    #[test]
+    fn insert_envelope_becomes_a_delta_keyed_on_identity() {
+        // env whose raw_payload is a serialized RawIngestEvent (as journal_batch writes).
+        let ev = sample_event(100);
+        let raw = serde_json::to_string(&ev).unwrap();
+        let prov = ProvenanceCtx::for_builtin_parser("p", "ds", raw.as_bytes());
+        let env = CanonicalEnvelope::new_insert(
+            "s".into(), "la".into(), 100, 200, raw, prov);
+        let d = envelope_to_delta(&env).expect("insert envelope yields a delta");
+        // native_id absent -> keyed on canonical_hash
+        assert_eq!(d.event_id, env.canonical_hash);
+        assert_eq!(d.event.timestamp, 100);
+    }
+
+    #[test]
+    fn skipped_envelope_yields_no_delta() {
+        let prov = ProvenanceCtx::for_builtin_parser("p", "ds", b"x");
+        let env = CanonicalEnvelope::new_insert(
+            "s".into(), "la".into(), 0, 5, "malformed".into(), prov)
+            .as_skipped("no_triple".into());
+        assert!(envelope_to_delta(&env).is_none());
     }
 }
