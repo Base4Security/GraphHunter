@@ -124,6 +124,33 @@ pub fn journal_batch(
     Ok(())
 }
 
+/// The canonical event set recovered from the journal, split by disposition.
+/// This is the reconstruction primitive: Fase C's incremental-vs-rebuild
+/// equivalence check will compare a rebuild from here against the live graph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JournalReconstruction {
+    pub inserted: Vec<CanonicalEnvelope>,
+    pub skipped: Vec<CanonicalEnvelope>,
+    pub total: usize,
+}
+
+/// Replay the whole journal and split records by change kind. Preserves append
+/// order within each bucket. (Corrections/tombstones are Fase C — for now they
+/// fall through to `inserted`/ignored; documented, not yet applied.)
+pub fn rebuild_from_journal(store: &JournalStore) -> std::io::Result<JournalReconstruction> {
+    let all = store.read_all()?;
+    let total = all.len();
+    let mut inserted = Vec::new();
+    let mut skipped = Vec::new();
+    for env in all {
+        match env.change_kind {
+            graph_hunter_canonical::ChangeKind::Skipped => skipped.push(env),
+            _ => inserted.push(env), // Insert (Correction/Tombstone deferred to Fase C)
+        }
+    }
+    Ok(JournalReconstruction { inserted, skipped, total })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +303,26 @@ mod tests {
         let store = JournalStore::open(dir.path()).unwrap();
         journal_batch(&store, "ds-1", "file", "ds-1", "generic", &[], &[], 1).unwrap();
         assert_eq!(store.read_all().unwrap().len(), 0);
+    }
+
+    // ── rebuild_from_journal ─────────────────────────────────────────
+
+    #[test]
+    fn rebuild_separates_inserted_from_skipped_and_counts_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = JournalStore::open(dir.path()).unwrap();
+        j.append(&env("ins-1", 1, 10)).unwrap();
+        j.append(&env("skip-1", 0, 11).as_skipped("no_triple".into())).unwrap();
+        j.append(&env("ins-2", 2, 12)).unwrap();
+        let r = rebuild_from_journal(&j).unwrap();
+        assert_eq!(r.total, 3);
+        assert_eq!(r.inserted.len(), 2);
+        assert_eq!(r.skipped.len(), 1);
+        assert_eq!(r.inserted[0].raw_payload, "ins-1");
+        assert_eq!(r.skipped[0].skip_reason.as_deref(), Some("no_triple"));
+        // Every raw row is recoverable — nothing was silently lost.
+        let payloads: Vec<_> = r.inserted.iter().chain(&r.skipped)
+            .map(|e| e.raw_payload.clone()).collect();
+        assert!(payloads.contains(&"skip-1".to_string()));
     }
 }
