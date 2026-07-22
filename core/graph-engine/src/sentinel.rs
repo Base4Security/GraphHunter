@@ -1232,11 +1232,22 @@ impl LogParser for SentinelJsonParser {
             .map(|line| {
                 let mut buf = line.as_bytes().to_vec();
                 let event = simd_json::serde::from_slice::<Value>(&mut buf).ok();
-                let events = event
+                let mut events = event
                     .as_ref()
                     .map(|e| Self::parse_event_raw(e))
                     .unwrap_or_default();
                 let produced = !events.is_empty();
+                // Attach the verbatim source row to every event this line
+                // produced (field_survival) — a line may yield N events
+                // (e.g. process-create's parent+child triples), all sharing
+                // the same origin row. Paid only on the produce branch, same
+                // cost tradeoff as the skip branch's `line.to_string()` below.
+                if produced {
+                    let raw_line = line.to_string();
+                    for ev in events.iter_mut() {
+                        ev.raw_line = Some(raw_line.clone());
+                    }
+                }
                 let skip = (!produced).then(|| {
                     let reason = event
                         .as_ref()
@@ -1455,5 +1466,46 @@ mod hydration_tests {
                 "parser reads {column} in {table} as {ty:?}, but sentinel_entity_targets omits it",
             );
         }
+    }
+}
+
+/// Fase C-2 Task 3: `raw_line` capture on the native NDJSON per-line emit
+/// path (`parse_raw_with_stats`, produce branch).
+#[cfg(test)]
+mod raw_line_tests {
+    use super::*;
+
+    #[test]
+    fn sentinel_native_parse_attaches_raw_line_to_events() {
+        // NDJSON (no leading `[`) so this exercises the per-line path, not
+        // the whole-array branch that delegates to `parse_with_stats`.
+        let input = r#"{"Type": "SecurityEvent", "TimeGenerated": "2024-01-15T14:30:00Z", "EventID": 4624, "Computer": "DC-01.contoso.local", "TargetUserName": "admin", "IpAddress": "10.0.0.5", "LogonType": 3}"#;
+
+        let (events, _stats) = SentinelJsonParser.parse_raw_with_stats(input);
+
+        assert!(!events.is_empty());
+        // Every produced event carries the original row.
+        assert!(events.iter().all(|e| e.raw_line.is_some()));
+        // The raw_line contains a field from the original row.
+        assert!(events[0]
+            .raw_line
+            .as_ref()
+            .unwrap()
+            .contains("TargetUserName"));
+    }
+
+    #[test]
+    fn sentinel_native_parse_shares_raw_line_across_multi_event_rows() {
+        // 4688 process-create yields 2 events (User->Execute->Process,
+        // Parent->Execute->Child) from a single source row — both must
+        // carry the same raw_line.
+        let input = r#"{"Type": "SecurityEvent", "TimeGenerated": "2024-01-15T14:30:00Z", "EventID": 4688, "Computer": "WS-01.contoso.local", "SubjectUserName": "admin", "NewProcessName": "C:\\Windows\\System32\\cmd.exe", "NewProcessId": "0x1234", "CommandLine": "cmd.exe /c whoami", "ParentProcessName": "C:\\Windows\\explorer.exe"}"#;
+
+        let (events, _stats) = SentinelJsonParser.parse_raw_with_stats(input);
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.raw_line.is_some()));
+        assert_eq!(events[0].raw_line, events[1].raw_line);
+        assert!(events[0].raw_line.as_ref().unwrap().contains("cmd.exe"));
     }
 }

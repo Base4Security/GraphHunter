@@ -1429,6 +1429,74 @@ impl LogParser for GenericParser {
         parse_events_with_stats(&events, |event| Self::parse_event(event))
     }
 
+    /// Native raw-event override for the generic/config path (Fase C-2
+    /// Task 3, field_survival). Only the parsed `Value` — not the original
+    /// raw `&str` — is in scope at emit time here (the raw row is discarded
+    /// per-line inside `parse_events`), so each produced event carries the
+    /// canonical (sorted-key) serialization of its pre-mapping `Value`
+    /// instead of the literal source bytes. That still reconstructs every
+    /// field the field-config mapping later drops. See
+    /// `crate::parser::canonical_value_string`.
+    fn parse_raw(&self, data: &str) -> Vec<crate::parser::RawIngestEvent> {
+        let events = Self::parse_events(data);
+        if events.is_empty() {
+            return Vec::new();
+        }
+
+        events
+            .par_iter()
+            .flat_map(|event| {
+                let triples = Self::parse_event(event);
+                if triples.is_empty() {
+                    return Vec::new();
+                }
+                let raw_line = crate::parser::canonical_value_string(event);
+                triples
+                    .into_iter()
+                    .map(|t| {
+                        let mut e = crate::parser::RawIngestEvent::from_parsed_triple(t);
+                        e.raw_line = Some(raw_line.clone());
+                        e
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Raw-event-with-stats variant of [`parse_raw`]. Reuses
+    /// `parse_events_with_stats` for the aggregate counters (rows_seen,
+    /// per_field_occurrence, drift, skip_reasons, ...) and separately lifts
+    /// each produced triple to a `RawIngestEvent` carrying the row's
+    /// canonical raw_line, mirroring `parse_raw` above.
+    fn parse_raw_with_stats(
+        &self,
+        data: &str,
+    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+        let events = Self::parse_events(data);
+        let (_, stats) = parse_events_with_stats(&events, |event| Self::parse_event(event));
+
+        let raw_events: Vec<crate::parser::RawIngestEvent> = events
+            .par_iter()
+            .flat_map(|event| {
+                let triples = Self::parse_event(event);
+                if triples.is_empty() {
+                    return Vec::new();
+                }
+                let raw_line = crate::parser::canonical_value_string(event);
+                triples
+                    .into_iter()
+                    .map(|t| {
+                        let mut e = crate::parser::RawIngestEvent::from_parsed_triple(t);
+                        e.raw_line = Some(raw_line.clone());
+                        e
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        (raw_events, stats)
+    }
+
     /// Generic Result variant (RH-P1-012).
     ///
     /// Reuses `parse_events` + per-event triple extraction, but events that
@@ -1569,4 +1637,58 @@ pub(crate) fn classify_skip_reason(event: &Value) -> &'static str {
         return "no_anchor";
     }
     "no_triple_emitted"
+}
+
+/// Fase C-2 Task 3: `raw_line` capture on the generic/config parse path.
+/// Only a parsed `Value` is in scope at emit time (the raw `&str` is
+/// discarded per-line inside `parse_events`), so the captured `raw_line` is
+/// the canonical (sorted-key) serialization of that pre-mapping `Value`
+/// rather than the literal source bytes.
+#[cfg(test)]
+mod raw_line_tests {
+    use super::*;
+
+    #[test]
+    fn generic_parse_attaches_canonical_raw_line() {
+        let json = r#"[{
+            "timestamp": "2024-01-15T14:30:00Z",
+            "src_ip": "10.0.0.1",
+            "dst_ip": "8.8.8.8",
+            "dst_port": "53",
+            "protocol": "UDP"
+        }]"#;
+
+        let (events, _stats) = GenericParser.parse_raw_with_stats(json);
+
+        assert!(!events.is_empty());
+        // Every produced event carries the canonical serialization of its
+        // source Value.
+        assert!(events.iter().all(|e| e.raw_line.is_some()));
+        // The raw_line contains a field from the original row.
+        let raw = events[0].raw_line.as_ref().unwrap();
+        assert!(raw.contains("src_ip"));
+        assert!(raw.contains("8.8.8.8"));
+
+        // `parse_raw` (used on the streaming ingest path) attaches the same
+        // canonical raw_line.
+        let raw_only = GenericParser.parse_raw(json);
+        assert!(!raw_only.is_empty());
+        assert!(raw_only.iter().all(|e| e.raw_line.is_some()));
+    }
+
+    #[test]
+    fn generic_parse_raw_line_is_stable_across_key_order() {
+        // Two Values with the same fields in different key order must
+        // produce the same canonical raw_line — otherwise a re-parse of
+        // semantically identical JSON would look like drift in the journal.
+        let a = r#"[{"src_ip": "10.0.0.1", "dst_ip": "8.8.8.8", "dst_port": "53", "protocol": "UDP"}]"#;
+        let b = r#"[{"protocol": "UDP", "dst_port": "53", "dst_ip": "8.8.8.8", "src_ip": "10.0.0.1"}]"#;
+
+        let events_a = GenericParser.parse_raw(a);
+        let events_b = GenericParser.parse_raw(b);
+
+        assert_eq!(events_a.len(), 1);
+        assert_eq!(events_b.len(), 1);
+        assert_eq!(events_a[0].raw_line, events_b[0].raw_line);
+    }
 }
