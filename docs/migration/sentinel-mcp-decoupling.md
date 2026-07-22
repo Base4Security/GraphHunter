@@ -85,6 +85,42 @@ esa dependencia de forma.
 | Auditoría | ✓ | `tracing::warn!(target: "kql_escape_hatch", ...)` — bloqueo (`siem.rs:50`) e invocación (`siem.rs:53-58`) |
 | Resultados tabulares claros (no confundibles con una respuesta del grafo) | ✓ | `source_tabular: true` en la respuesta normal (`query.ts:61`) y también en la respuesta de bloqueo (`escape_hatch.rs:35`) |
 
+### Segunda vía de entrada: `cmd_run_kql` (IPC de Tauri) — `descriptive`
+
+Lo anterior describe el gate en el borde `POST /kql` (HTTP/MCP). Existe una
+**segunda** vía de entrada de KQL de texto libre redactado por el analista:
+el comando IPC de Tauri `cmd_run_kql`
+(`apps/tauri/src-tauri/src/commands/sentinel.rs:69-74`), invocado desde el
+panel de la app de escritorio
+(`apps/tauri/src/components/DatasetsLeftPanel.tsx:394-409`, función
+`runAdhocKql`). Verificado leyendo el código: `cmd_run_kql` llama a
+`api.run_kql(params)` directamente (`sentinel.rs:73`), sin pasar por
+`super::escape_hatch::kql_escape_hatch_enabled()` — hoy queda **fuera** del
+gate descrito en la sección 1.
+
+Esto es alcance deliberado para esta Fase A, no una regresión: el gate
+existente gobierna el borde de red/MCP (`POST /kql`, consumido por
+`sentinel_query`), un límite de confianza distinto al de la IPC de escritorio
+(`cmd_run_kql` corre dentro del propio proceso de la app, invocado por el
+mismo usuario que la ejecuta — no cruza una red ni pasa por un LLM/MCP
+intermediario). Fase A encapsuló el borde de red porque era el hueco real
+identificado por S7/S8; no se auditó ni se decidió nada sobre la IPC de
+escritorio.
+
+**Decisión pendiente para Fase B:** o bien (a) extender el gate +
+auditoría (`tracing::warn!(target: "kql_escape_hatch", ...)`) también a
+`cmd_run_kql`, tratando la IPC de escritorio como otra superficie de KQL
+libre de analista que debe ser marcable/deshabilitable; o bien (b) aceptar
+formalmente el límite de confianza de escritorio (proceso local,
+usuario-invocado) como razón para no gatearla, y documentarlo como decisión
+explícita en vez de omisión implícita. Ninguna de las dos está tomada todavía.
+
+Nota de alcance sobre la sección 1 y la línea "único tool" de la sección 3
+más abajo: ambas describen específicamente la superficie **MCP/HTTP**
+(tools y el handler `POST /kql`). No debe leerse como que `/kql` es la
+única entrada de KQL de texto libre en todo el sistema — `cmd_run_kql` es
+una segunda entrada, fuera de ese boundary, según se documenta aquí.
+
 ## 2. Qué falta para las fases siguientes
 
 Dos huecos que S6 documentó siguen abiertos — `capabilities()` los declara,
