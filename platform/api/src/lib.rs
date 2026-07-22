@@ -12,6 +12,7 @@
 //! `~/.claude/plans/eager-bubbling-mochi.md` for the overall plan.
 
 pub mod ai;
+pub mod coverage;
 pub mod dto;
 pub mod error;
 pub mod events;
