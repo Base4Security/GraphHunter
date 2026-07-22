@@ -78,6 +78,40 @@ impl RawIngestEvent {
     }
 }
 
+/// Deterministic serialization of a `serde_json::Value` with all object keys
+/// sorted recursively, regardless of the `preserve_order` feature (which is
+/// ON transitively via `evtx`, so `serde_json::to_string` on a `Value`
+/// preserves insertion order — not stable across re-parse of semantically
+/// identical JSON). This is the C-1 `canonical_raw_payload` lesson
+/// (`platform/api/src/journal.rs`) applied at the `Value` level, for the
+/// generic parser path (`core/graph-engine/src/generic.rs`) where only a
+/// parsed `Value` — not the original raw `&str` — is in scope at emit time.
+///
+/// Object keys are sorted via `BTreeMap`; array element order is preserved
+/// (arrays are ordered data, not a key/value bag); scalars are left as-is.
+/// Rebuilding with a `BTreeMap`-sorted iterator and feeding that into
+/// `serde_json::Map::from_iter` yields a sorted-order `Map` even under
+/// `preserve_order` (`IndexMap` preserves *insertion* order, and insertion
+/// order here is the sorted order we iterate in).
+pub fn canonical_value_string(v: &serde_json::Value) -> String {
+    fn canon(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(map) => {
+                let mut sorted = std::collections::BTreeMap::new();
+                for (k, val) in map {
+                    sorted.insert(k.clone(), canon(val));
+                }
+                serde_json::Value::Object(sorted.into_iter().collect())
+            }
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(canon).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string(&canon(v)).unwrap_or_default()
+}
+
 /// Aggregate per-ingest parsing statistics. Populated by parsers that
 /// override [`LogParser::parse_with_stats`]. The default implementation
 /// returns an empty `ParseStats` so legacy parsers keep working — the
@@ -261,6 +295,16 @@ pub trait LogParser: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_value_string_is_stable_across_key_order() {
+        let a: serde_json::Value = serde_json::from_str(r#"{"b":2,"a":1,"c":{"y":2,"x":1}}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(r#"{"c":{"x":1,"y":2},"a":1,"b":2}"#).unwrap();
+        assert_eq!(canonical_value_string(&a), canonical_value_string(&b));
+        let back: serde_json::Value = serde_json::from_str(&canonical_value_string(&a)).unwrap();
+        assert_eq!(back["a"], serde_json::json!(1));
+        assert_eq!(back["c"]["x"], serde_json::json!(1));
+    }
 
     #[test]
     fn raw_ingest_event_carries_optional_raw_line() {
