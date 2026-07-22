@@ -90,6 +90,12 @@ pub struct LoadResult {
     /// ingested triples.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// True if this ingest stopped before consuming all input (e.g. Windows
+    /// critical-memory guard mid-file). Surfaced so a downstream answer over
+    /// this data can be marked possibly_incomplete (ingest_completeness). The
+    /// underlying signal was previously a dropped local (S5).
+    #[serde(default)]
+    pub stopped_early: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,4 +212,23 @@ pub struct IngestLlmProposal {
     pub diff: serde_json::Value,
     pub confidence: f32,
     pub backend_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_result_carries_stopped_early_default_false() {
+        // Backward compatible: deserializing an old LoadResult without the field defaults false.
+        let json = r#"{"new_entities":1,"new_relations":1,"total_entities":1,"total_relations":1,"zero_triples":false,"warnings":[]}"#;
+        let r: LoadResult = serde_json::from_str(json).unwrap();
+        assert!(!r.stopped_early);
+        // and a constructed one round-trips.
+        let mut r2 = r.clone();
+        r2.stopped_early = true;
+        let s = serde_json::to_string(&r2).unwrap();
+        let back: LoadResult = serde_json::from_str(&s).unwrap();
+        assert!(back.stopped_early);
+    }
 }

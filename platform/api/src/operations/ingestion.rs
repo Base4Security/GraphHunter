@@ -599,6 +599,7 @@ impl GraphHunterApi {
             zero_triples,
             ingest_stats,
             warnings,
+            stopped_early: false,
         })
     }
 
@@ -846,6 +847,7 @@ impl GraphHunterApi {
             zero_triples,
             ingest_stats: Some(stats),
             warnings,
+            stopped_early: false,
         })
     }
 
@@ -1010,6 +1012,7 @@ impl GraphHunterApi {
             zero_triples,
             ingest_stats,
             warnings,
+            stopped_early: false,
         })
     }
 
@@ -1219,6 +1222,7 @@ impl GraphHunterApi {
                                             && total_new_relations == 0,
                                         ingest_stats: None,
                                         warnings,
+                                        stopped_early: false,
                                     },
                                 })
                                 .unwrap_or_default(),
@@ -1353,8 +1357,8 @@ impl GraphHunterApi {
                     is_line_based,
                     bytes_total
                 );
-                let ingest_result: Result<(usize, usize, Option<DriftSnapshot>), String> =
-                    (|| -> Result<(usize, usize, Option<DriftSnapshot>), String> {
+                let ingest_result: Result<(usize, usize, Option<DriftSnapshot>, bool), String> =
+                    (|| -> Result<(usize, usize, Option<DriftSnapshot>, bool), String> {
                         if is_line_based {
                             // ── Line-based streaming path (NDJSON / IIS / CSV): mmap + line-batch parsing ──
                             bg_emitter.emit(
@@ -1759,7 +1763,7 @@ impl GraphHunterApi {
                                 }
                             }
 
-                            Ok((total_new_entities, total_new_relations, drift_accum))
+                            Ok((total_new_entities, total_new_relations, drift_accum, stopped_early))
                         } else {
                             // ── JSON array / small file: memory-mapped parse + insert ──
                             //
@@ -1876,12 +1880,16 @@ impl GraphHunterApi {
                             // and would self-deadlock under a held write guard.
                             note_post_finalize_appends(&bg_session, nr);
                             tracing::info!("INGEST: inserted ({}, {})", ne, nr);
-                            Ok((ne, nr, stats.drift))
+                            // Whole-file parse path always consumes the entire
+                            // input in one pass — there is no early-stop guard
+                            // here (only the line-based streaming branch above
+                            // can bail on the Windows critical-memory check).
+                            Ok((ne, nr, stats.drift, false))
                         }
                     })();
 
                 match ingest_result {
-                    Ok((new_entities, new_relations, drift)) => {
+                    Ok((new_entities, new_relations, drift, stopped_early)) => {
                         if let Some(ref d) = drift {
                             bg_api.record_drift(&bg_dataset_id, d);
                         }
@@ -1951,6 +1959,7 @@ impl GraphHunterApi {
                                     zero_triples: new_entities == 0 && new_relations == 0,
                                     ingest_stats: None,
                                     warnings,
+                                    stopped_early,
                                 },
                             })
                             .unwrap_or_default(),
