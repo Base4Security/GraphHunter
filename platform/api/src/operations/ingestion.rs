@@ -1494,6 +1494,14 @@ impl GraphHunterApi {
                                     // Stats fidelity trade-off documented on the trait
                                     // method: drift / per_field_occurrence / skip_reasons
                                     // are empty in the native typed paths.
+                                    // Skip samples for THIS batch only (not
+                                    // carried across iterations, unlike
+                                    // `drift_accum` which aggregates over the
+                                    // whole file) — capped at SKIP_SAMPLE_CAP
+                                    // so a batch made of many skip-heavy
+                                    // sub-chunks doesn't blow past the same
+                                    // bound the non-parallel parsers enforce.
+                                    let mut skipped_accum: Vec<(String, String)> = Vec::new();
                                     let events: Vec<graph_hunter_core::RawIngestEvent> =
                                         if sub_chunks.len() > 1 {
                                             use rayon::prelude::*;
@@ -1509,6 +1517,15 @@ impl GraphHunterApi {
                                                         .get_or_insert_with(DriftSnapshot::default)
                                                         .merge(&d);
                                                 }
+                                                if skipped_accum.len()
+                                                    < graph_hunter_core::parser::SKIP_SAMPLE_CAP
+                                                {
+                                                    let remaining =
+                                                        graph_hunter_core::parser::SKIP_SAMPLE_CAP
+                                                            - skipped_accum.len();
+                                                    skipped_accum
+                                                        .extend(s.skipped_samples.into_iter().take(remaining));
+                                                }
                                             }
                                             flattened
                                         } else {
@@ -1518,6 +1535,9 @@ impl GraphHunterApi {
                                                     .get_or_insert_with(DriftSnapshot::default)
                                                     .merge(&d);
                                             }
+                                            skipped_accum = s.skipped_samples;
+                                            skipped_accum
+                                                .truncate(graph_hunter_core::parser::SKIP_SAMPLE_CAP);
                                             e
                                         };
                                     // Journal step: must run BEFORE the graph
@@ -1525,17 +1545,19 @@ impl GraphHunterApi {
                                     // replayable. Gated behind GRAPHHUNTER_JOURNAL
                                     // (default off = no-op); failures only warn,
                                     // never abort ingestion — mirrors load_data.
-                                    // The parallel-chunk path above only keeps
-                                    // per-chunk drift (not skipped samples), so
-                                    // there are none to journal alongside this
-                                    // batch's `events`.
+                                    // The parallel-chunk path above now merges
+                                    // `skipped_samples` from every sub-chunk
+                                    // (capped at SKIP_SAMPLE_CAP) alongside
+                                    // `drift`, so real skip samples for this
+                                    // batch's `events` are journaled instead
+                                    // of an empty slice.
                                     if crate::journal::journal_enabled() {
                                         journal_batch_best_effort(
                                             &bg_dataset_id,
                                             "file_stream",
                                             resolved.as_str(),
                                             &events,
-                                            &[],
+                                            &skipped_accum,
                                         );
                                     }
                                     let (ne, nr) = if crate::journal::journal_enabled()
@@ -1555,7 +1577,7 @@ impl GraphHunterApi {
                                             bg_dataset_id.as_str(),
                                             resolved.as_str(),
                                             &events,
-                                            &[],
+                                            &skipped_accum,
                                             now_ms,
                                         );
                                         let mut graph = bg_session
