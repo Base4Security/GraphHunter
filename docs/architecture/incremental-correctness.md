@@ -1,6 +1,6 @@
-# Idempotencia incremental y equivalencia incremental-vs-rebuild (Fase C-1)
+# Idempotencia incremental y equivalencia incremental-vs-rebuild (Fase C-1) + raw-line plumbing (Fase C-2)
 
-*Rama `spec/hunt-journal`. Commits: `d1d5742` (`GraphDelta` + `apply_delta`
+*Rama `spec/hunt-journal`. Commits Fase C-1: `d1d5742` (`GraphDelta` + `apply_delta`
 idempotente), `c032061` (acotar el claim de dedup-en-crash a within-process),
 `296374f`/`dbd0ab1` (`envelope_to_delta`), `42264d5` (`apply_batch_idempotent`
 + flag `GRAPHHUNTER_GRAPHDELTA`), `d8a5004` (`check_incremental_equivalence`),
@@ -9,9 +9,17 @@ idempotente), `c032061` (acotar el claim de dedup-en-crash a within-process),
 Continúa `docs/architecture/journal.md` (Fase B), que dejó el
 paso 8 del pipeline de 12 pasos ("generar deltas del grafo") sin construir
 y declaró la equivalencia incremental-vs-rebuild como `proposed`.
+Commits Fase C-2 (raw-line plumbing, sección 7): `fee126b`
+(`RawIngestEvent.raw_line`), `df96681`/`046a1d3` (`canonical_value_string`),
+`63004e6` (captura en Sentinel nativo + `GenericParser`), `86b4f1e`
+(captura en `ConfigurableParser`), `41f6d43` (`build_batch_envelopes` prefiere
+`raw_line`), `05f35a6` (fix de compilación en literales `RawIngestEvent`),
+`670edaf` (test end-to-end). Plan:
+`docs/superpowers/plans/2026-07-22-sot-block2-faseC2-rawline.md`.
 Etiquetas de claim: `implemented` para `GraphDelta`/`apply_delta`, el flag
-`GRAPHHUNTER_GRAPHDELTA` y `check_incremental_equivalence`; `proposed`
-donde se indica explícitamente (Fase C-2).*
+`GRAPHHUNTER_GRAPHDELTA`, `check_incremental_equivalence`, y (sección 7)
+`RawIngestEvent.raw_line`/`canonical_value_string`/el uso de `raw_line` en
+`build_batch_envelopes`; `proposed` donde se indica explícitamente.*
 
 ## 1. `GraphDelta` + `apply_delta` idempotente
 
@@ -277,26 +285,175 @@ y `sot/validation/graphhunter/graphhunter_sufficiency_audit.md`
 (sección "Fase C-1 delta") para el flip de veredicto y los números
 reales leídos de `audit_results.json`.
 
-## 6. Qué queda para Fase C-2
+## 6. Qué quedaba para Fase C-2 (estado a cierre de C-1; ver sección 7 para lo que realmente pasó)
 
 - **`source_coverage`** (`degraded`, contexto `circuit_breaker`): el
   pipeline de watermark/circuit-breaker existe pero no está cableado en
   producción; el path en vivo no lleva contabilidad de cobertura. Cierre
   propuesto: cablear el runtime incremental de dirty-sets/watermark al
-  path de ingesta real (`proposed`, no construido en esta slice).
+  path de ingesta real (`proposed`, no construido en esta slice). **Sigue
+  degradado tras C-2** — explícitamente diferido a Fase F (ver sección 8).
 - **`field_survival`** (`degraded`, contexto `unmapped_field`): el
   journal guarda el triple `RawIngestEvent` post-mapeo para eventos
   insertados, no la fila cruda — un campo que el mapeo ya descartó
   antes de producir `RawIngestEvent` no es reconstruible desde el
   journal. Cierre propuesto: plumbing de la fila cruda de origen hacia
   el sobre también para eventos insertados, no solo para `Skipped`
-  (`proposed`, no construido en esta slice).
-- **`row_completeness`** e **`ingestion_time`** siguen exactamente como
-  Fase B los dejó (cableados solo en `load_data`/`load_data_with_config`,
-  no en `ingest_siem` ni streaming, para efectos de esos dos canales
-  específicos — distinto del cableado de `edge_multiplicity`, que Fase
-  C-1 sí extendió a los 6 sitios). Ver `docs/architecture/journal.md`
-  sección 5 para el detalle canal por canal que esta slice no re-abre.
+  (`proposed`, no construido en esta slice). **Fase C-2 lo construyó y
+  cierra este canal — ver sección 7.**
+- **`row_completeness`** e **`ingestion_time`** seguían, a cierre de
+  C-1, exactamente como Fase B los dejó (cableados solo en
+  `load_data`/`load_data_with_config`, no en `ingest_siem` ni streaming,
+  para efectos de esos dos canales específicos — distinto del cableado
+  de `edge_multiplicity`, que Fase C-1 sí extendió a los 6 sitios). **Esta
+  frase quedó desactualizada por commits posteriores a C-1** (el
+  journal-write se extendió a los 6 sitios también para `row_completeness`
+  — ver la re-lectura honesta en la sección 7.1); `ingestion_time` no fue
+  re-verificado en esta slice y no se reclama nada nuevo sobre él aquí.
+  Ver `docs/architecture/journal.md` sección 5 para el detalle histórico
+  canal por canal que Fase B dejó.
 - Sin Differential Dataflow (decisión de spec #4): la equivalencia
   incremental-vs-rebuild es un chequeo de conteos por rebuild completo,
   no un motor de dataflow incremental con dirty-tracking fino.
+
+## 7. `field_survival` (Fase C-2): raw-line plumbing para eventos insertados
+
+**`implemented`** — `core/graph-engine/src/parser.rs:58`
+(`RawIngestEvent.raw_line`), `core/graph-engine/src/generic.rs:1508,1540`
+y `core/graph-engine/src/field_preview.rs:979,1012`
+(captura en `GenericParser`/`ConfigurableParser`),
+`platform/api/src/journal.rs:179-182` (`build_batch_envelopes` lo consume).
+
+**Mecanismo.** `RawIngestEvent` gana un campo opcional
+`raw_line: Option<String>` (`#[serde(default, skip_serializing_if =
+"Option::is_none")]`, por lo que no rompe ningún literal existente ni el
+formato ya journaleado). `build_batch_envelopes` — el mismo punto que
+Fase C-1 usa para construir el `raw_payload` de cada sobre insertado —
+ahora prefiere `ev.raw_line` sobre la serialización de la tripla:
+
+```rust
+let raw = match &ev.raw_line {
+    Some(line) => line.clone(),
+    None => canonical_raw_payload(ev),
+};
+```
+
+`canonical_raw_payload` (la serialización determinista de la tripla,
+Fase C-1) sigue siendo el fallback cuando el parser no capturó una fila
+cruda — así que ningún camino pierde lo que ya tenía; esto es
+estrictamente aditivo.
+
+**Determinismo.** `canonical_value_string` (`core/graph-engine/src/
+parser.rs`, reexportado y usado por `generic.rs`/`field_preview.rs`)
+serializa el `Value` **pre-mapping** con claves ordenadas — el mismo
+problema de `preserve_order` transitivo vía `evtx` que Fase C-1 tuvo
+que resolver para `canonical_raw_payload` (ver sección 2) aplica aquí
+igual: un `serde_json::to_string` directo sobre un `Value` no es
+determinista entre re-parses porque `preserve_order` está activo en este
+workspace. `canonical_value_string` ordena las claves recursivamente
+(objetos anidados incluidos), así que dos parses del mismo `Value`
+lógico producen el mismo `raw_line`, y por tanto el mismo
+`canonical_hash` — la propiedad que el dedup de `crash_reingest`
+(sección 5) necesita para no romperse con esta fila más rica.
+
+**Qué cierra, exactamente.** El contexto declarado en
+`sot/validation/graphhunter/ingest_surface.json` para `field_survival`
+es `unmapped_field`: un campo que una `FieldConfig`
+(`sanitize_field_config`/`auto_field_config_for`,
+`platform/api/src/operations/ingestion.rs:147,177`) degrada a
+`Metadata` o descarta como candidato a nodo. Este cierre aplica
+exactamente a los dos caminos que alguna vez aplican una `FieldConfig`:
+
+- `GenericParser::parse_raw`/`::parse_raw_with_stats`
+  (`generic.rs:1495,1526`) — el path "generic" con su mapeo canónico
+  fijo.
+- `ConfigurableParser::parse_raw`/`::parse_raw_with_stats`
+  (`field_preview.rs:966,996`) — el path que aplica una `FieldConfig`
+  explícita (`load_data_with_config`) o auto-detectada
+  (`auto_field_config_for`, que cubre `csv|generic|sysmon|sentinel|
+  cognito`, `ingestion.rs:178-181` — por lo tanto NO es solo el formato
+  "generic": datos con formato sysmon/sentinel/csv/cognito que pasan por
+  un `FieldConfig` auto-detectado también quedan cubiertos).
+
+Ambos setean `raw_line = canonical_value_string(event)` en las dos
+variantes de cada uno (con/sin stats) — verificado leyendo las cuatro
+funciones, no asumido. Tests que fijan el contrato:
+`unmapped_field_is_reconstructable_from_journal` (`journal.rs:494`),
+`generic_parse_attaches_canonical_raw_line` (`generic.rs:1707`),
+`configurable_parser_attaches_canonical_raw_line`
+(`field_preview.rs:1038`).
+
+**Límites de honestidad (léanse junto con la nota del canal en
+`ingest_surface.json`, que es la fuente congelada):**
+
+1. **Formatos sin ruta de field-config.** `evtx`/`pcap`/`zeek`/
+   `suricata`/`netflow`/`haproxy`/`iis_w3c` (parsers nativos) y
+   Sysmon/Sentinel **cuando** corre su propio fast path nativo en vez de
+   `ConfigurableParser`, nunca aplican una `FieldConfig` — el modo de
+   falla `unmapped_field` no existe ahí, así que no hay nada que cerrar
+   en esos caminos para este contexto (no es un boundary del cierre;
+   es que el contexto no aplica). El parser nativo de Sysmon deja
+   `raw_line: None` en cada `RawIngestEvent` que construye.
+2. **Asimetría del fast path nativo de Sentinel — NO forma parte del
+   cierre de arriba.** `SentinelJsonParser::parse_raw_with_stats`
+   (usado por `load_data`/`load_data_with_config`/los sitios en chunk de
+   `load_data_streaming`) sí adjunta `raw_line` por línea NDJSON
+   (`sentinel.rs:1246-1249`). Pero el único método que llama
+   `ingest_siem` — la ruta declarada como "live sync path" del sistema
+   — es el `parse_raw` plano (`ingestion.rs:751`), que **no** setea
+   `raw_line` (`sentinel.rs:1169-1195`: la rama de emisión construye
+   cada `RawIngestEvent` vía `parse_event_raw` sin tocar ese campo).
+   `ingest_siem` nunca aplica una `FieldConfig` de todos modos, así que
+   esta asimetría no afecta el cierre de `unmapped_field` — pero sí
+   significa que la reconstrucción vía `raw_line` **no está disponible**
+   específicamente en `ingest_siem`; ese camino sigue cayendo a
+   `canonical_raw_payload` (la tripla, comportamiento de C-1), sin
+   cambios en esta slice. Este hallazgo corrige una asunción del plan
+   original de C-2 (que daba por hecho lo contrario); se deja registrado
+   aquí para que no se repita el error en una fase futura.
+3. **`raw_line` no es una copia byte-a-byte en el path genérico/
+   configurable.** Es la serialización canónica (claves ordenadas) del
+   `Value` ya parseado — determinista, y contiene todo campo presente
+   antes del mapeo, pero no los bytes literales de la línea de origen
+   (a diferencia del path nativo de Sentinel, donde sí es la línea
+   literal).
+4. **Detrás de `GRAPHHUNTER_JOURNAL`** (default off) — sin flag nuevo;
+   con el flag apagado, nada de esto se ejecuta y el comportamiento
+   externo es idéntico al de antes de C-2.
+
+### 7.1 Re-lectura honesta de `row_completeness`
+
+La sección 6 (redactada al cierre de C-1) decía que `row_completeness`
+seguía cableado solo en 2 de los 6 sitios. Leyendo el código actual
+(`platform/api/src/operations/ingestion.rs`), esa frase quedó
+desactualizada: `journal_batch_best_effort` se llama hoy en los 6
+sitios (`load_data` ~498, `ingest_siem` ~766, `load_data_with_config`
+~911, y los 3 de `load_data_streaming` ~1525/~1675/~1795) — cada evento
+**insertado** se journalea en los 6 caminos. Pero el canal sigue
+`degraded` en `ingest_surface.json` porque, para filas **descartadas**,
+dos sitios quedan ciegos: el sitio de batch-loop (chunk paralelo) de
+`load_data_streaming` journalea `skipped_samples` vacío por diseño
+(solo conserva drift), y — el hallazgo más importante — `ingest_siem`
+llama al `parse_raw` plano del parser, no a `parse_raw_with_stats`, así
+que no computa `ParseStats` en absoluto: ni cuenta ni muestrea filas
+descartadas, en el path que el propio sistema declara "en vivo". Ver la
+nota congelada de `row_completeness` en `ingest_surface.json` para el
+detalle citado línea por línea; esta subsección solo registra que la
+sección 6 de este documento no debe leerse como vigente para ese canal.
+
+## 8. Qué queda después de Fase C-2
+
+- **`source_coverage`** sigue `degraded`, explícitamente diferido a
+  **Fase F**: el poller/circuit-breaker existe pero está dormido (sin
+  cablear en producción) y el path en vivo (`ingest_siem`) es una query
+  one-shot sin breaker. Cerrarlo exige construir el pipeline de
+  streaming en producción — territorio de Fase F, no de esta slice.
+- **`row_completeness`** sigue `degraded` (ver 7.1): falta computar
+  `ParseStats` (o un contador equivalente) en el path plano de
+  `ingest_siem`, y dejar de descartar `skipped_samples` en el sitio de
+  batch-loop de `load_data_streaming`.
+- **`ingest_completeness`** no fue tocado por C-1 ni C-2; sigue siendo
+  territorio de la fase Coverage (criterio de spec 17).
+- Sin Differential Dataflow (decisión de spec #4, sin cambios): la
+  equivalencia incremental-vs-rebuild sigue siendo un chequeo de
+  conteos por rebuild completo.
