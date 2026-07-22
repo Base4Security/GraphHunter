@@ -78,6 +78,55 @@ pub fn journal_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// Build the canonical envelopes for a parsed batch — one per inserted event
+/// (`change_kind Insert`) plus one per skipped sample (`change_kind
+/// Skipped`), each with provenance frozen NOW and `ingestion_time = now_ms`.
+/// Pure (no I/O): this is the shared construction path between `journal_batch`
+/// (which appends the result to the on-disk journal) and the
+/// `GRAPHHUNTER_GRAPHDELTA` apply path in `operations::ingestion`, which
+/// applies the SAME envelopes to the graph in-memory instead of re-reading
+/// them back off disk. Building them once here keeps the journal-write flag
+/// and the apply flag orthogonal without duplicating the envelope-shaping
+/// logic.
+pub(crate) fn build_batch_envelopes(
+    source_id: &str,
+    source_kind: &str,
+    dataset_id: &str,
+    parser_name: &str,
+    events: &[RawIngestEvent],
+    skipped_samples: &[(String, String)],
+    now_ms: i64,
+) -> Vec<CanonicalEnvelope> {
+    let mut out = Vec::with_capacity(events.len() + skipped_samples.len());
+    for ev in events {
+        let raw = serde_json::to_string(ev).unwrap_or_default();
+        let prov = ProvenanceCtx::for_builtin_parser(parser_name, dataset_id, raw.as_bytes());
+        out.push(CanonicalEnvelope::new_insert(
+            source_id.to_string(),
+            source_kind.to_string(),
+            ev.timestamp,
+            now_ms,
+            raw,
+            prov,
+        ));
+    }
+    for (raw_row, reason) in skipped_samples {
+        let prov = ProvenanceCtx::for_builtin_parser(parser_name, dataset_id, raw_row.as_bytes());
+        out.push(
+            CanonicalEnvelope::new_insert(
+                source_id.to_string(),
+                source_kind.to_string(),
+                0,
+                now_ms,
+                raw_row.clone(),
+                prov,
+            )
+            .as_skipped(reason.clone()),
+        );
+    }
+    out
+}
+
 /// Journal a parsed batch: one envelope per inserted event (`change_kind
 /// Insert`) plus one per skipped sample (`change_kind Skipped`), each with
 /// provenance frozen NOW and `ingestion_time = now_ms`. This is steps 4-5 of
@@ -96,33 +145,59 @@ pub fn journal_batch(
     skipped_samples: &[(String, String)],
     now_ms: i64,
 ) -> std::io::Result<()> {
-    for ev in events {
-        let raw = serde_json::to_string(ev).unwrap_or_default();
-        let prov = ProvenanceCtx::for_builtin_parser(parser_name, dataset_id, raw.as_bytes());
-        let env = CanonicalEnvelope::new_insert(
-            source_id.to_string(),
-            source_kind.to_string(),
-            ev.timestamp,
-            now_ms,
-            raw,
-            prov,
-        );
-        store.append(&env)?;
-    }
-    for (raw_row, reason) in skipped_samples {
-        let prov = ProvenanceCtx::for_builtin_parser(parser_name, dataset_id, raw_row.as_bytes());
-        let env = CanonicalEnvelope::new_insert(
-            source_id.to_string(),
-            source_kind.to_string(),
-            0,
-            now_ms,
-            raw_row.clone(),
-            prov,
-        )
-        .as_skipped(reason.clone());
+    for env in build_batch_envelopes(
+        source_id,
+        source_kind,
+        dataset_id,
+        parser_name,
+        events,
+        skipped_samples,
+        now_ms,
+    ) {
         store.append(&env)?;
     }
     Ok(())
+}
+
+/// `GRAPHHUNTER_GRAPHDELTA`: apply journal envelopes to the graph idempotently
+/// (edge multiplicity keyed on event identity, via `GraphHunter::apply_delta`)
+/// instead of the direct, non-deduping `insert_raw_events` path. Default off.
+/// Only meaningful when `GRAPHHUNTER_JOURNAL` is also on — the envelopes this
+/// applies come from the same in-memory batch the journal write journals.
+pub fn graphdelta_enabled() -> bool {
+    std::env::var("GRAPHHUNTER_GRAPHDELTA")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Apply a slice of just-journaled envelopes to the graph idempotently.
+/// Insert envelopes are turned into `GraphDelta`s (via `envelope_to_delta`)
+/// and applied through `GraphHunter::apply_delta`, which dedups on event
+/// identity — so replaying the same batch twice (e.g. a crash-and-reingest)
+/// applies each envelope at most once. Skipped envelopes and envelopes whose
+/// payload doesn't deserialize back into a `RawIngestEvent` yield no delta
+/// and are silently ignored (they never produced an edge to begin with). A
+/// failed `apply_delta` only warns and moves on — this must never abort the
+/// caller's ingest. Returns `(applied, skipped_as_duplicate)`; envelopes that
+/// yielded no delta at all count toward neither.
+pub fn apply_batch_idempotent(
+    graph: &mut graph_hunter_core::graph::GraphHunter,
+    envelopes: &[CanonicalEnvelope],
+) -> (usize, usize) {
+    let mut applied = 0usize;
+    let mut dup = 0usize;
+    for env in envelopes {
+        if let Some(delta) = envelope_to_delta(env) {
+            match graph.apply_delta(&delta) {
+                Ok(out) if out.applied => applied += 1,
+                Ok(_) => dup += 1,
+                Err(e) => {
+                    tracing::warn!(target: "graphdelta", error = %e, "apply_delta failed; skipping")
+                }
+            }
+        }
+    }
+    (applied, dup)
 }
 
 /// The canonical event set recovered from the journal, split by disposition.
@@ -385,5 +460,47 @@ mod tests {
         let env = CanonicalEnvelope::new_insert(
             "s".into(), "la".into(), 0, 5, "not json".into(), prov);
         assert!(envelope_to_delta(&env).is_none());
+    }
+
+    // ── graphdelta_enabled ───────────────────────────────────────────
+
+    #[test]
+    fn graphdelta_flag_defaults_off() {
+        let _lock = lock_env();
+        unsafe { std::env::remove_var("GRAPHHUNTER_GRAPHDELTA") };
+        assert!(!graphdelta_enabled());
+        unsafe { std::env::set_var("GRAPHHUNTER_GRAPHDELTA", "1") };
+        assert!(graphdelta_enabled());
+        unsafe { std::env::remove_var("GRAPHHUNTER_GRAPHDELTA") };
+    }
+
+    // ── apply_batch_idempotent ───────────────────────────────────────
+
+    /// Build an Insert envelope whose raw_payload is a serialized
+    /// `RawIngestEvent` (as `journal_batch`/`build_batch_envelopes` write),
+    /// so `envelope_to_delta` can turn it back into a `GraphDelta`.
+    fn insert_envelope_for(ev: &RawIngestEvent) -> CanonicalEnvelope {
+        let raw = serde_json::to_string(ev).unwrap();
+        let prov = ProvenanceCtx::for_builtin_parser("generic", "ds-1", raw.as_bytes());
+        CanonicalEnvelope::new_insert("ds-1".into(), "file".into(), ev.timestamp, 1000, raw, prov)
+    }
+
+    #[test]
+    fn apply_batch_idempotent_dedups_on_replay() {
+        use graph_hunter_core::graph::GraphHunter;
+        let mut g = GraphHunter::new();
+        // Two distinct events (different timestamps -> different serialized
+        // payload -> different canonical_hash, since no native_id is set).
+        let evs = vec![
+            insert_envelope_for(&sample_event(100)),
+            insert_envelope_for(&sample_event(200)),
+        ];
+        let (a1, s1) = apply_batch_idempotent(&mut g, &evs);
+        assert_eq!((a1, s1), (2, 0));
+        assert_eq!(g.relation_count(), 2);
+        // Replay the SAME batch (crash re-ingest): both skipped as duplicates.
+        let (a2, s2) = apply_batch_idempotent(&mut g, &evs);
+        assert_eq!((a2, s2), (0, 2));
+        assert_eq!(g.relation_count(), 2); // no duplication
     }
 }

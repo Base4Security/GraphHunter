@@ -482,19 +482,19 @@ impl GraphHunterApi {
                 (e, s, false)
             };
             self.record_parse_skips(dataset_id.as_str(), None, &stats);
+            // `used_auto` tells us which parser actually produced `events`:
+            // when an auto-built FieldConfig drove a ConfigurableParser,
+            // journal/apply that identity instead of the raw format name, so
+            // the frozen provenance reflects the real producer (matches the
+            // `load_data_with_config` branch below, which always used
+            // "configurable").
+            let journaled_parser_name =
+                if used_auto { "configurable" } else { resolved_format.as_str() };
             // Journal step (4-5 of the 12-step order): must run BEFORE the
             // graph insert below so a crash in between is replayable. Gated
             // behind GRAPHHUNTER_JOURNAL (default off = no-op); failures only
             // warn, never abort ingestion — journaling is additive.
             if crate::journal::journal_enabled() {
-                // `used_auto` tells us which parser actually produced `events`:
-                // when an auto-built FieldConfig drove a ConfigurableParser,
-                // journal that identity instead of the raw format name, so the
-                // frozen provenance reflects the real producer (matches the
-                // `load_data_with_config` branch below, which always used
-                // "configurable").
-                let journaled_parser_name =
-                    if used_auto { "configurable" } else { resolved_format.as_str() };
                 journal_batch_best_effort(
                     &dataset_id,
                     "file",
@@ -503,9 +503,42 @@ impl GraphHunterApi {
                     &stats.skipped_samples,
                 );
             }
-            let (ne, nr) = graph
-                .insert_raw_events(events, Some(dataset_id.as_str()))
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let (ne, nr) = if crate::journal::journal_enabled()
+                && crate::journal::graphdelta_enabled()
+            {
+                // GRAPHHUNTER_GRAPHDELTA: apply the just-journaled envelopes
+                // idempotently (edge multiplicity keyed on event identity)
+                // instead of the direct, non-deduping insert below, so a
+                // crash-and-reingest of this same batch cannot duplicate
+                // edges. Envelopes are built in-memory from the same
+                // `events`/`skipped_samples` the journal write above just
+                // used — not re-read off disk.
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let envelopes = crate::journal::build_batch_envelopes(
+                    dataset_id.as_str(),
+                    "file",
+                    dataset_id.as_str(),
+                    journaled_parser_name,
+                    &events,
+                    &stats.skipped_samples,
+                    now_ms,
+                );
+                let entities_before = graph.entity_count();
+                let relations_before = graph.relation_count();
+                let (_applied, _dup) =
+                    crate::journal::apply_batch_idempotent(&mut graph, &envelopes);
+                (
+                    graph.entity_count() - entities_before,
+                    graph.relation_count() - relations_before,
+                )
+            } else {
+                graph
+                    .insert_raw_events(events, Some(dataset_id.as_str()))
+                    .map_err(|e| ApiError::Internal(e.to_string()))?
+            };
             run_full_scoring(&mut graph);
             // An empty ParseStats (rows_seen == 0) means the parser didn't
             // report real stats — treat as "unknown".
@@ -838,9 +871,38 @@ impl GraphHunterApi {
                         &stats.skipped_samples,
                     );
                 }
-                let (ne, nr) = graph
-                    .insert_raw_events(events, Some(dataset_id.as_str()))
-                    .map_err(|e| ApiError::Internal(e.to_string()))?;
+                let (ne, nr) = if crate::journal::journal_enabled()
+                    && crate::journal::graphdelta_enabled()
+                {
+                    // GRAPHHUNTER_GRAPHDELTA: apply the just-journaled
+                    // envelopes idempotently instead of the direct insert
+                    // below — see the load_data branch above for rationale.
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0);
+                    let envelopes = crate::journal::build_batch_envelopes(
+                        dataset_id.as_str(),
+                        "file",
+                        dataset_id.as_str(),
+                        "configurable",
+                        &events,
+                        &stats.skipped_samples,
+                        now_ms,
+                    );
+                    let entities_before = graph.entity_count();
+                    let relations_before = graph.relation_count();
+                    let (_applied, _dup) =
+                        crate::journal::apply_batch_idempotent(&mut graph, &envelopes);
+                    (
+                        graph.entity_count() - entities_before,
+                        graph.relation_count() - relations_before,
+                    )
+                } else {
+                    graph
+                        .insert_raw_events(events, Some(dataset_id.as_str()))
+                        .map_err(|e| ApiError::Internal(e.to_string()))?
+                };
                 (ne, nr, Some(stats))
             };
             run_full_scoring(&mut graph);
