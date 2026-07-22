@@ -318,6 +318,19 @@ reales leídos de `audit_results.json`.
 
 ## 7. `field_survival` (Fase C-2): raw-line plumbing para eventos insertados
 
+> **Corrección (léase junto con 7.2 antes de confiar en el código de
+> abajo):** el mecanismo descrito en esta sección — `raw_payload =
+> ev.raw_line` — fue el diseño de C-2 Task 4 y **resultó ser un bug
+> crítico** (whole-phase final review): rompió `envelope_to_delta` y la
+> preservación de multiplicidad, los otros dos consumidores de
+> `raw_payload`. El fix (§7.2) desacopla el campo: `raw_payload` vuelve
+> a ser siempre `canonical_raw_payload(ev)` (C-1), y la línea cruda vive
+> en un campo nuevo, `raw_source_row`. El resto de esta sección describe
+> el *contexto que field_survival cierra* correctamente; solo el
+> fragmento de código de abajo y las referencias a `raw_payload` como
+> portador de la línea cruda quedan obsoletas — léanse como
+> `raw_source_row`.
+
 **`implemented`** — `core/graph-engine/src/parser.rs:58`
 (`RawIngestEvent.raw_line`), `core/graph-engine/src/generic.rs:1508,1540`
 y `core/graph-engine/src/field_preview.rs:979,1012`
@@ -440,6 +453,82 @@ descartadas, en el path que el propio sistema declara "en vivo". Ver la
 nota congelada de `row_completeness` en `ingest_surface.json` para el
 detalle citado línea por línea; esta subsección solo registra que la
 sección 6 de este documento no debe leerse como vigente para ese canal.
+
+### 7.2 Corrección crítica (whole-phase final review): `raw_payload`
+tenía tres consumidores, C-2 solo pensó en uno
+
+**El bug.** La sección 7 de arriba describe el mecanismo tal como C-2
+Task 4 lo dejó: `build_batch_envelopes` hacía `raw_payload =
+ev.raw_line` cuando estaba presente. Eso resuelve `field_survival`,
+pero `raw_payload` no es solo el campo de field-survival — tiene otros
+dos consumidores que ese cambio rompió en silencio:
+
+1. **`envelope_to_delta`** (`platform/api/src/journal.rs:322`) hace
+   `serde_json::from_str::<RawIngestEvent>(&env.raw_payload).ok()?`.
+   Cuando `raw_payload` es la línea cruda (no una serialización de
+   `RawIngestEvent`), el parse falla y devuelve `None` — así que
+   `apply_batch_idempotent` insertaba **cero** aristas para cualquier
+   batch con `raw_line`, con `GRAPHHUNTER_JOURNAL` +
+   `GRAPHHUNTER_GRAPHDELTA` ambos activos. Lo mismo rompe
+   `rebuild_from_journal`/`check_incremental_equivalence`.
+2. **`canonical_hash = sha256(raw_payload ‖ mapping_hash)`**
+   (`platform/canonical/src/envelope.rs:101-107`; `native_id` siempre
+   `None` en `new_insert`). Una fila de origen que produce N eventos
+   comparte una sola `raw_line` (confirmado por el propio test de C-2,
+   `sentinel_native_parse_shares_raw_line_across_multi_event_rows`) →
+   N `raw_payload` idénticos → N `canonical_hash` idénticos →
+   `apply_delta` los deduplica como si fueran reintentos del mismo
+   evento → se destruye la multiplicidad que
+   `distinct_event_ids_preserve_multiplicity` (sección 5) exige
+   preservar.
+
+**El fix: desacoplar los dos roles.** `CanonicalEnvelope` gana un campo
+nuevo, `raw_source_row: Option<String>`
+(`#[serde(default, skip_serializing_if = "Option::is_none")]`,
+aditivo — no rompe el formato ya journaleado), poblado vía
+`.with_source_row(...)` DESPUÉS de que `compute_hash` ya corrió sobre
+`raw_payload` — así que `raw_source_row` nunca entra al hash.
+`build_batch_envelopes` vuelve a hacer `raw_payload =
+canonical_raw_payload(ev)` SIEMPRE (comportamiento de C-1: serialización
+determinista por evento, distinta entre eventos aunque compartan fila de
+origen) y adicionalmente setea `raw_source_row = ev.raw_line.clone()`.
+Resultado:
+
+- **Identidad + reconstrucción** (`raw_payload`/`canonical_hash`):
+  vuelven a ser exactamente el comportamiento de C-1 —
+  `envelope_to_delta` reconstruye, y N eventos de una misma fila
+  producen N hashes distintos (multiplicidad preservada).
+- **`field_survival`** (`raw_source_row`): el campo no mapeado sigue
+  siendo reconstructable desde el journal — solo que desde
+  `raw_source_row`, no desde `raw_payload`.
+
+**Tests que fijan el contrato (RED contra el código de C-2, GREEN
+después del fix):**
+
+- `envelope_to_delta_reconstructs_even_when_raw_line_was_captured`
+  (`journal.rs`) — guarda C-1: contra el código roto,
+  `envelope_to_delta` devolvía `None`; con el fix, `Some`.
+- `multiplicity_is_preserved_across_a_shared_multi_event_source_row`
+  (`journal.rs`) — guarda C-2: dos eventos DISTINTOS que comparten
+  `raw_line` (simulando una fila de origen multi-evento, como la 4688 de
+  Sentinel) → contra el código roto, `raw_payload` idéntico entre ambos
+  (el `assert_ne!` sobre `raw_payload` ya falla ahí) y
+  `apply_batch_idempotent` no insertaba ninguna arista (`relation_count()
+  == 0`, no 1 — porque la línea cruda tampoco deserializa como
+  `RawIngestEvent`, así que además de la dedup por hash, `C-1` también
+  fallaba en el mismo batch); con el fix, `relation_count() == 2`.
+- `flags_on_reconstruction_is_non_empty_for_raw_line_carrying_batch`
+  (`journal.rs`) — guarda C-1 explícita con flags on: contra el código
+  roto, `applied == 0`; con el fix, `applied == 2`.
+- `inserted_envelope_carries_raw_line_in_source_row_not_payload` y
+  `unmapped_field_is_reconstructable_from_journal` se actualizaron para
+  afirmar sobre `raw_source_row`, no `raw_payload`.
+
+`edge_multiplicity` (sección 5) y `field_survival` (sección 7) vuelven
+a ser ciertos genuinamente y simultáneamente — la sección 7 de arriba
+sigue describiendo correctamente el *contexto que field_survival
+cierra* (unmapped_field vía FieldConfig); lo único que cambió es DÓNDE
+vive el campo (`raw_source_row` en vez de `raw_payload`).
 
 ## 8. Qué queda después de Fase C-2
 
