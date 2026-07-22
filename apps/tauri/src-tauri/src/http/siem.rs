@@ -43,6 +43,19 @@ pub(super) async fn handler_run_kql(
     State(api): State<Arc<GraphHunterApi>>,
     Json(body): Json<RunKqlBody>,
 ) -> Response {
+    // Escape-hatch gate: analyst free-text KQL is a marked, audited, disable-able
+    // boundary. System-internal run_kql callers (journal expand) and system-
+    // generated collection KQL (graph_build) do NOT pass through this handler.
+    if !super::escape_hatch::kql_escape_hatch_enabled() {
+        tracing::warn!(target: "kql_escape_hatch", "raw /kql blocked: escape hatch disabled");
+        return super::escape_hatch::disabled_response().into_response();
+    }
+    tracing::warn!(
+        target: "kql_escape_hatch",
+        kql_len = body.kql.len(),
+        ingest = ?body.ingest,
+        "raw /kql escape hatch invoked (analyst free-text KQL)"
+    );
     let result = tokio::time::timeout(
         Duration::from_secs(120),
         api.run_kql(graph_hunter_api::dto::sentinel::RunKqlRequest {
@@ -347,5 +360,32 @@ pub(super) async fn handler_sentinel_status(State(api): State<Arc<GraphHunterApi
             "connector_id": null,
             "status": null,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // No axum test harness exists in this crate to construct a full
+    // State<Arc<GraphHunterApi>>/Json<RunKqlBody> call into
+    // `handler_run_kql` (the only other http submodule test, in
+    // http/journal.rs, is a pure helper-function test with no State at
+    // all). This test instead pins the *contract* handler_run_kql's gate
+    // relies on: with the escape hatch disabled, the gate must return
+    // `escape_hatch::disabled_response()` — a structured 403 that steers
+    // analysts to the graph tools — instead of reaching `api.run_kql`.
+    #[tokio::test]
+    async fn kql_gate_blocks_when_flag_disabled() {
+        unsafe {
+            std::env::set_var("GRAPHHUNTER_KQL_ESCAPE_HATCH", "0");
+        }
+        assert!(!crate::http::escape_hatch::kql_escape_hatch_enabled());
+        let (status, body) = crate::http::escape_hatch::disabled_response();
+        unsafe {
+            std::env::remove_var("GRAPHHUNTER_KQL_ESCAPE_HATCH");
+        }
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        let v: serde_json::Value = body.0;
+        assert_eq!(v["error"], "kql_escape_hatch_disabled");
+        assert!(v["hint"].as_str().unwrap().contains("graph"));
     }
 }

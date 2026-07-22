@@ -25,6 +25,7 @@ mod agentic;
 mod anomaly;
 mod catalog;
 mod dlq;
+mod escape_hatch;
 mod export;
 mod graph;
 mod graph_meta;
