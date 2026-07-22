@@ -202,6 +202,14 @@ impl GraphHunterApi {
                 live_tail_stats: std::sync::RwLock::new(crate::state::LiveTailStats::default()),
                 proposals: std::sync::RwLock::new(std::collections::HashMap::new()),
                 last_build: std::sync::RwLock::new(None),
+                // Not persisted in `SessionFile` — same ephemeral policy
+                // as `ai_conversation`/`proposals`. A reloaded session
+                // starts with a clean completeness record; any
+                // incompleteness from the ingest that originally
+                // produced this saved graph is not reconstructable here.
+                ingest_coverage: std::sync::RwLock::new(
+                    crate::coverage::IngestCoverage::default(),
+                ),
             });
             self.sessions().insert(session);
         }

@@ -1893,6 +1893,23 @@ impl GraphHunterApi {
                         if let Some(ref d) = drift {
                             bg_api.record_drift(&bg_dataset_id, d);
                         }
+                        // completeness_flag (design spec §17): fold this
+                        // ingest's stopped_early signal into the session's
+                        // running coverage state so a later `run_hunt`
+                        // marks its answer `possibly_incomplete`. Monotonic
+                        // — see `IngestCoverage::observe`. Only this
+                        // streaming path currently computes a real
+                        // stopped_early (the Windows critical-memory
+                        // early-bail); the other ingest entry points
+                        // (`load_data`, `ingest_siem`,
+                        // `load_data_with_config`, the ingestor-registry
+                        // branch above) always report `stopped_early:
+                        // false` today, so wiring `observe()` there would
+                        // be a no-op — left for follow-up if/when those
+                        // paths grow a real early-stop condition.
+                        if let Ok(mut ic) = bg_session.ingest_coverage.write() {
+                            ic.observe(stopped_early, false);
+                        }
                         bg_emitter.emit(
                             INGEST_PROGRESS,
                             serde_json::json!({

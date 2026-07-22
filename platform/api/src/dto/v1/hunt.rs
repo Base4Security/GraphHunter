@@ -85,6 +85,19 @@ pub struct RunHuntResponse {
     pub diagnostic: Option<HuntDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_tail_coverage: Option<LiveTailCoverage>,
+    /// Completeness metadata for this answer: `possibly_incomplete` +
+    /// the covered time span, populated from the session's
+    /// `IngestCoverage` when `GRAPHHUNTER_COVERAGE` is on and the
+    /// session had an incomplete ingest. Default clear — with the
+    /// flag off (or on a session with no incomplete ingests) this is
+    /// `AnswerCoverage::default()`, so existing callers see no
+    /// behavior change. `#[serde(default)]` documents intent for any
+    /// future Deserialize impl on this type; today `RunHuntResponse`
+    /// is Serialize-only (wire-outgoing), so backward compatibility
+    /// for JSON consumers already holds structurally — old clients
+    /// ignore the new field.
+    #[serde(default)]
+    pub coverage: crate::coverage::AnswerCoverage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,4 +284,33 @@ pub struct DiffHuntsRequest {
     pub hypothesis: Hypothesis,
     pub baseline_ts: i64,
     pub current_ts: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `RunHuntResponse` is Serialize-only (wire-outgoing; `HuntDiagnostic`
+    /// doesn't derive `Deserialize`), so this pins the field at the
+    /// construction + serialization boundary rather than round-tripping
+    /// JSON: a response built without touching `coverage` explicitly
+    /// (i.e. `AnswerCoverage::default()`) reports `possibly_incomplete ==
+    /// false` and serializes coverage as the all-clear shape — old
+    /// clients that don't know the field ignore it; clients that do see
+    /// unambiguous "clear" rather than absence.
+    #[test]
+    fn run_hunt_response_carries_coverage_default_clear() {
+        let r = RunHuntResponse {
+            paths: Vec::new(),
+            path_count: 0,
+            truncated: false,
+            diagnostic: None,
+            live_tail_coverage: None,
+            coverage: crate::coverage::AnswerCoverage::default(),
+        };
+        assert!(!r.coverage.possibly_incomplete);
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["coverage"]["possibly_incomplete"], false);
+        assert!(json["coverage"]["coverage_start"].is_null());
+    }
 }

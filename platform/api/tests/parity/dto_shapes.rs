@@ -104,6 +104,7 @@ fn run_hunt_response_shape_with_inline_paths() {
         truncated: false,
         diagnostic: None,
         live_tail_coverage: None,
+        coverage: graph_hunter_api::coverage::AnswerCoverage::default(),
     };
     assert_keys(&resp, &["paths", "path_count", "truncated"]);
 }

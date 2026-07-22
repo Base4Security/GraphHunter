@@ -205,6 +205,25 @@ impl GraphHunterApi {
         };
         let live_tail_coverage = live_tail_coverage_for_session(&session);
 
+        // Completeness metadata (design spec §17). The graph doesn't
+        // expose a cached global min/max edge timestamp (only per-node /
+        // per-path scans exist, e.g. `graph.rs` path-span helpers), and
+        // a full O(E) scan on every `run_hunt` call would be an
+        // unacceptable per-query tax on large graphs. So the covered
+        // time span (`coverage_start`/`coverage_end`) is left `None` for
+        // now — `possibly_incomplete` (from the session's
+        // `IngestCoverage`) is the primary signal this task wires.
+        // Populating a real span is follow-up work once a cheap
+        // (ideally O(1), maintained incrementally at ingest time)
+        // min/max-timestamp accessor exists on `GraphHunter`.
+        let coverage = {
+            let ic = session
+                .ingest_coverage
+                .read()
+                .map_err(|e| ApiError::Internal(format!("ingest_coverage lock poisoned: {e}")))?;
+            crate::coverage::answer_coverage(&ic, None, None)
+        };
+
         // Publish to the shared cache so get_hunt_page can serve it.
         let mut cache = self
             .inner
@@ -221,6 +240,7 @@ impl GraphHunterApi {
                 truncated,
                 diagnostic,
                 live_tail_coverage,
+                coverage,
             })
         } else {
             *cache = paths;
@@ -230,6 +250,7 @@ impl GraphHunterApi {
                 truncated,
                 diagnostic,
                 live_tail_coverage,
+                coverage,
             })
         }
     }
@@ -1173,6 +1194,93 @@ mod tests {
                 dedup_mode: None,
             })
             .expect("Structural override after Anomaly must not error");
+    }
+
+    /// `RunHuntResponse.coverage` reflects the session's `IngestCoverage`
+    /// when `GRAPHHUNTER_COVERAGE` is on: a session marked incomplete
+    /// by a prior ingest (`stopped_early = true`) produces
+    /// `coverage.possibly_incomplete == true` on the next `run_hunt`.
+    /// Wiring check for Task 5 (completeness_flag) — end-to-end through
+    /// `answer_coverage`, not just the DTO default.
+    #[test]
+    fn run_hunt_coverage_flag_on_reflects_incomplete_session() {
+        let _env_guard = lock_env();
+        let prior = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "1") };
+
+        let api = api();
+        if let Some(session) = api.sessions().current_session() {
+            session
+                .ingest_coverage
+                .write()
+                .unwrap()
+                .observe(true, false);
+        } else {
+            panic!("test harness session must exist");
+        }
+
+        let resp = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: None,
+                dedup_mode: None,
+            })
+            .expect("run_hunt should not error");
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
+        }
+
+        assert!(
+            resp.coverage.possibly_incomplete,
+            "session with stopped_early=true must mark the answer possibly_incomplete"
+        );
+        assert!(resp
+            .coverage
+            .incomplete_reasons
+            .iter()
+            .any(|r| r.contains("stopped_early")));
+    }
+
+    /// With `GRAPHHUNTER_COVERAGE` off (default), `run_hunt` never marks
+    /// the answer — even on a session whose ingest stopped early. Pins
+    /// the "flag off = no behavior change" contract from the brief.
+    #[test]
+    fn run_hunt_coverage_flag_off_stays_clear_even_if_session_incomplete() {
+        let _env_guard = lock_env();
+        let prior = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
+
+        let api = api();
+        if let Some(session) = api.sessions().current_session() {
+            session
+                .ingest_coverage
+                .write()
+                .unwrap()
+                .observe(true, false);
+        }
+
+        let resp = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: None,
+                dedup_mode: None,
+            })
+            .expect("run_hunt should not error");
+
+        if let Some(v) = prior {
+            unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) };
+        }
+
+        assert!(!resp.coverage.possibly_incomplete);
+        assert!(resp.coverage.coverage_start.is_none());
     }
 
     #[test]
