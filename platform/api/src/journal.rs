@@ -491,6 +491,23 @@ mod tests {
     }
 
     #[test]
+    fn unmapped_field_is_reconstructable_from_journal() {
+        // An inserted event whose raw_line carries a field the triple omits.
+        let mut ev = sample_event(100);
+        ev.src_metadata.clear(); // triple carries no such field
+        ev.raw_line = Some("{\"src\":\"u\",\"dropped_by_mapping\":\"still_here\"}".into());
+        let dir = tempfile::tempdir().unwrap();
+        let store = JournalStore::open(dir.path()).unwrap();
+        for e in build_batch_envelopes("s", "la", "ds", "p", &[ev], &[], 1000) {
+            store.append(&e).unwrap();
+        }
+        // read the journal back and confirm the dropped field is recoverable.
+        let all = store.read_all().unwrap();
+        assert!(all[0].raw_payload.contains("dropped_by_mapping"));
+        assert!(all[0].raw_payload.contains("still_here"));
+    }
+
+    #[test]
     fn journal_batch_writes_one_insert_per_event_plus_one_skipped_per_sample() {
         let dir = tempfile::tempdir().unwrap();
         let store = JournalStore::open(dir.path()).unwrap();
