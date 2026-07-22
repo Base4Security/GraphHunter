@@ -172,7 +172,14 @@ pub(crate) fn build_batch_envelopes(
 ) -> Vec<CanonicalEnvelope> {
     let mut out = Vec::with_capacity(events.len() + skipped_samples.len());
     for ev in events {
-        let raw = canonical_raw_payload(ev);
+        // Prefer the verbatim source row (field_survival): unmapped fields survive
+        // in the journal. Fall back to the canonical triple serialization (C-1)
+        // when the parser did not capture a raw line. Both are deterministic, so the
+        // canonical_hash / dedup key stays stable across re-parse.
+        let raw = match &ev.raw_line {
+            Some(line) => line.clone(),
+            None => canonical_raw_payload(ev),
+        };
         let prov = ProvenanceCtx::for_builtin_parser(parser_name, dataset_id, raw.as_bytes());
         out.push(CanonicalEnvelope::new_insert(
             source_id.to_string(),
@@ -458,6 +465,28 @@ mod tests {
             rel_metadata: Default::default(),
             timestamp: ts,
         }
+    }
+
+    #[test]
+    fn inserted_envelope_uses_raw_line_when_present() {
+        let mut ev = sample_event(100); // reuse the module helper
+        ev.raw_line = Some("{\"unmapped_field\":\"survives\"}".into());
+        let envs = build_batch_envelopes("s", "la", "ds", "p", &[ev], &[], 1000);
+        // the inserted envelope's raw_payload is the raw line, not the triple JSON.
+        assert_eq!(envs[0].raw_payload, "{\"unmapped_field\":\"survives\"}");
+        // and it still round-trips as an Insert.
+        assert_eq!(envs[0].change_kind, graph_hunter_canonical::ChangeKind::Insert);
+    }
+
+    #[test]
+    fn inserted_envelope_falls_back_to_triple_when_no_raw_line() {
+        let ev = sample_event(100); // raw_line = None
+        let envs = build_batch_envelopes("s", "la", "ds", "p", &[ev], &[], 1000);
+        // fallback: raw_payload is the canonical triple serialization (C-1 behavior),
+        // which parses back to a RawIngestEvent.
+        let back: graph_hunter_core::parser::RawIngestEvent =
+            serde_json::from_str(&envs[0].raw_payload).unwrap();
+        assert_eq!(back.timestamp, 100);
     }
 
     #[test]
