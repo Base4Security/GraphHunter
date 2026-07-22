@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use graph_hunter_canonical::{CanonicalEnvelope, ProvenanceCtx};
 use graph_hunter_core::delta::GraphDelta;
 use graph_hunter_core::parser::RawIngestEvent;
+use graph_hunter_core::{EntityType, RelationType};
 
 const JOURNAL_FILE: &str = "journal.jsonl";
 
@@ -88,6 +89,78 @@ pub fn journal_enabled() -> bool {
 /// them back off disk. Building them once here keeps the journal-write flag
 /// and the apply flag orthogonal without duplicating the envelope-shaping
 /// logic.
+/// Mirror of `RawIngestEvent` with `BTreeMap` metadata fields instead of
+/// `HashMap`, used only to produce a deterministic `raw_payload` string. See
+/// `canonical_raw_payload` for why this exists.
+#[derive(serde::Serialize)]
+struct CanonicalRawIngestEvent<'a> {
+    src_id: &'a str,
+    src_type: &'a EntityType,
+    src_metadata: std::collections::BTreeMap<&'a str, &'a str>,
+    dst_id: &'a str,
+    dst_type: &'a EntityType,
+    dst_metadata: std::collections::BTreeMap<&'a str, &'a str>,
+    rel_type: &'a RelationType,
+    rel_metadata: std::collections::BTreeMap<&'a str, &'a str>,
+    timestamp: i64,
+}
+
+/// Serialize a `RawIngestEvent` into the journal's `raw_payload` with
+/// deterministic (sorted-key) output, so that re-parsing the SAME source row
+/// twice (e.g. a poller crashing and re-polling the same row) always produces
+/// byte-identical JSON and therefore the same `canonical_hash` (critical fix,
+/// Fase C-1 final review).
+///
+/// `RawIngestEvent` carries three `HashMap<String, String>` metadata fields
+/// (src/dst/rel), and `serde_json::to_string` on a `HashMap` serializes
+/// entries in the map's iteration order — which is non-deterministic across
+/// separately constructed `HashMap` instances because `HashMap` uses a
+/// per-instance `RandomState` hasher. Two freshly-parsed `RawIngestEvent`s
+/// with identical logical content can therefore serialize to different JSON
+/// strings and hash differently, silently defeating `apply_delta`'s
+/// event-identity dedup (`native_id` is never populated by
+/// `CanonicalEnvelope::new_insert`, so `canonical_hash` — derived from this
+/// very string — is always the actual dedup key).
+///
+/// First attempt (rejected): round-trip through `serde_json::Value`,
+/// relying on `serde_json::Map` being `BTreeMap`-backed when the
+/// `preserve_order` feature is off. That assumption does NOT hold in this
+/// workspace: no workspace `Cargo.toml` enables `preserve_order` directly,
+/// but `evtx` (a transitive dependency reachable from this same build
+/// target) does, and Cargo unifies serde_json's features across the whole
+/// dependency graph for a given target — so `serde_json::Map` is actually
+/// `IndexMap`-backed here (verified via `cargo tree -e features -i
+/// serde_json`, which shows `serde_json feature "preserve_order"` pulled in
+/// by `evtx`). An `IndexMap`-backed `Value::Object` preserves whatever
+/// (random) order the source `HashMap` handed it, so the `Value` round-trip
+/// is a no-op and does NOT fix the bug (confirmed empirically: the stability
+/// test below still failed with that approach).
+///
+/// Actual fix: serialize a shadow struct (`CanonicalRawIngestEvent`) whose
+/// metadata fields are `BTreeMap`, not `HashMap`. `serde_json::to_string`
+/// does not build a `Value`/`Map` for direct string output — it streams
+/// each field's entries in whatever order the field's own `Serialize` impl
+/// hands them. `BTreeMap`'s `Serialize` impl always iterates in sorted key
+/// order (a property of `BTreeMap` itself, independent of serde_json's
+/// `preserve_order` feature), so the emitted JSON is deterministic
+/// regardless of the source `HashMap`'s iteration order. See
+/// `canonical_serialization_is_stable_across_reparse` for the test that
+/// pins this down.
+pub(crate) fn canonical_raw_payload(ev: &RawIngestEvent) -> String {
+    let canon = CanonicalRawIngestEvent {
+        src_id: &ev.src_id,
+        src_type: &ev.src_type,
+        src_metadata: ev.src_metadata.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
+        dst_id: &ev.dst_id,
+        dst_type: &ev.dst_type,
+        dst_metadata: ev.dst_metadata.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
+        rel_type: &ev.rel_type,
+        rel_metadata: ev.rel_metadata.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
+        timestamp: ev.timestamp,
+    };
+    serde_json::to_string(&canon).unwrap_or_default()
+}
+
 pub(crate) fn build_batch_envelopes(
     source_id: &str,
     source_kind: &str,
@@ -99,7 +172,7 @@ pub(crate) fn build_batch_envelopes(
 ) -> Vec<CanonicalEnvelope> {
     let mut out = Vec::with_capacity(events.len() + skipped_samples.len());
     for ev in events {
-        let raw = serde_json::to_string(ev).unwrap_or_default();
+        let raw = canonical_raw_payload(ev);
         let prov = ProvenanceCtx::for_builtin_parser(parser_name, dataset_id, raw.as_bytes());
         out.push(CanonicalEnvelope::new_insert(
             source_id.to_string(),
@@ -231,7 +304,9 @@ pub fn rebuild_from_journal(store: &JournalStore) -> std::io::Result<JournalReco
 /// envelopes carry a serialized RawIngestEvent in `raw_payload` (written by
 /// `journal_batch`); Skipped envelopes carry a raw source row and produce no
 /// edge, so they yield None. The event id is the source-native id when present
-/// (stable across re-ingest), else the canonical hash.
+/// (stable across re-ingest), else the canonical hash. The envelope's
+/// provenance dataset is threaded onto the delta so `apply_delta` doesn't
+/// drop dataset attribution the way the un-threaded path used to.
 pub fn envelope_to_delta(env: &CanonicalEnvelope) -> Option<GraphDelta> {
     use graph_hunter_canonical::ChangeKind;
     if env.change_kind != ChangeKind::Insert {
@@ -239,7 +314,8 @@ pub fn envelope_to_delta(env: &CanonicalEnvelope) -> Option<GraphDelta> {
     }
     let event: RawIngestEvent = serde_json::from_str(&env.raw_payload).ok()?;
     let event_id = env.native_id.clone().unwrap_or_else(|| env.canonical_hash.clone());
-    Some(GraphDelta::new(event, event_id))
+    let dataset_id = Some(env.provenance.source_dataset_id.clone());
+    Some(GraphDelta::new(event, event_id, dataset_id))
 }
 
 /// Observable-count comparison between a live incremental graph and a
@@ -470,6 +546,10 @@ mod tests {
         // native_id absent -> keyed on canonical_hash
         assert_eq!(d.event_id, env.canonical_hash);
         assert_eq!(d.event.timestamp, 100);
+        // dataset attribution flows from the envelope's frozen provenance
+        // through to the delta (not dropped the way the un-threaded
+        // insert_raw_events(..., None) path used to drop it).
+        assert_eq!(d.dataset_id.as_deref(), Some("ds"));
     }
 
     #[test]
@@ -541,6 +621,126 @@ mod tests {
         let (a2, s2) = apply_batch_idempotent(&mut g, &evs);
         assert_eq!((a2, s2), (0, 2));
         assert_eq!(g.relation_count(), 2); // no duplication
+    }
+
+    // ── canonical_raw_payload (critical fix, Fase C-1 final review) ───
+    //
+    // `RawIngestEvent` carries 3 `HashMap<String, String>` metadata fields.
+    // `serde_json::to_string` on a plain `HashMap` serializes entries in the
+    // map's iteration order, which is non-deterministic across separately
+    // constructed `HashMap` instances (Rust's `RandomState` hasher). Two
+    // `RawIngestEvent`s built from the SAME logical row (e.g. a poller crash
+    // that re-polls and re-parses the identical source row into brand-new
+    // maps) can therefore serialize to different JSON and hash differently,
+    // which silently defeats `apply_delta`'s event-identity dedup — since
+    // `native_id` is never populated (`CanonicalEnvelope::new_insert`
+    // hardcodes `None`), `canonical_hash` (a function of this very string)
+    // is always the real dedup key. These two tests are the ones that would
+    // have caught it: run against `serde_json::to_string(ev)` directly
+    // (pre-fix) they fail (RED) because `raw1 != raw2` most of the time;
+    // against `canonical_raw_payload` (post-fix) they pass (GREEN) because
+    // the round-trip through `serde_json::Value` sorts every object's keys
+    // (this workspace does not enable serde_json's `preserve_order`
+    // feature, so `serde_json::Map` is `BTreeMap`-backed).
+
+    /// One logical event, with its 3 metadata maps built by inserting keys
+    /// in one order.
+    fn logically_identical_event_variant_a() -> RawIngestEvent {
+        let mut src_metadata = std::collections::HashMap::new();
+        src_metadata.insert("user".to_string(), "alice".to_string());
+        src_metadata.insert("domain".to_string(), "corp".to_string());
+        let mut dst_metadata = std::collections::HashMap::new();
+        dst_metadata.insert("os".to_string(), "linux".to_string());
+        dst_metadata.insert("role".to_string(), "dc".to_string());
+        let mut rel_metadata = std::collections::HashMap::new();
+        rel_metadata.insert("logon_type".to_string(), "3".to_string());
+        RawIngestEvent {
+            src_id: "u1".into(),
+            src_type: graph_hunter_core::EntityType::User,
+            src_metadata,
+            dst_id: "h1".into(),
+            dst_type: graph_hunter_core::EntityType::Host,
+            dst_metadata,
+            rel_type: graph_hunter_core::RelationType::Auth,
+            rel_metadata,
+            timestamp: 500,
+        }
+    }
+
+    /// The SAME logical event as variant_a — identical ids/types/timestamp
+    /// and identical metadata key/value pairs — but every `HashMap` is a
+    /// freshly-constructed instance with keys inserted in a DIFFERENT order.
+    /// This is what a crash-and-re-poll actually produces: the same source
+    /// row, re-parsed into brand-new maps.
+    fn logically_identical_event_variant_b() -> RawIngestEvent {
+        let mut src_metadata = std::collections::HashMap::new();
+        src_metadata.insert("domain".to_string(), "corp".to_string());
+        src_metadata.insert("user".to_string(), "alice".to_string());
+        let mut dst_metadata = std::collections::HashMap::new();
+        dst_metadata.insert("role".to_string(), "dc".to_string());
+        dst_metadata.insert("os".to_string(), "linux".to_string());
+        let mut rel_metadata = std::collections::HashMap::new();
+        rel_metadata.insert("logon_type".to_string(), "3".to_string());
+        RawIngestEvent {
+            src_id: "u1".into(),
+            src_type: graph_hunter_core::EntityType::User,
+            src_metadata,
+            dst_id: "h1".into(),
+            dst_type: graph_hunter_core::EntityType::Host,
+            dst_metadata,
+            rel_type: graph_hunter_core::RelationType::Auth,
+            rel_metadata,
+            timestamp: 500,
+        }
+    }
+
+    #[test]
+    fn canonical_serialization_is_stable_across_reparse() {
+        let ev1 = logically_identical_event_variant_a();
+        let ev2 = logically_identical_event_variant_b();
+
+        let raw1 = canonical_raw_payload(&ev1);
+        let raw2 = canonical_raw_payload(&ev2);
+        assert_eq!(
+            raw1, raw2,
+            "canonical_raw_payload must be stable regardless of HashMap \
+             construction/iteration order — this is what makes a crash \
+             re-poll's re-parse of the same row produce the SAME raw_payload"
+        );
+
+        // Same downstream consequence: the canonical_hash the journal
+        // actually dedups on is identical too.
+        let prov = ProvenanceCtx::for_builtin_parser("generic", "ds-1", raw1.as_bytes());
+        let hash1 = CanonicalEnvelope::compute_hash(&raw1, &prov);
+        let hash2 = CanonicalEnvelope::compute_hash(&raw2, &prov);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn crash_reingest_reparse_of_the_same_row_does_not_duplicate_the_edge() {
+        use graph_hunter_core::graph::GraphHunter;
+        // Two envelopes built independently (as journal_batch would for two
+        // separate ingest attempts of the SAME source row across a crash),
+        // each from a freshly re-parsed RawIngestEvent with its own fresh
+        // HashMaps.
+        let ev1 = logically_identical_event_variant_a();
+        let ev2 = logically_identical_event_variant_b();
+        let raw1 = canonical_raw_payload(&ev1);
+        let raw2 = canonical_raw_payload(&ev2);
+        let prov1 = ProvenanceCtx::for_builtin_parser("generic", "ds-1", raw1.as_bytes());
+        let prov2 = ProvenanceCtx::for_builtin_parser("generic", "ds-1", raw2.as_bytes());
+        let env1 = CanonicalEnvelope::new_insert(
+            "s".into(), "la".into(), ev1.timestamp, 1000, raw1, prov1);
+        let env2 = CanonicalEnvelope::new_insert(
+            "s".into(), "la".into(), ev2.timestamp, 2000, raw2, prov2);
+
+        let mut g = GraphHunter::new();
+        let (applied, dup) = apply_batch_idempotent(&mut g, &[env1, env2]);
+        // Idempotent across RE-PARSE, not just across identical-object
+        // replay: the second envelope is recognized as the same event
+        // despite coming from a separately re-parsed RawIngestEvent.
+        assert_eq!((applied, dup), (1, 1));
+        assert_eq!(g.relation_count(), 1);
     }
 
     // ── check_incremental_equivalence ────────────────────────────────

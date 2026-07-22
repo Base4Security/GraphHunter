@@ -10,6 +10,14 @@
 //! edge_multiplicity channel). `applied_event_ids` lives only in memory, so a
 //! full process restart wipes it: cross-restart durability would require
 //! seeding `applied_event_ids` from the journal on startup (future work).
+//!
+//! `event_id` stability across re-parse depends on the journal's `raw_payload`
+//! being serialized deterministically (sorted map keys) — see
+//! `platform/api/src/journal.rs`'s canonicalizing serialization. Without that,
+//! `RawIngestEvent`'s `HashMap` metadata fields serialize in per-instance
+//! `RandomState` iteration order, so re-parsing the same source row after a
+//! crash produces a different `canonical_hash` each time and this whole
+//! dedup collapses (critical-fix wave, Fase C-1 final review).
 
 use crate::parser::RawIngestEvent;
 
@@ -17,11 +25,16 @@ use crate::parser::RawIngestEvent;
 pub struct GraphDelta {
     pub event: RawIngestEvent,
     pub event_id: String,
+    /// The dataset this event belongs to, threaded through to
+    /// `insert_raw_events` so `apply_delta` doesn't silently drop dataset
+    /// attribution the way the direct ingest path (which passes
+    /// `Some(dataset_id)`) never does.
+    pub dataset_id: Option<String>,
 }
 
 impl GraphDelta {
-    pub fn new(event: RawIngestEvent, event_id: String) -> Self {
-        GraphDelta { event, event_id }
+    pub fn new(event: RawIngestEvent, event_id: String, dataset_id: Option<String>) -> Self {
+        GraphDelta { event, event_id, dataset_id }
     }
 }
 
@@ -51,7 +64,7 @@ mod tests {
     fn first_apply_inserts_edge() {
         let mut g = GraphHunter::new();
         let out = g
-            .apply_delta(&GraphDelta::new(ev("u", "h", 100), "evt-1".into()))
+            .apply_delta(&GraphDelta::new(ev("u", "h", 100), "evt-1".into(), None))
             .unwrap();
         assert!(out.applied);
         assert_eq!(g.relation_count(), 1);
@@ -60,7 +73,7 @@ mod tests {
     #[test]
     fn reapplying_same_event_id_is_a_noop() {
         let mut g = GraphHunter::new();
-        let d = GraphDelta::new(ev("u", "h", 100), "evt-1".into());
+        let d = GraphDelta::new(ev("u", "h", 100), "evt-1".into(), None);
         g.apply_delta(&d).unwrap();
         let out2 = g.apply_delta(&d).unwrap(); // crash replay: same event_id
         assert!(!out2.applied);
@@ -68,12 +81,32 @@ mod tests {
     }
 
     #[test]
+    fn apply_delta_threads_dataset_id_into_inserted_entities() {
+        // apply_delta must not drop dataset attribution the way it used to
+        // (insert_raw_events(vec![delta.event.clone()], None) hardcoded
+        // None) — the direct ingest path passes Some(dataset_id), and the
+        // delta-apply path must match it or per-dataset views/removal miss
+        // these entities.
+        let mut g = GraphHunter::new();
+        let d = GraphDelta::new(ev("u", "h", 100), "evt-1".into(), Some("ds-42".into()));
+        g.apply_delta(&d).unwrap();
+        assert_eq!(
+            g.get_entity("u").unwrap().dataset_id.as_deref(),
+            Some("ds-42")
+        );
+        assert_eq!(
+            g.get_entity("h").unwrap().dataset_id.as_deref(),
+            Some("ds-42")
+        );
+    }
+
+    #[test]
     fn distinct_event_ids_preserve_multiplicity() {
         let mut g = GraphHunter::new();
         // two genuinely different events between the same entities at the same ts
-        g.apply_delta(&GraphDelta::new(ev("u", "h", 100), "evt-1".into()))
+        g.apply_delta(&GraphDelta::new(ev("u", "h", 100), "evt-1".into(), None))
             .unwrap();
-        g.apply_delta(&GraphDelta::new(ev("u", "h", 100), "evt-2".into()))
+        g.apply_delta(&GraphDelta::new(ev("u", "h", 100), "evt-2".into(), None))
             .unwrap();
         assert_eq!(g.relation_count(), 2); // multiplicity preserved
     }

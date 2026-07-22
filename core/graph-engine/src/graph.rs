@@ -3275,7 +3275,8 @@ impl GraphHunter {
                 new_relations: 0,
             });
         }
-        let (new_entities, new_relations) = self.insert_raw_events(vec![delta.event.clone()], None)?;
+        let (new_entities, new_relations) =
+            self.insert_raw_events(vec![delta.event.clone()], delta.dataset_id.as_deref())?;
         self.applied_event_ids.insert(key);
         Ok(AppliedOutcome {
             applied: true,
