@@ -109,8 +109,8 @@ mismo lote dos veces produce solo el primer lote de aristas reales.
 En `platform/api/src/operations/ingestion.rs` este apply se invoca
 detrás de `journal_enabled() && graphdelta_enabled()` **en los 6
 sitios que llaman a `insert_raw_events`**: `load_data` (línea ~507,
-entregado en Fase C-1 sobre la base de Fase B), `load_data_with_config`
-(~769), `ingest_siem` — el path de sync **en vivo**, Sentinel/Elastic
+entregado en Fase C-1 sobre la base de Fase B), `ingest_siem` — el path
+de sync **en vivo**, Sentinel/Elastic (~769) —, `load_data_with_config`
 (~920) — y los 3 sitios de `load_data_streaming` (~1534, ~1684, ~1804:
 el batch de chunk paralelo, el tramo final con `final_stats`, y el
 parse de archivo completo). Cuando ambos flags están activos, el sitio
