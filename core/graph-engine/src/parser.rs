@@ -109,7 +109,8 @@ pub fn canonical_value_string(v: &serde_json::Value) -> String {
             other => other.clone(),
         }
     }
-    serde_json::to_string(&canon(v)).unwrap_or_default()
+    serde_json::to_string(&canon(v))
+        .expect("canonical Value serialization cannot fail for well-formed input")
 }
 
 /// Aggregate per-ingest parsing statistics. Populated by parsers that
@@ -304,6 +305,19 @@ mod tests {
         let back: serde_json::Value = serde_json::from_str(&canonical_value_string(&a)).unwrap();
         assert_eq!(back["a"], serde_json::json!(1));
         assert_eq!(back["c"]["x"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn canonical_value_string_sorts_keys_of_objects_nested_in_arrays() {
+        // Guards the recursion into Value::Array elements: a bare top-level
+        // sort (or one that only recurses into Value::Object, not Array)
+        // would miss key-order drift inside array elements.
+        let a: serde_json::Value = serde_json::from_str(r#"[{"b":2,"a":1}]"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(r#"[{"a":1,"b":2}]"#).unwrap();
+        assert_eq!(canonical_value_string(&a), canonical_value_string(&b));
+        let back: serde_json::Value = serde_json::from_str(&canonical_value_string(&a)).unwrap();
+        assert_eq!(back[0]["a"], serde_json::json!(1));
+        assert_eq!(back[0]["b"], serde_json::json!(2));
     }
 
     #[test]
