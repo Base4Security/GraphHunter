@@ -948,4 +948,137 @@ impl LogParser for ConfigurableParser {
             self.parse_event_with_config(event)
         })
     }
+
+    /// Native raw-event override (Fase C-2 Task 3 follow-up, field_survival
+    /// for configured mappings). `event` here is the pre-mapping `Value` —
+    /// the same one `parse_event_with_config` receives before
+    /// `apply_timestamp_hints` strips any `FieldRole::Ignore` field — so its
+    /// canonical serialization contains every field the config later drops.
+    /// Without this, the `unmapped_field` field_survival context would be
+    /// dishonest for the one path (`ConfigurableParser`) that actually applies
+    /// a field-config mapping.
+    fn parse_raw(&self, data: &str) -> Vec<crate::parser::RawIngestEvent> {
+        let events = Self::collect_events(data);
+        if events.is_empty() {
+            return Vec::new();
+        }
+
+        events
+            .par_iter()
+            .flat_map(|event| {
+                let triples = self.parse_event_with_config(event);
+                if triples.is_empty() {
+                    return Vec::new();
+                }
+                let raw_line = crate::parser::canonical_value_string(event);
+                triples
+                    .into_iter()
+                    .map(|t| {
+                        let mut e = crate::parser::RawIngestEvent::from_parsed_triple(t);
+                        e.raw_line = Some(raw_line.clone());
+                        e
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Raw-event-with-stats variant of [`parse_raw`]. Reuses
+    /// `parse_events_with_stats` for the aggregate counters and separately
+    /// lifts each produced triple to a `RawIngestEvent` carrying the row's
+    /// canonical raw_line, mirroring `parse_raw` above.
+    fn parse_raw_with_stats(
+        &self,
+        data: &str,
+    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+        let events = Self::collect_events(data);
+        let (_, stats) = crate::generic::parse_events_with_stats(&events, |event| {
+            self.parse_event_with_config(event)
+        });
+
+        let raw_events: Vec<crate::parser::RawIngestEvent> = events
+            .par_iter()
+            .flat_map(|event| {
+                let triples = self.parse_event_with_config(event);
+                if triples.is_empty() {
+                    return Vec::new();
+                }
+                let raw_line = crate::parser::canonical_value_string(event);
+                triples
+                    .into_iter()
+                    .map(|t| {
+                        let mut e = crate::parser::RawIngestEvent::from_parsed_triple(t);
+                        e.raw_line = Some(raw_line.clone());
+                        e
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        (raw_events, stats)
+    }
+}
+
+/// Fase C-2 Task 3 follow-up: `raw_line` capture on the configured-mapping
+/// path. This is the `unmapped_field` field_survival property: a field the
+/// user's `FieldConfig` drops (`FieldRole::Ignore`) must still be
+/// reconstructable from the journal via `raw_line`, since the mapping that
+/// dropped it is exactly what field_survival is meant to audit.
+#[cfg(test)]
+mod raw_line_tests {
+    use super::*;
+
+    #[test]
+    fn configurable_parser_attaches_canonical_raw_line() {
+        // Same fixture as `configurable_parser_ignores_field`: "Noise" is
+        // explicitly dropped by the config (FieldRole::Ignore), so it never
+        // reaches a triple — but it must still survive in raw_line.
+        let data = r#"[{
+            "User": "admin",
+            "Image": "cmd.exe",
+            "Noise": "ignore_me"
+        }]"#;
+
+        let config = FieldConfig {
+            mappings: vec![FieldMapping {
+                raw_name: "Noise".to_string(),
+                role: FieldRole::Ignore,
+                entity_type: None,
+                timestamp_format: None,
+                locale: None,
+            }],
+        };
+
+        let parser = ConfigurableParser::new(config);
+
+        // Sanity: the mapping really does drop "Noise" from the triples
+        // (mirrors `configurable_parser_ignores_field`).
+        let triples = parser.parse(data);
+        assert!(!triples.is_empty());
+        let has_noise_node = triples
+            .iter()
+            .any(|(src, _, dst)| src.id.contains("Noise") || dst.id.contains("Noise"));
+        assert!(!has_noise_node, "Ignored field should not produce nodes");
+
+        let (events, _stats) = parser.parse_raw_with_stats(data);
+        assert!(!events.is_empty());
+        // Every produced event carries the canonical serialization of its
+        // pre-mapping source Value.
+        assert!(events.iter().all(|e| e.raw_line.is_some()));
+        // The dropped field's value survives in raw_line even though it was
+        // stripped before triple construction — the exact unmapped_field
+        // field_survival property.
+        let raw = events[0].raw_line.as_ref().unwrap();
+        assert!(
+            raw.contains("ignore_me"),
+            "raw_line must retain the value of a field the config dropped, got: {raw}"
+        );
+
+        // `parse_raw` (used on the streaming ingest path) attaches the same
+        // canonical raw_line.
+        let raw_only = parser.parse_raw(data);
+        assert!(!raw_only.is_empty());
+        assert!(raw_only.iter().all(|e| e.raw_line.is_some()));
+        assert!(raw_only[0].raw_line.as_ref().unwrap().contains("ignore_me"));
+    }
 }
