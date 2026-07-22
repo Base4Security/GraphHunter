@@ -487,10 +487,18 @@ impl GraphHunterApi {
             // behind GRAPHHUNTER_JOURNAL (default off = no-op); failures only
             // warn, never abort ingestion — journaling is additive.
             if crate::journal::journal_enabled() {
+                // `used_auto` tells us which parser actually produced `events`:
+                // when an auto-built FieldConfig drove a ConfigurableParser,
+                // journal that identity instead of the raw format name, so the
+                // frozen provenance reflects the real producer (matches the
+                // `load_data_with_config` branch below, which always used
+                // "configurable").
+                let journaled_parser_name =
+                    if used_auto { "configurable" } else { resolved_format.as_str() };
                 journal_batch_best_effort(
                     &dataset_id,
                     "file",
-                    resolved_format.as_str(),
+                    journaled_parser_name,
                     &events,
                     &stats.skipped_samples,
                 );
