@@ -42,24 +42,29 @@ Puntos que cierran canales de la auditoría, directamente del código:
 - **`event_time` vs `ingestion_time` distintos** (envelope.rs:41-45):
   el primero viene de la fila fuente; el segundo es el reloj de
   ingesta (`journal_batch`'s `now_ms`, ver §2). Distinguirlos es lo que
-  permite razonar sobre llegadas tardías — para el observador respaldado
-  por el journal, no para la arista del grafo (ver Fronteras honestas,
-  punto (d), más abajo).
-- **`raw_payload` verbatim** (envelope.rs:50-52): sobrevive incluso si
-  la fila fue descartada (`as_skipped`, envelope.rs:92-96) o si un campo
-  no fue mapeado por el grafo — el campo no sobrevive en el grafo, pero
-  sí en el journal.
+  permitiría razonar sobre llegadas tardías para el observador
+  respaldado por el journal — pero solo donde el journal está cableado
+  (ver Fronteras honestas, punto 6, más abajo); no cambia nada en la
+  arista del grafo.
+- **`raw_payload`** (envelope.rs:50-52): sobrevive verbatim para filas
+  `Skipped`. Para eventos insertados, lo que se journalea es el triple
+  `RawIngestEvent` post-mapeo, no la fila cruda de origen (ver
+  Fronteras honestas, punto 3) — un campo ya descartado por el mapeo no
+  sobrevive en ninguno de los dos lados.
 - **`provenance` congelada** (envelope.rs:56-57, `new_insert`,
   envelope.rs:60-87): se construye una vez, al ingerir, y viaja con el
-  sobre; el journal nunca la vuelve a leer en export.
+  sobre; el journal nunca la vuelve a leer en export. Aplica solo donde
+  el journal corre (ver Fronteras honestas, punto 2).
 - **`normalizer_version`** (envelope.rs:15-18): sube cuando cambia la
   forma del sobre o las reglas de canonicalización, pero los eventos ya
   journaleados conservan la versión con la que fueron escritos — un
   bump nunca reinterpreta eventos viejos (spec §10).
 - **`ChangeKind::Skipped`** (envelope.rs:22-27,92-96): una fila
   descartada se journalea igual que una insertada, solo que con
-  `change_kind = Skipped` y `skip_reason` poblado — es la mitad de lo
-  que cierra `row_completeness`.
+  `change_kind = Skipped` y `skip_reason` poblado — es parte de lo que
+  se necesitaría para cerrar `row_completeness`, pero no lo cierra por
+  sí sola: el journal solo corre en 2 de los 6 sitios de insert (ver
+  Fronteras honestas, punto 2).
 
 ## 2. El journal append-only (`JournalStore`)
 
@@ -109,13 +114,16 @@ El spec de la fase (§9) describe el pipeline de ingesta como una
 secuencia de 12 pasos ordenados; el plan de Fase B nombra explícitamente
 solo los que le conciernen (pasos 4-5 para el journal-write, paso 9 para
 el insert al grafo, pasos 8-9 para "generar deltas del grafo / aplicar
-los deltas"). Ese enumerado completo de 12 pasos no está transcrito
-verbatim en ningún archivo trackeado de este repo (ni en el plan, ni en
-comentarios de código) — lo que sigue es la reconstrucción honesta del
-tramo que Fase B sí toca, leída directamente del pipeline real en
-`platform/api/src/operations/ingestion.rs` (`load_data`,
-`load_data_with_config`), con los mismos números de paso que el propio
-código usa en sus comentarios:
+los deltas"). Ese enumerado completo de 12 pasos SÍ está transcrito
+verbatim en este repo: `docs/superpowers/specs/2026-07-21-sot-integration-design.md:164-167`
+("Orden de procesamiento de 12 pasos: obtener → validar → canonicalizar
+→ persistir journal → sync → dedup → normalizar → generar deltas →
+aplicar → índices → validar → confirmar checkpoint"). Lo que sigue es la
+reconstrucción honesta del tramo que Fase B sí toca, leída directamente
+del pipeline real en `platform/api/src/operations/ingestion.rs`
+(`load_data`, `load_data_with_config`), mapeada a esos mismos 12 pasos
+del spec (los números de paso usados en comentarios de código, 4-5/8/9,
+son un subconjunto de esa numeración, no una renumeración distinta):
 
 | # | Paso | Dónde | Fase B lo toca? |
 |---|---|---|---|
@@ -155,9 +163,24 @@ pub fn journal_enabled() -> bool {
 }
 ```
 
-Default **off** (no-op total): con el flag apagado, el pipeline de
-ingesta es idéntico al de antes de Fase B — cero escritura de journal,
-cero cambio de comportamiento externo. Convención: variable booleana
+Default **off**: con el flag apagado, cero escritura de journal — la
+parte de Fase B con nombre "journal" no escribe nada. Pero **no es un
+no-op total de comportamiento externo**: Task 3 (Fase B) hizo que los
+fast paths nativos (Sysmon, Sentinel) empiecen a poblar
+`ParseStats.skipped_samples` en el punto del descarte, y eso es
+**siempre-activo, independiente del flag**. `record_parse_skips`
+(`platform/api/src/operations/dlq.rs:282-310`) drena ese
+`skipped_samples` a entradas `FailureKind::ParseFailure` en el DLQ,
+y se llama en `ingestion.rs:484` y `:819` **antes** de la comprobación
+`journal_enabled()` — no detrás de ella. Antes de Fase B,
+`skipped_samples` llegaba vacío desde los fast paths nativos, así que
+`record_parse_skips` hacía un early-return (`stats.skipped_samples.is_empty()`,
+dlq.rs:288-290) y el DLQ nunca veía esas filas descartadas por Sysmon/
+Sentinel. Con Task 3, esas filas ahora sí producen entradas DLQ reales,
+en producción, hoy, con el flag apagado — el contrato del DLQ
+("toda fila descartada queda visible en algún sitio") por fin se
+honra para esos fast paths. Convención del flag `GRAPHHUNTER_JOURNAL`
+en sí (la escritura del journal.jsonl): variable booleana
 *truthy-to-enable* (`"1"` o `true`/`True`/`TRUE`), la misma que usa
 `env_flag` en `core/graph-engine/src/planner.rs`. Nota: Fase A introdujo
 un flag *falsy-to-disable*; este es *truthy-to-enable* como el resto del
@@ -172,73 +195,91 @@ si algo falla (resolución de directorio, apertura del store, append) —
 
 ## 5. Qué canales cierra, y bajo qué condición
 
-Todos los cierres de esta sección están **detrás de
-`GRAPHHUNTER_JOURNAL`, default off** — la superficie declarada en
-`sot/validation/graphhunter/ingest_surface.json` modela el sistema
-**con el journal habilitado**, no el comportamiento por defecto que se
-distribuye hoy.
+**Corrección post-revisión (honesty fix wave):** la primera versión de
+esta sección declaraba 5 canales cerrados a `full`. Una revisión de
+fase completa encontró que 4 de esos 5 flips estaban sobre-declarados:
+el journal escribe *triples post-mapeo* (`RawIngestEvent`), no la fila
+cruda, para eventos insertados; y solo está cableado en 2 de los 6
+sitios `insert_raw_events` (los dos paths de carga de archivo,
+`load_data`/`load_data_with_config`) — **no** en `ingest_siem` (el path
+de sync en vivo Sentinel/Elastic, que es justamente el "live sync path"
+que este `system` declara) ni en los 3 sitios de
+`load_data_streaming`. Solo **un** canal cierra de verdad para el
+sistema declarado: `skip_diagnostics`. Los otros 4 vuelven a `degraded`/
+`absent` (su fidelidad original), con la infraestructura de Fase B
+documentada como entregada-pero-insuficiente para el cierre. Ver
+`sot/validation/graphhunter/ingest_surface.json` y
+`sot/validation/graphhunter/graphhunter_sufficiency_audit.md` (sección
+"Fase B delta") para el detalle canal por canal.
 
 Re-frozen `sot/validation/graphhunter/audit_results.json` (`python
 scripts/sot_sys/audit_graphhunter.py && python
 scripts/sot_sys/audit_graphhunter.py --check` → `audit_results.json up
 to date`):
 
-- **`row_completeness`** → `full`. `journal_batch` (journal.rs:88-125)
-  escribe un envelope por cada evento *y* por cada muestra descartada
-  antes del insert (ingestion.rs:485-497). El directorio del journal es
-  global por instalación (`<data_dir>/GraphHunter/journal`, no
-  por-sesión, `ingestion.rs:56-59`) — un follow-up anotado que no afecta
-  este cierre, porque la contabilidad es por registro, no por sesión.
-- **`field_survival`** → `full`. `raw_payload` sobrevive verbatim en el
-  envelope (envelope.rs:50-52) aunque el grafo degrade o descarte el
-  campo como candidato a nodo.
-- **`skip_diagnostics`** → `full`. Los fast paths nativos ahora
+- **`skip_diagnostics`** → `full`. Cierra de verdad, siempre-activo,
+  independiente de `GRAPHHUNTER_JOURNAL`. Los fast paths nativos ahora
   reservoir-samplean filas descartadas hasta `SKIP_SAMPLE_CAP = 50`
   (`core/graph-engine/src/parser.rs:84`) en el punto exacto del
   descarte: `sysmon.rs:2325-2326` y `sentinel.rs:1250-1251` pueblan
-  `ParseStats.skipped_samples`, journaleado vía el parámetro
-  `skipped_samples` de `journal_batch` (journal.rs:94,111-123).
-  **Frontera honesta:** Sysmon tiene un test dedicado que verifica que
+  `ParseStats.skipped_samples`. **El cap no es una constante única
+  compartida**: el path genérico (`core/graph-engine/src/generic.rs:1542`)
+  usa su propio `SKIP_SAMPLE_CAP` local = 20, distinto del 50 de los
+  fast paths nativos — no leer esto como un cap universal. **Frontera
+  honesta:** Sysmon tiene un test dedicado que verifica que
   `skipped_samples` se pobló (`core/graph-engine/src/tests.rs:1258`,
   `sysmon_fast_path_records_skipped_samples_up_to_cap`); Sentinel solo
   tiene cobertura indirecta — sus tests de descarte
   (`tests.rs:3114`,`3135`) verifican que no se produjeron triples, no
   que `skipped_samples` se pobló.
-- **`provenance_stability`** → `full`. `journal_batch` congela
-  `ProvenanceCtx` en el momento del journal-write (journal.rs:100,112),
-  embebida en el sobre (envelope.rs:56-57) y nunca releída en export —
-  esto cierra la contaminación por **edición de mapping** (`mapping_edit`,
-  el contexto declarado del canal): una edición posterior de config/VRL
-  ya no puede contaminar retroactivamente una relación ya ingerida.
-  **Frontera honesta, explícita:** el `mapping_hash` de los parsers
-  builtin es la etiqueta estática `"builtin:<parser_name>"`
-  (`platform/canonical/src/provenance.rs:65`) — **no cambia si la
-  lógica del parser cambia**. Este cierre es sobre contaminación por
-  edición de mapping, nada más; no detecta un cambio silencioso en el
-  código de un parser builtin.
-- **`ingestion_time`** → `full`, **relativo al observador respaldado
-  por el journal, no al grafo**. `CanonicalEnvelope.ingestion_time`
-  (envelope.rs:43-45) es una lectura de reloj real, congelada en
-  `journal_batch` (journal.rs:104-117 `now_ms`). Esto **no** cambia la
-  representación del grafo: la arista sigue hardcodeando
-  `ingested_at_delta = 0` en los mismos sitios de ingesta masiva
-  (issue documentado en el propio código del sobre, envelope.rs:44) —
-  propagar el `ingestion_time` del sobre hacia la arista es territorio
-  de Fase C.
+- **`row_completeness`** → **`degraded`** (no cierra). `journal_batch`
+  (journal.rs:88-125) escribe un envelope por cada evento *y* por cada
+  muestra descartada (`<=50`/batch) antes del insert, pero solo en los
+  2 paths de carga de archivo (`ingestion.rs:485-497,819-832`) — el
+  path de sync en vivo `ingest_siem` (`ingestion.rs:712`) y los 3 sitios
+  de `load_data_streaming` (`ingestion.rs:1406,1504,1574`) no journalean
+  nada. Fase C: cablear esos 4 sitios restantes.
+- **`field_survival`** → **`degraded`** (no cierra). El journal guarda
+  `serde_json::to_string(ev)` de `RawIngestEvent` — el triple
+  *post-mapeo* (`journal.rs:98-100`; forma en
+  `core/graph-engine/src/parser.rs:41-52`) — no la fila cruda de origen,
+  para eventos insertados. Un campo que el mapeo ya descartó antes de
+  producir `RawIngestEvent` **no** es reconstruible desde el journal.
+  Solo las filas `Skipped` conservan su línea cruda verbatim
+  (`raw_row`). Fase C: plumbing de fila cruda para eventos insertados.
+- **`provenance_stability`** → **`degraded`** (no cierra para el
+  sistema declarado). `journal_batch` sí congela `ProvenanceCtx` en el
+  momento del journal-write (journal.rs:100,112) para lo que journalea
+  — pero eso es, de nuevo, solo los 2 paths de carga de archivo, no el
+  path de sync en vivo `ingest_siem` que este `system` declara. Además,
+  la rama de mapping configurable actualmente congela `mapping_hash`
+  como la etiqueta estática `"builtin:configurable"` en vez de un
+  sha256(FieldConfig) real — dos mappings configurables distintos son
+  indistinguibles en la procedencia congelada. Fase C: cablear el path
+  en vivo + identidad real de mapping configurable.
+- **`ingestion_time`** → **`absent`** (su fidelidad original; no
+  cierra). `CanonicalEnvelope.ingestion_time` (envelope.rs:43-45) es
+  una lectura de reloj real, congelada en `journal_batch`
+  (journal.rs:104-117 `now_ms`) — pero solo en los 2 paths de carga de
+  archivo, no en el path en vivo declarado. La arista del grafo sigue
+  hardcodeando `ingested_at_delta = 0` sin cambios. Fase C: cablear el
+  path en vivo + propagar el `ingestion_time` del sobre hacia la arista.
 
 **Delta de veredictos, leído de `audit_results.json` (sin inflar):**
 las 30 hipótesis del catálogo siguen `InsufficientWithWitness` — ninguna
 voltea a `Sufficient` — porque `HYPOTHESIS_REQUIRES` (`gh_audit.py`)
 incluye `edge_multiplicity`, `ingest_completeness` y `source_coverage`,
 que siguen degradados (Fase C / fase de Coverage, sin tocar por Fase B).
-Lo que sí cambió: el `blind_channels` de cada una de las 30 hipótesis
-bajó de 5 a **3** entradas (`edge_multiplicity`, `ingest_completeness`,
-`source_coverage` — `field_survival` y `row_completeness` salieron del
-conjunto ciego). La transversal `loss_reconstruction` (requiere
-`completeness_flag`, `ingestion_time`, `provenance_stability`,
-`skip_diagnostics`) bajó su conjunto ciego de 4 a **1** entrada (solo
-`completeness_flag`, absent, territorio de la fase de Coverage) — sigue
-`InsufficientWithWitness`, parcialmente cerrada, no completamente. La
+El `blind_channels` de cada una de las 30 hipótesis se mantiene en
+**5** entradas, sin cambio: `skip_diagnostics` no forma parte de
+`HYPOTHESIS_REQUIRES` de ninguna hipótesis del catálogo, así que su
+cierre no reduce ningún conjunto ciego de hipótesis individuales. La
+transversal `loss_reconstruction` (requiere `completeness_flag`,
+`ingestion_time`, `provenance_stability`, `skip_diagnostics`) sí baja
+su conjunto ciego de 4 a **3** entradas (`completeness_flag`,
+`ingestion_time`, `provenance_stability` — solo `skip_diagnostics` salió
+del conjunto ciego) — sigue `InsufficientWithWitness`, parcialmente
+cerrada, no completamente. La
 transversal `exhaustiveness_marking` (requiere `completeness_flag`,
 `ingest_completeness`, `source_coverage`) no cambió: ninguno de sus tres
 canales requeridos fue tocado por Fase B. Detalle completo en
@@ -247,20 +288,37 @@ canales requeridos fue tocado por Fase B. Detalle completo en
 
 ## Fronteras honestas (resumen)
 
-1. Todo lo de la sección 5 está **detrás de `GRAPHHUNTER_JOURNAL`,
-   default off** — modela el sistema journal-habilitado, no el
-   comportamiento por defecto shippeado hoy.
-2. `provenance_stability` cierra **contaminación por edición de
-   mapping**, no cambios en la lógica de un parser builtin (el
-   `mapping_hash` builtin es una etiqueta estática por nombre de
-   parser).
-3. El directorio del journal es **global por instalación**, no
-   por-sesión — no afecta los cierres de canal (crash-replay/freeze/
-   contabilidad se sostienen igual), pero es un follow-up anotado para
+1. Solo **`skip_diagnostics`** cierra de verdad para el `system`
+   declarado ("GraphHunter ingest pipeline, live sync paths"), y lo hace
+   siempre-activo, independiente de `GRAPHHUNTER_JOURNAL`. Los otros 4
+   canales que esta fase tocó (`row_completeness`, `field_survival`,
+   `provenance_stability`, `ingestion_time`) permanecen `degraded`/
+   `absent` — la infraestructura de journal existe (detrás del flag)
+   pero no cierra ninguno de ellos para el path en vivo declarado.
+2. El journal solo está cableado en 2 de los 6 sitios
+   `insert_raw_events` — los dos paths de carga de archivo
+   (`load_data`, `load_data_with_config`). El path de sync en vivo
+   `ingest_siem` (el "live sync path" que el `system` declara) y los 3
+   sitios de `load_data_streaming` no journalean nada, con el flag en
+   el estado que sea.
+3. El journal guarda el triple `RawIngestEvent` post-mapeo, no la fila
+   cruda de origen, para eventos insertados — un campo descartado por
+   el mapeo antes de `RawIngestEvent` no es reconstruible desde el
+   journal. Solo las filas `Skipped` conservan su raw_row verbatim.
+4. `provenance_stability` no cierra para el path declarado (ver punto
+   2); y aun donde el freeze sí corre, la rama de mapping configurable
+   congela `mapping_hash` como la etiqueta estática
+   `"builtin:configurable"`, no un hash real de `FieldConfig` — dos
+   mappings configurables distintos son indistinguibles.
+5. El directorio del journal es **global por instalación**, no
+   por-sesión — no afecta lo anterior, pero es un follow-up anotado para
    una fase posterior.
-4. `ingestion_time` se cierra **para el observador respaldado por el
-   journal**; la arista del grafo sigue hardcodeando
-   `ingested_at_delta = 0` — eso es un problema de representación del
-   grafo, territorio de Fase C.
-5. La captura de skips en Sentinel tiene solo **cobertura de test
-   indirecta**; Sysmon tiene el test dedicado.
+6. `ingestion_time` no cierra para el path en vivo declarado (ver punto
+   2); y la arista del grafo sigue hardcodeando `ingested_at_delta = 0`
+   sin cambios — eso es un problema de representación del grafo,
+   territorio de Fase C.
+7. La captura de skips en Sentinel tiene solo **cobertura de test
+   indirecta**; Sysmon tiene el test dedicado. El cap de reservoir-
+   sampling no es una constante única: 50 en los fast paths nativos
+   (`core/graph-engine/src/parser.rs`), 20 en el path genérico
+   (`core/graph-engine/src/generic.rs:1542`).
