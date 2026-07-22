@@ -123,6 +123,13 @@ const CRITICAL_MEMORY_MB: u64 = 256;
 const LARGE_FILE_THRESHOLD: u64 = 10 * 1024 * 1024;
 const PREVIEW_READ_SIZE: usize = 64 * 1024;
 const EVTX_PREVIEW_SAMPLE_SIZE: usize = 1000;
+/// Upper bound for the whole-file (non-line-delimited) ingest branch. That
+/// branch parses the entire file at once and peaks near 8× the input size
+/// in transient `Vec<ParsedTriple>` + `Vec<RawIngestEvent>`, so a file past
+/// this size is rejected with a clear error instead of aborting the process
+/// on a multi-GB allocation. Line-delimited formats are unaffected — they
+/// stream in batches and never hit this branch.
+const WHOLE_FILE_PARSE_LIMIT: u64 = 512 * 1024 * 1024;
 
 /// Rewrites a [`FieldConfig`] that was likely saved before canonical-Skip
 /// semantics were fixed. When a mapping targets a canonical field whose
@@ -914,6 +921,12 @@ impl GraphHunterApi {
             "iis",
             "iis_w3c",
             "w3c",
+            "haproxy",
+            "hap",
+            "haproxy_http",
+            "fortigate",
+            "fgt",
+            "fortios",
             "fortianalyzer",
             "faz",
             "forti",
@@ -923,7 +936,7 @@ impl GraphHunterApi {
             && !crate::ingestors::is_known_streaming_format(&pre_check)
         {
             return Err(ApiError::InvalidInput(format!(
-                "Unsupported format: '{}'. Use 'auto', 'evtx', 'pcap', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', or 'fortianalyzer'.",
+                "Unsupported format: '{}'. Use 'auto', 'evtx', 'pcap', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', 'haproxy', 'fortigate', or 'fortianalyzer'.",
                 req.format
             )));
         }
@@ -1131,8 +1144,17 @@ impl GraphHunterApi {
                 let resolved = resolve_format(&peek_buf, &bg_format);
 
                 let trimmed_peek = peek_buf.trim_start();
+                // HAProxy and FortiGate are line-delimited and parse each
+                // line independently (no header/array state), so they belong
+                // on the mmap line-batch streaming path. Without this they
+                // fell through to the whole-file branch, which buffers the
+                // entire log + every event at once — a multi-GB HAProxy log
+                // then aborted with `memory allocation of N bytes failed`.
                 let is_line_based = trimmed_peek.starts_with('{')
-                    || matches!(resolved.as_str(), "iis" | "iis_w3c" | "w3c")
+                    || matches!(
+                        resolved.as_str(),
+                        "iis" | "iis_w3c" | "w3c" | "haproxy" | "fortigate"
+                    )
                     || (resolved == "cognito" && !trimmed_peek.starts_with('['));
 
                 let iis_fields_header = if matches!(resolved.as_str(), "iis" | "iis_w3c" | "w3c") {
@@ -1491,6 +1513,31 @@ impl GraphHunterApi {
                             Ok((total_new_entities, total_new_relations, drift_accum))
                         } else {
                             // ── JSON array / small file: memory-mapped parse + insert ──
+                            //
+                            // This branch parses the WHOLE file in one
+                            // `parse_raw_with_stats(contents)` call, which
+                            // materializes a `Vec<ParsedTriple>` (448 B/event)
+                            // and a `Vec<RawIngestEvent>` (272 B/event) for
+                            // every event at once. At ~12 M events/GB that
+                            // peaks near 8 GB per GB of input — a multi-GB
+                            // file aborts the process with
+                            // `memory allocation of N bytes failed`. Line-
+                            // delimited formats avoid this via the streaming
+                            // branch above; JSON-array formats can't be line-
+                            // split, so guard by size and fail loudly with an
+                            // actionable message instead of crashing.
+                            if bytes_total > WHOLE_FILE_PARSE_LIMIT {
+                                return Err(format!(
+                                    "File '{}' ({} MB, format '{}') is too large for the whole-file ingest path \
+                                     (limit {} MB). This format isn't line-delimited so it can't be streamed. \
+                                     Split the file, or convert it to a streamable format (CSV / NDJSON / a native \
+                                     line format like HAProxy or FortiGate).",
+                                    bg_path,
+                                    bytes_total / (1024 * 1024),
+                                    resolved,
+                                    WHOLE_FILE_PARSE_LIMIT / (1024 * 1024),
+                                ));
+                            }
                             let file = std::fs::File::open(&bg_path)
                                 .map_err(|e| format!("Failed to open file '{}': {}", bg_path, e))?;
                             let mmap = unsafe { memmap2::Mmap::map(&file) }
