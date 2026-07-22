@@ -366,4 +366,24 @@ mod tests {
             .as_skipped("no_triple".into());
         assert!(envelope_to_delta(&env).is_none());
     }
+
+    #[test]
+    fn native_id_is_preferred_over_canonical_hash_when_present() {
+        let ev = sample_event(100);
+        let raw = serde_json::to_string(&ev).unwrap();
+        let prov = ProvenanceCtx::for_builtin_parser("p", "ds", raw.as_bytes());
+        let mut env = CanonicalEnvelope::new_insert(
+            "s".into(), "la".into(), 100, 200, raw, prov);
+        env.native_id = Some("native-1".into());
+        let d = envelope_to_delta(&env).expect("insert envelope yields a delta");
+        assert_eq!(d.event_id, "native-1");
+    }
+
+    #[test]
+    fn insert_envelope_with_malformed_payload_yields_no_delta() {
+        let prov = ProvenanceCtx::for_builtin_parser("p", "ds", b"not json");
+        let env = CanonicalEnvelope::new_insert(
+            "s".into(), "la".into(), 0, 5, "not json".into(), prov);
+        assert!(envelope_to_delta(&env).is_none());
+    }
 }
