@@ -27,6 +27,8 @@ test("sentinel_query labels its result as source-tabular, not a graph answer", a
   const out: any = await sentinelQuery.execute(ctx, { query: "SecurityEvent | take 1" });
   assert.equal(calls[0].path, "/kql");
   assert.equal(out.source_tabular, true);
-  // The underlying rows are still present.
-  assert.ok(out.result ?? out.rows ?? out.data);
+  // The underlying rows survive at the top level (the spread variant, not a
+  // `{ result }` wrap) — this is exactly what lets ContextEnricher.parseRows
+  // read `.rows` directly off execute()'s output.
+  assert.deepEqual(out.rows, [{ a: 1 }]);
 });
