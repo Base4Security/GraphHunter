@@ -9,7 +9,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use graph_hunter_canonical::CanonicalEnvelope;
+use graph_hunter_canonical::{CanonicalEnvelope, ProvenanceCtx};
+use graph_hunter_core::parser::RawIngestEvent;
 
 const JOURNAL_FILE: &str = "journal.jsonl";
 
@@ -66,10 +67,67 @@ impl JournalStore {
     }
 }
 
+/// `GRAPHHUNTER_JOURNAL`: enable the append-only canonical journal on the
+/// ingest write path. Default OFF (no-op) — truthy-to-enable, matching the
+/// engine's `env_flag` convention (core/graph-engine planner.rs); this is
+/// NOT the falsy-to-disable convention some Fase A flags use.
+pub fn journal_enabled() -> bool {
+    std::env::var("GRAPHHUNTER_JOURNAL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Journal a parsed batch: one envelope per inserted event (`change_kind
+/// Insert`) plus one per skipped sample (`change_kind Skipped`), each with
+/// provenance frozen NOW and `ingestion_time = now_ms`. This is steps 4-5 of
+/// the 12-step ingest order and MUST run before the caller's graph insert
+/// (step 9), so a crash between journal-write and graph-insert is
+/// replayable. Pure w.r.t. the caller's state — the only side effect is
+/// `store.append` — so it's unit-testable without the API's session
+/// machinery.
+pub fn journal_batch(
+    store: &JournalStore,
+    source_id: &str,
+    source_kind: &str,
+    dataset_id: &str,
+    parser_name: &str,
+    events: &[RawIngestEvent],
+    skipped_samples: &[(String, String)],
+    now_ms: i64,
+) -> std::io::Result<()> {
+    for ev in events {
+        let raw = serde_json::to_string(ev).unwrap_or_default();
+        let prov = ProvenanceCtx::for_builtin_parser(parser_name, dataset_id, raw.as_bytes());
+        let env = CanonicalEnvelope::new_insert(
+            source_id.to_string(),
+            source_kind.to_string(),
+            ev.timestamp,
+            now_ms,
+            raw,
+            prov,
+        );
+        store.append(&env)?;
+    }
+    for (raw_row, reason) in skipped_samples {
+        let prov = ProvenanceCtx::for_builtin_parser(parser_name, dataset_id, raw_row.as_bytes());
+        let env = CanonicalEnvelope::new_insert(
+            source_id.to_string(),
+            source_kind.to_string(),
+            0,
+            now_ms,
+            raw_row.clone(),
+            prov,
+        )
+        .as_skipped(reason.clone());
+        store.append(&env)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_hunter_canonical::{CanonicalEnvelope, ProvenanceCtx};
+    use graph_hunter_canonical::{CanonicalEnvelope, ChangeKind, ProvenanceCtx};
 
     fn env(payload: &str, et: i64, it: i64) -> CanonicalEnvelope {
         let p = ProvenanceCtx::for_builtin_parser("sysmon", "ds-1", payload.as_bytes());
@@ -111,5 +169,112 @@ mod tests {
         let j = JournalStore::open(dir.path()).unwrap();
         assert_eq!(j.read_all().unwrap().len(), 0);
         assert_eq!(j.count().unwrap(), 0);
+    }
+
+    // ── journal_enabled ─────────────────────────────────────────────
+
+    /// Process-wide mutex for the `GRAPHHUNTER_JOURNAL`-mutating tests below.
+    /// Cargo runs tests in parallel by default, so two tests setting/
+    /// clearing the same env var would race. Mirrors the `ENV_LOCK`
+    /// convention already used in `operations/hunt.rs` for
+    /// `GRAPHHUNTER_YANNAKAKIS`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn journal_enabled_defaults_off() {
+        let _guard = lock_env();
+        unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL") };
+        assert!(!journal_enabled());
+    }
+
+    #[test]
+    fn journal_enabled_truthy_values_turn_it_on() {
+        let _guard = lock_env();
+        for v in ["1", "true", "TRUE", "True"] {
+            unsafe { std::env::set_var("GRAPHHUNTER_JOURNAL", v) };
+            assert!(journal_enabled(), "expected {v:?} to enable the journal");
+        }
+        unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL") };
+    }
+
+    #[test]
+    fn journal_enabled_other_values_stay_off() {
+        let _guard = lock_env();
+        for v in ["0", "false", "no", ""] {
+            unsafe { std::env::set_var("GRAPHHUNTER_JOURNAL", v) };
+            assert!(!journal_enabled(), "expected {v:?} to leave the journal off");
+        }
+        unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL") };
+    }
+
+    // ── journal_batch ────────────────────────────────────────────────
+
+    fn sample_event(ts: i64) -> RawIngestEvent {
+        RawIngestEvent {
+            src_id: "1.2.3.4".into(),
+            src_type: graph_hunter_core::EntityType::IP,
+            src_metadata: Default::default(),
+            dst_id: "host-1".into(),
+            dst_type: graph_hunter_core::EntityType::Host,
+            dst_metadata: Default::default(),
+            rel_type: graph_hunter_core::RelationType::Connect,
+            rel_metadata: Default::default(),
+            timestamp: ts,
+        }
+    }
+
+    #[test]
+    fn journal_batch_writes_one_insert_per_event_plus_one_skipped_per_sample() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JournalStore::open(dir.path()).unwrap();
+        let events = vec![sample_event(100), sample_event(200)];
+        let skipped = vec![
+            ("malformed-row-1".to_string(), "no_triple".to_string()),
+            ("malformed-row-2".to_string(), "missing_field".to_string()),
+        ];
+        journal_batch(
+            &store,
+            "ds-1",
+            "file",
+            "ds-1",
+            "generic",
+            &events,
+            &skipped,
+            999_000,
+        )
+        .unwrap();
+
+        let all = store.read_all().unwrap();
+        assert_eq!(all.len(), 4);
+
+        let inserts: Vec<_> = all.iter().filter(|e| e.change_kind == ChangeKind::Insert).collect();
+        let skips: Vec<_> = all.iter().filter(|e| e.change_kind == ChangeKind::Skipped).collect();
+        assert_eq!(inserts.len(), 2);
+        assert_eq!(skips.len(), 2);
+
+        // ingestion_time is populated with the frozen clock for every record.
+        assert!(all.iter().all(|e| e.ingestion_time == 999_000));
+        // provenance is frozen into each record (non-empty mapping_hash).
+        assert!(all.iter().all(|e| !e.provenance.mapping_hash.is_empty()));
+        // skipped rows preserve their raw payload and reason.
+        assert!(skips.iter().any(|e| e.raw_payload == "malformed-row-1"
+            && e.skip_reason.as_deref() == Some("no_triple")));
+        assert!(skips.iter().any(|e| e.raw_payload == "malformed-row-2"
+            && e.skip_reason.as_deref() == Some("missing_field")));
+        // inserted events carry the event's own timestamp as event_time.
+        assert!(inserts.iter().any(|e| e.event_time == 100));
+        assert!(inserts.iter().any(|e| e.event_time == 200));
+    }
+
+    #[test]
+    fn journal_batch_is_a_noop_write_with_empty_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JournalStore::open(dir.path()).unwrap();
+        journal_batch(&store, "ds-1", "file", "ds-1", "generic", &[], &[], 1).unwrap();
+        assert_eq!(store.read_all().unwrap().len(), 0);
     }
 }

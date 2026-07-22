@@ -52,6 +52,57 @@ fn note_post_finalize_appends(session: &Session, new_relations: usize) {
     session.note_post_finalize_appends(new_relations as u64, now_secs());
 }
 
+/// Best-effort append of a journal batch for one ingest call, shared by
+/// `load_data` and `load_data_with_config`. Resolves the on-disk journal
+/// directory as a sibling of the session data dir (`<data_dir>/GraphHunter/
+/// journal`) — mirrors how the DLQ store lives outside any single
+/// `Session`, since `Session` itself carries no directory of its own.
+/// Any failure along the way (dir resolution, store open, append) only
+/// `tracing::warn!`s: the journal is additive and must never abort
+/// ingestion (design spec §9, steps 4-9 run before the graph insert at
+/// step 9, but a journaling failure is not an ingest failure).
+fn journal_batch_best_effort(
+    dataset_id: &str,
+    source_kind: &str,
+    parser_name: &str,
+    events: &[graph_hunter_core::parser::RawIngestEvent],
+    skipped_samples: &[(String, String)],
+) {
+    let dir = match dirs::data_dir() {
+        Some(d) => d.join("GraphHunter").join("journal"),
+        None => {
+            tracing::warn!(
+                target: "journal",
+                "could not resolve app data directory; journal append skipped"
+            );
+            return;
+        }
+    };
+    let store = match crate::journal::JournalStore::open(&dir) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(target: "journal", error = %e, "journal open failed; continuing");
+            return;
+        }
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    if let Err(e) = crate::journal::journal_batch(
+        &store,
+        dataset_id,
+        source_kind,
+        dataset_id,
+        parser_name,
+        events,
+        skipped_samples,
+        now_ms,
+    ) {
+        tracing::warn!(target: "journal", error = %e, "journal append failed; continuing");
+    }
+}
+
 // ── Constants for load_data_streaming (lifted from Tauri commands) ─────
 /// Number of lines per batch during streaming line-based ingestion.
 const BATCH_LINES: usize = 50_000;
@@ -424,6 +475,19 @@ impl GraphHunterApi {
                 (e, s, false)
             };
             self.record_parse_skips(dataset_id.as_str(), None, &stats);
+            // Journal step (4-5 of the 12-step order): must run BEFORE the
+            // graph insert below so a crash in between is replayable. Gated
+            // behind GRAPHHUNTER_JOURNAL (default off = no-op); failures only
+            // warn, never abort ingestion — journaling is additive.
+            if crate::journal::journal_enabled() {
+                journal_batch_best_effort(
+                    &dataset_id,
+                    "file",
+                    resolved_format.as_str(),
+                    &events,
+                    &stats.skipped_samples,
+                );
+            }
             let (ne, nr) = graph
                 .insert_raw_events(events, Some(dataset_id.as_str()))
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -746,6 +810,19 @@ impl GraphHunterApi {
                 let parser = ConfigurableParser::new(req.config.clone());
                 let (events, stats) = parser.parse_raw_with_stats(&contents);
                 self.record_parse_skips(dataset_id.as_str(), None, &stats);
+                // Journal step (4-5 of the 12-step order): must run BEFORE
+                // the graph insert below. Gated behind GRAPHHUNTER_JOURNAL
+                // (default off = no-op); failures only warn, never abort
+                // ingestion — journaling is additive.
+                if crate::journal::journal_enabled() {
+                    journal_batch_best_effort(
+                        &dataset_id,
+                        "file",
+                        "configurable",
+                        &events,
+                        &stats.skipped_samples,
+                    );
+                }
                 let (ne, nr) = graph
                     .insert_raw_events(events, Some(dataset_id.as_str()))
                     .map_err(|e| ApiError::Internal(e.to_string()))?;
