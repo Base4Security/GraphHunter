@@ -749,9 +749,54 @@ impl GraphHunterApi {
             let parser = make_parser_for_format("sentinel").map_err(ApiError::InvalidInput)?;
             // RawIngestEvent path — see evtx.rs for the rationale.
             let events = parser.parse_raw(&data);
-            let (e, r) = graph
-                .insert_raw_events(events, Some(dataset_id.as_str()))
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            // Journal step (4-5 of the 12-step order): must run BEFORE the
+            // graph insert below so a crash in between is replayable. Gated
+            // behind GRAPHHUNTER_JOURNAL (default off = no-op); failures only
+            // warn, never abort ingestion — mirrors the load_data branch.
+            // `ingest_siem` is the live Sentinel/Elastic pull path, so wiring
+            // this closes the honesty gap: without it the edge-multiplicity
+            // dedup only ever applied to file-based ingest, never to the
+            // declared "live sync path". No ParseStats here (`parse_raw`, not
+            // `parse_raw_with_stats`), so there are no skipped samples to
+            // journal alongside the events. `parser_name` is "sentinel"
+            // literal (not `source`) because `make_parser_for_format` above
+            // is hardcoded to "sentinel" regardless of source — that
+            // reflects the actual parser that produced `events`.
+            if crate::journal::journal_enabled() {
+                journal_batch_best_effort(&dataset_id, "siem", "sentinel", &events, &[]);
+            }
+            let (e, r) = if crate::journal::journal_enabled()
+                && crate::journal::graphdelta_enabled()
+            {
+                // GRAPHHUNTER_GRAPHDELTA: apply the just-journaled envelopes
+                // idempotently instead of the direct, non-deduping insert
+                // below — see the load_data branch above for rationale.
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let envelopes = crate::journal::build_batch_envelopes(
+                    dataset_id.as_str(),
+                    "siem",
+                    dataset_id.as_str(),
+                    "sentinel",
+                    &events,
+                    &[],
+                    now_ms,
+                );
+                let entities_before = graph.entity_count();
+                let relations_before = graph.relation_count();
+                let (_applied, _dup) =
+                    crate::journal::apply_batch_idempotent(&mut graph, &envelopes);
+                (
+                    graph.entity_count() - entities_before,
+                    graph.relation_count() - relations_before,
+                )
+            } else {
+                graph
+                    .insert_raw_events(events, Some(dataset_id.as_str()))
+                    .map_err(|e| ApiError::Internal(e.to_string()))?
+            };
             run_full_scoring(&mut graph);
             (e, r)
         };
@@ -1467,7 +1512,59 @@ impl GraphHunterApi {
                                             }
                                             e
                                         };
-                                    let (ne, nr) = {
+                                    // Journal step: must run BEFORE the graph
+                                    // insert below so a crash in between is
+                                    // replayable. Gated behind GRAPHHUNTER_JOURNAL
+                                    // (default off = no-op); failures only warn,
+                                    // never abort ingestion — mirrors load_data.
+                                    // The parallel-chunk path above only keeps
+                                    // per-chunk drift (not skipped samples), so
+                                    // there are none to journal alongside this
+                                    // batch's `events`.
+                                    if crate::journal::journal_enabled() {
+                                        journal_batch_best_effort(
+                                            &bg_dataset_id,
+                                            "file_stream",
+                                            resolved.as_str(),
+                                            &events,
+                                            &[],
+                                        );
+                                    }
+                                    let (ne, nr) = if crate::journal::journal_enabled()
+                                        && crate::journal::graphdelta_enabled()
+                                    {
+                                        // GRAPHHUNTER_GRAPHDELTA: apply the
+                                        // just-journaled envelopes idempotently
+                                        // instead of the direct insert below —
+                                        // see the load_data branch for rationale.
+                                        let now_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis() as i64)
+                                            .unwrap_or(0);
+                                        let envelopes = crate::journal::build_batch_envelopes(
+                                            bg_dataset_id.as_str(),
+                                            "file_stream",
+                                            bg_dataset_id.as_str(),
+                                            resolved.as_str(),
+                                            &events,
+                                            &[],
+                                            now_ms,
+                                        );
+                                        let mut graph = bg_session
+                                            .graph
+                                            .write()
+                                            .map_err(|e| format!("Lock poisoned: {}", e))?;
+                                        let entities_before = graph.entity_count();
+                                        let relations_before = graph.relation_count();
+                                        let (_applied, _dup) =
+                                            crate::journal::apply_batch_idempotent(
+                                                &mut graph, &envelopes,
+                                            );
+                                        (
+                                            graph.entity_count() - entities_before,
+                                            graph.relation_count() - relations_before,
+                                        )
+                                    } else {
                                         let mut graph = bg_session
                                             .graph
                                             .write()
@@ -1565,7 +1662,59 @@ impl GraphHunterApi {
                                             .get_or_insert_with(DriftSnapshot::default)
                                             .merge(&d);
                                     }
-                                    let (ne, nr) = {
+                                    // Journal step: must run BEFORE the graph
+                                    // insert below so a crash in between is
+                                    // replayable. Gated behind GRAPHHUNTER_JOURNAL
+                                    // (default off = no-op); failures only warn,
+                                    // never abort ingestion — mirrors load_data.
+                                    // Unlike the batch-loop site above, this
+                                    // final-remainder parse keeps `final_stats`
+                                    // in scope, so its real `skipped_samples`
+                                    // are journaled alongside `events`.
+                                    if crate::journal::journal_enabled() {
+                                        journal_batch_best_effort(
+                                            &bg_dataset_id,
+                                            "file_stream",
+                                            resolved.as_str(),
+                                            &events,
+                                            &final_stats.skipped_samples,
+                                        );
+                                    }
+                                    let (ne, nr) = if crate::journal::journal_enabled()
+                                        && crate::journal::graphdelta_enabled()
+                                    {
+                                        // GRAPHHUNTER_GRAPHDELTA: apply the
+                                        // just-journaled envelopes idempotently
+                                        // instead of the direct insert below —
+                                        // see the load_data branch for rationale.
+                                        let now_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis() as i64)
+                                            .unwrap_or(0);
+                                        let envelopes = crate::journal::build_batch_envelopes(
+                                            bg_dataset_id.as_str(),
+                                            "file_stream",
+                                            bg_dataset_id.as_str(),
+                                            resolved.as_str(),
+                                            &events,
+                                            &final_stats.skipped_samples,
+                                            now_ms,
+                                        );
+                                        let mut graph = bg_session
+                                            .graph
+                                            .write()
+                                            .map_err(|e| format!("Lock poisoned: {}", e))?;
+                                        let entities_before = graph.entity_count();
+                                        let relations_before = graph.relation_count();
+                                        let (_applied, _dup) =
+                                            crate::journal::apply_batch_idempotent(
+                                                &mut graph, &envelopes,
+                                            );
+                                        (
+                                            graph.entity_count() - entities_before,
+                                            graph.relation_count() - relations_before,
+                                        )
+                                    } else {
                                         let mut graph = bg_session
                                             .graph
                                             .write()
@@ -1635,7 +1784,55 @@ impl GraphHunterApi {
                             let (events, stats) = parser.parse_raw_with_stats(contents);
                             tracing::info!("INGEST: parsed {} events", events.len());
 
-                            let (ne, nr) = {
+                            // Journal step: must run BEFORE the graph insert
+                            // below so a crash in between is replayable. Gated
+                            // behind GRAPHHUNTER_JOURNAL (default off = no-op);
+                            // failures only warn, never abort ingestion —
+                            // mirrors load_data. `stats` is in scope here (this
+                            // is the whole-file parse path), so its real
+                            // `skipped_samples` are journaled alongside `events`.
+                            if crate::journal::journal_enabled() {
+                                journal_batch_best_effort(
+                                    &bg_dataset_id,
+                                    "file_stream",
+                                    resolved.as_str(),
+                                    &events,
+                                    &stats.skipped_samples,
+                                );
+                            }
+                            let (ne, nr) = if crate::journal::journal_enabled()
+                                && crate::journal::graphdelta_enabled()
+                            {
+                                // GRAPHHUNTER_GRAPHDELTA: apply the
+                                // just-journaled envelopes idempotently instead
+                                // of the direct insert below — see the
+                                // load_data branch above for rationale.
+                                let now_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as i64)
+                                    .unwrap_or(0);
+                                let envelopes = crate::journal::build_batch_envelopes(
+                                    bg_dataset_id.as_str(),
+                                    "file_stream",
+                                    bg_dataset_id.as_str(),
+                                    resolved.as_str(),
+                                    &events,
+                                    &stats.skipped_samples,
+                                    now_ms,
+                                );
+                                let mut graph = bg_session
+                                    .graph
+                                    .write()
+                                    .map_err(|e| format!("Lock poisoned: {}", e))?;
+                                let entities_before = graph.entity_count();
+                                let relations_before = graph.relation_count();
+                                let (_applied, _dup) =
+                                    crate::journal::apply_batch_idempotent(&mut graph, &envelopes);
+                                (
+                                    graph.entity_count() - entities_before,
+                                    graph.relation_count() - relations_before,
+                                )
+                            } else {
                                 let mut graph = bg_session
                                     .graph
                                     .write()
