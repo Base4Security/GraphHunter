@@ -242,6 +242,45 @@ pub fn envelope_to_delta(env: &CanonicalEnvelope) -> Option<GraphDelta> {
     Some(GraphDelta::new(event, event_id))
 }
 
+/// Observable-count comparison between a live incremental graph and a
+/// fresh rebuild from the journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EquivalenceReport {
+    pub entity_count_matches: bool,
+    pub relation_count_matches: bool,
+    pub live_entities: usize,
+    pub rebuilt_entities: usize,
+    pub live_relations: usize,
+    pub rebuilt_relations: usize,
+}
+
+/// Rebuild a fresh graph from the journal (idempotent apply of every inserted
+/// envelope) and compare observable counts against the live graph. This is the
+/// translation-validation check (SOT-VM framing): the from-scratch rebuild is
+/// the trusted reference; the live graph is the untrusted incremental artifact.
+/// Fase C-1 compares entity/relation counts; richer observable equality (query
+/// outputs) is future work.
+pub fn check_incremental_equivalence(
+    live: &graph_hunter_core::graph::GraphHunter,
+    store: &JournalStore,
+) -> std::io::Result<EquivalenceReport> {
+    let recon = rebuild_from_journal(store)?;
+    let mut rebuilt = graph_hunter_core::graph::GraphHunter::new();
+    apply_batch_idempotent(&mut rebuilt, &recon.inserted);
+    let live_e = live.entity_count();
+    let live_r = live.relation_count();
+    let reb_e = rebuilt.entity_count();
+    let reb_r = rebuilt.relation_count();
+    Ok(EquivalenceReport {
+        entity_count_matches: live_e == reb_e,
+        relation_count_matches: live_r == reb_r,
+        live_entities: live_e,
+        rebuilt_entities: reb_e,
+        live_relations: live_r,
+        rebuilt_relations: reb_r,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,5 +541,33 @@ mod tests {
         let (a2, s2) = apply_batch_idempotent(&mut g, &evs);
         assert_eq!((a2, s2), (0, 2));
         assert_eq!(g.relation_count(), 2); // no duplication
+    }
+
+    // ── check_incremental_equivalence ────────────────────────────────
+
+    #[test]
+    fn rebuild_from_journal_matches_live_after_idempotent_apply() {
+        use graph_hunter_core::graph::GraphHunter;
+        let dir = tempfile::tempdir().unwrap();
+        let store = JournalStore::open(dir.path()).unwrap();
+        // journal 3 distinct insert envelopes + 1 skipped; also feed a live graph
+        // by applying the same batch idempotently (once) — plus a crash replay.
+        let inserts = vec![
+            insert_envelope_for(&sample_event(100)),
+            insert_envelope_for(&sample_event(200)),
+            insert_envelope_for(&sample_event(300)),
+        ];
+        for e in &inserts {
+            store.append(e).unwrap();
+        }
+        store.append(&env("skip-1", 0, 11).as_skipped("no_triple".into())).unwrap();
+        let mut live = GraphHunter::new();
+        apply_batch_idempotent(&mut live, &inserts);
+        apply_batch_idempotent(&mut live, &inserts); // crash replay: idempotent
+        let rep = check_incremental_equivalence(&live, &store).unwrap();
+        assert!(rep.entity_count_matches, "{rep:?}");
+        assert!(rep.relation_count_matches, "{rep:?}");
+        assert_eq!(rep.live_relations, 3); // multiplicity: 3, not 6
+        assert_eq!(rep.rebuilt_relations, 3);
     }
 }
