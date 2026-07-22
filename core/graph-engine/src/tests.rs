@@ -1231,6 +1231,47 @@ fn sysmon_parse_missing_required_fields_skipped() {
     assert!(triples.is_empty());
 }
 
+/// Builds NDJSON input (no leading `[`, so `parse_raw_with_stats` takes
+/// the native `par_lines` fast path instead of delegating to the legacy
+/// `parse_with_stats`) with `n` rows that the fast path skips, cycling
+/// through three distinct skip causes so the reservoir sees varied
+/// `reason` strings:
+/// - an unsupported EventID (falls through both typed-scratch matches to
+///   the `Value`-based `parse_event`'s `_ => Vec::new()` arm);
+/// - an EventID 1 row with `Image` but no `User`/`ParentImage` (matches
+///   `typed_process_create_raw`'s EventID but returns `Some(vec![])` —
+///   "no mappable entities");
+/// - a non-JSON garbage line (fails every parse attempt).
+fn sysmon_input_with_skips(n: usize) -> String {
+    let rows = [
+        r#"{"EventID": 999, "UtcTime": "2024-01-15 14:30:00"}"#.to_string(),
+        r#"{"EventID": 1, "UtcTime": "2024-01-15 14:30:00", "Image": "C:\\Windows\\cmd.exe", "Computer": "H1"}"#.to_string(),
+        "not json at all!".to_string(),
+    ];
+    (0..n)
+        .map(|i| rows[i % rows.len()].clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn sysmon_fast_path_records_skipped_samples_up_to_cap() {
+    // Build input with 3 skippable rows mixed in; reuses the helper
+    // above rather than the array-literal fixtures used elsewhere in
+    // this file because `parse_raw_with_stats` only exercises the
+    // native `par_lines` fast path for NDJSON input.
+    let input = sysmon_input_with_skips(3);
+    let parser = SysmonJsonParser;
+    let (_, stats) = parser.parse_raw_with_stats(&input);
+
+    assert!(stats.rows_skipped >= 3);
+    // The gap this closes: samples were empty on the fast path before.
+    assert!(!stats.skipped_samples.is_empty());
+    assert!(stats.skipped_samples.len() <= crate::parser::SKIP_SAMPLE_CAP);
+    // Each sample is (raw_row, reason) with a non-empty reason.
+    assert!(stats.skipped_samples.iter().all(|(_, r)| !r.is_empty()));
+}
+
 #[test]
 fn sysmon_parse_garbage_input_returns_empty() {
     let parser = SysmonJsonParser;

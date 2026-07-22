@@ -1207,28 +1207,50 @@ impl LogParser for SentinelJsonParser {
             return (events, stats);
         }
 
-        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool)> = trimmed
+        // Per-line: (events, produced_at_least_one_triple, skip_sample).
+        // `skip_sample` is `Some((raw_row, reason))` only when the row was
+        // skipped — the `line.to_string()` allocation is paid solely on
+        // that (rare) branch so per-row throughput is untouched. Unlike
+        // Sysmon's typed-scratch fast path, `event: Option<Value>` is
+        // already materialized here, so classification reuses the same
+        // `classify_skip_reason` the generic/legacy path reports via
+        // `skip_reasons` — the reason stays consistent across paths.
+        type SkipSample = Option<(String, String)>;
+        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool, SkipSample)> = trimmed
             .par_lines()
             .filter(|l| !l.trim().is_empty())
             .map(|line| {
                 let mut buf = line.as_bytes().to_vec();
                 let event = simd_json::serde::from_slice::<Value>(&mut buf).ok();
                 let events = event
-                    .map(|e| Self::parse_event_raw(&e))
+                    .as_ref()
+                    .map(|e| Self::parse_event_raw(e))
                     .unwrap_or_default();
                 let produced = !events.is_empty();
-                (events, produced)
+                let skip = (!produced).then(|| {
+                    let reason = event
+                        .as_ref()
+                        .map(crate::generic::classify_skip_reason)
+                        .unwrap_or("unparseable_row");
+                    (line.to_string(), reason.to_string())
+                });
+                (events, produced, skip)
             })
             .collect();
 
         let mut stats = crate::parser::ParseStats::default();
         stats.rows_seen = per_line.len();
         let mut all_events: Vec<crate::parser::RawIngestEvent> = Vec::new();
-        for (events, produced) in per_line {
+        for (events, produced, skip) in per_line {
             if produced {
                 stats.rows_with_triples += 1;
             } else {
                 stats.rows_skipped += 1;
+                if let Some(sample) = skip {
+                    if stats.skipped_samples.len() < crate::parser::SKIP_SAMPLE_CAP {
+                        stats.skipped_samples.push(sample);
+                    }
+                }
             }
             all_events.extend(events);
         }

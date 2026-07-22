@@ -77,6 +77,12 @@ impl RawIngestEvent {
 ///
 /// Zero-triple detection and per-field coverage reporting both read off
 /// this struct.
+///
+/// Cap on how many `(raw_row, reason)` pairs `skipped_samples` retains.
+/// Shared by every parser (generic + native fast paths) so the reservoir
+/// never grows unbounded on huge ingests. See `skipped_samples` below.
+pub const SKIP_SAMPLE_CAP: usize = 50;
+
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct ParseStats {
     /// Total number of input events/rows the parser actually saw. Zero
@@ -219,15 +225,21 @@ pub trait LogParser: Send + Sync {
     /// the typed scratch fast-path (e.g. `SysmonEventTyped` for
     /// SysmonJsonParser) which doesn't materialize a
     /// `serde_json::Value` per event. Without a `Value`, the
-    /// `per_field_occurrence`, `skip_reasons`, and
-    /// `skipped_samples` fields can't be populated cheaply — those
-    /// inspections rely on `Value::as_object()` / cell-by-cell
-    /// scanning. Native overrides may leave those fields empty and
-    /// only populate `rows_seen`, `rows_with_triples`,
-    /// `rows_skipped`, and `drift`. The UI gracefully degrades:
-    /// empty maps render as "not reported", not "all zero".
-    /// Callers that need full per-field stats should call
-    /// `parse_with_stats` instead.
+    /// `per_field_occurrence` and `skip_reasons` fields can't be
+    /// populated cheaply — those inspections rely on
+    /// `Value::as_object()` / cell-by-cell scanning. Native overrides
+    /// may leave those two fields empty and only populate
+    /// `rows_seen`, `rows_with_triples`, `rows_skipped`, and `drift`.
+    /// The UI gracefully degrades: empty maps render as "not
+    /// reported", not "all zero". Callers that need full per-field
+    /// stats should call `parse_with_stats` instead.
+    ///
+    /// `skipped_samples` is the exception: `SysmonJsonParser` and
+    /// `SentinelJsonParser` populate it (bounded to
+    /// [`SKIP_SAMPLE_CAP`]) at the exact point each row is skipped,
+    /// even on the native fast path — capturing the raw row costs a
+    /// `String` allocation only on the (rare) skip branch, so it
+    /// doesn't touch the hot per-row throughput.
     fn parse_raw_with_stats(&self, data: &str) -> (Vec<RawIngestEvent>, ParseStats) {
         let (triples, stats) = self.parse_with_stats(data);
         let events: Vec<RawIngestEvent> = triples

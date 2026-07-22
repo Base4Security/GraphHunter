@@ -2247,10 +2247,14 @@ impl LogParser for SysmonJsonParser {
             return (events, stats);
         }
 
-        // Per-line: (events, produced_at_least_one_triple). Reduce
-        // counts after the collect; events are flattened into the
-        // returned Vec.
-        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool)> = trimmed
+        // Per-line: (events, produced_at_least_one_triple, skip_sample).
+        // `skip_sample` is `Some((raw_row, reason))` only when the row was
+        // skipped — the `line.to_string()` allocation is paid solely on
+        // that (rare) branch so the hot per-row throughput this fast path
+        // exists for is untouched. Reduce counts after the collect;
+        // events are flattened into the returned Vec.
+        type SkipSample = Option<(String, String)>;
+        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool, SkipSample)> = trimmed
             .par_lines()
             .filter(|l| !l.trim().is_empty())
             .map_init(
@@ -2258,7 +2262,12 @@ impl LogParser for SysmonJsonParser {
                 |scratch, line| {
                     if let Some(events) = Self::try_parse_typed_raw_with_scratch(line, scratch) {
                         let produced = !events.is_empty();
-                        return (events, produced);
+                        // Matched a typed EventID but yielded zero
+                        // triples (e.g. EventID 1 with no
+                        // User/ParentImage to anchor a triple on).
+                        let skip = (!produced)
+                            .then(|| (line.to_string(), "no_mappable_entities".to_string()));
+                        return (events, produced, skip);
                     }
                     if let Some(triples) = Self::try_parse_typed_with_scratch(line, scratch) {
                         let produced = !triples.is_empty();
@@ -2266,7 +2275,9 @@ impl LogParser for SysmonJsonParser {
                             .into_iter()
                             .map(crate::parser::RawIngestEvent::from_parsed_triple)
                             .collect();
-                        return (events, produced);
+                        let skip = (!produced)
+                            .then(|| (line.to_string(), "no_mappable_entities".to_string()));
+                        return (events, produced, skip);
                     }
                     scratch.clear();
                     scratch.extend_from_slice(line.as_bytes());
@@ -2274,15 +2285,30 @@ impl LogParser for SysmonJsonParser {
                         .ok()
                         .or_else(|| serde_json::from_str(line).ok());
                     let events: Vec<crate::parser::RawIngestEvent> = parsed
+                        .as_ref()
                         .map(|e| {
-                            Self::parse_event(&e)
+                            Self::parse_event(e)
                                 .into_iter()
                                 .map(crate::parser::RawIngestEvent::from_parsed_triple)
                                 .collect()
                         })
                         .unwrap_or_default();
                     let produced = !events.is_empty();
-                    (events, produced)
+                    let skip = (!produced).then(|| {
+                        // `parsed` deserialized fine (e.g. unsupported
+                        // EventID falling to `parse_event`'s `_ =>
+                        // Vec::new()` arm) — reuse the same
+                        // classification the generic/non-native paths
+                        // report via `skip_reasons` so the reason is
+                        // consistent across fast and legacy paths.
+                        // Otherwise the line didn't even deserialize.
+                        let reason = parsed
+                            .as_ref()
+                            .map(crate::generic::classify_skip_reason)
+                            .unwrap_or("unparseable_row");
+                        (line.to_string(), reason.to_string())
+                    });
+                    (events, produced, skip)
                 },
             )
             .collect();
@@ -2290,16 +2316,22 @@ impl LogParser for SysmonJsonParser {
         let mut stats = crate::parser::ParseStats::default();
         stats.rows_seen = per_line.len();
         let mut all_events: Vec<crate::parser::RawIngestEvent> = Vec::new();
-        for (events, produced) in per_line {
+        for (events, produced, skip) in per_line {
             if produced {
                 stats.rows_with_triples += 1;
             } else {
                 stats.rows_skipped += 1;
+                if let Some(sample) = skip {
+                    if stats.skipped_samples.len() < crate::parser::SKIP_SAMPLE_CAP {
+                        stats.skipped_samples.push(sample);
+                    }
+                }
             }
             all_events.extend(events);
         }
-        // per_field_occurrence, skip_reasons, skipped_samples, drift
-        // intentionally left empty — see trait docstring.
+        // per_field_occurrence, skip_reasons, drift intentionally left
+        // empty — see trait docstring. `skipped_samples` is populated
+        // above (bounded reservoir, closes the S4 gap).
         (all_events, stats)
     }
 }
