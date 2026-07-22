@@ -741,14 +741,14 @@ impl GraphHunterApi {
         let resume_phase = resume_phase_after_finalize(session.phase());
         session.set_phase(crate::state::SessionPhase::Finalizing);
         let _phase_guard = FinalizePhaseGuard { session: Arc::clone(&session), resume: resume_phase };
-        let (new_entities, new_relations) = {
+        let (new_entities, new_relations, stats) = {
             let mut graph = session
                 .graph
                 .write()
                 .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
             let parser = make_parser_for_format("sentinel").map_err(ApiError::InvalidInput)?;
             // RawIngestEvent path — see evtx.rs for the rationale.
-            let events = parser.parse_raw(&data);
+            let (events, stats) = parser.parse_raw_with_stats(&data);
             // Journal step (4-5 of the 12-step order): must run BEFORE the
             // graph insert below so a crash in between is replayable. Gated
             // behind GRAPHHUNTER_JOURNAL (default off = no-op); failures only
@@ -756,14 +756,21 @@ impl GraphHunterApi {
             // `ingest_siem` is the live Sentinel/Elastic pull path, so wiring
             // this closes the honesty gap: without it the edge-multiplicity
             // dedup only ever applied to file-based ingest, never to the
-            // declared "live sync path". No ParseStats here (`parse_raw`, not
-            // `parse_raw_with_stats`), so there are no skipped samples to
-            // journal alongside the events. `parser_name` is "sentinel"
-            // literal (not `source`) because `make_parser_for_format` above
-            // is hardcoded to "sentinel" regardless of source — that
-            // reflects the actual parser that produced `events`.
+            // declared "live sync path". `parse_raw_with_stats` (not
+            // `parse_raw`) so real skipped samples are journaled alongside
+            // the events instead of the previous empty-slice stand-in.
+            // `parser_name` is "sentinel" literal (not `source`) because
+            // `make_parser_for_format` above is hardcoded to "sentinel"
+            // regardless of source — that reflects the actual parser that
+            // produced `events`.
             if crate::journal::journal_enabled() {
-                journal_batch_best_effort(&dataset_id, "siem", "sentinel", &events, &[]);
+                journal_batch_best_effort(
+                    &dataset_id,
+                    "siem",
+                    "sentinel",
+                    &events,
+                    &stats.skipped_samples,
+                );
             }
             let (e, r) = if crate::journal::journal_enabled()
                 && crate::journal::graphdelta_enabled()
@@ -798,7 +805,7 @@ impl GraphHunterApi {
                     .map_err(|e| ApiError::Internal(e.to_string()))?
             };
             run_full_scoring(&mut graph);
-            (e, r)
+            (e, r, stats)
         };
         // Record post-finalize appends after the write guard is dropped
         // (calling while holding the graph write lock self-deadlocks the RwLock).
@@ -830,13 +837,14 @@ impl GraphHunterApi {
             )
         };
 
+        let zero_triples = stats.rows_seen > 0 && stats.rows_with_triples == 0;
         Ok(LoadResult {
             new_entities,
             new_relations,
             total_entities,
             total_relations,
-            zero_triples: false,
-            ingest_stats: None,
+            zero_triples,
+            ingest_stats: Some(stats),
             warnings,
         })
     }
