@@ -37,14 +37,25 @@ pub fn disabled_response() -> (StatusCode, Json<Value>) {
     )
 }
 
+/// Process-wide lock guarding tests that mutate the `GRAPHHUNTER_KQL_ESCAPE_HATCH`
+/// env var. `std::env::var`/`set_var` are process-global, so two such tests
+/// running concurrently under the default multi-threaded test runner can race
+/// (one test's assert can observe the other's in-flight value). Both
+/// `flag_defaults_enabled_and_respects_explicit_falsy` (this module) and
+/// `kql_gate_blocks_when_flag_disabled` (`http::siem`) acquire this lock
+/// before touching the env var. `pub(crate)` so `siem.rs` can reach it.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // These tests mutate a process-global env var; keep them in one test to
+    // These tests mutate a process-global env var; serialize via ENV_LOCK to
     // avoid cross-test races under the default multi-threaded runner.
     #[test]
     fn flag_defaults_enabled_and_respects_explicit_falsy() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Rust 2024 (this crate's edition) marks `env::set_var`/`remove_var`
         // unsafe (process-global mutation); wrap each call, matching the
         // pattern already used in `lib.rs`.

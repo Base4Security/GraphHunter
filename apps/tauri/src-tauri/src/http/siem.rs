@@ -375,6 +375,12 @@ mod tests {
     // analysts to the graph tools — instead of reaching `api.run_kql`.
     #[tokio::test]
     async fn kql_gate_blocks_when_flag_disabled() {
+        // Serialize with escape_hatch's env-var test: both mutate the
+        // process-global GRAPHHUNTER_KQL_ESCAPE_HATCH and can race under the
+        // default parallel test runner otherwise.
+        let _guard = crate::http::escape_hatch::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("GRAPHHUNTER_KQL_ESCAPE_HATCH", "0");
         }
