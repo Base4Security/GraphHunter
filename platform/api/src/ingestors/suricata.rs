@@ -218,6 +218,7 @@ fn parse_flow(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -251,6 +252,7 @@ fn parse_alert(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEven
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -286,6 +288,7 @@ fn parse_dns(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent>
         rel_type: RelationType::DNS,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -321,6 +324,7 @@ fn parse_http(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -365,6 +369,7 @@ fn parse_tls(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent>
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -406,6 +411,7 @@ fn parse_krb5(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent
         rel_type: RelationType::Auth,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -456,6 +462,7 @@ fn parse_smb(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent>
         rel_type: RelationType::Auth,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 

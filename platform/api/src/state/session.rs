@@ -658,6 +658,7 @@ mod tests {
                 rel_type: RelationType::Auth,
                 rel_metadata: Default::default(),
                 timestamp: ts,
+                raw_line: None,
             }
         }
 

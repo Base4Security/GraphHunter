@@ -464,6 +464,7 @@ mod tests {
             rel_type: graph_hunter_core::RelationType::Connect,
             rel_metadata: Default::default(),
             timestamp: ts,
+            raw_line: None,
         }
     }
 
@@ -693,6 +694,7 @@ mod tests {
             rel_type: graph_hunter_core::RelationType::Auth,
             rel_metadata,
             timestamp: 500,
+            raw_line: None,
         }
     }
 
@@ -720,6 +722,7 @@ mod tests {
             rel_type: graph_hunter_core::RelationType::Auth,
             rel_metadata,
             timestamp: 500,
+            raw_line: None,
         }
     }
 
