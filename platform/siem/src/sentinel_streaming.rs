@@ -225,19 +225,30 @@ pub struct KqlQueryBuilder;
 impl KqlQueryBuilder {
     /// Builds a KQL query for a Sentinel table.
     ///
-    /// Resolution order for the `where TimeGenerated ...` clause:
-    ///   1. `watermark` set → `> datetime({watermark})` (incremental
-    ///      polling — wins over any caller-supplied window).
-    ///   2. `time_window_filter` set → use the caller's pre-rendered
-    ///      filter verbatim. Phase L: the api crate renders this from
-    ///      its `TimeWindow` DTO via `kql_filter()`; siem stays
-    ///      DTO-free so the dep direction (api → siem, not the
-    ///      reverse) is preserved.
-    ///   3. Neither set → legacy `ago(24h)` fallback for callers that
-    ///      haven't migrated.
+    /// Cursors on `ingestion_time()` — monotonic w.r.t. when a row became
+    /// queryable — rather than `TimeGenerated` (event time). Log Analytics
+    /// ingests rows minutes after their event time, so a `TimeGenerated >
+    /// watermark` cursor silently drops any row whose event time falls
+    /// before the watermark but that ingests after it (late-arriving /
+    /// out-of-order logs). `ingestion_time()` never skips a late arrival.
     ///
-    /// Back-compat: callers that don't pass a time window get the same
-    /// behavior they had before this change.
+    /// `coalesce(ingestion_time(), TimeGenerated)` degrades gracefully for
+    /// tables without an ingestion-time policy (those rows fall back to
+    /// event time). `_ingest_ts` is an added column — every row keeps its
+    /// original `TimeGenerated` for the parser.
+    ///
+    /// Resolution order for the `where ...` clause:
+    ///   1. `watermark` set → `where _ingest_ts > datetime({watermark})`
+    ///      (incremental polling — wins over any caller-supplied window).
+    ///   2. `time_window_filter` set → use the caller's pre-rendered
+    ///      event-time filter verbatim (first-poll backfill). Phase L: the
+    ///      api crate renders this from its `TimeWindow` DTO via
+    ///      `kql_filter()`; siem stays DTO-free so the dep direction
+    ///      (api → siem, not the reverse) is preserved. The result is
+    ///      still ordered by `_ingest_ts` so the watermark captured after
+    ///      this poll is an ingestion-time value.
+    ///   3. Neither set → `where _ingest_ts > ago(24h)` fallback for
+    ///      callers that haven't migrated.
     pub fn build(
         table: &str,
         watermark: Option<&str>,
@@ -245,12 +256,12 @@ impl KqlQueryBuilder {
         time_window_filter: Option<&str>,
     ) -> String {
         let time_filter = match (watermark, time_window_filter) {
-            (Some(w), _) => format!("where TimeGenerated > datetime({})", w),
+            (Some(w), _) => format!("where _ingest_ts > datetime({})", w),
             (None, Some(tw)) => tw.to_string(),
-            (None, None) => "where TimeGenerated > ago(24h)".to_string(),
+            (None, None) => "where _ingest_ts > ago(24h)".to_string(),
         };
         format!(
-            "{} | {} | order by TimeGenerated asc | take {}",
+            "{} | extend _ingest_ts = coalesce(ingestion_time(), TimeGenerated) | {} | order by _ingest_ts asc | take {}",
             table, time_filter, batch_size
         )
     }
@@ -364,23 +375,29 @@ mod tests {
         let q = KqlQueryBuilder::build("SecurityEvent", Some("2024-01-15T14:30:00Z"), 10000, None);
         assert_eq!(
             q,
-            "SecurityEvent | where TimeGenerated > datetime(2024-01-15T14:30:00Z) | order by TimeGenerated asc | take 10000"
+            "SecurityEvent | extend _ingest_ts = coalesce(ingestion_time(), TimeGenerated) \
+             | where _ingest_ts > datetime(2024-01-15T14:30:00Z) \
+             | order by _ingest_ts asc | take 10000"
         );
     }
 
     #[test]
-    fn kql_without_watermark() {
+    fn kql_without_watermark_uses_ingestion_time_default() {
         let q = KqlQueryBuilder::build("SigninLogs", None, 5000, None);
         assert_eq!(
             q,
-            "SigninLogs | where TimeGenerated > ago(24h) | order by TimeGenerated asc | take 5000"
+            "SigninLogs | extend _ingest_ts = coalesce(ingestion_time(), TimeGenerated) \
+             | where _ingest_ts > ago(24h) \
+             | order by _ingest_ts asc | take 5000"
         );
     }
 
-    /// Phase L: caller supplies a pre-rendered time-window filter and
-    /// the builder uses it verbatim instead of the legacy 24h default.
+    /// Phase L / Sentinel Task 1: no watermark yet, so the caller's
+    /// event-time backfill filter is used verbatim — but the query still
+    /// projects + orders by `_ingest_ts` so the first watermark captured
+    /// is an ingestion_time value (subsequent polls are ingestion-cursored).
     #[test]
-    fn kql_with_time_window_filter_overrides_default() {
+    fn kql_first_poll_uses_caller_window_then_orders_by_ingest_ts() {
         let q = KqlQueryBuilder::build(
             "SigninLogs",
             None,
@@ -389,7 +406,9 @@ mod tests {
         );
         assert_eq!(
             q,
-            "SigninLogs | where TimeGenerated > ago(7d) | order by TimeGenerated asc | take 5000"
+            "SigninLogs | extend _ingest_ts = coalesce(ingestion_time(), TimeGenerated) \
+             | where TimeGenerated > ago(7d) \
+             | order by _ingest_ts asc | take 5000"
         );
     }
 
@@ -404,12 +423,12 @@ mod tests {
             Some("where TimeGenerated > ago(7d)"),
         );
         assert!(
-            q.contains("datetime(2024-01-15T14:30:00Z)"),
-            "watermark must win over time_window: {q}"
+            q.contains("_ingest_ts > datetime(2024-01-15T14:30:00Z)"),
+            "watermark must win: {q}"
         );
         assert!(
             !q.contains("ago(7d)"),
-            "time_window leaked through despite watermark: {q}"
+            "time_window leaked despite watermark: {q}"
         );
     }
 
