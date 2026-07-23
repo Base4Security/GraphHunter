@@ -2634,6 +2634,10 @@ impl GraphHunter {
         let mut new_relations = 0usize;
         let ds: Option<Arc<str>> = dataset_id.map(|s| Arc::from(s.as_str()));
         let ds_tag = self.intern_dataset_tag(ds.as_deref());
+        // Stamp every edge from this call with the same receive-time —
+        // computed once, outside the per-edge loop (this is a mass
+        // ingest, not a per-event wall-clock sample).
+        let ingested_at_delta = encode_ingested_at(now_seconds());
 
         for (mut src, rel, mut dst) in triples {
             if let Some(ref id) = ds {
@@ -2682,7 +2686,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
-                ingested_at_delta: 0,
+                ingested_at_delta,
             };
 
             // Always insert relation
@@ -3003,6 +3007,8 @@ impl GraphHunter {
         let mut new_relations = 0usize;
         let ds: Option<Arc<str>> = dataset_id.map(|s| Arc::from(s.as_str()));
         let ds_tag = self.intern_dataset_tag(ds.as_deref());
+        // Same receive-time for every edge in this chunked ingest call.
+        let ingested_at_delta = encode_ingested_at(now_seconds());
 
         for (i, (mut src, rel, mut dst)) in triples.into_iter().enumerate() {
             if let Some(ref id) = ds {
@@ -3048,7 +3054,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
-                ingested_at_delta: 0,
+                ingested_at_delta,
             };
 
             // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
@@ -3132,6 +3138,8 @@ impl GraphHunter {
         let mut new_relations = 0usize;
         let ds: Option<Arc<str>> = dataset_id.map(Arc::from);
         let ds_tag = self.intern_dataset_tag(dataset_id);
+        // Same receive-time for every edge in this batch insert.
+        let ingested_at_delta = encode_ingested_at(now_seconds());
 
         for (mut src, rel, mut dst) in triples {
             if let Some(ref id) = ds {
@@ -3177,7 +3185,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
-                ingested_at_delta: 0,
+                ingested_at_delta,
             };
 
             // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
@@ -3206,6 +3214,8 @@ impl GraphHunter {
         let mut new_relations = 0usize;
         let ds: Option<Arc<str>> = dataset_id.map(Arc::from);
         let ds_tag = self.intern_dataset_tag(dataset_id);
+        // Same receive-time for every edge in this batch insert.
+        let ingested_at_delta = encode_ingested_at(now_seconds());
 
         for ev in events {
             let crate::parser::RawIngestEvent {
@@ -3267,7 +3277,7 @@ impl GraphHunter {
                 timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
-                ingested_at_delta: 0,
+                ingested_at_delta,
             };
 
             // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
@@ -3469,7 +3479,13 @@ impl GraphHunter {
             compact.source_sid = src_sid;
             snapshot.push(compact);
         });
-        let mut groups: HashMap<(String, String, String), Vec<Relation>> = HashMap::new();
+        // `Relation` (the materialized domain struct) has no
+        // `ingested_at` field, so the compaction rebuild carries each
+        // edge's original `ingested_at_delta` alongside it in a
+        // parallel `u32` rather than losing it in the Relation
+        // round-trip. Compaction observes/reorganizes existing edges —
+        // it must never invent a new receive-time for them.
+        let mut groups: HashMap<(String, String, String), Vec<(Relation, u32)>> = HashMap::new();
         for compact in &snapshot {
             edges_before += 1;
             let rel = self.materialize_relation(compact);
@@ -3478,22 +3494,29 @@ impl GraphHunter {
                 rel.dest_id.clone(),
                 format!("{}", rel.rel_type),
             );
-            groups.entry(key).or_default().push(rel);
+            groups
+                .entry(key)
+                .or_default()
+                .push((rel, compact.ingested_at_delta));
         }
 
-        let mut summary_edges: Vec<Relation> = Vec::new();
-        let mut keep_edges: Vec<Relation> = Vec::new();
+        let mut summary_edges: Vec<(Relation, u32)> = Vec::new();
+        let mut keep_edges: Vec<(Relation, u32)> = Vec::new();
 
         for ((_src, _dst, _rt), edges) in &groups {
-            let all_old = edges.iter().all(|e| e.timestamp < cutoff);
+            let all_old = edges.iter().all(|(e, _)| e.timestamp < cutoff);
             if all_old && edges.len() > 1 {
-                let earliest = edges.iter().map(|e| e.timestamp).min().unwrap();
-                let latest = edges.iter().map(|e| e.timestamp).max().unwrap();
+                let earliest = edges.iter().map(|(e, _)| e.timestamp).min().unwrap();
+                let latest = edges.iter().map(|(e, _)| e.timestamp).max().unwrap();
                 let count = edges.len();
                 edges_removed += count - 1;
                 groups_compacted += 1;
 
-                let mut summary = edges[0].clone();
+                // Preserve edges[0]'s ingested_at_delta for the summary
+                // edge, mirroring how its other non-timestamp fields
+                // (metadata, dataset) already come from edges[0].
+                let (first_rel, first_delta) = &edges[0];
+                let mut summary = first_rel.clone();
                 summary.timestamp = earliest;
                 summary
                     .metadata
@@ -3501,7 +3524,7 @@ impl GraphHunter {
                 summary
                     .metadata
                     .insert("compacted_latest".to_string(), latest.to_string());
-                summary_edges.push(summary);
+                summary_edges.push((summary, *first_delta));
             } else {
                 keep_edges.extend(edges.iter().cloned());
             }
@@ -3512,8 +3535,9 @@ impl GraphHunter {
         self.reverse_adj.clear();
         self.meta_store = MetadataStore::new();
 
-        let all_edges: Vec<Relation> = keep_edges.into_iter().chain(summary_edges).collect();
-        for rel in all_edges {
+        let all_edges: Vec<(Relation, u32)> =
+            keep_edges.into_iter().chain(summary_edges).collect();
+        for (rel, ingested_at_delta) in all_edges {
             let src_sid = self.interner.intern(&rel.source_id);
             let dst_sid = self.interner.intern(&rel.dest_id);
             let meta_offset = self.append_edge_metadata(&rel.rel_type, &rel.metadata);
@@ -3525,7 +3549,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
-                ingested_at_delta: 0,
+                ingested_at_delta,
             };
             // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
             self.push_to_streaming(&compact)?;

@@ -25,8 +25,22 @@
 //!   from `timestamp` for legacy edges).
 //! * Spill v1 → v2 migrator CLI.
 
+use graph_hunter_core::parser::RawIngestEvent;
 use graph_hunter_core::relation::{INGEST_EPOCH_BASE, encode_ingested_at};
 use graph_hunter_core::{Entity, EntityType, GraphHunter, GraphRead, Relation, RelationType};
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Current wall-clock time in epoch seconds, computed independently of the
+/// crate's private `graph::now_seconds` helper (this is an external
+/// integration test, so it can't reach that private fn — and shouldn't need
+/// to: any correct implementation must agree with the system clock).
+fn now_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before UNIX_EPOCH")
+        .as_secs() as i64
+}
 
 #[test]
 fn add_relation_stamps_ingested_at_with_wallclock() {
@@ -165,4 +179,104 @@ fn encode_helper_matches_expected_delta() {
     let ten_days_after_epoch = INGEST_EPOCH_BASE + 10 * 24 * 3600;
     let delta = encode_ingested_at(ten_days_after_epoch);
     assert_eq!(delta, 10 * 24 * 3600);
+}
+
+#[test]
+fn ingested_edges_carry_a_real_receive_time_not_the_epoch_base() {
+    // This pins the Task 1 fix: mass-ingest paths (insert_raw_events,
+    // insert_triples, ingest_logs_with_policy, ingest_logs_chunked) used to
+    // hardcode `ingested_at_delta: 0`, so every mass-ingested edge read back
+    // as INGEST_EPOCH_BASE regardless of when it was actually received.
+    let mut g = GraphHunter::new();
+
+    let event = RawIngestEvent {
+        src_id: "alice".to_string(),
+        src_type: EntityType::User,
+        src_metadata: HashMap::new(),
+        dst_id: "web-01".to_string(),
+        dst_type: EntityType::Host,
+        dst_metadata: HashMap::new(),
+        rel_type: RelationType::Auth,
+        rel_metadata: HashMap::new(),
+        // Event time is in the past — must not be confused with ingest time.
+        timestamp: 1_700_000_000,
+        raw_line: None,
+    };
+
+    let before = now_seconds();
+    g.insert_raw_events(vec![event], None)
+        .expect("insert_raw_events should succeed");
+    let after = now_seconds();
+
+    let edges = g.get_compact_relations("alice");
+    assert_eq!(edges.len(), 1);
+    let ts = edges[0].ingested_at();
+
+    assert!(
+        ts >= before && ts <= after,
+        "ingested_at should be ~now, got {ts} (before={before}, after={after}, base={INGEST_EPOCH_BASE})"
+    );
+    assert!(
+        ts > INGEST_EPOCH_BASE,
+        "ingested_at {ts} must not be the hardcoded-0 epoch base {INGEST_EPOCH_BASE}"
+    );
+}
+
+#[test]
+fn compact_before_preserves_ingested_at_delta_not_reset() {
+    // compact_before rebuilds edges from the existing ones (grouping,
+    // possibly summarizing multiple edges into one). It must carry the
+    // original ingested_at_delta forward — never reset it to 0 (the old,
+    // now-fixed hardcoded-0 bug) and never re-stamp it to "now" (which
+    // would erase the true receive time on every compaction).
+    let mut g = GraphHunter::new();
+    g.add_entity(Entity::new("alice", EntityType::User))
+        .unwrap();
+    g.add_entity(Entity::new("web-01", EntityType::Host))
+        .unwrap();
+
+    // Two edges between the same pair, both with event timestamps well
+    // before the cutoff below, so compact_before groups and summarizes
+    // them into a single edge (the `all_old && edges.len() > 1` path).
+    g.add_relation(Relation::new(
+        "alice".to_string(),
+        "web-01".to_string(),
+        RelationType::Auth,
+        100,
+    ))
+    .unwrap();
+    g.add_relation(Relation::new(
+        "alice".to_string(),
+        "web-01".to_string(),
+        RelationType::Auth,
+        200,
+    ))
+    .unwrap();
+
+    let before_edges = g.get_compact_relations("alice");
+    assert_eq!(before_edges.len(), 2);
+    let expected_delta = before_edges[0].ingested_at_delta;
+    assert_ne!(
+        expected_delta, 0,
+        "precondition: add_relation must stamp a real (non-zero) delta"
+    );
+
+    let stats = g
+        .compact_before(1_000)
+        .expect("compact_before should succeed");
+    assert_eq!(
+        stats.groups_compacted, 1,
+        "the two same-pair edges should be summarized into one group"
+    );
+
+    let after_edges = g.get_compact_relations("alice");
+    assert_eq!(
+        after_edges.len(),
+        1,
+        "the two edges should have been compacted into a single summary edge"
+    );
+    assert_eq!(
+        after_edges[0].ingested_at_delta, expected_delta,
+        "compaction must preserve the original ingested_at_delta, not reset it to 0"
+    );
 }
