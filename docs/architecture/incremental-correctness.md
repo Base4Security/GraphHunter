@@ -712,3 +712,56 @@ HYPOTHESIS_REQUIRES).
   **sí** sería rebuild-reproducible; threadearlo por
   `envelope_to_delta → GraphDelta → insert_raw_events` es trabajo futuro para
   reproducibilidad plena.
+
+## 11. Canal `provenance_stability` cerrado — `loss_reconstruction` Sufficient (hito)
+
+El witness (`mapping_edit`): editar un mapping **después** de ingestar no debe
+cambiar retroactivamente la procedencia exportada de una arista ya ingestada.
+
+**El defecto real (que el whole-phase review atrapó — mi reframe inicial estaba
+equivocado):** existía un sitio de mutación post-ingesta —
+`promote_field_config_to_latest_dataset` (`agentic_review.rs`) sobreescribe el
+`field_config` de un dataset ya ingestado tras una aprobación de agentic-review.
+Y el export derivaba la procedencia del `field_config` **mutable** → editar el
+mapping contaminaba las aristas viejas. (La "labeled inference" S4 del assessment
+viejo tenía razón en este punto; asumirla stale habría sido un flip deshonesto.)
+
+**El cierre honesto:**
+1. **`DatasetInfo.mapping_hash`** — identidad de mapping **congelada** por-dataset
+   en ingesta (FieldConfig → `cfg:sha256(serde_json(FieldConfig))`; builtin →
+   `builtin:{parser}`), **separada** del `field_config` mutable.
+2. El export deriva la procedencia **solo** de `mapping_hash`/`parser`
+   congelados — **nunca** del `field_config` mutable ni de ningún mapping
+   actual/global.
+3. `promote` sigue tocando `field_config` (para UI/replay) pero **no** el
+   `mapping_hash` → la mutación ya no contamina.
+4. **Test del witness real:** ingesta configA → export → muta `field_config` a
+   configB (exactamente como promote) → re-export → las aristas viejas
+   **mantienen** el hash de configA. Rojo contra el código pre-fix, verde ahora.
+5. Todos los paths **live** (ingest_siem, sentinel_connect, run_kql, graph_build)
+   + los ingestores de streaming (EVTX/PCAP/Zeek/Suricata/NetFlow) ahora congelan
+   una identidad `builtin:{parser}` real (antes el inútil `builtin:unknown`).
+
+**Límites honestos (en la nota del canal):** la identidad builtin es
+code-versioned (no un content-hash de un artefacto editable); sesiones legacy sin
+los campos → `builtin:unknown` (fallback serde-default); ingestores binarios
+no-EVTX ignoran un FieldConfig explícito (combo sin sentido → labeling inexacto,
+witness sigue cerrado); `mapping_hash`/`parser` persisten en el header JSON de la
+sesión y sobreviven save/reload.
+
+### 🎯 HITO: todas las familias SOT Sufficient
+
+Con `provenance_stability` → `full`, **`loss_reconstruction` es ahora
+`Sufficient`** (blind_channels vacío). Estado del audit:
+
+| Familia | Estado |
+|---|---|
+| `exhaustiveness_marking` | ✅ Sufficient |
+| `loss_reconstruction` | ✅ **Sufficient** (era la última transversal ciega) |
+| 30/30 catálogo ATT&CK | ✅ Sufficient |
+
+**Todas las transversales y las 30 hipótesis del catálogo son Sufficient** — el
+estado Suficiente completo para las familias declaradas, con los límites
+disclosed que la nota de cada canal arrastra (flag-gating de journal/coverage,
+receive-clock de ingestion_time, identidad builtin code-versioned). No se afirma
+más que eso.
