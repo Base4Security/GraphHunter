@@ -58,6 +58,7 @@ fn fresh_api_with_dataset(name: &str) -> (GraphHunterApi, String) {
             relation_count: 0,
             field_config: None,
             ingest_stats: None,
+            parser: None,
         });
     }
     (api, dataset_id)

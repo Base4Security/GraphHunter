@@ -67,6 +67,16 @@ pub struct DatasetInfo {
     /// "unknown" rather than "zero".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingest_stats: Option<ParseStats>,
+    /// Resolved parser/format name frozen at ingest time for datasets
+    /// *without* a `field_config` (e.g. `"sysmon"`, `"fortigate"`,
+    /// `"sentinel"`, `"configurable"`). Lets export stamp a real
+    /// `builtin:{parser}` provenance identity instead of falling back to
+    /// `builtin:unknown`. `None` for legacy sessions written before this
+    /// field existed, or ingest paths not yet wired to populate it — export
+    /// falls back to `"unknown"` in that case (same as before this field
+    /// existed, never a crash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parser: Option<String>,
 }
 
 /// Serializable session file format for disk persistence. Holds the

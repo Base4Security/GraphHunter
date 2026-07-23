@@ -152,6 +152,7 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
+                parser: None,
             });
         }
 
@@ -469,6 +470,7 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
+                parser: None,
             });
         }
 
@@ -777,6 +779,7 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
+                parser: None,
             });
         }
 

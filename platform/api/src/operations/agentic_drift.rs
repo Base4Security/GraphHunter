@@ -574,6 +574,7 @@ mod tests {
                 relation_count: 0,
                 field_config: Some(cfg()),
                 ingest_stats: None,
+                parser: None,
             });
         }
         // Seed two triples (alice->cmd, bob->whoami) tagged to ds.

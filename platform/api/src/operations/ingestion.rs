@@ -488,6 +488,16 @@ impl GraphHunterApi {
                 // instead of the empty default.
                 field_config: auto_config.clone(),
                 ingest_stats: None,
+                // Frozen at ingest, mirrors `journaled_parser_name` below:
+                // "configurable" when the auto-built config drove the parse,
+                // else the resolved format name. Known now (before parsing
+                // even runs) since `auto_config.is_some()` already decided
+                // which parser will be used.
+                parser: Some(if auto_config.is_some() {
+                    "configurable".to_string()
+                } else {
+                    resolved_format.clone()
+                }),
             });
         }
         let resume_phase = resume_phase_after_finalize(session.phase());
@@ -773,6 +783,11 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
+                // `make_parser_for_format("sentinel")` below is hardcoded
+                // regardless of `source` (see the comment at that call) —
+                // "sentinel" is the real frozen parser identity for both
+                // the Sentinel and Elastic branches of this op today.
+                parser: Some("sentinel".to_string()),
             });
         }
 
@@ -955,6 +970,9 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: Some(req.config.clone()),
                 ingest_stats: None,
+                // Unused by export's provenance identity when `field_config`
+                // is `Some` (always true on this path) — left unset.
+                parser: None,
             });
         }
 
@@ -1156,6 +1174,10 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: req.config.clone(),
                 ingest_stats: None,
+                // The resolved format isn't known yet at this point (only
+                // determined in the background task below, from a content
+                // peek); patched in once that happens.
+                parser: None,
             });
         }
 
@@ -1394,11 +1416,16 @@ impl GraphHunterApi {
 
                 // Persist the effective config into DatasetInfo so the UI's
                 // "Schema used" panel reflects what was actually applied.
-                if let Some(cfg) = &auto_config {
-                    if let Ok(mut datasets) = bg_session.datasets.write() {
-                        if let Some(ds) = datasets.iter_mut().find(|d| d.id == bg_dataset_id) {
+                // Also freeze the resolved parser/format name now that it's
+                // known (it wasn't yet at the synchronous push above) —
+                // export's builtin-parser provenance identity reads this
+                // for datasets that end up with no `field_config`.
+                if let Ok(mut datasets) = bg_session.datasets.write() {
+                    if let Some(ds) = datasets.iter_mut().find(|d| d.id == bg_dataset_id) {
+                        if let Some(cfg) = &auto_config {
                             ds.field_config = Some(cfg.clone());
                         }
+                        ds.parser = Some(resolved.clone());
                     }
                 }
 

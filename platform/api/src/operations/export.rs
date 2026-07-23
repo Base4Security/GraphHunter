@@ -198,22 +198,39 @@ impl GraphHunterApi {
             .min(MAX_PAGE_SIZE);
         let offset = req.offset.unwrap_or(0);
 
-        // Build a per-dataset mapping_hash table from FieldConfig before
-        // touching the graph. Datasets without a FieldConfig stay on the
-        // builtin-parser path; datasets with one get a real
-        // `vrl-v{N}:{sha256(vrl_source)}` stamp.
+        // Build a frozen per-dataset provenance-identity table before
+        // touching the graph, derived entirely from `DatasetInfo` — the
+        // record captured at ingest time — never from a "current"/global
+        // mapping. This is what makes the exported `mapping_hash` stable:
+        // editing a mapping after ingest cannot retroactively change an
+        // already-ingested edge's provenance, because export never
+        // consults anything but the frozen `DatasetInfo` for the dataset
+        // the edge was tagged with at ingest.
+        //
+        // Datasets with a `field_config` get `cfg:sha256(serde_json(cfg))`
+        // (see `ProvenanceCtx::for_configurable`) — hashed directly from
+        // the frozen config, not from any downstream VRL/compiler
+        // representation of it. Datasets without one fall back to the
+        // `builtin:{parser}` identity using the parser/format resolved and
+        // frozen on `DatasetInfo` at ingest (`"unknown"` for datasets
+        // ingested before that field existed).
         let session = self.resolve_session(req.session.as_ref())?;
-        let vrl_by_dataset: HashMap<String, graph_hunter_vrl::VrlProgram> = {
+        let identity_by_dataset: HashMap<String, ProvenanceCtx> = {
             let infos = session
                 .datasets
                 .read()
                 .map_err(|e| ApiError::Internal(format!("session datasets lock poisoned: {e}")))?;
             infos
                 .iter()
-                .filter_map(|d| {
-                    d.field_config
-                        .as_ref()
-                        .map(|cfg| (d.id.clone(), graph_hunter_vrl::field_config_to_vrl(cfg)))
+                .map(|d| {
+                    let ctx = match &d.field_config {
+                        Some(cfg) => ProvenanceCtx::for_configurable(cfg, d.id.clone(), &[]),
+                        None => {
+                            let parser = d.parser.as_deref().unwrap_or("unknown");
+                            ProvenanceCtx::for_builtin_parser(parser, d.id.clone(), &[])
+                        }
+                    };
+                    (d.id.clone(), ctx)
                 })
                 .collect()
         };
@@ -267,7 +284,7 @@ impl GraphHunterApi {
                     skipped += 1;
                     continue;
                 }
-                let prov = provenance_for_relation(relation, &dataset_filter, &vrl_by_dataset);
+                let prov = provenance_for_relation(relation, &dataset_filter, &identity_by_dataset);
                 let event = triple_to_ocsf(source, relation, dest, &prov);
                 let value = serde_json::to_value(&event)
                     .map_err(|e| ApiError::Internal(format!("ocsf serialize: {e}")))?;
@@ -370,32 +387,33 @@ impl GraphHunterApi {
 
 /// Builds a Provenance Extension context for a relation at export time.
 /// The raw event bytes are not retained after ingest, so `raw_event_sha256`
-/// is empty until M5 wires in cold-store lookup. `parser_name` is best-
-/// effort: we read it from relation metadata if the ingestion path
-/// stamped it, otherwise fall back to `"unknown"`.
+/// is empty until M5 wires in cold-store lookup.
+///
+/// The identity always comes from `identity_by_dataset` — the FROZEN
+/// per-dataset table built from `DatasetInfo` before this function is ever
+/// called (see the caller in `export_ocsf`) — never from the relation's
+/// own metadata. That's the frozen-mapping-identity contract: a relation
+/// only carries its `dataset_id` tag; the mapping identity for that
+/// dataset is looked up, not recomputed from anything relation-local.
+///
+/// The `relation.metadata["parser_name"]` fallback below only fires for
+/// relations whose `dataset_id` doesn't resolve to any tracked
+/// `DatasetInfo` at all (e.g. hand-built test fixtures that never
+/// registered a dataset) — a pre-existing, narrower legacy path kept so
+/// those callers still get a best-effort non-empty `parser_name` instead
+/// of a hard error.
 fn provenance_for_relation(
     relation: &graph_hunter_core::relation::Relation,
     dataset_override: &Option<String>,
-    vrl_by_dataset: &HashMap<String, graph_hunter_vrl::VrlProgram>,
+    identity_by_dataset: &HashMap<String, ProvenanceCtx>,
 ) -> ProvenanceCtx {
     let dataset_id = dataset_override
         .clone()
         .or_else(|| relation.dataset_id.as_deref().map(|s| s.to_string()))
         .unwrap_or_else(|| "unknown".to_string());
 
-    // If the dataset that produced this relation has a FieldConfig, the
-    // VRL compiler has already given us a stable mapping_hash — stamp
-    // it. Otherwise fall back to the legacy builtin-parser identity so
-    // hand-written parsers still emit a non-empty hash.
-    if let Some(program) = vrl_by_dataset.get(&dataset_id) {
-        return ProvenanceCtx::for_vrl(
-            program.provenance_id(),
-            program.mapping_version,
-            program.source.as_bytes(),
-            dataset_id,
-            &[],
-            1.0,
-        );
+    if let Some(ctx) = identity_by_dataset.get(&dataset_id) {
+        return ctx.clone();
     }
 
     let parser_name = relation

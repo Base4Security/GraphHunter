@@ -4,6 +4,7 @@
 //! program, or agentic draft — carries this context so the forensic
 //! question "what raw log produced this node?" has a deterministic answer.
 
+use graph_hunter_core::FieldConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -22,10 +23,13 @@ pub struct ProvenanceCtx {
     pub mapping_id: String,
     /// Monotonically-increasing version of that mapping.
     pub mapping_version: u32,
-    /// Content hash of the mapping artefact. `sha256(vrl_source)` for VRL
-    /// programs; `sha256(serde_json(FieldConfig))` for declarative configs;
-    /// constant `"builtin:<parser>"` tag for hand-written parsers where no
-    /// source artefact exists.
+    /// Content hash of the mapping artefact: bare `sha256(vrl_source)` for
+    /// VRL programs; `"cfg:" + sha256(serde_json(FieldConfig))` for
+    /// declarative field-mapping configs — hashed directly from the frozen
+    /// `FieldConfig` recorded on the dataset at ingest time, independent of
+    /// any VRL/compiler representation of it, so the identity survives a
+    /// change to the VRL generator; constant `"builtin:<parser>"` tag for
+    /// hand-written parsers where no source artefact exists.
     pub mapping_hash: String,
     /// Name of the parser family that produced the triple. One of the
     /// seven shipping names or `"vrl"` / `"configurable"`.
@@ -70,6 +74,38 @@ impl ProvenanceCtx {
             mapping_version: 1,
             mapping_hash,
             parser_name,
+            confidence: 1.0,
+            raw_event_sha256: hash_or_empty(raw_event),
+            upstream_ids: Vec::new(),
+        }
+    }
+
+    /// Construct a provenance context for a declarative field-mapping
+    /// config. The mapping hash is `"cfg:" + sha256(serde_json(field_config))`
+    /// — hashed directly from the frozen config, not from any downstream
+    /// VRL/compiler representation of it. This is what makes the identity
+    /// *frozen*: editing the session's current mapping after ingest cannot
+    /// retroactively change an already-ingested edge's provenance, because
+    /// the hash is derived from the `FieldConfig` recorded on the dataset at
+    /// ingest time, not from whatever mapping is active "now".
+    ///
+    /// `serde_json::to_vec` is used (not a `Debug`/`Hash` derive) because
+    /// `FieldConfig` is Vec-only (no `HashMap`), so its JSON serialization
+    /// is already deterministic and stable across process runs.
+    pub fn for_configurable(
+        field_config: &FieldConfig,
+        dataset_id: impl Into<String>,
+        raw_event: &[u8],
+    ) -> Self {
+        let bytes = serde_json::to_vec(field_config).unwrap_or_default();
+        let mapping_hash = format!("cfg:{}", sha256_hex(&bytes));
+        Self {
+            schema_version: Self::SCHEMA_TAG.to_string(),
+            source_dataset_id: dataset_id.into(),
+            mapping_id: mapping_hash.clone(),
+            mapping_version: 1,
+            mapping_hash,
+            parser_name: "configurable".to_string(),
             confidence: 1.0,
             raw_event_sha256: hash_or_empty(raw_event),
             upstream_ids: Vec::new(),
@@ -159,5 +195,45 @@ mod tests {
         let b = ProvenanceCtx::for_vrl("map-1", 1, src, "ds1", b"{}", 0.9);
         assert_eq!(a.mapping_hash, b.mapping_hash);
         assert_ne!(a.mapping_hash, "builtin:vrl");
+    }
+
+    fn mapping(raw_name: &str, entity_type: &str) -> FieldConfig {
+        use graph_hunter_core::{FieldMapping, FieldRole};
+        FieldConfig {
+            mappings: vec![FieldMapping {
+                raw_name: raw_name.to_string(),
+                role: FieldRole::Node,
+                entity_type: Some(entity_type.to_string()),
+                timestamp_format: None,
+                locale: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn configurable_ctx_hashes_field_config_directly() {
+        let cfg = mapping("User", "User");
+        let a = ProvenanceCtx::for_configurable(&cfg, "ds1", b"{}");
+        let b = ProvenanceCtx::for_configurable(&cfg, "ds1", b"{}");
+        assert_eq!(a.mapping_hash, b.mapping_hash, "same config -> same hash");
+        assert!(
+            a.mapping_hash.starts_with("cfg:"),
+            "got: {}",
+            a.mapping_hash
+        );
+        assert_eq!(a.mapping_hash.len(), "cfg:".len() + 64);
+        assert_eq!(a.parser_name, "configurable");
+    }
+
+    #[test]
+    fn configurable_ctx_distinguishes_different_configs() {
+        let cfg_a = mapping("User", "User");
+        let cfg_b = mapping("User", "Process");
+        let a = ProvenanceCtx::for_configurable(&cfg_a, "ds1", b"{}");
+        let b = ProvenanceCtx::for_configurable(&cfg_b, "ds1", b"{}");
+        assert_ne!(
+            a.mapping_hash, b.mapping_hash,
+            "different FieldConfig must yield different mapping_hash"
+        );
     }
 }
