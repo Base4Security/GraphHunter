@@ -16,9 +16,28 @@ use graph_hunter_core::parser::RawIngestEvent;
 use graph_hunter_core::{EntityType, RelationType};
 
 const JOURNAL_FILE: &str = "journal.jsonl";
+/// The single retained rotated segment. Older than this is pruned: retention
+/// is `.1` + the active file, never `.2` — see `journal_max_bytes`.
+const JOURNAL_ROTATED_FILE: &str = "journal.jsonl.1";
+const DEFAULT_JOURNAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Cap (in bytes) on the ACTIVE journal segment before `append` rotates it out
+/// to `journal.jsonl.1`, read from `GRAPHHUNTER_JOURNAL_MAX_BYTES` (default
+/// 256 MiB). Bounds total on-disk journal size to ~2x this value (active +
+/// one rotated segment) so the append-only journal can be safely enabled by
+/// default without unbounded disk growth. A missing or unparseable value
+/// falls back to the default defensively — this must never panic or block
+/// ingestion on a malformed env var.
+fn journal_max_bytes() -> u64 {
+    std::env::var("GRAPHHUNTER_JOURNAL_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_JOURNAL_MAX_BYTES)
+}
 
 pub struct JournalStore {
     path: PathBuf,
+    rotated_path: PathBuf,
 }
 
 impl JournalStore {
@@ -27,11 +46,39 @@ impl JournalStore {
     pub fn open(dir: impl AsRef<Path>) -> std::io::Result<Self> {
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir)?;
-        Ok(JournalStore { path: dir.join(JOURNAL_FILE) })
+        Ok(JournalStore {
+            path: dir.join(JOURNAL_FILE),
+            rotated_path: dir.join(JOURNAL_ROTATED_FILE),
+        })
+    }
+
+    /// Rotate the active file out to the single retained rotated segment,
+    /// pruning whatever `.1` held before (retention: active + one rotated
+    /// segment, never a `.2`). `remove_file` then `rename` (rather than
+    /// relying on rename-replaces-target, which Windows doesn't support for
+    /// `std::fs::rename`) still keeps the journal crash-safe: at every point
+    /// either the old `.1` still exists, or it's gone and the FULL prior
+    /// active file has already landed at `.1` via the atomic rename — a crash
+    /// between the two steps never loses data, it only leaves `.1` briefly
+    /// absent while the about-to-be-rotated data is still intact in the
+    /// active file. The active file is NEVER deleted except via this rename.
+    fn rotate(&self) -> std::io::Result<()> {
+        let _ = std::fs::remove_file(&self.rotated_path);
+        std::fs::rename(&self.path, &self.rotated_path)?;
+        Ok(())
     }
 
     /// Append one envelope as a JSONL line. Append-only: never rewrites.
+    /// Rotates the active file out to `journal.jsonl.1` FIRST if it has
+    /// already reached the size cap (`journal_max_bytes`), so the new line
+    /// always starts (or continues) a fresh, under-cap active file and is
+    /// never lost — the full prior contents move intact to `.1`.
     pub fn append(&self, env: &CanonicalEnvelope) -> std::io::Result<()> {
+        if let Ok(meta) = std::fs::metadata(&self.path) {
+            if meta.len() >= journal_max_bytes() {
+                self.rotate()?;
+            }
+        }
         let mut line = serde_json::to_vec(env)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         line.push(b'\n');
@@ -40,12 +87,14 @@ impl JournalStore {
         Ok(())
     }
 
-    /// Read every record in append order. Missing file → empty.
-    pub fn read_all(&self) -> std::io::Result<Vec<CanonicalEnvelope>> {
-        if !self.path.exists() {
+    /// Read every JSONL record from one segment file in append order.
+    /// Missing file → empty. Shared by `read_all` across the rotated +
+    /// active segments.
+    fn read_segment(path: &Path) -> std::io::Result<Vec<CanonicalEnvelope>> {
+        if !path.exists() {
             return Ok(Vec::new());
         }
-        let f = File::open(&self.path)?;
+        let f = File::open(path)?;
         let mut out = Vec::new();
         for line in BufReader::new(f).lines() {
             let line = line?;
@@ -59,14 +108,30 @@ impl JournalStore {
         Ok(out)
     }
 
-    pub fn count(&self) -> std::io::Result<usize> {
-        if !self.path.exists() {
+    /// Read every record in append order, spanning segments when a rotation
+    /// has happened: the rotated segment (`journal.jsonl.1`, older records)
+    /// FIRST, then the active file (`journal.jsonl`, newer records), so the
+    /// result is chronological. With no rotation (the common, under-cap
+    /// case) this is byte-identical to reading the active file alone.
+    pub fn read_all(&self) -> std::io::Result<Vec<CanonicalEnvelope>> {
+        let mut out = Self::read_segment(&self.rotated_path)?;
+        out.extend(Self::read_segment(&self.path)?);
+        Ok(out)
+    }
+
+    fn count_segment(path: &Path) -> std::io::Result<usize> {
+        if !path.exists() {
             return Ok(0);
         }
-        let f = File::open(&self.path)?;
+        let f = File::open(path)?;
         Ok(BufReader::new(f).lines().filter(|l| {
             l.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false)
         }).count())
+    }
+
+    /// Count spans the rotated segment + active file, same as `read_all`.
+    pub fn count(&self) -> std::io::Result<usize> {
+        Ok(Self::count_segment(&self.rotated_path)? + Self::count_segment(&self.path)?)
     }
 }
 
@@ -1005,6 +1070,11 @@ mod tests {
 
     #[test]
     fn append_then_read_all_preserves_order_and_content() {
+        // Guards against GRAPHHUNTER_JOURNAL_MAX_BYTES races with the
+        // rotation/retention tests below, which mutate that env var: see
+        // their doc comments for why every append-using test must serialize
+        // on ENV_LOCK now that append() reads a process-global cap.
+        let _guard = lock_env();
         let dir = tempfile::tempdir().unwrap();
         let j = JournalStore::open(dir.path()).unwrap();
         j.append(&env("row-a", 1, 10)).unwrap();
@@ -1020,6 +1090,8 @@ mod tests {
 
     #[test]
     fn a_reopened_journal_reads_prior_records() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let dir = tempfile::tempdir().unwrap();
         {
             let j = JournalStore::open(dir.path()).unwrap();
@@ -1038,6 +1110,61 @@ mod tests {
         let j = JournalStore::open(dir.path()).unwrap();
         assert_eq!(j.read_all().unwrap().len(), 0);
         assert_eq!(j.count().unwrap(), 0);
+    }
+
+    // ── rotation / retention ────────────────────────────────────────
+
+    /// The tiny cap used by the rotation/retention tests below. A single
+    /// journaled `CanonicalEnvelope` (via the `env(...)` helper) serializes
+    /// to ~535-540 bytes here — it carries a full `ProvenanceCtx` with two
+    /// 64-hex-char SHA-256 digests (`canonical_hash`, `raw_event_sha256`)
+    /// plus schema/mapping metadata — so a cap anywhere near the brief's
+    /// illustrative "300" would be smaller than ONE record and force a
+    /// rotation on every single append, which (given retention keeps only
+    /// the active file + one `.1`) would destroy all but the newest 2
+    /// records regardless of how many appends preceded them. 6000 bytes is
+    /// ~11 records per segment: large enough that `journal_rotates_at_cap_..`
+    /// below (20 appends) hits exactly ONE rotation, comfortably before a
+    /// second one would start pruning; `journal_retention_bounds_..` (200
+    /// appends) still exercises many rotations and proves the 2-segment cap
+    /// holds over the long run.
+    const TEST_JOURNAL_CAP: &str = "6000";
+
+    #[test]
+    fn journal_rotates_at_cap_and_read_all_spans_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        // Force a tiny cap for the test (env), so a few appends trigger rotation.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("GRAPHHUNTER_JOURNAL_MAX_BYTES", TEST_JOURNAL_CAP); }
+        let j = JournalStore::open(dir.path()).unwrap();
+        for i in 0..20 { j.append(&env(&format!("row-{i}"), i, i*10)).unwrap(); }
+        unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL_MAX_BYTES"); }
+        // A rotated segment exists AND read_all returns ALL 20 in order (spans .1 + active).
+        assert!(dir.path().join("journal.jsonl.1").exists(), "expected a rotated segment");
+        let all = j.read_all().unwrap();
+        assert_eq!(all.len(), 20, "read_all must span the rotated segment + active file");
+        assert_eq!(all[0].raw_payload, "row-0");
+        assert_eq!(all[19].raw_payload, "row-19");
+        assert_eq!(j.count().unwrap(), 20);
+    }
+
+    #[test]
+    fn journal_retention_bounds_disk_to_two_segments() {
+        // With a tiny cap and many appends, only the active file + one .1
+        // exist (older data pruned) — total on-disk stays ~2x cap, not
+        // unbounded.
+        let dir = tempfile::tempdir().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("GRAPHHUNTER_JOURNAL_MAX_BYTES", TEST_JOURNAL_CAP); }
+        let j = JournalStore::open(dir.path()).unwrap();
+        for i in 0..200 { j.append(&env(&format!("r{i}"), i, i)).unwrap(); }
+        unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL_MAX_BYTES"); }
+        // No .2 / older segments — retention keeps only active + .1.
+        assert!(!dir.path().join("journal.jsonl.2").exists());
+        let bytes: u64 = std::fs::read_dir(dir.path()).unwrap()
+            .filter_map(|e| e.ok()).map(|e| e.metadata().unwrap().len()).sum();
+        let cap: u64 = TEST_JOURNAL_CAP.parse().unwrap();
+        assert!(bytes < cap * 3, "journal disk must stay bounded (~2x cap), got {bytes}");
     }
 
     // ── journal_enabled ─────────────────────────────────────────────
@@ -1131,6 +1258,8 @@ mod tests {
 
     #[test]
     fn unmapped_field_is_reconstructable_from_journal() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         // An inserted event whose raw_line carries a field the triple omits.
         let mut ev = sample_event(100);
         ev.src_metadata.clear(); // triple carries no such field
@@ -1156,6 +1285,8 @@ mod tests {
 
     #[test]
     fn journal_batch_writes_one_insert_per_event_plus_one_skipped_per_sample() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let dir = tempfile::tempdir().unwrap();
         let store = JournalStore::open(dir.path()).unwrap();
         let events = vec![sample_event(100), sample_event(200)];
@@ -1199,6 +1330,8 @@ mod tests {
 
     #[test]
     fn journal_batch_is_a_noop_write_with_empty_inputs() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let dir = tempfile::tempdir().unwrap();
         let store = JournalStore::open(dir.path()).unwrap();
         journal_batch(&store, "ds-1", "file", "ds-1", "generic", &[], &[], 1).unwrap();
@@ -1209,6 +1342,8 @@ mod tests {
 
     #[test]
     fn rebuild_separates_inserted_from_skipped_and_counts_all() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let dir = tempfile::tempdir().unwrap();
         let j = JournalStore::open(dir.path()).unwrap();
         j.append(&env("ins-1", 1, 10)).unwrap();
@@ -1536,6 +1671,8 @@ mod tests {
 
     #[test]
     fn rebuild_from_journal_matches_live_after_idempotent_apply() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         use graph_hunter_core::graph::GraphHunter;
         let dir = tempfile::tempdir().unwrap();
         let store = JournalStore::open(dir.path()).unwrap();
@@ -1597,6 +1734,8 @@ mod tests {
     /// `NOT-COMPARABLE` marker for the honesty dimensions.
     #[test]
     fn report_marks_uncomparable_dimensions_and_renders_readably() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let (live, store, _dir) = build_live_graph_and_its_journal();
         let report = check_incremental_equivalence(&live, &store).unwrap();
 
@@ -1639,6 +1778,8 @@ mod tests {
     /// trustworthy reference — the guard exists precisely to flag that.
     #[test]
     fn journal_with_correction_envelope_marks_rebuild_unfaithful() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         use graph_hunter_canonical::ChangeKind;
         let (live, store, _dir) = build_live_graph_and_its_journal();
 
@@ -1705,6 +1846,8 @@ mod tests {
 
     #[test]
     fn rich_compare_identical_graphs_match_all_structural_dimensions() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let (live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         let report = compare_observable_equality(&live, &rebuilt, DEFAULT_HYPOTHESIS_BATTERY);
         assert!(matches!(report.entities, DimensionResult::Match), "entities: {:?}", report.entities);
@@ -1740,6 +1883,8 @@ mod tests {
     /// dedicated test below (`rich_compare_catches_entity_metadata_divergence`).
     #[test]
     fn rich_compare_catches_injected_edge_divergence() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         // Mutate the LIVE graph after the fact so it diverges from the
         // rebuild: one extra edge the journal never recorded. Both endpoints
@@ -1769,6 +1914,8 @@ mod tests {
     /// conflated with an `entity_metadata` divergence.
     #[test]
     fn rich_compare_catches_entity_only_in_live() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         live.add_entity(graph_hunter_core::Entity::new(
             "orphan-entity",
@@ -1792,6 +1939,8 @@ mod tests {
     /// `Match`, since both sides still agree on which ids exist.
     #[test]
     fn rich_compare_catches_entity_metadata_divergence() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         // "1.2.3.4" exists on both sides (sample_event's src, type IP).
         // Flip its type on the live side only — a genuine type divergence,
@@ -1822,6 +1971,8 @@ mod tests {
     /// changing the entity dimensions.
     #[test]
     fn rich_compare_catches_temporal_window_divergence() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         // Both endpoints already exist in `live` (see
         // rich_compare_catches_injected_edge_divergence); the journaled
@@ -1854,6 +2005,8 @@ mod tests {
     /// dimension's actual detail message.
     #[test]
     fn display_renders_diff_dimension_with_its_detail() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         live.add_relation(graph_hunter_core::Relation::new(
             "1.2.3.4",
@@ -1882,6 +2035,8 @@ mod tests {
 
     #[test]
     fn rich_compare_hypothesis_results_match_across_incremental_and_rebuild() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let (live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         // The plan doc's illustrative battery ("User -[Auth]-> Host",
         // "Host -[Execute]-> Process") uses entity/relation types that do
@@ -1903,6 +2058,8 @@ mod tests {
     /// edge instances between the same vertex pair.
     #[test]
     fn rich_compare_hypothesis_results_catches_divergent_rebuild() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         live.add_entity(graph_hunter_core::Entity::new(
             "host-2",
@@ -1949,6 +2106,8 @@ mod tests {
     /// both graphs.
     #[test]
     fn rich_compare_hypothesis_results_inert_battery_is_not_comparable() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let (live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         let battery = ["Process -[Execute]-> Process"];
         let report = compare_hypothesis_results(&live, &rebuilt, &battery);
@@ -1969,6 +2128,8 @@ mod tests {
     /// agreement.
     #[test]
     fn rich_compare_hypothesis_results_surfaces_unparseable_battery_entries() {
+        // See append_then_read_all_preserves_order_and_content's guard comment.
+        let _guard = lock_env();
         let (live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         let battery = ["not a valid dsl string"];
         let report = compare_hypothesis_results(&live, &rebuilt, &battery);
