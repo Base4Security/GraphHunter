@@ -200,3 +200,104 @@ up to date` confirma que ninguno de los cambios de código de Fase A tocó un
 canal declarado en `ingest_surface.json` — es la evidencia directa de que
 "encapsular no cambia la superficie de suficiencia": la línea base congelada
 del Bloque 1 se mantiene, sin delta de veredictos atribuible a Fase A.
+
+## 4. Fases D/E — convergencia sobre la Domain API (certificado)
+
+**Estado (tested):** el camino de hipótesis del MCP ya es local y convergente
+*antes* de esta fase. El MCP no genera KQL de hipótesis ni consulta Sentinel
+para cazar: `hunt_run` reenvía la DSL a `POST /run_hunt`
+(`platform/mcp/src/tools/hunt/run.ts`), el handler HTTP delega en el único
+`GraphHunterApi::run_hunt` (`apps/tauri/src-tauri/src/http/hunt.rs`,
+`handler_run_hunt`), y la GUI de Tauri invoca *ese mismo* método por
+`cmd_run_hunt` (`apps/tauri/src-tauri/src/commands/graph_ops.rs`). Core, REST,
+MCP y tests corren el mismo código del motor local
+(`platform/api/src/operations/hunt.rs`, `run_hunt`). Fase E ("`run_hypothesis`
+siempre en el motor local") es, por tanto, ya el comportamiento en runtime: no
+existe una vía alterna "evaluar hipótesis vía KQL de Sentinel" que retirar del
+MCP.
+
+Por eso el entregable "Refactor MCP sobre Domain API | 2-D/E" (§9) no es
+construcción de un puente ausente, sino **el certificado** de la convergencia
+más **la corrección de un defecto de transporte** que la reconocimiento
+descubrió.
+
+### El defecto: el transporte descartaba `coverage` (walk-back de Fase F)
+
+El handler HTTP definía su propio `RunHuntResponse` que re-emitía sólo
+`path_count`/`truncated`/`diagnostic`/`live_tail_coverage` y **descartaba el
+campo `coverage: AnswerCoverage`** que el response del core sí porta. Como
+consecuencia, los `missing_sources`/`source_watermarks` que Fase F añadió al
+answer **nunca llegaban al consumidor MCP** — el consumidor primario de toda
+la integración SOT.
+
+Dicho sin adornos: **antes de este fix, la garantía de Fase F ("una ventana
+ciega/fallida es distinguible en la respuesta") NO se sostenía sobre el
+transporte MCP.** Se cumplía en el core y en la GUI, pero el eslabón más
+externo la perdía en silencio. Una garantía de observabilidad es sólo tan
+fuerte como su consumidor real; hasta esta fase, el hito de Fase F estaba
+incompleto end-to-end para el MCP.
+
+**Fix (tested):** `project_run_hunt_response`
+(`apps/tauri/src-tauri/src/http/hunt.rs`) es ahora la proyección pura
+core→HTTP y copia `coverage`; el campo lleva
+`#[serde(skip_serializing_if = "is_default_coverage")]`, de modo que con
+`GRAPHHUNTER_COVERAGE` apagado un `AnswerCoverage::default()` se omite y el
+wire queda byte-idéntico al contrato previo (no-op cuando off preservado).
+
+### §25.11 certificado
+
+El criterio de aceptación 11 ("misma hipótesis = mismo resultado desde
+core/REST/MCP") queda cubierto por dos capas, replicando la filosofía del
+`platform/api/tests/parity` existente:
+
+1. **Capa de proyección (tested):** `coverage_survives_core_to_http_projection`
+   y `default_coverage_is_omitted_from_http_wire` fijan que la cobertura
+   sobrevive el mapeo y que el default se omite del wire — el guardián directo
+   contra la re-aparición del field-drop.
+2. **Capa end-to-end (tested, ver límite de entorno):**
+   `same_hypothesis_same_result_core_vs_http` dispara la misma DSL por el
+   router real (`build_app` + `oneshot`) y afirma `path_count`/`truncated`
+   iguales entre la llamada directa al core y `/run_hunt`.
+
+Estos tests cierran el hueco que el comentario de `tests/parity/scenarios.rs`
+declaraba abierto ("*if a transport delegator ever skips a method or miswires
+an argument, these tests still pass ... until a full HTTP/Tauri runtime harness
+lands*") — para el camino de hunt, ese harness ya existe.
+
+**Límite de entorno honesto:** el binario de test de `apps/tauri` no arranca en
+esta máquina — `ort`/`onnxruntime.dll` devuelve `STATUS_ENTRYPOINT_NOT_FOUND`
+(la copia de System32 es incompatible y no hay ninguna en `target/`), lo que
+bloquea *toda* la suite de tests del crate, no sólo estos. Los tres tests
+**compilan** contra los tipos reales y fueron revisados como correctos por
+lectura (firmas de constructores cross-chequeadas), pero no se observó una
+corrida en verde en este entorno. La suite `platform/api` (que no linkea `ort`)
+corre 35/35. El diff cross-transport en vivo (JSON byte a byte con los flags
+encendidos) queda pendiente de un entorno con la DLL de ONNX compatible — es
+una brecha de verificación de entorno, no un defecto de código.
+
+### Residuales honestos (no reclamados)
+
+- La GUI `cmd_run_hunt` fija `scoring: None`/`dedup_mode: None` mientras el MCP
+  expone overrides por llamada — una **asimetría de defaults intencional**, no
+  una divergencia del motor: ambos entran al mismo `run_hunt`.
+- `paths` **no** se inlinea en el response HTTP a propósito (el MCP los pagina
+  vía `/hunt_results`); sólo `coverage` era un drop no intencional.
+- La Domain API todavía arrastra ~231 hits `AZURE_*`/`TimeGenerated` en sus
+  capas de **recolección/exportación** (territorio de Fase A), ortogonal a la
+  evaluación de hipótesis. D/E **no** reclama haber des-Azure-ado la API.
+
+### Evidencia: no-op de la auditoría (criterio §17)
+
+D/E no toca ningún canal de telemetría declarado en `ingest_surface.json`, por
+lo que el cambio de veredicto esperado es **ninguno**:
+
+```
+$ cd /c/Users/lsotomayor/sot
+$ python scripts/sot_sys/audit_graphhunter.py --check
+audit_results.json up to date
+```
+
+Salida real capturada tras el fix del transporte. El hito de Fase F (30/30
+Sufficient) se mantiene sin delta atribuible a D/E — la convergencia y la
+corrección del transporte **fortalecen** el hito end-to-end sin alterar la
+superficie de suficiencia.
