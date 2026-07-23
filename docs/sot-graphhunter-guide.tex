@@ -1,0 +1,567 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish,es-noshorthands]{babel}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,backgrounds,calc}
+\usepackage{booktabs}
+\usepackage{tcolorbox}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage[hidelinks]{hyperref}
+
+% ---- Colors ----
+\definecolor{ghblue}{HTML}{1F4E79}
+\definecolor{ghteal}{HTML}{2C7A7B}
+\definecolor{ghgray}{HTML}{4A5568}
+\definecolor{ghlight}{HTML}{EBF4FF}
+\definecolor{ghgreen}{HTML}{22803B}
+\definecolor{ghred}{HTML}{9B2C2C}
+\definecolor{ghamber}{HTML}{B7791F}
+\definecolor{codebg}{HTML}{F5F7FA}
+
+% ---- Section styling ----
+\titleformat{\section}{\color{ghblue}\Large\bfseries}{\thesection.}{0.6em}{}
+\titleformat{\subsection}{\color{ghteal}\large\bfseries}{\thesubsection}{0.6em}{}
+
+% ---- Header/footer ----
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{ghgray}SOT en GraphHunter}
+\fancyhead[R]{\small\color{ghgray}Teoría del Observador Suficiente}
+\fancyfoot[C]{\small\color{ghgray}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ---- Listings ----
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{ghgray!40},
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  xleftmargin=6pt,xrightmargin=6pt,
+  aboveskip=8pt,belowskip=8pt,
+}
+
+% ---- Boxes ----
+\newtcolorbox{ideabox}[1][]{colback=ghlight,colframe=ghblue,
+  fonttitle=\bfseries,title={#1},boxrule=0.8pt,arc=2pt,left=6pt,right=6pt,top=4pt,bottom=4pt}
+\newtcolorbox{keybox}[1][]{colback=ghgreen!8,colframe=ghgreen,
+  fonttitle=\bfseries,title={#1},boxrule=0.8pt,arc=2pt,left=6pt,right=6pt,top=4pt,bottom=4pt}
+\newtcolorbox{warnbox}[1][]{colback=ghamber!10,colframe=ghamber,
+  fonttitle=\bfseries,title={#1},boxrule=0.8pt,arc=2pt,left=6pt,right=6pt,top=4pt,bottom=4pt}
+
+\newcommand{\term}[1]{\textcolor{ghblue}{\textbf{#1}}}
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+% ---- Title ----
+\title{\vspace{-1.5cm}
+  {\color{ghblue}\Huge\bfseries Teoría del Observador Suficiente\\[2mm]
+  \Large en GraphHunter}\\[4mm]
+  {\color{ghgray}\large Cómo un cazador de amenazas sabe cuándo \emph{puede confiar} en lo que ve\\
+  \normalsize Guía didáctica, paso a paso}}
+\author{\color{ghgray}Documentación de arquitectura --- GraphHunter}
+\date{\color{ghgray}\today}
+
+\begin{document}
+\maketitle
+\thispagestyle{fancy}
+
+\begin{abstract}
+\noindent Este documento explica, de forma didáctica y paso a paso, cómo la
+\emph{Teoría del Observador Suficiente} (SOT, por \emph{Sufficient Observer
+Theory}) organiza la ingesta y la caza de amenazas en GraphHunter. La idea
+central es simple pero poderosa: antes de responder ``¿hay un ataque?'', un
+observador honesto debe poder responder ``¿tengo suficiente información para
+que mi respuesta sea confiable, o hay algo que no puedo ver?''. Recorreremos
+qué es un observador, qué significa que sea \emph{suficiente}, qué es un
+\emph{testigo de ceguera}, cómo está construida la tubería de datos de
+GraphHunter, y seguiremos un evento real desde la fuente hasta la respuesta de
+una hipótesis de caza.
+\end{abstract}
+
+\tableofcontents
+\vspace{4mm}
+
+% ======================================================================
+\section{El problema: ver no es lo mismo que saber}
+
+Imaginá un analista de seguridad frente a una consola. Escribe una hipótesis
+de caza --- por ejemplo, \emph{``¿algún usuario se autenticó en un host y luego
+ese host se comunicó con una IP externa sospechosa?''} --- y el sistema
+responde: \textbf{``0 resultados''}.
+
+\begin{ideabox}[La pregunta incómoda]
+¿``0 resultados'' significa \emph{``no pasó''}, o significa \emph{``pasó, pero
+no lo vi''}? Estas dos situaciones son operacionalmente idénticas para un
+sistema ingenuo --- y peligrosamente distintas para el analista.
+\end{ideabox}
+
+Un firewall pudo haberse caído durante la ventana. Un log pudo llegar tarde y
+quedar fuera del cursor de ingesta. Una tabla de Sentinel pudo dar timeout.
+En todos esos casos, un sistema que solo dice ``0 resultados'' está
+\textbf{mintiendo por omisión}: presenta datos incompletos como si fueran
+exhaustivos.
+
+SOT ataca exactamente este problema. No busca que el sistema \emph{nunca} sea
+ciego --- eso es imposible en el mundo real --- sino que el sistema
+\textbf{sepa cuándo es ciego} y lo \textbf{declare honestamente} en su
+respuesta.
+
+% ======================================================================
+\section{Vocabulario SOT en cinco ideas}
+
+SOT modela un sistema de observación con cinco elementos. Los presentamos con
+su nombre formal y su traducción al mundo de GraphHunter.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{@{}p{1.4cm}p{3.6cm}p{9.4cm}@{}}
+\toprule
+\textbf{Símbolo} & \textbf{Nombre} & \textbf{En GraphHunter} \\
+\midrule
+$X$ & Mundo real (estados) & Lo que \emph{realmente} pasó en la red: logins, conexiones, procesos. \\
+$S$ & Señal / observación & Lo que las fuentes (Sentinel, Sysmon, FortiGate\ldots) \emph{reportan}. \\
+$B$ & Familia de comportamientos & El catálogo de hipótesis de caza (30 patrones ATT\&CK) que queremos poder distinguir. \\
+$C$ & Contextos & Condiciones bajo las que observamos: llegada tardía, caída de fuente, edición de mapping\ldots \\
+$R$ & Respuesta del observador & La respuesta del \code{run\_hunt}: los caminos encontrados \emph{más} los metadatos de cobertura. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keybox}[Definición de suficiencia]
+Un observador es \term{suficiente} para una familia $B$ de comportamientos si,
+a partir de lo que observa ($S$), puede \textbf{distinguir} cuál
+comportamiento de $B$ ocurrió --- \emph{en todos los contextos $C$ declarados}.
+Si existe algún contexto donde dos comportamientos distintos producen la
+\emph{misma observación}, el observador es \textbf{insuficiente}, y esa
+coincidencia se llama un \textbf{testigo de ceguera}.
+\end{keybox}
+
+\subsection{El testigo de ceguera, el corazón de SOT}
+
+Un \term{testigo} (witness) es una prueba concreta de que el observador no
+puede distinguir dos historias que \emph{deberían} distinguirse. Se describe
+con tres piezas:
+
+\begin{center}
+\begin{tikzpicture}[node distance=3mm,every node/.style={font=\small}]
+  \node[draw=ghblue,fill=ghlight,rounded corners,text width=4.3cm,align=center,minimum height=1.5cm] (l) {\textbf{Historia izquierda}\\ el evento llega \emph{tarde}};
+  \node[draw=ghblue,fill=ghlight,rounded corners,text width=4.3cm,align=center,minimum height=1.5cm,right=1.6cm of l] (r) {\textbf{Historia derecha}\\ el evento llega \emph{puntual}};
+  \node[draw=ghred,fill=ghred!8,rounded corners,text width=4.6cm,align=center,minimum height=1.5cm,below=1.1cm of $(l)!0.5!(r)$] (o) {\textbf{\code{same\_observed}}\\ la arista exportada es \emph{idéntica}};
+  \draw[-{Latex[length=2mm]},ghgray] (l.south) -- (o.north west);
+  \draw[-{Latex[length=2mm]},ghgray] (r.south) -- (o.north east);
+  \node[right=0.5cm of o,text width=4.6cm,align=left,ghred] {\footnotesize $\Rightarrow$ el observador \textbf{no} puede razonar sobre llegada tardía: \term{testigo}.};
+\end{tikzpicture}
+\end{center}
+
+Cerrar un testigo significa hacer que \code{same\_observed} \textbf{deje de ser
+verdad}: cambiar el sistema para que las dos historias produzcan respuestas
+distinguibles. Como veremos, GraphHunter cierra cada testigo con una pieza
+concreta de código y lo \emph{prueba} con un test.
+
+% ======================================================================
+\section{La arquitectura: una tubería que preserva la evidencia}
+
+El principio de diseño de GraphHunter es \textbf{``KQL no computa el grafo''}:
+las fuentes (como Microsoft Sentinel) solo entregan \emph{eventos crudos}; toda
+la correlación y la caza ocurren localmente, en un grafo de procedencia. Esto
+desacopla al observador de la fuente y le da control total sobre la
+suficiencia.
+
+\begin{center}
+\begin{tikzpicture}[
+    node distance=6mm and 9mm,
+    box/.style={draw=ghblue,fill=ghlight,rounded corners,text width=2.35cm,align=center,minimum height=1.15cm,font=\footnotesize\bfseries},
+    every path/.style={-{Latex[length=2.4mm]},ghteal,thick}
+  ]
+  \node[box] (src) {Source\\Connector};
+  \node[box,right=of src] (jr) {Raw Event\\Journal};
+  \node[box,right=of jr] (nm) {Normalizer};
+  \node[box,right=of nm] (gd) {Graph\\Delta};
+  \node[box,below=of gd] (rt) {Incremental\\Graph Runtime};
+  \node[box,left=of rt] (api) {Domain\\API};
+  \node[box,left=of api] (mcp) {MCP\\/\,GUI};
+
+  \draw (src) -- (jr);
+  \draw (jr) -- (nm);
+  \draw (nm) -- (gd);
+  \draw (gd) -- (rt);
+  \draw (rt) -- (api);
+  \draw (api) -- (mcp);
+
+  \node[below=1mm of src,text width=2.35cm,align=center,font=\scriptsize,ghgray] {KQL solo para \emph{traer} filas};
+  \node[below=1mm of jr,text width=2.35cm,align=center,font=\scriptsize,ghgray] {append-only, rotado};
+  \node[below=1mm of nm,text width=2.35cm,align=center,font=\scriptsize,ghgray] {sobre canónico};
+  \node[above=1mm of gd,text width=2.35cm,align=center,font=\scriptsize,ghgray] {idempotente};
+  \node[right=1mm of rt,text width=2.0cm,align=left,font=\scriptsize,ghgray] {el grafo local};
+  \node[below=1mm of api,text width=2.35cm,align=center,font=\scriptsize,ghgray] {\code{run\_hunt} vive acá};
+  \node[below=1mm of mcp,text width=2.35cm,align=center,font=\scriptsize,ghgray] {caza 100\% local};
+\end{tikzpicture}
+\end{center}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{3.1cm}p{11.3cm}@{}}
+\toprule
+\textbf{Etapa} & \textbf{Qué hace y qué garantía de SOT aporta} \\
+\midrule
+\term{Source Connector} & Trae bytes crudos de la fuente. El KQL es una ``bomba de extracción'', nunca lógica de hipótesis. Registra cobertura por-fuente (si una tabla falla, se marca ciega). \\
+\term{Raw Event Journal} & Log append-only de cada evento tal como llegó, con rotación por tamaño para no llenar el disco. Permite \emph{reconstruir} el grafo desde cero (base de confianza). \\
+\term{Normalizer} & Convierte cada evento en un \emph{sobre canónico}: id de fuente, tiempo de evento \emph{y de ingesta}, procedencia, hash, payload crudo. Sin tipos de Azure en el núcleo. \\
+\term{GraphDelta} & Contrato de cambios \emph{idempotente}: re-ingestar el mismo evento no duplica aristas. Clave: dedup por \emph{huella canónica}, nunca por timestamp. \\
+\term{Incremental Runtime} & Aplica los deltas al grafo en memoria. Garantía verificada: \emph{incremental $=$ rebuild} (aplicar deltas da el mismo grafo que reconstruir desde el journal). \\
+\term{Domain API} & Expone \code{run\_hunt} y demás operaciones, agnóstico al transporte. GUI, REST y MCP invocan \emph{el mismo} código local. \\
+\term{MCP / GUI} & El consumidor. Recibe los caminos encontrados \textbf{y} los metadatos de cobertura, para nunca confundir ``ciego'' con ``vacío''. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ======================================================================
+\section{Paso a paso: la vida de un evento}
+
+Sigamos un único evento --- un login de Windows --- desde que ocurre hasta que
+un analista caza sobre él. Este es el recorrido que hace real a SOT.
+
+\begin{enumerate}[leftmargin=*,itemsep=6pt]
+  \item[\textbf{Paso 0.}] \term{Ocurre el hecho.} A las 14:30, la usuaria
+  \code{alice} se autentica en \code{WORKSTATION-01}. Microsoft Sentinel lo
+  registra como un \code{SecurityEvent} con \code{EventID 4624}. Este es el
+  estado del mundo real, $X$.
+
+  \item[\textbf{Paso 1.}] \term{Extracción cruda.} El Source Connector polea
+  Sentinel con una query \emph{ligera}, sin joins ni agregaciones:
+\begin{lstlisting}
+SecurityEvent
+| extend _ingest_ts = coalesce(ingestion_time(), TimeGenerated)
+| where _ingest_ts > datetime(<ultimo watermark>)
+| order by _ingest_ts asc | take 10000
+\end{lstlisting}
+  \begin{warnbox}[Por qué \code{ingestion\_time()} y no \code{TimeGenerated}]
+  El tiempo del \emph{evento} (\code{TimeGenerated}) puede llegar ``hacia
+  atrás'': un log tardío entra al workspace con un timestamp anterior al
+  cursor y se perdería para siempre. El tiempo de \emph{ingesta} solo crece,
+  así que el cursor \code{> watermark} nunca se saltea una llegada tardía.
+  \end{warnbox}
+
+  \item[\textbf{Paso 2.}] \term{Sobre canónico + journal.} El evento se envuelve
+  en un \code{CanonicalEnvelope} que congela: el tiempo de evento
+  \emph{y} el de ingesta, la procedencia (qué mapping lo produjo), y un hash
+  canónico determinístico. Se escribe al journal append-only.
+
+  \item[\textbf{Paso 3.}] \term{GraphDelta idempotente.} El normalizador emite
+  un delta con clave \code{event\_id} $=$ \code{canonical\_hash} $=$
+  \code{sha256(payload $\|$ mapping\_hash)}. Si el conector se cae y re-polea
+  la misma fila, el delta tiene la \emph{misma} clave $\Rightarrow$ el runtime
+  lo reconoce como ya aplicado y \textbf{no duplica la arista}.
+
+  \item[\textbf{Paso 4.}] \term{Aplicación al grafo.} El runtime inserta la
+  arista \code{User(alice) --[Auth]--> Host(WORKSTATION-01)}. La arista lleva:
+  su tiempo de evento (para ordenar), su tiempo de \emph{ingesta}
+  (\code{ingested\_at}, para razonar sobre llegada tardía), y su
+  \code{mapping\_hash} \emph{congelado} (para procedencia estable).
+
+  \item[\textbf{Paso 5.}] \term{Fusión multi-fuente.} Otro evento --- una
+  conexión de FortiGate desde \code{WORKSTATION-01} a \code{10.0.0.42} ---
+  entra por el mismo camino. Como comparte el nodo \code{Host}, las dos fuentes
+  se \textbf{fusionan en un solo grafo conectado}. Sentinel es solo una fuente
+  más.
+
+  \item[\textbf{Paso 6.}] \term{La caza, 100\% local.} El analista lanza la
+  hipótesis \code{User -[Auth]-> Host -[Connect]-> IP}. El \code{run\_hunt}
+  \emph{traversa el grafo local} --- sin volver a la nube, sin KQL --- y
+  encuentra el camino \code{alice} $\to$ \code{WORKSTATION-01} $\to$
+  \code{10.0.0.42}.
+
+  \item[\textbf{Paso 7.}] \term{La respuesta honesta.} La respuesta no es solo
+  ``1 camino''. Incluye un objeto \code{AnswerCoverage}:
+\begin{lstlisting}
+AnswerCoverage {
+  possibly_incomplete: false,
+  coverage_start: 1705328880, coverage_end: 1705329060,
+  missing_sources: []
+}
+\end{lstlisting}
+  Si en cambio el conector de FortiGate hubiera fallado en esa ventana, la
+  \emph{misma} caza devolvería el mismo camino \textbf{pero} con
+  \code{missing\_sources: ["fortigate:edge-fw"]} y
+  \code{possibly\_incomplete: true}. \emph{Ahí} está la diferencia entre
+  ``no lo vi'' y ``no pasó''.
+\end{enumerate}
+
+% ======================================================================
+\section{Los canales: en qué dimensiones puede fallar el observador}
+
+SOT descompone la suficiencia en \term{canales de telemetría}: dimensiones
+independientes en las que la observación puede ser fiel o ciega. Cada hipótesis
+de caza declara qué canales necesita. GraphHunter tiene 11 canales; siete son
+requeridos por las hipótesis del catálogo, y todos están hoy en \textbf{full}.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{3.6cm}p{10.8cm}@{}}
+\toprule
+\textbf{Canal} & \textbf{Pregunta que responde} \\
+\midrule
+\code{entity\_identity} & ¿Dos menciones de ``alice'' son la misma entidad? \\
+\code{edge\_multiplicity} & ¿Cuántas veces ocurrió realmente esta relación? (dedup sin perder multiplicidad) \\
+\code{event\_time} & ¿Cuándo ocurrió el evento? \\
+\code{ingestion\_time} & ¿Cuándo lo \emph{recibimos}? (para razonar sobre llegada tardía) \\
+\code{field\_survival} & ¿Sobrevive la fila cruda para reconstruir campos no mapeados? \\
+\code{row\_completeness} & ¿Registramos qué filas se descartaron por malformadas? \\
+\code{ingest\_completeness} & ¿Sabemos si la ingesta se cortó a mitad (memoria crítica)? \\
+\code{source\_coverage} & ¿Sabemos si una fuente quedó ciega en la ventana? \\
+\code{skip\_diagnostics} & ¿Guardamos muestras de lo que se saltó? \\
+\code{completeness\_flag} & ¿La respuesta puede decir ``posiblemente incompleta''? \\
+\code{provenance\_stability} & ¿Editar un mapping después de ingestar contamina la procedencia vieja? \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{ideabox}[Preguntas transversales]
+Además de las 30 hipótesis del catálogo, hay preguntas \emph{transversales} que
+combinan canales. La más exigente es \code{loss\_reconstruction}
+(``¿podemos reconstruir qué se perdió y por qué?''), que requiere
+\code{completeness\_flag}, \code{ingestion\_time}, \code{provenance\_stability}
+y \code{skip\_diagnostics}. Con los cuatro en \textbf{full}, esta transversal
+es \term{Suficiente}.
+\end{ideabox}
+
+% ======================================================================
+\section{La auditoría: cómo se \emph{mide} la suficiencia}
+
+La suficiencia no se afirma, se \textbf{audita}. Un runner (que vive en un
+repositorio separado, para preservar la cultura de resultados congelados)
+evalúa cada hipótesis contra el modelo de canales declarado y emite un
+veredicto:
+
+\begin{center}
+\begin{tikzpicture}[node distance=4mm,every node/.style={font=\small}]
+  \node[draw=ghgreen,fill=ghgreen!8,rounded corners,text width=4.6cm,align=center,minimum height=1.3cm] (suf) {\textbf{Sufficient}\\ conjunto ciego \emph{vacío}: la respuesta es confiable};
+  \node[draw=ghred,fill=ghred!8,rounded corners,text width=6.2cm,align=center,minimum height=1.3cm,right=1.4cm of suf] (ins) {\textbf{InsufficientWithWitness}\\ hay un canal ciego $\Rightarrow$ se adjunta el testigo concreto};
+\end{tikzpicture}
+\end{center}
+
+El veredicto es puramente mecánico: una hipótesis es \emph{Suficiente} si y
+solo si su \emph{conjunto ciego} --- los canales requeridos que no están en
+\code{full} --- es vacío. Esto hace que cerrar un canal a \code{full}
+\textbf{propague} suficiencia de forma verificable y honesta.
+
+\begin{keybox}[Disciplina de claims (tabla de honestidad)]
+Cada afirmación de garantía en la documentación lleva una etiqueta:
+\emph{proved / tested / implemented / read-verified / proposed}. Un canal se
+declara \code{full} solo con evidencia \code{file:line} concreta \emph{y} con
+sus límites declarados. Ejemplos de límites que GraphHunter declara sin
+maquillar: el reloj de ingesta es el de \emph{recepción} de GraphHunter (no el
+del origen); la identidad de un parser builtin es \emph{code-versioned}; la
+ventana del journal es reciente-only.
+\end{keybox}
+
+% ======================================================================
+\section{Dos cierres de canal, en detalle}
+
+Para hacer tangible cómo se cierra un testigo, veamos dos casos reales.
+
+\subsection{\texttt{ingestion\_time}: de ``ciego'' a ``full''}
+
+\textbf{El testigo:} la arista guardaba \code{ingested\_at\_delta = 0}
+hardcodeado, así que un evento tardío y uno puntual producían la
+\emph{misma} arista --- \code{same\_observed}.
+
+\textbf{El cierre:} (1) los sitios de ingesta ahora estampan
+\code{encode\_ingested\_at(now())}; (2) el valor se \emph{preserva} en la
+compactación; (3) se \emph{lee de vuelta} en la arista materializada. Ahora un
+evento tardío estampa un \code{ingested\_at} estrictamente posterior
+$\Rightarrow$ el testigo se rompe. Verificado por un test que ingesta un
+evento y verifica que su \code{ingested\_at} $\approx$ ahora, no la época base.
+
+\subsection{\texttt{provenance\_stability}: el testigo que casi se nos escapa}
+
+\textbf{El testigo:} editar un mapping después de ingestar no debe cambiar la
+procedencia de aristas viejas. Un análisis inicial concluyó ``ya está cerrado''
+--- pero la revisión adversarial encontró un camino de contaminación real: una
+función que \emph{sobreescribía} el \code{field\_config} de un dataset ya
+ingestado, y el export leía ese valor \emph{mutable}.
+
+\textbf{El cierre:} se congeló la identidad del mapping
+(\code{DatasetInfo.mapping\_hash}) \emph{separada} del \code{field\_config}
+mutable; el export lee solo el valor congelado. Un test \emph{genuino} ingesta
+bajo el config A, edita a config B, re-exporta, y verifica que las aristas
+viejas mantienen el hash de A.
+
+\begin{ideabox}[La lección]
+Este caso es el espíritu de SOT en acción: la disciplina de \emph{verificar
+contra el código, no contra la nota}, y de dejar que una revisión adversarial
+cace lo que el autor pasó por alto. La honestidad no es un adorno; es el
+mecanismo.
+\end{ideabox}
+
+% ======================================================================
+\section{El certificado incremental $=$ rebuild}
+
+Hay una grieta silenciosa en toda esta historia. GraphHunter no reconstruye el
+grafo desde cero en cada ingesta --- eso sería carísimo. Aplica \emph{deltas}
+incrementales a un grafo que ya vive en memoria. Pero entonces surge una duda
+que va al corazón de la confianza:
+
+\begin{ideabox}[La pregunta de fondo]
+El camino \emph{rápido} (aplicar deltas incrementalmente) ¿produce
+\textbf{el mismo grafo} que el camino \emph{lento y confiable} (reconstruir
+todo desde el journal)? Si no lo hiciera, toda garantía de cobertura o
+suficiencia sobre el grafo vivo sería una ilusión: estaríamos razonando sobre
+un artefacto que no es fiel a la evidencia.
+\end{ideabox}
+
+\subsection{Validación por traducción: quién es la base de confianza}
+
+GraphHunter adopta aquí un patrón tomado de la verificación de compiladores
+(SOT-VM): la \term{validación por traducción}. En vez de \emph{confiar} en que
+el runtime incremental es correcto, se lo trata como un ``compilador no
+confiable'' y se \textbf{verifica su salida} contra una referencia.
+
+\begin{center}
+\begin{tikzpicture}[node distance=4mm,every node/.style={font=\small}]
+  \node[draw=ghgreen,fill=ghgreen!8,rounded corners,text width=4.3cm,align=center,minimum height=1.5cm] (ref) {\textbf{Rebuild desde el journal}\\ la \emph{referencia confiable}};
+  \node[draw=ghamber,fill=ghamber!10,rounded corners,text width=4.3cm,align=center,minimum height=1.5cm,right=2.2cm of ref] (live) {\textbf{Grafo incremental vivo}\\ el artefacto \emph{no confiable}};
+  \node[draw=ghblue,fill=ghlight,rounded corners,text width=5.2cm,align=center,minimum height=1.2cm,below=1.2cm of $(ref)!0.5!(live)$] (cmp) {\textbf{El comparador}\\ \emph{la base de confianza}};
+  \draw[-{Latex[length=2mm]},ghgray] (ref.south) -- (cmp.north west);
+  \draw[-{Latex[length=2mm]},ghgray] (live.south) -- (cmp.north east);
+\end{tikzpicture}
+\end{center}
+
+La base de confianza no es el runtime incremental (que puede tener bugs), sino
+el \textbf{comparador} más la referencia. Si el comparador dice ``iguales'',
+entonces --- para todo lo que el comparador sabe mirar --- el camino rápido es
+tan fiel como el lento.
+
+\subsection{Qué compara el comparador (y qué honestamente \emph{no})}
+
+El comparador toma una foto de ambos grafos (\code{to\_snapshot()}, resolviendo
+las identidades internas a cadenas de texto para poder compararlas entre
+grafos) y contrasta dimensión por dimensión:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{3.9cm}p{10.5cm}@{}}
+\toprule
+\textbf{Dimensión} & \textbf{Cómo se compara} \\
+\midrule
+\code{entities} & Conjunto de ids de entidades. \\
+\code{entity\_metadata} & Por id: tipo (por \emph{valor}, no por texto), metadata y \code{dataset\_id}. \\
+\code{edges\_multiset} & \emph{Multiset} de aristas \code{(src, rel, dst, ts, meta, dataset)}: la multiplicidad se atrapa por construcción; el orden no se asume. \\
+\code{temporal\_window} & El rango \code{[min, max]} de timestamps de aristas. \\
+\code{hypothesis\_results} & Una batería de hipótesis corrida en \emph{ambos} grafos; se comparan los caminos como multiset. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{keybox}[La honestidad del \texttt{NotComparable}]
+Hay dimensiones que el grafo \textbf{no observa}: la procedencia más allá del
+\code{dataset\_id}, los scores de anomalía (los produce un pase aparte), el
+timestamp MVCC de inserción (no determinístico entre live y rebuild). El
+comparador las marca \code{NotComparable} \emph{con su razón} --- nunca como
+``iguales''. Afirmar igualdad sobre una dimensión que no se puede observar es
+justamente la sobre-afirmación que SOT prohíbe. Del mismo modo, si la batería
+de hipótesis no produce ningún camino en ninguno de los dos grafos, el
+resultado es \code{NotComparable} (``silencio $\neq$ acuerdo''), no un
+\code{Match} vacío.
+\end{keybox}
+
+\subsection{El certificado sobre un dataset \emph{real}}
+
+La prueba definitiva no corre sobre datos sintéticos, sino sobre un dataset de
+intrusión \textbf{multi-fuente real} (Sysmon $+$ Sentinel $+$ FortiGate),
+ingerido por \emph{dos caminos genuinamente distintos}:
+
+\begin{center}
+\begin{tikzpicture}[node distance=5mm,every node/.style={font=\footnotesize}]
+  \node[draw=ghamber,fill=ghamber!10,rounded corners,text width=5.0cm,align=center,minimum height=1.4cm] (a) {\textbf{Camino \code{live}}\\ en memoria, incremental, en batches por-fuente $+$ un \emph{crash replay}};
+  \node[draw=ghgreen,fill=ghgreen!8,rounded corners,text width=5.0cm,align=center,minimum height=1.4cm,right=1.6cm of a] (b) {\textbf{Camino \code{rebuilt}}\\ desde cero, leyendo el journal \emph{de disco}};
+  \node[draw=ghblue,fill=ghlight,rounded corners,text width=4.6cm,align=center,below=1.0cm of $(a)!0.5!(b)$,minimum height=1.0cm] (eq) {\code{all\_comparable\_dimensions\_match()}\\ \textcolor{ghgreen}{\textbf{$=$ verdadero}}};
+  \draw[-{Latex[length=2mm]},ghgray] (a.south) -- (eq.north west);
+  \draw[-{Latex[length=2mm]},ghgray] (b.south) -- (eq.north east);
+\end{tikzpicture}
+\end{center}
+
+Es una equivalencia real \emph{memoria-vs-disco} $+$ \emph{incremental-vs-batch}
+$+$ \emph{dedup} (el crash replay re-aplica un batch y el conteo \textbf{no}
+crece). Resultado: 9 entidades / 7 relaciones, las cinco dimensiones
+comparables en \code{PASS}, y la procedencia/scores honestamente
+\code{NotComparable}.
+
+\begin{warnbox}[El control negativo: el certificado tiene dientes]
+Un certificado que siempre dice ``iguales'' no prueba nada. Por eso hay un
+\emph{control negativo}: se dropea el último registro del journal, de modo que
+la reconstrucción sea un subconjunto estricto del grafo vivo. El comparador
+entonces marca \code{DIFF} correctamente. Un certificado que pasa
+\emph{y} falla cuando debe fallar es un certificado en el que se puede confiar.
+\end{warnbox}
+
+\subsection{Un límite declarado: \texttt{rebuild\_faithful}}
+
+La reconstrucción todavía no reproduce fielmente los sobres de
+\code{Correction}/\code{Tombstone} (correcciones y borrados lógicos). Si el
+journal validado contiene alguno, el reporte marca
+\code{rebuild\_faithful: false} con un caveat --- la equivalencia \textbf{no}
+se afirma sobre un journal con correcciones. Otro ejemplo de la disciplina:
+declarar el límite en vez de maquillarlo.
+
+\begin{ideabox}[Por qué esto cierra el círculo]
+El certificado incremental $=$ rebuild es lo que hace \emph{confiables} a todas
+las garantías anteriores. La cobertura, la multiplicidad, la procedencia
+congelada --- todas se calculan sobre el grafo vivo (el camino rápido). El
+certificado prueba que ese grafo rápido es fiel a la evidencia del journal (el
+camino confiable). Sin él, SOT razonaría sobre una sombra; con él, razona sobre
+el grafo real.
+\end{ideabox}
+
+% ======================================================================
+\section{El estado final: todo Suficiente, con límites honestos}
+
+Tras cerrar los canales, el estado de la auditoría es:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{6.5cm}p{4cm}@{}}
+\toprule
+\textbf{Familia} & \textbf{Veredicto} \\
+\midrule
+30 hipótesis del catálogo ATT\&CK & \textcolor{ghgreen}{\textbf{Sufficient}} (30/30) \\
+Transversal \code{exhaustiveness\_marking} & \textcolor{ghgreen}{\textbf{Sufficient}} \\
+Transversal \code{loss\_reconstruction} & \textcolor{ghgreen}{\textbf{Sufficient}} \\
+Los 11 canales de telemetría & \textcolor{ghgreen}{\textbf{full}} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Y la maquinaria corre \textbf{por defecto} (journal acotado + dedup idempotente
++ cobertura + cobertura por-fuente), con cada flag como un escape hatch que se
+puede apagar. Lo que \emph{no} se afirma: que el repositorio sea ``Suficiente
+en todo'' de forma incondicional. Cada garantía arrastra su límite declarado
+--- y eso, precisamente, es lo que la hace confiable.
+
+\begin{keybox}[La idea para llevarse]
+SOT no le pide al observador que sea omnisciente. Le pide que sea
+\textbf{honesto sobre su ceguera}. En GraphHunter, eso se traduce en una regla
+simple: \emph{una respuesta de caza nunca presenta datos incompletos como
+exhaustivos}. Cuando el sistema no puede ver algo, lo dice --- y esa
+distinción, entre ``no pasó'' y ``no lo vi'', es lo que separa a un cazador de
+amenazas confiable de uno que solo parece confiable.
+\end{keybox}
+
+\vfill
+\begin{center}
+\small\color{ghgray}\emph{Documento generado a partir de la arquitectura de
+GraphHunter y su serie de validación SOT.}
+\end{center}
+
+\end{document}
