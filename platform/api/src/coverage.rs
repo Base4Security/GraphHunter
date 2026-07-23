@@ -190,6 +190,35 @@ impl SourceCoverage {
     }
 }
 
+/// Probe-every-call outcome recorder for `ingest_siem` (Fase F, Task 4).
+///
+/// `ingest_siem` is a one-shot on-demand pull, not a polling loop — there is
+/// no future tick that would retry a source once its breaker opens. Skipping
+/// the pull on `is_open` (as a naive breaker-consumer might) would leave that
+/// source blind *forever*: nothing ever calls `record_covered` again to
+/// close it. So this function does NOT check `is_open` and never skips —
+/// every call is treated as an attempted probe of the source:
+///   * `success == true`  -> `record_covered` (advances the watermark,
+///     resets the failure counter, closes the breaker if it was open).
+///   * `success == false` -> `record_failure` (may open the breaker) then
+///     `record_missing` (marks this window blind for the answer surface).
+/// `is_open`/`missing` remain purely a *reporting* signal surfaced on
+/// answers — recoverable on the very next successful call.
+pub fn record_siem_outcome(
+    sc: &mut SourceCoverage,
+    source_id: &str,
+    success: bool,
+    window_end_ts: i64,
+    max_failures: u32,
+) {
+    if success {
+        sc.record_covered(source_id, window_end_ts);
+    } else {
+        sc.record_failure(source_id, max_failures);
+        sc.record_missing(source_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +376,46 @@ mod tests {
         sc.record_covered("la:ws", 2000); // success resets the counter
         assert!(!sc.record_failure("la:ws", 3)); // 1 failure again, not open
         assert!(!sc.is_open("la:ws"));
+    }
+
+    // -- record_siem_outcome (ingest_siem probe-every-call wiring, Task 4) --
+
+    #[test]
+    fn record_siem_outcome_success_records_watermark_and_closes() {
+        let mut sc = SourceCoverage::new();
+        record_siem_outcome(&mut sc, "sentinel:ws1", true, 1000, 3);
+        assert!(!sc.is_open("sentinel:ws1"));
+        let (watermarks, missing) = sc.snapshot();
+        assert_eq!(watermarks.get("sentinel:ws1"), Some(&1000));
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn record_siem_outcome_opens_breaker_after_max_failures_and_marks_missing() {
+        let mut sc = SourceCoverage::new();
+        record_siem_outcome(&mut sc, "sentinel:ws1", false, 100, 3);
+        record_siem_outcome(&mut sc, "sentinel:ws1", false, 200, 3);
+        assert!(!sc.is_open("sentinel:ws1"));
+        record_siem_outcome(&mut sc, "sentinel:ws1", false, 300, 3);
+        assert!(sc.is_open("sentinel:ws1"));
+        let (_watermarks, missing) = sc.snapshot();
+        assert!(missing.contains(&"sentinel:ws1".to_string()));
+    }
+
+    #[test]
+    fn record_siem_outcome_probe_every_call_recovers_after_failures() {
+        // DESIGN CORRECTION regression test: ingest_siem is one-shot, so the
+        // breaker must NOT be a "skip while open" gate — the very next call
+        // (a probe, not a skip) has to be able to recover it via success.
+        let mut sc = SourceCoverage::new();
+        record_siem_outcome(&mut sc, "sentinel:ws1", false, 100, 3);
+        record_siem_outcome(&mut sc, "sentinel:ws1", false, 200, 3);
+        record_siem_outcome(&mut sc, "sentinel:ws1", false, 300, 3);
+        assert!(sc.is_open("sentinel:ws1"));
+        record_siem_outcome(&mut sc, "sentinel:ws1", true, 400, 3);
+        assert!(!sc.is_open("sentinel:ws1"));
+        let (watermarks, missing) = sc.snapshot();
+        assert_eq!(watermarks.get("sentinel:ws1"), Some(&400));
+        assert!(missing.is_empty());
     }
 }

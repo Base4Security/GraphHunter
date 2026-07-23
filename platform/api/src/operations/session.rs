@@ -210,6 +210,11 @@ impl GraphHunterApi {
                 ingest_coverage: std::sync::RwLock::new(
                     crate::coverage::IngestCoverage::default(),
                 ),
+                // Not persisted — same ephemeral policy as `ingest_coverage`
+                // above: a reloaded session starts with a clean breaker.
+                source_coverage: std::sync::RwLock::new(
+                    crate::coverage::SourceCoverage::default(),
+                ),
             });
             self.sessions().insert(session);
         }

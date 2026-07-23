@@ -145,6 +145,14 @@ pub struct Session {
     /// `crate::coverage::answer_coverage`) to populate
     /// `RunHuntResponse.coverage`. Monotonic — see `IngestCoverage::observe`.
     pub ingest_coverage: RwLock<crate::coverage::IngestCoverage>,
+    /// Per-source watermark + circuit breaker (Fase F, Task 3/4): tracks how
+    /// far each SIEM source (`ingest_siem`) or streaming source has been
+    /// successfully pulled, and a consecutive-failure breaker used only as a
+    /// *reporting* signal (missing_sources on answers) — never to skip a
+    /// pull, since `ingest_siem` is one-shot and has no later tick to
+    /// recover a skipped source. Ephemeral — NOT persisted in
+    /// `SessionFile`/GHS1, same policy as `ingest_coverage`.
+    pub source_coverage: RwLock<crate::coverage::SourceCoverage>,
 }
 
 /// D3 stage 3+4 — Session-level LFTJ index cache. Built lazily on
@@ -372,6 +380,7 @@ impl Session {
             proposals: RwLock::new(std::collections::HashMap::new()),
             last_build: RwLock::new(None),
             ingest_coverage: RwLock::new(crate::coverage::IngestCoverage::default()),
+            source_coverage: RwLock::new(crate::coverage::SourceCoverage::default()),
         }
     }
 

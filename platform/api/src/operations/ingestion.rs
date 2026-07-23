@@ -52,6 +52,28 @@ fn note_post_finalize_appends(session: &Session, new_relations: usize) {
     session.note_post_finalize_appends(new_relations as u64, now_secs());
 }
 
+/// Record a failed `ingest_siem` pull against the per-source breaker
+/// (GRAPHHUNTER_SOURCE_COVERAGE gated; no-op with the flag off). Called at
+/// every fetch-failure exit point (task join error and upstream query
+/// error, for both Sentinel and Elastic) so PROBE-EVERY-CALL holds: this
+/// one-shot pull never skips on `is_open` (see `record_siem_outcome`'s doc
+/// comment), it only ever attempts and records the outcome. `window_end_ts`
+/// is `now` — a failed pull has no parsed events to derive a watermark from.
+fn record_siem_failure(session: &Session, source_id: &str) {
+    if !crate::coverage::source_coverage_enabled() {
+        return;
+    }
+    if let Ok(mut sc) = session.source_coverage.write() {
+        crate::coverage::record_siem_outcome(
+            &mut sc,
+            source_id,
+            false,
+            now_secs(),
+            SIEM_BREAKER_MAX_FAILURES,
+        );
+    }
+}
+
 /// Best-effort append of a journal batch for one ingest call, shared by
 /// `load_data` and `load_data_with_config`. Resolves the on-disk journal
 /// directory as a sibling of the session data dir (`<data_dir>/GraphHunter/
@@ -130,6 +152,11 @@ const EVTX_PREVIEW_SAMPLE_SIZE: usize = 1000;
 /// on a multi-GB allocation. Line-delimited formats are unaffected — they
 /// stream in batches and never hit this branch.
 const WHOLE_FILE_PARSE_LIMIT: u64 = 512 * 1024 * 1024;
+
+/// Consecutive-failure threshold before `ingest_siem`'s per-source breaker
+/// opens (a reporting signal only — see `record_siem_outcome`'s doc comment
+/// for why a one-shot pull must never skip on `is_open`).
+const SIEM_BREAKER_MAX_FAILURES: u32 = 5;
 
 /// Rewrites a [`FieldConfig`] that was likely saved before canonical-Skip
 /// semantics were fixed. When a mapping targets a canonical field whose
@@ -615,7 +642,13 @@ impl GraphHunterApi {
                 ApiError::InvalidInput("missing param: source (sentinel | elastic)".into())
             })?;
 
-        let data = match source {
+        // Resolved up front (not after the network fetch below) so a fetch
+        // failure still has a session to record the per-source breaker
+        // failure against — PROBE-EVERY-CALL (see `record_siem_failure`):
+        // every `ingest_siem` call, success or failure, is a probe.
+        let session = self.resolve_session(req.session.as_ref())?;
+
+        let (data, source_id) = match source {
             "sentinel" => {
                 let workspace_id = req
                     .params
@@ -643,16 +676,19 @@ impl GraphHunterApi {
                     }),
                     _ => None,
                 };
+                let source_id = format!("sentinel:{workspace_id}");
                 let res = tokio::task::spawn_blocking(move || {
                     graph_hunter_siem::run_sentinel_query(&workspace_id, &query, auth)
                 })
                 .await
-                .map_err(|e| ApiError::Internal(format!("task join error: {e}")))?
+                .map_err(|e| ApiError::Internal(format!("task join error: {e}")))
+                .inspect_err(|_| record_siem_failure(&session, &source_id))?
                 .map_err(|e| ApiError::Upstream {
                     service: "sentinel".into(),
                     message: e,
-                })?;
-                res.data
+                })
+                .inspect_err(|_| record_siem_failure(&session, &source_id))?;
+                (res.data, source_id)
             }
             "elastic" => {
                 let url = req
@@ -695,16 +731,19 @@ impl GraphHunterApi {
                     }),
                     _ => None,
                 };
+                let source_id = format!("elastic:{url}");
                 let res = tokio::task::spawn_blocking(move || {
                     graph_hunter_siem::run_elastic_query(&url, &index, &query, size, None, auth)
                 })
                 .await
-                .map_err(|e| ApiError::Internal(format!("task join error: {e}")))?
+                .map_err(|e| ApiError::Internal(format!("task join error: {e}")))
+                .inspect_err(|_| record_siem_failure(&session, &source_id))?
                 .map_err(|e| ApiError::Upstream {
                     service: "elastic".into(),
                     message: e.to_string(),
-                })?;
-                res.data
+                })
+                .inspect_err(|_| record_siem_failure(&session, &source_id))?;
+                (res.data, source_id)
             }
             other => {
                 return Err(ApiError::InvalidInput(format!(
@@ -712,8 +751,6 @@ impl GraphHunterApi {
                 )));
             }
         };
-
-        let session = self.resolve_session(req.session.as_ref())?;
 
         let dataset_id = Uuid::new_v4().to_string();
         let name = match source {
@@ -742,7 +779,7 @@ impl GraphHunterApi {
         let resume_phase = resume_phase_after_finalize(session.phase());
         session.set_phase(crate::state::SessionPhase::Finalizing);
         let _phase_guard = FinalizePhaseGuard { session: Arc::clone(&session), resume: resume_phase };
-        let (new_entities, new_relations, stats) = {
+        let (new_entities, new_relations, stats, window_end_ts) = {
             let mut graph = session
                 .graph
                 .write()
@@ -750,6 +787,14 @@ impl GraphHunterApi {
             let parser = make_parser_for_format("sentinel").map_err(ApiError::InvalidInput)?;
             // RawIngestEvent path — see evtx.rs for the rationale.
             let (events, stats) = parser.parse_raw_with_stats(&data);
+            // Coverage window end: the max event timestamp this pull actually
+            // covered, or `now` when the pull returned zero events (an empty
+            // result is still a covered window, not a blind one).
+            let window_end_ts = events
+                .iter()
+                .map(|e| e.timestamp)
+                .max()
+                .unwrap_or_else(now_secs);
             // Journal step (4-5 of the 12-step order): must run BEFORE the
             // graph insert below so a crash in between is replayable. Gated
             // behind GRAPHHUNTER_JOURNAL (default off = no-op); failures only
@@ -806,8 +851,25 @@ impl GraphHunterApi {
                     .map_err(|e| ApiError::Internal(e.to_string()))?
             };
             run_full_scoring(&mut graph);
-            (e, r, stats)
+            (e, r, stats, window_end_ts)
         };
+        // The pull (and its parse/insert) reached here without error: record
+        // it as covered. PROBE-EVERY-CALL — this also recovers the breaker
+        // if prior calls had opened it (see `record_siem_outcome`'s doc
+        // comment on why a one-shot pull must never skip on `is_open`).
+        if crate::coverage::source_coverage_enabled() {
+            let mut sc = session
+                .source_coverage
+                .write()
+                .map_err(|e| ApiError::Internal(format!("source_coverage lock poisoned: {e}")))?;
+            crate::coverage::record_siem_outcome(
+                &mut sc,
+                &source_id,
+                true,
+                window_end_ts,
+                SIEM_BREAKER_MAX_FAILURES,
+            );
+        }
         // Record post-finalize appends after the write guard is dropped
         // (calling while holding the graph write lock self-deadlocks the RwLock).
         // no-ops here: phase is Finalizing at this point (the FinalizePhaseGuard has
