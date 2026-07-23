@@ -92,6 +92,104 @@ pub fn answer_coverage(
     }
 }
 
+/// GRAPHHUNTER_SOURCE_COVERAGE: track per-source watermarks + a circuit
+/// breaker for the streaming poller's session marker. Default off.
+/// Truthy-to-enable (same convention as [`coverage_enabled`]).
+pub fn source_coverage_enabled() -> bool {
+    std::env::var("GRAPHHUNTER_SOURCE_COVERAGE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Per-source coverage/breaker state tracked by [`SourceCoverage`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+struct PerSource {
+    last_covered_ts: Option<i64>,
+    consecutive_failures: u32,
+    open: bool,
+    missing: bool,
+}
+
+/// Session marker: per-source watermark + circuit breaker, keyed by
+/// `source_id`. Closes the `circuit_breaker` context (design spec Fase F,
+/// Task 3): tracks how far each source has been successfully covered and
+/// whether repeated poll failures should stop further polling of it.
+///
+/// Deliberately a **replicated, minimal** breaker rather than a reuse of
+/// `graph_hunter_core::ingest::source_poller::CircuitBreaker`: that type is
+/// private to `source_poller`, is wired to `PollerMetrics` atomics, and uses
+/// a monotonic-clock-based backoff window (`circuit_open_until`). Exposing
+/// it as `pub(crate)` would couple this `api` crate to a core-internal
+/// runtime type just to reuse the failure-counting arithmetic. The contract
+/// here only needs a deterministic consecutive-failure counter — open when
+/// `consecutive_failures >= max_failures` — which is what's implemented
+/// below; it is intentionally clock-free so it's trivially unit-testable.
+/// Temporal backoff (re-closing the breaker after some time has passed) is
+/// NOT implemented here; a later task can layer it on top by injecting a
+/// clock, reusing the same counter semantics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SourceCoverage {
+    sources: std::collections::BTreeMap<String, PerSource>,
+}
+
+impl SourceCoverage {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A successful pull covering up to `window_end_ts` for `source_id`:
+    /// advances the watermark and closes the breaker.
+    pub fn record_covered(&mut self, source_id: &str, window_end_ts: i64) {
+        let entry = self.sources.entry(source_id.to_string()).or_default();
+        entry.last_covered_ts = Some(window_end_ts);
+        entry.consecutive_failures = 0;
+        entry.open = false;
+        entry.missing = false;
+    }
+
+    /// A failed pull for `source_id`. Increments the consecutive-failure
+    /// counter; once it reaches `max_failures` the breaker opens (and stays
+    /// open until the next [`Self::record_covered`]). Returns the resulting
+    /// open state.
+    pub fn record_failure(&mut self, source_id: &str, max_failures: u32) -> bool {
+        let entry = self.sources.entry(source_id.to_string()).or_default();
+        entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+        if entry.consecutive_failures >= max_failures {
+            entry.open = true;
+        }
+        entry.open
+    }
+
+    /// Is the source's breaker currently open (skip the pull)?
+    pub fn is_open(&self, source_id: &str) -> bool {
+        self.sources.get(source_id).map(|s| s.open).unwrap_or(false)
+    }
+
+    /// Mark a window as not covered (breaker-skipped or errored) for
+    /// `source_id`.
+    pub fn record_missing(&mut self, source_id: &str) {
+        self.sources.entry(source_id.to_string()).or_default().missing = true;
+    }
+
+    /// Snapshot for the answer: `(source -> last_covered_ts` where known`,
+    /// sorted list of sources currently missing coverage or breaker-open)`.
+    pub fn snapshot(&self) -> (std::collections::BTreeMap<String, i64>, Vec<String>) {
+        let watermarks = self
+            .sources
+            .iter()
+            .filter_map(|(id, s)| s.last_covered_ts.map(|ts| (id.clone(), ts)))
+            .collect();
+        // BTreeMap iteration is already key-sorted, so `missing` comes out sorted.
+        let missing = self
+            .sources
+            .iter()
+            .filter(|(_, s)| s.missing || s.open)
+            .map(|(id, _)| id.clone())
+            .collect();
+        (watermarks, missing)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +307,45 @@ mod tests {
         assert_eq!(ac.missing_sources, vec!["xdr".to_string()]);
         // a missing source makes the answer possibly_incomplete.
         assert!(ac.possibly_incomplete);
+    }
+
+    // Uses lock_env/ENV_LOCK defined above in this same module.
+
+    #[test]
+    fn source_coverage_flag_defaults_off() {
+        let _g = lock_env();
+        unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") };
+        assert!(!source_coverage_enabled());
+        unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", "1") };
+        assert!(source_coverage_enabled());
+        unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") };
+    }
+
+    #[test]
+    fn breaker_opens_after_consecutive_failures_and_marks_missing() {
+        let mut sc = SourceCoverage::new();
+        // a good pull records the watermark, breaker closed.
+        sc.record_covered("la:ws", 1000);
+        assert!(!sc.is_open("la:ws"));
+        // 3 consecutive failures (max_failures = 3) opens the breaker.
+        assert!(!sc.record_failure("la:ws", 3));
+        assert!(!sc.record_failure("la:ws", 3));
+        assert!(sc.record_failure("la:ws", 3)); // now open
+        assert!(sc.is_open("la:ws"));
+        // an open breaker's window is recorded missing.
+        sc.record_missing("la:ws");
+        let (wms, missing) = sc.snapshot();
+        assert_eq!(wms.get("la:ws"), Some(&1000)); // last good watermark
+        assert!(missing.contains(&"la:ws".to_string()));
+    }
+
+    #[test]
+    fn success_resets_failures() {
+        let mut sc = SourceCoverage::new();
+        sc.record_failure("la:ws", 3);
+        sc.record_failure("la:ws", 3);
+        sc.record_covered("la:ws", 2000); // success resets the counter
+        assert!(!sc.record_failure("la:ws", 3)); // 1 failure again, not open
+        assert!(!sc.is_open("la:ws"));
     }
 }
