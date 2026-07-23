@@ -44,6 +44,24 @@ const FIRST_POLL_DELAY_SECS: u64 = 2;
 /// times a single table can be drained within one poll.
 const MAX_DRAIN_ITERS: u32 = 100;
 
+/// Consecutive-failure threshold before a table's per-source `SourceCoverage`
+/// breaker opens (a reporting signal only — see
+/// `coverage::record_siem_outcome`'s doc comment). Mirrors
+/// `operations::ingestion::SIEM_BREAKER_MAX_FAILURES` (same value, same
+/// semantics); kept as its own module-local constant here rather than
+/// importing that one because it's private to `ingestion.rs`.
+const COVERAGE_MAX_FAILURES: u32 = 5;
+
+/// `SourceCoverage` source-id scheme for the connector: `sentinel:<table>`.
+/// Each Sentinel table is tracked as an independent source so one table
+/// going blind (auth/table/transport error) marks only that table missing
+/// on `missing_sources` — a healthy table polling fine alongside it must
+/// not be dragged down. Must stay consistent between the success and
+/// failure recording call sites below.
+fn coverage_source_id(table: &str) -> String {
+    format!("sentinel:{table}")
+}
+
 // ── Connector status ──
 
 /// Live status of the Sentinel connector, broadcast via watch channel.
@@ -214,6 +232,11 @@ pub async fn polling_loop<T: SentinelTransport>(
         let mut total_new_entities = 0usize;
         let mut total_new_relations = 0usize;
 
+        // GRAPHHUNTER_SOURCE_COVERAGE gate: checked once per poll (not once
+        // per table/row) so the flag-off path stays a single cheap env read
+        // per poll iteration and touches `source_coverage` zero times.
+        let coverage_on = crate::coverage::source_coverage_enabled();
+
         for table in &config.tables {
             if cancel.is_cancelled() {
                 break;
@@ -326,6 +349,26 @@ pub async fn polling_loop<T: SentinelTransport>(
                                 }
                             }
                             consecutive_errors = 0;
+
+                            // Reached here without a transport/normalize error
+                            // for this table: rows ingested OR a clean empty
+                            // result both count as covered (SOT: a covered
+                            // window just needs its watermark advanced, per
+                            // `record_siem_outcome`'s success arm in
+                            // `ingestion.rs`). `now_secs()` stands in for the
+                            // batch's max timestamp — acceptable per the task
+                            // brief since the marker only needs to advance.
+                            if coverage_on {
+                                if let Ok(mut sc) = session.source_coverage.write() {
+                                    crate::coverage::record_siem_outcome(
+                                        &mut sc,
+                                        &coverage_source_id(table),
+                                        true,
+                                        crate::util::now_secs(),
+                                        COVERAGE_MAX_FAILURES,
+                                    );
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::error!("SENTINEL: table {} normalize error: {}", table, e);
@@ -336,6 +379,17 @@ pub async fn polling_loop<T: SentinelTransport>(
                                 consecutive_errors,
                                 true,
                             );
+                            if coverage_on {
+                                if let Ok(mut sc) = session.source_coverage.write() {
+                                    crate::coverage::record_siem_outcome(
+                                        &mut sc,
+                                        &coverage_source_id(table),
+                                        false,
+                                        crate::util::now_secs(),
+                                        COVERAGE_MAX_FAILURES,
+                                    );
+                                }
+                            }
                             // Don't spin on a broken response for this table.
                             break;
                         }
@@ -349,6 +403,17 @@ pub async fn polling_loop<T: SentinelTransport>(
                             consecutive_errors,
                             true,
                         );
+                        if coverage_on {
+                            if let Ok(mut sc) = session.source_coverage.write() {
+                                crate::coverage::record_siem_outcome(
+                                    &mut sc,
+                                    &coverage_source_id(table),
+                                    false,
+                                    crate::util::now_secs(),
+                                    COVERAGE_MAX_FAILURES,
+                                );
+                            }
+                        }
                         // Don't spin on a broken transport for this table.
                         break;
                     }
@@ -743,6 +808,235 @@ mod pause_tests {
             "expected all 210 rows ingested as relations (proves drain didn't stop after batch 1)"
         );
 
+        cancel.cancel();
+        let _ = loop_handle.await;
+    }
+
+    // ── Source coverage tests (Task 4: connector loop wires SourceCoverage) ──
+    //
+    // GRAPHHUNTER_SOURCE_COVERAGE is process-global env state, and cargo runs
+    // tests in parallel by default. Serialize mutation of it with a
+    // module-local mutex, mirroring the `ENV_LOCK` convention used in
+    // `coverage.rs` / `journal.rs` / `operations/hunt.rs`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Mock transport whose `execute_query` always fails (simulated
+    /// transport error), so the connector's per-table failure arm fires on
+    /// every poll.
+    struct FailingQueryTransport {
+        calls: AtomicUsize,
+    }
+
+    impl SentinelTransport for FailingQueryTransport {
+        async fn acquire_token(
+            &self,
+            _t: &str,
+            _c: &str,
+            _s: &str,
+        ) -> Result<TokenResponse, String> {
+            Ok(TokenResponse {
+                access_token: "tok".into(),
+                expires_in: 3600,
+            })
+        }
+
+        async fn execute_query(
+            &self,
+            _ws: &str,
+            _q: &str,
+            _b: &str,
+        ) -> Result<serde_json::Value, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err("simulated transport failure".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn coverage_off_by_default_records_nothing() {
+        let _guard = lock_env();
+        unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") };
+
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("coverage-off-test".into()),
+        })
+        .expect("session");
+        let session = api.sessions().current_session().expect("session");
+
+        let transport = Arc::new(FailingQueryTransport {
+            calls: AtomicUsize::new(0),
+        });
+        let cache = Arc::new(SentinelTokenCache::new());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (status_tx, _status_rx) = tokio::sync::watch::channel(ConnectorStatus::Connecting);
+        let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+
+        let mut config = test_config();
+        // Long interval: only the first poll fires during this test.
+        config.poll_interval_secs = 300;
+
+        let loop_handle = tokio::spawn(polling_loop(
+            config,
+            transport.clone(),
+            cache,
+            session.clone(),
+            "sid".into(),
+            Arc::new(NoopEmitter) as Arc<dyn EventEmitter>,
+            cancel.clone(),
+            status_tx,
+            "ds".into(),
+            pause_rx,
+        ));
+
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if transport.calls.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+        }
+        assert!(
+            transport.calls.load(Ordering::SeqCst) >= 1,
+            "expected at least one poll attempt"
+        );
+        // Give the (no-op) failure-handling path a moment to run past the
+        // query call before snapshotting.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let (watermarks, missing) = session.source_coverage.read().unwrap().snapshot();
+        assert!(
+            watermarks.is_empty() && missing.is_empty(),
+            "flag unset: source_coverage must stay untouched (zero recordings), \
+             got watermarks={watermarks:?} missing={missing:?}"
+        );
+
+        cancel.cancel();
+        let _ = loop_handle.await;
+    }
+
+    #[tokio::test]
+    async fn failing_table_query_marks_source_missing_when_coverage_enabled() {
+        let _guard = lock_env();
+        unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", "1") };
+
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("coverage-fail-test".into()),
+        })
+        .expect("session");
+        let session = api.sessions().current_session().expect("session");
+
+        let transport = Arc::new(FailingQueryTransport {
+            calls: AtomicUsize::new(0),
+        });
+        let cache = Arc::new(SentinelTokenCache::new());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (status_tx, _status_rx) = tokio::sync::watch::channel(ConnectorStatus::Connecting);
+        let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+
+        let mut config = test_config();
+        config.poll_interval_secs = 300;
+
+        let loop_handle = tokio::spawn(polling_loop(
+            config,
+            transport.clone(),
+            cache,
+            session.clone(),
+            "sid".into(),
+            Arc::new(NoopEmitter) as Arc<dyn EventEmitter>,
+            cancel.clone(),
+            status_tx,
+            "ds".into(),
+            pause_rx,
+        ));
+
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if transport.calls.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+        }
+        assert!(
+            transport.calls.load(Ordering::SeqCst) >= 1,
+            "expected at least one poll attempt"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let (_watermarks, missing) = session.source_coverage.read().unwrap().snapshot();
+        assert!(
+            missing.contains(&"sentinel:SigninLogs".to_string()),
+            "expected sentinel:SigninLogs to be reported missing after a \
+             transport-error poll, got {missing:?}"
+        );
+
+        unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") };
+        cancel.cancel();
+        let _ = loop_handle.await;
+    }
+
+    #[tokio::test]
+    async fn successful_poll_records_covered_and_not_missing() {
+        let _guard = lock_env();
+        unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", "1") };
+
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("coverage-success-test".into()),
+        })
+        .expect("session");
+        let session = api.sessions().current_session().expect("session");
+
+        // A single batch under batch_size (caught up after one call), so
+        // the drain loop stops after exactly one query.
+        let transport = Arc::new(DrainMockTransport::new(vec![10]));
+        let cache = Arc::new(SentinelTokenCache::new());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (status_tx, _status_rx) = tokio::sync::watch::channel(ConnectorStatus::Connecting);
+        let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+
+        let mut config = test_config();
+        config.poll_interval_secs = 300;
+
+        let loop_handle = tokio::spawn(polling_loop(
+            config,
+            transport.clone(),
+            cache,
+            session.clone(),
+            "sid".into(),
+            Arc::new(NoopEmitter) as Arc<dyn EventEmitter>,
+            cancel.clone(),
+            status_tx,
+            "ds".into(),
+            pause_rx,
+        ));
+
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if transport.call_count.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+        }
+        assert!(
+            transport.call_count.load(Ordering::SeqCst) >= 1,
+            "expected at least one poll attempt"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let (watermarks, missing) = session.source_coverage.read().unwrap().snapshot();
+        assert!(
+            watermarks.contains_key("sentinel:SigninLogs"),
+            "expected sentinel:SigninLogs watermark to be recorded on a \
+             successful poll, got {watermarks:?}"
+        );
+        assert!(
+            !missing.contains(&"sentinel:SigninLogs".to_string()),
+            "a successful poll must not mark the source missing, got {missing:?}"
+        );
+
+        unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") };
         cancel.cancel();
         let _ = loop_handle.await;
     }
