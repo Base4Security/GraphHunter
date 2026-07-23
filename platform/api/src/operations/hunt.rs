@@ -99,14 +99,22 @@ fn live_tail_coverage_for_session(
 /// `answer_coverage`. Factored out so both `run_hunt`'s single-query
 /// call site and every `run_hunt_batch` entry-construction path
 /// (fast/cache paths included) populate `coverage` from the same real
-/// session state rather than duplicating the 3 reads per site. Cheap —
-/// three `RwLock::read`s — so there's no reason for the
-/// LFTJ/Yannakakis fast paths to skip it. With `GRAPHHUNTER_COVERAGE`
-/// off, `answer_coverage` still returns the all-clear default
-/// regardless of what's read here.
+/// session state rather than duplicating the 3 reads per site.
+///
+/// With `GRAPHHUNTER_COVERAGE` off this is a true no-op: it returns the
+/// all-clear default *before* touching any lock or scanning the graph.
+/// `edge_timestamp_range()` is an O(E) full edge scan (not a cheap
+/// lock read like the other two), so a batch of N hypotheses must not
+/// pay for N scans just to have `answer_coverage` throw the result away
+/// afterward — a prior phase explicitly rejected exactly that per-query
+/// tax. Flag-on keeps paying the O(E) cost (accepted tradeoff, disclosed
+/// in `coverage_enabled`'s doc).
 fn session_answer_coverage(
     session: &crate::state::Session,
 ) -> ApiResult<crate::coverage::AnswerCoverage> {
+    if !crate::coverage::coverage_enabled() {
+        return Ok(crate::coverage::AnswerCoverage::default());
+    }
     let ic = session
         .ingest_coverage
         .read()
@@ -1315,6 +1323,46 @@ mod tests {
 
         assert!(!resp.coverage.possibly_incomplete);
         assert!(resp.coverage.coverage_start.is_none());
+    }
+
+    /// `session_answer_coverage` itself (not just the `run_hunt` wrapper)
+    /// is a true no-op when `GRAPHHUNTER_COVERAGE` is off: it must return
+    /// the all-clear default without needing the graph's edge-timestamp
+    /// scan or the ingest/source-coverage lock reads to produce anything
+    /// meaningful — even on a session whose ingest is marked incomplete
+    /// and whose source_coverage has a missing source, the flag-off
+    /// result is indistinguishable from a pristine session. Pins the
+    /// perf fix: flag-off must skip the O(E) `edge_timestamp_range()`
+    /// scan entirely rather than compute-then-discard it.
+    #[test]
+    fn session_answer_coverage_flag_off_is_default_no_op() {
+        let _env_guard = lock_env();
+        let prior = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
+
+        let api = api();
+        let session = api
+            .sessions()
+            .current_session()
+            .expect("test harness session must exist");
+        session
+            .ingest_coverage
+            .write()
+            .unwrap()
+            .observe(true, false);
+        session
+            .source_coverage
+            .write()
+            .unwrap()
+            .record_missing("xdr:tenant");
+
+        let coverage = session_answer_coverage(&session).expect("must not error");
+
+        if let Some(v) = prior {
+            unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) };
+        }
+
+        assert_eq!(coverage, crate::coverage::AnswerCoverage::default());
     }
 
     /// `RunHuntResponse.coverage` also carries the session's
