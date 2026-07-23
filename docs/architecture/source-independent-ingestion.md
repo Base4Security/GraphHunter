@@ -162,3 +162,201 @@ la sección 1 (código real, testeado, mergeado en Tasks 1-2 de este plan).
 `descriptive` — las secciones 2 y 3: documentan una brecha ya cerrada por
 código y una decisión de alcance ya tomada por el assessment (S7/S8), no
 introducen ninguna garantía nueva ni ningún test nuevo por sí mismas.
+
+## 4. Cobertura (spec §17): `possibly_incomplete` + el cierre de `row_completeness`
+
+**Estado:** `implemented` para lo descrito abajo; los boundaries de esta
+sección son deliberados, no pendientes de pulir. **Fase:** Coverage fase
+(rama `spec/hunt-journal`, commits `1c716d3`/`5845a4e` — Tasks 1-2,
+`row_completeness` — y `0916683`/`896bddc`/`ce07d11` — Tasks 3-5,
+`ingest_completeness`/`completeness_flag`). Consume el journal de
+`docs/architecture/journal.md` y no lo reemplaza. Fuente de verdad para el
+delta de veredictos: `sot/validation/graphhunter/ingest_surface.json` y
+`sot/validation/graphhunter/graphhunter_sufficiency_audit.md`, sección
+"Coverage phase delta".
+
+### 4.1 `row_completeness`: los dos sitios ciegos que quedaban se cierran
+
+El journal (`docs/architecture/journal.md` §5) dejó dos sitios sin
+diagnóstico de skip incluso después de Fase C-1/C-2: el path de sync en
+vivo `ingest_siem` y el batch-loop paralelo de `load_data_streaming`.
+Ambos se cierran aquí:
+
+- **`ingest_siem`** (`platform/api/src/operations/ingestion.rs` ~751) ahora
+  llama `parser.parse_raw_with_stats` en vez de la variante ciega a stats
+  `parse_raw`, así que computa un `ParseStats` real y journalea
+  `stats.skipped_samples` (`ingestion.rs` ~766) en vez de pasar siempre un
+  slice vacío literal como antes.
+- El **batch-loop paralelo de `load_data_streaming`** (`ingestion.rs`
+  ~1494-1553) ahora acumula `skipped_samples` de cada sub-chunk (o toma
+  directamente el `ParseStats.skipped_samples` del parser cuando hay un
+  solo chunk) en `skipped_accum`, acotado a `SKIP_SAMPLE_CAP`, y journalea
+  ese acumulador en vez de un slice vacío.
+
+Con esto, los 6 sitios `insert_raw_events` journalean tanto filas
+insertadas como muestras de skip. **Frontera honesta, sin redondear hacia
+arriba:** `rows_skipped` es un conteo exacto en los 6 sitios; solo la
+*muestra* cruda de `skipped_samples` está acotada — 50 para los fast paths
+nativos sysmon/sentinel (`core/graph-engine/src/parser.rs::SKIP_SAMPLE_CAP`),
+20 para el path genérico/configurable (constante local separada en
+`generic.rs`) — dos constantes distintas, no un cap único. Detrás de
+`GRAPHHUNTER_JOURNAL` (default apagado); con el flag apagado no cambia el
+comportamiento actual.
+
+### 4.2 `coverage.rs`: el marcador `IngestCoverage` + `answer_coverage`
+
+`platform/api/src/coverage.rs` (nuevo) define dos tipos:
+
+```rust
+pub struct IngestCoverage {
+    pub possibly_incomplete: bool,
+    pub incomplete_reasons: Vec<String>,
+}
+impl IngestCoverage {
+    pub fn observe(&mut self, stopped_early: bool, whole_file_rejected: bool) { /* monotónico */ }
+}
+
+pub struct AnswerCoverage {
+    pub possibly_incomplete: bool,
+    pub coverage_start: Option<i64>,
+    pub coverage_end: Option<i64>,
+    pub incomplete_reasons: Vec<String>,
+}
+pub fn answer_coverage(ic: &IngestCoverage, edge_ts_min: Option<i64>, edge_ts_max: Option<i64>) -> AnswerCoverage;
+```
+
+`IngestCoverage::observe` es **monotónico**: una vez marcada
+`possibly_incomplete = true`, una ingesta limpia posterior no la borra —
+la pérdida pasada no es recuperable retroactivamente. `Session` gana un
+campo `ingest_coverage: RwLock<IngestCoverage>`
+(`platform/api/src/state/session.rs`), inicializado a `default()` (limpio)
+para toda sesión nueva o recargada — una sesión recargada desde
+`SessionFile` **no** reconstruye la incompletitud de la ingesta original
+que produjo ese grafo guardado (no persistido, política efímera igual que
+`ai_conversation`/`proposals`).
+
+El único sitio que llama `.observe(...)` con una señal real es el path de
+streaming de `load_data_streaming` (`ingestion.rs` ~1908-1910), justo
+después de que ese ingest termina, con el `stopped_early` real de esa
+ingesta (ver 4.3). Ningún otro operation de ingesta llama `.observe()` —
+no hace falta: los otros cuatro (`load_data`, `ingest_siem`,
+`load_data_with_config`, la rama de registro de ingestors EVTX/PCAP)
+siempre reportan `stopped_early = false` (ver 4.3), así que llamar
+`.observe(false, false)` ahí sería un no-op.
+
+`answer_coverage(&ic, edge_ts_min, edge_ts_max)` construye el
+`AnswerCoverage` que viaja en la respuesta: con `GRAPHHUNTER_COVERAGE`
+apagado devuelve siempre `AnswerCoverage::default()` (todo limpio, ningún
+span filtrado) sin mirar `ic`; con el flag encendido, copia
+`possibly_incomplete`/`incomplete_reasons` de `ic` y el span de
+`edge_ts_min`/`edge_ts_max` tal cual se lo pasen.
+
+### 4.3 `stopped_early`: la única señal real, y de dónde sale
+
+`LoadResult.stopped_early: bool` (`platform/api/src/dto/v1/ingestion.rs`,
+`#[serde(default)]`) se añadió a los 5 sitios que construyen `LoadResult`.
+**Solo uno** de esos 5 computa un valor que no sea el hardcode `false`: la
+rama *line-based* de `load_data_streaming` (NDJSON/IIS/CSV vía mmap +
+batch), donde `stopped_early` viene del guard de memoria crítica de
+Windows (`CRITICAL_MEMORY_MB`) que corta la ingesta a mitad de archivo
+(`ingestion.rs` ~1763). La rama *whole-file* (JSON array / archivo
+pequeño) de la misma función siempre pasa `false` — no tiene ningún guard
+de corte temprano, consume el archivo entero en una sola pasada
+(`ingestion.rs` ~1880-1884). `load_data`, `ingest_siem`,
+`load_data_with_config`, y la rama de registro de ingestors EVTX/PCAP
+también hardcodean `false` (`ingestion.rs` ~599/847/1012/1222) — ninguno
+tiene guard de memoria, así que no hay nada real que surfacear ahí. Nota
+aparte, no confundir: `MAX_INGEST_LINES` sigue siendo el guard muerto
+(`usize::MAX`) que ya era antes de esta fase — no dispara nunca y no
+aporta señal a `stopped_early`.
+
+### 4.4 `RunHuntResponse.coverage`: dónde vive el marcador, y dónde no
+
+`RunHuntResponse` (`platform/api/src/dto/v1/hunt.rs`) gana el campo
+`coverage: AnswerCoverage`. `run_hunt`
+(`platform/api/src/operations/hunt.rs` ~205-224) lo puebla en cada
+llamada leyendo `session.ingest_coverage` y llamando
+`coverage::answer_coverage(&ic, None, None)` — el `None, None` es
+deliberado, no un placeholder olvidado: el grafo no expone hoy un
+accessor barato (idealmente O(1), mantenido incrementalmente al ingerir)
+de timestamp mínimo/máximo de arista, y un scan O(E) en cada `run_hunt`
+se rechazó como un impuesto inaceptable por consulta sobre grafos
+grandes. `coverage_start`/`coverage_end` quedan **siempre `None`** — el
+span de tiempo cubierto del spec §17 queda diferido, no entregado, por
+esta fase.
+
+El cableado sesión → respuesta está **integration-tested**, no solo
+leído: `run_hunt_coverage_flag_on_reflects_incomplete_session`
+(`operations/hunt.rs`) llama `session.ingest_coverage.observe(true,
+false)` directamente y verifica que la respuesta de `run_hunt` trae
+`coverage.possibly_incomplete == true` con una razón `stopped_early` en
+`incomplete_reasons`; `run_hunt_coverage_flag_off_stays_clear_even_if_session_incomplete`
+fija el contrato de que, con el flag apagado, ninguna sesión — ni una
+marcada incompleta — produce un marcador. **Frontera honesta:** esos
+tests inyectan la señal directamente vía `.observe(...)`; ningún harness
+de este repo fuerza una condición real de memoria crítica de Windows, así
+que el tramo "presión de memoria real → `stopped_early`" sigue siendo
+solo leído-y-verificado en el código (confirmado presente), no ejercitado
+extremo a extremo bajo presión real.
+
+**El marcador vive solo en `RunHuntResponse`** — la superficie de
+respuesta-a-hipótesis de un hunt individual. **No** vive en:
+
+- `RunHuntBatchEntry` (`dto/v1/hunt.rs`), la entrada por-ítem de
+  `run_hunt_batch` — no tiene campo `coverage`.
+- `GraphNeighborsResult`/`GraphPathResult`/`GraphAnomalyResult`
+  (`platform/api/src/operations/graph_ops.rs`) — ninguna de las tres
+  respuestas de `graph_neighbors`/`graph_path`/`graph_anomaly` fue tocada
+  por esta fase.
+
+### 4.5 Los flags
+
+- **`GRAPHHUNTER_JOURNAL`** (ya documentado en `journal.md` §4): controla
+  la escritura del journal, y por lo tanto la parte de este cierre que
+  vive en `journal_batch_best_effort` (4.1).
+- **`GRAPHHUNTER_COVERAGE`** (nuevo, `coverage.rs::coverage_enabled`):
+  booleano *truthy-to-enable* (`"1"` o `true`/`True`/`TRUE`, mismo
+  convenio que `GRAPHHUNTER_JOURNAL` y `env_flag` de `planner.rs`).
+  Default **apagado** — con el flag apagado, `answer_coverage` siempre
+  devuelve `AnswerCoverage::default()` sin mirar la sesión, así que
+  ninguna respuesta existente cambia de forma observable.
+
+### 4.6 Qué cierra esto — y lo que sigue abierto
+
+Leído del re-freeze de
+`sot/validation/graphhunter/audit_results.json`
+(`python scripts/sot_sys/audit_graphhunter.py --check` → `up to date`):
+
+- **`row_completeness`** → `full` (4.1).
+- **`ingest_completeness`** → `full`, acotado al mecanismo real: solo el
+  guard de memoria crítica de Windows del path de streaming line-based
+  produce la señal; las otras cuatro rutas de ingesta no tienen guard y
+  no pueden aportarla; el marcador solo llega a `RunHuntResponse` (4.4).
+- **`completeness_flag`** → `full`: el DTO que responde una hipótesis de
+  hunt ya no carece de `possibly_incomplete` — pero, leído literal,
+  "ningún DTO" (el hallazgo S11 caso 28 original) seguiría siendo cierto
+  para `RunHuntBatchEntry` y para las tres respuestas de `graph_ops.rs`
+  (4.4); el flip se declara sobre la superficie de respuesta-a-hipótesis,
+  no sobre "todo DTO existe".
+
+El blind set por hipótesis del catálogo baja de 3 a 1 entrada
+(`source_coverage` es la única que queda); ninguna de las 30 hipótesis
+alcanza `Sufficient`, ni tampoco la transversal `exhaustiveness_marking`
+(que ahora queda ciega solo por `source_coverage`). Detalle canal por
+canal y el delta exacto en
+`sot/validation/graphhunter/graphhunter_sufficiency_audit.md`, sección
+"Coverage phase delta".
+
+**Lo que NO se tocó, y es deliberado:**
+
+- `whole_file_rejected` nunca se computa — `observe()` siempre lo recibe
+  en `false`; solo la pata `stopped_early` es real.
+- `source_watermarks`/`missing_sources` (también spec §17) son
+  responsabilidad de `source_coverage`, no de esta fase.
+- `source_coverage` mismo: sigue `degraded`, sin tocar — el poller sigue
+  dormido y el path en vivo sigue sin circuit breaker.
+
+**`source_coverage` (Fase F) es, hoy, el único bloqueante restante para
+que cualquier hipótesis del catálogo de GraphHunter alcance su primer
+veredicto `Sufficient` en esta auditoría.** Esta fase no lo toca ni
+reclama haberlo tocado.
