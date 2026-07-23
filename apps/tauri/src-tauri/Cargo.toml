@@ -105,3 +105,10 @@ opt-level = 3
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+# Only for the `/run_hunt` cross-transport oneshot test in
+# `http::hunt::tests` — `ServiceExt::oneshot` drives the real axum
+# router without binding a socket. Matches the workspace's existing
+# tower-http 0.5 line.
+tower = { version = "0.5", features = ["util"] }

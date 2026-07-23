@@ -335,7 +335,9 @@ async fn capture(
 
 /// Build the API router (shared by run and run_async).
 /// POST routes are also registered with trailing slash so /notes/ and /notes both work.
-fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
+/// `pub(crate)` so the `/run_hunt` cross-transport equivalence test in
+/// `http::hunt::tests` can drive the real router via `tower::ServiceExt::oneshot`.
+pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
     let state = HttpState { app: app_state, api };
     Router::new()
         .route("/", get(misc::handler_api_root))
