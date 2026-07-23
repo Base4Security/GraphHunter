@@ -5,7 +5,7 @@
 //! append-only JSONL store (core/graph-engine/src/dlq). Lives in platform/api
 //! (not canonical/core) to avoid a crate cycle: it depends on CanonicalEnvelope.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -361,12 +361,24 @@ impl DimensionResult {
 
 /// Multiset key for one observed edge, built entirely from resolved
 /// `String`s — never `StrId`s, which are interner-local and meaningless
-/// across two independently-built graphs. Relation/entity type is captured
-/// via its `Display` string (not `to_u8()`, whose `Other(_)` variants all
-/// collapse to one sentinel byte — see `RelationType::to_u8` doc comment).
-/// Metadata is flattened into a sorted `Vec` so two `HashMap`s holding the
-/// same pairs in different iteration order compare equal.
-type EdgeKey = (String, String, String, i64, Vec<(String, String)>, Option<String>);
+/// across two independently-built graphs. `rel_type` is the actual
+/// `RelationType` VALUE, not its `Display` string: `Display` is not
+/// injective (e.g. `RelationType::Connect` and `RelationType::Other("Connect")`
+/// both render `"Connect"`), so keying on the printed form could launder a
+/// genuine type divergence into a false `Match`. `RelationType` derives
+/// `Hash`/`Eq` but not `Ord`, so this key lives in a `HashMap`, not a
+/// `BTreeMap` (see `edge_multiset`). Metadata is flattened into a sorted
+/// `Vec` so two `HashMap`s holding the same pairs in different iteration
+/// order compare equal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EdgeKey {
+    source_id: String,
+    rel_type: RelationType,
+    dest_id: String,
+    timestamp: i64,
+    meta: Vec<(String, String)>,
+    dataset: Option<String>,
+}
 
 fn sorted_metadata(meta: &std::collections::HashMap<String, String>) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = meta.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
@@ -375,18 +387,18 @@ fn sorted_metadata(meta: &std::collections::HashMap<String, String>) -> Vec<(Str
 }
 
 fn edge_key(r: &graph_hunter_core::Relation) -> EdgeKey {
-    (
-        r.source_id.clone(),
-        r.rel_type.to_string(),
-        r.dest_id.clone(),
-        r.timestamp,
-        sorted_metadata(&r.metadata),
-        r.dataset_id.as_ref().map(|s| s.to_string()),
-    )
+    EdgeKey {
+        source_id: r.source_id.clone(),
+        rel_type: r.rel_type.clone(),
+        dest_id: r.dest_id.clone(),
+        timestamp: r.timestamp,
+        meta: sorted_metadata(&r.metadata),
+        dataset: r.dataset_id.as_ref().map(|s| s.to_string()),
+    }
 }
 
-fn edge_multiset(relations: &[graph_hunter_core::Relation]) -> BTreeMap<EdgeKey, usize> {
-    let mut map: BTreeMap<EdgeKey, usize> = BTreeMap::new();
+fn edge_multiset(relations: &[graph_hunter_core::Relation]) -> HashMap<EdgeKey, usize> {
+    let mut map: HashMap<EdgeKey, usize> = HashMap::new();
     for r in relations {
         *map.entry(edge_key(r)).or_insert(0) += 1;
     }
@@ -395,7 +407,9 @@ fn edge_multiset(relations: &[graph_hunter_core::Relation]) -> BTreeMap<EdgeKey,
 
 /// Compare the edge multisets of `live` vs `rebuilt`. Order across (and even
 /// within) vertices is never assumed to match — this is a count-map
-/// comparison, not a positional one.
+/// comparison, not a positional one. `HashMap == HashMap` (used above)
+/// compares keys AND counts correctly regardless of either map's internal
+/// iteration order, so multiplicity divergences are still caught.
 fn compare_edges(
     live: &[graph_hunter_core::Relation],
     rebuilt: &[graph_hunter_core::Relation],
@@ -405,7 +419,12 @@ fn compare_edges(
     if live_map == rebuilt_map {
         return DimensionResult::Match;
     }
-    let mut keys: BTreeSet<&EdgeKey> = live_map.keys().collect();
+    // Union of keys from both maps. `HashMap` iteration order is
+    // non-deterministic (and can even vary between two runs of the SAME
+    // process), so — to keep the "first 5 divergences" detail message
+    // deterministic — every divergence is rendered to a string FIRST, and
+    // only then sorted and truncated.
+    let mut keys: HashSet<&EdgeKey> = live_map.keys().collect();
     keys.extend(rebuilt_map.keys());
     let mut divergences: Vec<String> = Vec::new();
     for k in keys {
@@ -414,13 +433,12 @@ fn compare_edges(
         if lc != rc {
             divergences.push(format!(
                 "(src={}, rel={}, dst={}, ts={}, meta={:?}, dataset={:?}): live={} rebuilt={}",
-                k.0, k.1, k.2, k.3, k.4, k.5, lc, rc
+                k.source_id, k.rel_type, k.dest_id, k.timestamp, k.meta, k.dataset, lc, rc
             ));
-            if divergences.len() >= 5 {
-                break;
-            }
         }
     }
+    divergences.sort();
+    divergences.truncate(5);
     DimensionResult::Diff {
         detail: format!(
             "live: {} distinct edge keys / {} total edges; rebuilt: {} distinct edge keys / {} total edges; first divergences: [{}]",
@@ -433,14 +451,19 @@ fn compare_edges(
     }
 }
 
-/// id -> (type display string, sorted metadata) for order-independent
-/// per-entity comparison.
+/// id -> (entity type, sorted metadata) for order-independent per-entity
+/// comparison. Keyed on the actual `EntityType` VALUE, not its `Display`
+/// string: `Display` is not injective (e.g. `EntityType::IP` and
+/// `EntityType::Other("IP")` both render `"IP"`), so comparing printed
+/// strings could report `Match` for a genuine type divergence. The outer
+/// map stays a `BTreeMap<String, _>` — `id` is a plain `String` (`Ord`),
+/// only the VALUE's type field needed to move off `Display`.
 fn entity_map(
     entities: &[graph_hunter_core::Entity],
-) -> BTreeMap<String, (String, Vec<(String, String)>)> {
+) -> BTreeMap<String, (EntityType, Vec<(String, String)>)> {
     entities
         .iter()
-        .map(|e| (e.id.clone(), (e.entity_type.to_string(), sorted_metadata(&e.metadata))))
+        .map(|e| (e.id.clone(), (e.entity_type.clone(), sorted_metadata(&e.metadata))))
         .collect()
 }
 
@@ -1226,8 +1249,12 @@ mod tests {
         assert!(report.relation_count_matches);
     }
 
+    /// Fix 3 (renamed from `rich_compare_catches_injected_edge_and_metadata_divergence`):
+    /// this test only ever injected an edge divergence, never a metadata one
+    /// — the old name was a misnomer. The metadata-Diff case now has its own
+    /// dedicated test below (`rich_compare_catches_entity_metadata_divergence`).
     #[test]
-    fn rich_compare_catches_injected_edge_and_metadata_divergence() {
+    fn rich_compare_catches_injected_edge_divergence() {
         let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         // Mutate the LIVE graph after the fact so it diverges from the
         // rebuild: one extra edge the journal never recorded. Both endpoints
@@ -1247,6 +1274,87 @@ mod tests {
             matches!(report.edges_multiset, DimensionResult::Diff { .. }),
             "expected edge multiset divergence, got {:?}",
             report.edges_multiset
+        );
+        assert!(!report.all_comparable_dimensions_match());
+    }
+
+    /// Fix 2 — negative control for the `entities` dimension: an entity
+    /// present in `live` but absent from the rebuild (the journal never saw
+    /// it) must surface as a `Diff` on `entities` specifically, not get
+    /// conflated with an `entity_metadata` divergence.
+    #[test]
+    fn rich_compare_catches_entity_only_in_live() {
+        let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
+        live.add_entity(graph_hunter_core::Entity::new(
+            "orphan-entity",
+            graph_hunter_core::EntityType::Host,
+        ))
+        .expect("fresh id, not already present in live");
+
+        let report = compare_observable_equality(&live, &rebuilt);
+        assert!(
+            matches!(report.entities, DimensionResult::Diff { .. }),
+            "expected entity id-set divergence, got {:?}",
+            report.entities
+        );
+        assert!(!report.all_comparable_dimensions_match());
+    }
+
+    /// Fix 2 — negative control for the `entity_metadata` dimension: same id
+    /// present on both sides, but the LIVE side's entity type diverges from
+    /// what the journal rebuild produced. Must surface as a `Diff` on
+    /// `entity_metadata` while `entities` (the id-set dimension) stays a
+    /// `Match`, since both sides still agree on which ids exist.
+    #[test]
+    fn rich_compare_catches_entity_metadata_divergence() {
+        let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
+        // "1.2.3.4" exists on both sides (sample_event's src, type IP).
+        // Flip its type on the live side only — a genuine type divergence,
+        // not a Display-string coincidence (Fix 1's false-Match vector).
+        let ent = live
+            .get_entity_mut("1.2.3.4")
+            .expect("entity exists in live from the journaled batch");
+        assert_eq!(ent.entity_type, graph_hunter_core::EntityType::IP);
+        ent.entity_type = graph_hunter_core::EntityType::Other("IP".to_string());
+
+        let report = compare_observable_equality(&live, &rebuilt);
+        assert!(
+            matches!(report.entities, DimensionResult::Match),
+            "id sets still agree, expected Match, got {:?}",
+            report.entities
+        );
+        assert!(
+            matches!(report.entity_metadata, DimensionResult::Diff { .. }),
+            "expected entity_metadata divergence, got {:?}",
+            report.entity_metadata
+        );
+        assert!(!report.all_comparable_dimensions_match());
+    }
+
+    /// Fix 2 — negative control for the `temporal_window` dimension: an edge
+    /// with a timestamp outside the journal-rebuilt range pushes `live`'s
+    /// `edge_timestamp_range()` away from `rebuilt`'s, without necessarily
+    /// changing the entity dimensions.
+    #[test]
+    fn rich_compare_catches_temporal_window_divergence() {
+        let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
+        // Both endpoints already exist in `live` (see
+        // rich_compare_catches_injected_edge_divergence); the journaled
+        // batch's timestamps are 100/200/300, so 10_000_000 is well outside
+        // the rebuild's range.
+        live.add_relation(graph_hunter_core::Relation::new(
+            "1.2.3.4",
+            "host-1",
+            graph_hunter_core::RelationType::Connect,
+            10_000_000,
+        ))
+        .expect("both endpoints already exist in the live graph");
+
+        let report = compare_observable_equality(&live, &rebuilt);
+        assert!(
+            matches!(report.temporal_window, DimensionResult::Diff { .. }),
+            "expected temporal window divergence, got {:?}",
+            report.temporal_window
         );
         assert!(!report.all_comparable_dimensions_match());
     }
