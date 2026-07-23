@@ -312,6 +312,12 @@ pub fn normalize_response(raw: &Value) -> Result<SentinelQueryResult, String> {
             .filter_map(|c| c.get("name").and_then(|n| n.as_str()))
             .collect();
         let time_col = col_names.iter().position(|&n| n == "TimeGenerated");
+        let ingest_ts_col = col_names.iter().position(|&n| n == "_ingest_ts");
+        // Per-table decision: prefer `_ingest_ts` (ingestion-time watermark)
+        // when this table's response projected it; otherwise fall back to
+        // `TimeGenerated` so the sync hydration path (which never projects
+        // `_ingest_ts`) keeps advancing its watermark unchanged.
+        let watermark_col = ingest_ts_col.or(time_col);
         let rows = table
             .get("rows")
             .and_then(|r| r.as_array())
@@ -323,7 +329,7 @@ pub fn normalize_response(raw: &Value) -> Result<SentinelQueryResult, String> {
             for (i, cell) in arr.iter().enumerate() {
                 if let Some(&name) = col_names.get(i) {
                     let value = cell.clone();
-                    if Some(i) == time_col {
+                    if Some(i) == watermark_col {
                         if let Value::String(s) = &value {
                             if last_time
                                 .as_ref()
@@ -440,5 +446,36 @@ mod tests {
         assert_eq!(store.get("SecurityEvent").unwrap(), "2024-01-15T14:30:00Z");
         assert_eq!(store.get("SigninLogs").unwrap(), "2024-01-15T15:00:00Z");
         assert!(store.get("DeviceProcessEvents").is_none());
+    }
+
+    #[test]
+    fn normalize_advances_watermark_on_ingest_ts_when_present() {
+        let raw = serde_json::json!({
+            "tables": [{
+                "columns": [
+                    {"name": "TimeGenerated", "type": "datetime"},
+                    {"name": "_ingest_ts", "type": "datetime"}
+                ],
+                "rows": [
+                    ["2024-01-15T10:00:00Z", "2024-01-15T10:05:00Z"],
+                    ["2024-01-15T09:00:00Z", "2024-01-15T10:07:00Z"]  // late event, later ingest
+                ]
+            }]
+        });
+        let r = normalize_response(&raw).unwrap();
+        // Watermark = max ingestion time, NOT max event time.
+        assert_eq!(r.next_query_start.as_deref(), Some("2024-01-15T10:07:00Z"));
+    }
+
+    #[test]
+    fn normalize_falls_back_to_timegenerated_without_ingest_ts() {
+        let raw = serde_json::json!({
+            "tables": [{
+                "columns": [{"name": "TimeGenerated", "type": "datetime"}],
+                "rows": [["2024-01-15T10:00:00Z"], ["2024-01-15T10:30:00Z"]]
+            }]
+        });
+        let r = normalize_response(&raw).unwrap();
+        assert_eq!(r.next_query_start.as_deref(), Some("2024-01-15T10:30:00Z"));
     }
 }
