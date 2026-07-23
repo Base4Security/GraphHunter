@@ -201,9 +201,9 @@ canal declarado en `ingest_surface.json` — es la evidencia directa de que
 "encapsular no cambia la superficie de suficiencia": la línea base congelada
 del Bloque 1 se mantiene, sin delta de veredictos atribuible a Fase A.
 
-## 4. Fases D/E — convergencia sobre la Domain API (certificado)
+## 4. Fases D/E — convergencia sobre la Domain API (implemented, read-verified; green run pendiente por bloqueo ONNX del crate apps/tauri)
 
-**Estado (tested):** el camino de hipótesis del MCP ya es local y convergente
+**Estado (implemented, read-verified; green run pendiente por bloqueo ONNX del crate apps/tauri):** el camino de hipótesis del MCP ya es local y convergente
 *antes* de esta fase. El MCP no genera KQL de hipótesis ni consulta Sentinel
 para cazar: `hunt_run` reenvía la DSL a `POST /run_hunt`
 (`platform/mcp/src/tools/hunt/run.ts`), el handler HTTP delega en el único
@@ -217,52 +217,85 @@ existe una vía alterna "evaluar hipótesis vía KQL de Sentinel" que retirar de
 MCP.
 
 Por eso el entregable "Refactor MCP sobre Domain API | 2-D/E" (§9) no es
-construcción de un puente ausente, sino **el certificado** de la convergencia
-más **la corrección de un defecto de transporte** que la reconocimiento
-descubrió.
+construcción de un puente ausente, sino **la constatación** (implemented,
+read-verified; green run pendiente por ONNX) de la convergencia más **la
+corrección de un defecto de transporte** — en HTTP y en la GUI — que la
+reconocimiento descubrió.
 
-### El defecto: el transporte descartaba `coverage` (walk-back de Fase F)
+### El defecto: el transporte HTTP y la GUI descartaban `coverage` (walk-back de Fase F)
 
 El handler HTTP definía su propio `RunHuntResponse` que re-emitía sólo
 `path_count`/`truncated`/`diagnostic`/`live_tail_coverage` y **descartaba el
-campo `coverage: AnswerCoverage`** que el response del core sí porta. Como
-consecuencia, los `missing_sources`/`source_watermarks` que Fase F añadió al
-answer **nunca llegaban al consumidor MCP** — el consumidor primario de toda
-la integración SOT.
+campo `coverage: AnswerCoverage`** que el response del core sí porta.
+Independientemente, el mismo defecto existía en la GUI: `types::HuntResults`
+(`apps/tauri/src-tauri/src/types.rs`), el tipo que retorna `cmd_run_hunt`
+(`apps/tauri/src-tauri/src/commands/graph_ops.rs`) — invocado por el panel de
+hunt de la GUI en `apps/tauri/src/components/HypothesisBuilder.tsx:213`, el
+**camino de hunt único primario del frontend** — también construía su
+respuesta sin copiar `coverage`. Como consecuencia, los
+`missing_sources`/`source_watermarks` que Fase F añadió al answer **nunca
+llegaban ni al consumidor MCP ni al camino de hunt único de la GUI** — los dos
+consumidores primarios de hipótesis de toda la integración SOT.
 
 Dicho sin adornos: **antes de este fix, la garantía de Fase F ("una ventana
-ciega/fallida es distinguible en la respuesta") NO se sostenía sobre el
-transporte MCP.** Se cumplía en el core y en la GUI, pero el eslabón más
-externo la perdía en silencio. Una garantía de observabilidad es sólo tan
-fuerte como su consumidor real; hasta esta fase, el hito de Fase F estaba
-incompleto end-to-end para el MCP.
+ciega/fallida es distinguible en la respuesta") NO se sostenía ni sobre el
+transporte MCP ni sobre el camino de hunt único de la GUI.** Se cumplía en el
+core y únicamente en el camino *batch* de la GUI (`cmd_run_hunt_batch` →
+`RunHuntBatchResponse` → `RunHuntBatchEntry`, que sí porta `coverage`); el
+eslabón más externo — MCP y GUI single-hunt por igual — la perdía en
+silencio. Una garantía de observabilidad es sólo tan fuerte como su
+consumidor real; hasta esta fase, el hito de Fase F estaba incompleto
+end-to-end tanto para el MCP como para la GUI.
 
-**Fix (tested):** `project_run_hunt_response`
-(`apps/tauri/src-tauri/src/http/hunt.rs`) es ahora la proyección pura
-core→HTTP y copia `coverage`; el campo lleva
-`#[serde(skip_serializing_if = "is_default_coverage")]`, de modo que con
-`GRAPHHUNTER_COVERAGE` apagado un `AnswerCoverage::default()` se omite y el
-wire queda byte-idéntico al contrato previo (no-op cuando off preservado).
+**Fix (implemented, read-verified; green run pendiente por bloqueo ONNX del
+crate apps/tauri) — dos partes:**
 
-### §25.11 certificado
+1. **HTTP:** `project_run_hunt_response`
+   (`apps/tauri/src-tauri/src/http/hunt.rs`) es ahora la proyección pura
+   core→HTTP y copia `coverage`; el campo lleva
+   `#[serde(skip_serializing_if = "is_default_coverage")]`, de modo que con
+   `GRAPHHUNTER_COVERAGE` apagado un `AnswerCoverage::default()` se omite y el
+   wire queda byte-idéntico al contrato previo (no-op cuando off preservado).
+2. **GUI (este wave):** `types::HuntResults` gana el campo simétrico
+   `coverage: AnswerCoverage` con el mismo predicado
+   (`is_default_hunt_coverage`, misma semántica no-op-cuando-off), y
+   `cmd_run_hunt` (`graph_ops.rs`) copia `coverage: resp.coverage` en la
+   construcción del `Ok(HuntResults { ... })`.
+
+Con ambos fixes aplicados, la afirmación end-to-end — **"la cobertura de Fase
+F llega a todo consumidor de hipótesis: MCP y GUI de hunt único"** — es ahora
+verdadera por construcción, y no un walk-back parcial que dejaba la GUI
+single-hunt fuera.
+
+### §25.11 — cubierto por tests que compilan, pendiente de corrida verde
 
 El criterio de aceptación 11 ("misma hipótesis = mismo resultado desde
 core/REST/MCP") queda cubierto por dos capas, replicando la filosofía del
 `platform/api/tests/parity` existente:
 
-1. **Capa de proyección (tested):** `coverage_survives_core_to_http_projection`
-   y `default_coverage_is_omitted_from_http_wire` fijan que la cobertura
+1. **Capa de proyección (implemented, read-verified; green run pendiente por
+   ONNX):** `coverage_survives_core_to_http_projection` y
+   `default_coverage_is_omitted_from_http_wire` fijan que la cobertura
    sobrevive el mapeo y que el default se omite del wire — el guardián directo
    contra la re-aparición del field-drop.
-2. **Capa end-to-end (tested, ver límite de entorno):**
-   `same_hypothesis_same_result_core_vs_http` dispara la misma DSL por el
-   router real (`build_app` + `oneshot`) y afirma `path_count`/`truncated`
-   iguales entre la llamada directa al core y `/run_hunt`.
+2. **Capa end-to-end (implemented, read-verified; green run pendiente por
+   ONNX):** `same_hypothesis_same_result_core_vs_http` dispara la misma DSL
+   por el router real (`build_app` + `oneshot`) y afirma
+   `path_count`/`truncated` iguales entre la llamada directa al core y
+   `/run_hunt` — **esto es core-vs-REST; no ejercita la pata MCP.**
+
+La pata MCP (el pass-through TypeScript de `hunt_run` en
+`platform/mcp/src/tools/hunt/run.ts`, que reenvía a `POST /run_hunt`) **no
+tiene ningún test propio** — queda cubierta por argumento de construcción
+(reenvía al mismo handler HTTP que sí corre `same_hypothesis_same_result_core_vs_http`),
+no por una corrida de test que ejercite el pass-through en sí.
 
 Estos tests cierran el hueco que el comentario de `tests/parity/scenarios.rs`
 declaraba abierto ("*if a transport delegator ever skips a method or miswires
 an argument, these tests still pass ... until a full HTTP/Tauri runtime harness
-lands*") — para el camino de hunt, ese harness ya existe.
+lands*") — para el camino de hunt, ese harness ya existe (compilado y
+revisado por lectura; corrida en verde pendiente por el bloqueo ONNX
+descrito abajo).
 
 **Límite de entorno honesto:** el binario de test de `apps/tauri` no arranca en
 esta máquina — `ort`/`onnxruntime.dll` devuelve `STATUS_ENTRYPOINT_NOT_FOUND`
