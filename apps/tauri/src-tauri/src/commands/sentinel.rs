@@ -65,11 +65,26 @@ pub fn cmd_sentinel_pause(api: State<Arc<GraphHunterApi>>) -> Result<(), Command
 
 /// Ad-hoc KQL query against Log Analytics — ingest results into the
 /// current session's graph and run full scoring.
+///
+/// Gated by the `GRAPHHUNTER_KQL_ESCAPE_HATCH` escape hatch: this is the
+/// free-text analyst-KQL entry point from the GUI, so it must honor the
+/// same gate HTTP `POST /kql` enforces at its boundary
+/// (`http::escape_hatch::disabled_response`). Internal/collection callers
+/// of `api.run_kql` (journal expand, graph_build/graph_propose) stay
+/// ungated — only this command boundary is checked.
 #[tauri::command]
 pub async fn cmd_run_kql(
     api: State<'_, Arc<GraphHunterApi>>,
     params: RunKqlRequest,
 ) -> Result<KqlResult, CommandError> {
+    if !crate::http::escape_hatch::kql_escape_hatch_enabled() {
+        return Err(CommandError::InvalidInput(
+            "Raw KQL is disabled (GRAPHHUNTER_KQL_ESCAPE_HATCH). Use the graph tools \
+             (sentinel_seed, node_enrich, hunt_run) — the correlated graph, not raw \
+             source rows."
+                .into(),
+        ));
+    }
     api.run_kql(params).await.map_err(CommandError::from)
 }
 

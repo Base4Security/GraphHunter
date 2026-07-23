@@ -12,14 +12,12 @@ use serde_json::{json, Value};
 
 /// Whether the raw-KQL escape hatch is enabled. Default: enabled. Only an
 /// explicit falsy value ("0"/"false"/"no"/"off", case-insensitive) disables it.
+///
+/// Delegates to `graph_hunter_api::kql_flags::kql_escape_hatch_enabled()`,
+/// the canonical reader for `GRAPHHUNTER_KQL_ESCAPE_HATCH`, so this crate and
+/// `platform/api` never diverge on the flag's semantics.
 pub fn kql_escape_hatch_enabled() -> bool {
-    match std::env::var("GRAPHHUNTER_KQL_ESCAPE_HATCH") {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-        Err(_) => true,
-    }
+    graph_hunter_api::kql_flags::kql_escape_hatch_enabled()
 }
 
 /// Structured response returned by POST /kql when the escape hatch is
