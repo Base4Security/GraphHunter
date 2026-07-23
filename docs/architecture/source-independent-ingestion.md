@@ -360,3 +360,231 @@ canal y el delta exacto en
 que cualquier hipótesis del catálogo de GraphHunter alcance su primer
 veredicto `Sufficient` en esta auditoría.** Esta fase no lo toca ni
 reclama haberlo tocado.
+
+## 5. Fase F: `source_coverage` cierra — el primer veredicto `Sufficient`
+
+**Estado:** `implemented` para lo descrito abajo. **Fase:** Fase F (rama
+`spec/hunt-journal`, commits `504a03c` accessor `edge_timestamp_range`,
+`fe5df64` `AnswerCoverage.source_watermarks`/`missing_sources`, `ef8b437`
+`SourceCoverage` — breaker + watermark por-fuente, `8e6df8f` cableado en
+`ingest_siem`, `d9a4819` cableado en `run_hunt`/`run_hunt_batch`). Consume
+`coverage.rs` (§4.2) y no lo reemplaza. Fuente de verdad para el delta de
+veredictos: `sot/validation/graphhunter/ingest_surface.json` y
+`sot/validation/graphhunter/graphhunter_sufficiency_audit.md`, sección
+"Fase F delta — MILESTONE: first `Sufficient` verdict".
+
+### 5.1 `SourceCoverage`: breaker + watermark por-fuente
+
+`platform/api/src/coverage.rs` gana un tipo nuevo:
+
+```rust
+pub struct SourceCoverage { /* BTreeMap<source_id, PerSource> */ }
+impl SourceCoverage {
+    pub fn record_covered(&mut self, source_id: &str, window_end_ts: i64);
+    pub fn record_failure(&mut self, source_id: &str, max_failures: u32) -> bool;
+    pub fn is_open(&self, source_id: &str) -> bool;
+    pub fn record_missing(&mut self, source_id: &str);
+    pub fn snapshot(&self) -> (BTreeMap<String, i64>, Vec<String>); // watermarks, missing
+}
+```
+
+Cada `source_id` lleva su propio `last_covered_ts` (watermark) y un
+contador de fallas consecutivas que abre el breaker al llegar a
+`SIEM_BREAKER_MAX_FAILURES`. Es, deliberadamente, un breaker **replicado y
+mínimo** — no una reutilización de
+`graph_hunter_core::ingest::source_poller::CircuitBreaker` (ese tipo es
+`pub(crate)` de `source_poller`, atado a `PollerMetrics` con átomos, y usa
+backoff basado en reloj monotónico vía `circuit_open_until`; exponerlo
+como `pub(crate)` acoplaría este crate `api` a un tipo interno del runtime
+del core solo para reutilizar la aritmética de conteo de fallas). El
+contrato que `SourceCoverage` necesita es más chico: un contador
+determinista de fallas consecutivas — abierto cuando
+`consecutive_failures >= max_failures` — deliberadamente sin reloj, para
+que sea trivialmente unit-testeable. Backoff temporal (re-cerrar el
+breaker tras que pase cierto tiempo) **no** está implementado aquí; una
+tarea futura puede añadirlo inyectando un reloj sobre el mismo contador.
+
+`record_siem_outcome` (también en `coverage.rs`) es el recorder
+**probe-every-call** que `ingest_siem` invoca en cada llamada:
+
+```rust
+pub fn record_siem_outcome(sc: &mut SourceCoverage, source_id: &str,
+                            success: bool, window_end_ts: i64, max_failures: u32) {
+    if success { sc.record_covered(source_id, window_end_ts); }
+    else { sc.record_failure(source_id, max_failures); sc.record_missing(source_id); }
+}
+```
+
+Deliberadamente **no** mira `is_open` antes de decidir si "saltar" la
+llamada: `ingest_siem` es un pull síncrono on-demand, no un loop de
+polling — no hay un próximo tick que reintente una fuente una vez que su
+breaker se abre. Si esta función saltara la llamada cuando `is_open`
+fuera cierto (como haría un consumidor ingenuo del breaker), esa fuente
+quedaría ciega **para siempre**, porque nada más volvería a llamar
+`record_covered` para cerrarlo. Por eso cada llamada a `ingest_siem` se
+trata como una probe real de la fuente — éxito o fallo, siempre se
+registra un resultado.
+
+### 5.2 Cableado en `ingest_siem`: éxito, fallo, y el orden de resolución de sesión
+
+`platform/api/src/operations/ingestion.rs`:
+
+- **Éxito.** Tras insertar el pull en el grafo sin error, se llama
+  `record_siem_outcome(sc, source_id, true, window_end_ts, MAX_FAILURES)`
+  con `window_end_ts` = el timestamp de evento más alto que el pull
+  realmente cubrió (o `now()` si el pull devolvió cero eventos — un
+  resultado vacío sigue siendo una ventana cubierta, no una ventana
+  ciega). Esto avanza el watermark y recupera el breaker si estaba
+  abierto por fallas previas.
+- **Fallo.** `record_siem_failure` se llama en los dos puntos de salida
+  por fallo (error de `task::spawn_blocking`/join, y error de la query
+  upstream), para **ambas** fuentes (Sentinel y Elastic), con
+  `record_siem_outcome(sc, source_id, false, now(), MAX_FAILURES)` — un
+  pull fallido no tiene eventos parseados de los que derivar un
+  watermark, así que usa `now()`.
+- **Orden de resolución de sesión.** La sesión se resuelve **antes** del
+  fetch de red (no después), a propósito: así, incluso si el fetch falla,
+  hay una sesión contra la cual registrar la falla del breaker
+  per-fuente — el comentario en el código lo llama explícito:
+  "PROBE-EVERY-CALL: every `ingest_siem` call, success or failure, is a
+  probe." Efecto colateral deseable: una sesión inválida ahora falla
+  rápido, antes de gastar una llamada de red.
+- **Brecha angosta, no arreglada aquí.** `record_covered` en el camino de
+  éxito corre solo después de que `graph.insert_raw_events(...)?` retorna
+  `Ok`; un error a nivel de inserción posterior a un fetch exitoso
+  propaga por `?` antes de llegar a `record_covered` — ese modo de falla
+  angosto no registra ningún resultado (ni covered ni missing). Se
+  disclosea, no se arregla en esta fase.
+
+### 5.3 `source_watermarks`/`missing_sources` en las respuestas, y el span vía `edge_timestamp_range`
+
+`session_answer_coverage` (`operations/hunt.rs`, factorizado para que
+`run_hunt` y **todas** las rutas de `run_hunt_batch` —incluidas las
+rápidas LFTJ/Yannakakis y las de cache— construyan `coverage` desde el
+mismo estado real de sesión) ahora lee tres cosas y las funde en un solo
+`AnswerCoverage`:
+
+1. `session.ingest_coverage` (§4.2, sin cambios).
+2. `session.source_coverage.snapshot()` → `(source_watermarks,
+   missing_sources)` — nuevo en esta fase.
+3. `session.graph.edge_timestamp_range()` → `(edge_ts_min, edge_ts_max)`
+   — nuevo accessor (`core/graph-engine/src/graph.rs`, Fase F Task 1): un
+   único pase O(E) sobre `for_each_edge` que calcula el mínimo y máximo
+   `timestamp` de arista en todo el grafo (`None` si el grafo no tiene
+   aristas). **Nota de costo, honesta:** la decisión de la fase Coverage
+   (§4.4) había rechazado explícitamente un scan O(E) por-hunt como "un
+   impuesto inaceptable" — ese rechazo era sobre construir el accessor
+   entonces; ahora que el accessor existe, `session_answer_coverage` lo
+   llama en **cada** `run_hunt`/`run_hunt_batch`, incondicionalmente (no
+   detrás de ningún flag) — el flag `GRAPHHUNTER_COVERAGE` solo controla
+   si `answer_coverage` **expone** `coverage_start`/`coverage_end` en la
+   respuesta, no si el scan se ejecuta. `edges_sorted` (ver el comentario
+   en `edge_timestamp_range`) solo ordena aristas dentro de la lista de
+   cada vértice, no globalmente, así que no sirve como atajo O(1) para
+   este cálculo global — es un costo real pagado por cada hunt, no un
+   placeholder.
+
+`AnswerCoverage.source_watermarks`/`missing_sources` viajan en
+`RunHuntResponse` **y** `RunHuntBatchEntry` — la misma paridad de forma
+que `completeness_flag` estableció en la fase Coverage (§4.6): la
+superficie del catálogo de 30 hipótesis (`run_hunt_batch`) queda marcada,
+no solo el hunt individual. Con `GRAPHHUNTER_SOURCE_COVERAGE` **o**
+`GRAPHHUNTER_COVERAGE` apagados, ambos campos se omiten del wire (mismo
+convenio `#[serde(skip_serializing_if)]` que el resto de `AnswerCoverage`)
+— no hay cambio observable en el payload con los flags apagados.
+
+### 5.4 Qué cierra esto, exactamente, y con qué límites
+
+Esto cierra el contexto `circuit_breaker` de `source_coverage` para el
+**path en vivo one-shot** `ingest_siem`: el `same_observed` del testigo
+esquemático ("identical graph and identical answers") deja de sostenerse
+— una ventana con breaker abierto o con fallas se ve ahora como un
+`source_watermark` rezagado más ese `source_id` en `missing_sources` en la
+respuesta del hunt, distinguible de una fuente que genuinamente no emitió
+nada en esa ventana. **Esto es lo que cierra el observable del testigo.**
+
+Límites, sin redondear hacia arriba (texto completo en la nota de
+`source_coverage` en `ingest_surface.json`):
+
+1. **One-shot, no polling.** `ingest_siem` es un pull síncrono on-demand,
+   no un loop de polling — no hay tick de scheduler que saltar. El
+   mecanismo de cierre es **coverage accounting por fallas** sobre ese
+   path one-shot, que surfacea una ventana ciega en la próxima respuesta
+   — **no** es el "circuit breaker de polling que salta ventanas de poll"
+   que describía la nota original de Block-0. Ese mecanismo literal
+   pertenece al poller de streaming **dormido**
+   (`source_poller::CircuitBreaker` + `ParserTask` + `GraphWriter`) —
+   deliberadamente no reutilizado (ver §5.1) y **no cableado en
+   producción**; sigue dormido. Esto no es una brecha contra el testigo:
+   lo que había que cerrar era el observable del testigo, y el poller
+   nunca fue requerido para cerrarlo.
+2. **Efímero.** `SourceCoverage` es un `RwLock<SourceCoverage>` solo en
+   memoria en `Session` — no se persiste al formato de guardado de sesión
+   `GHS1`, así que un reload de sesión pierde todos los watermarks y el
+   estado del breaker (misma forma de límite que `IngestCoverage`, §4.2).
+3. **Hunt/batch-only.** Solo `RunHuntResponse` y `RunHuntBatchEntry`
+   llevan `source_watermarks`/`missing_sources`; `GraphNeighborsResult`/
+   `GraphPathResult`/`GraphAnomalyResult` (`graph_ops.rs`) quedan sin
+   marcar.
+4. **Cableado read-verified, no integration-tested end-to-end.**
+   `ingest_siem` es async (`spawn_blocking` alrededor de la llamada de
+   red a Sentinel/Elastic); su cableado de coverage en los tres puntos
+   (éxito + 2 salidas de fallo) está **read-verified** (confirmado
+   presente leyendo `ingestion.rs`), no ejercitado extremo a extremo con
+   un pull real de Azure/Elastic (no hay harness de test para eso en este
+   repo). Lo que **sí** está unit/integration-tested: la función pura
+   `record_siem_outcome` (éxito/fallo/recuperación-tras-fallo/no-salta-en-
+   open, `coverage.rs`) y el path e2e de `run_hunt` que marca
+   `SourceCoverage` de la sesión directamente y verifica que la respuesta
+   lo refleja (`operations/hunt.rs`).
+5. **Brecha angosta** (§5.2): error de inserción post-fetch no registra
+   ningún resultado.
+6. **Costo del span** (§5.3): `edge_timestamp_range` es un scan O(E)
+   pagado en cada hunt, no gated por flag.
+7. Detrás de `GRAPHHUNTER_SOURCE_COVERAGE` **y** `GRAPHHUNTER_COVERAGE`
+   (default apagados ambos).
+
+### 5.5 EL HITO: las 30 hipótesis alcanzan `Sufficient` — el primer veredicto `Sufficient` del programa
+
+`source_coverage` era el **último** canal `degraded` de los 7 en
+`HYPOTHESIS_REQUIRES` (`edge_multiplicity`, `entity_identity`,
+`event_time`, `field_survival`, `ingest_completeness`,
+`row_completeness`, `source_coverage`) — los otros 6 ya estaban `full`
+tras Fase C-1/C-2/Coverage. Al flipearlo, el conjunto ciego de **cada una
+de las 30 hipótesis del catálogo** (`cat-001`..`cat-030`) queda **vacío**,
+y `_verdict` devuelve `Sufficient` para las 30. Leído directamente del
+re-freeze de `sot/validation/graphhunter/audit_results.json`
+(`python scripts/sot_sys/audit_graphhunter.py --check` → `up to date`):
+**30/30 hipótesis `Sufficient`** — el primer veredicto `Sufficient` de
+todo el programa de auditoría.
+
+**Ambas transversales, estado exacto, sin inflar:**
+
+- **`exhaustiveness_marking`** (`completeness_flag`, `ingest_completeness`,
+  `source_coverage`) → **`Sufficient`**: las tres ya son `full`.
+- **`loss_reconstruction`** (`completeness_flag`, `ingestion_time`,
+  `provenance_stability`, `skip_diagnostics`) → **sigue
+  `InsufficientWithWitness`**, ciega en dos canales que ni `HYPOTHESIS_
+  REQUIRES` ni Fase F tocan: `ingestion_time` (`absent` desde Block 0 —
+  `ingested_at_delta` hardcodeado a `0` en los sitios de ingesta masiva) y
+  `provenance_stability` (`degraded` desde la corrección de Fase B —
+  `ProvenanceCtx` contaminado retroactivamente en export, más
+  `mapping_hash` del path configurable como tag estático en vez de un
+  hash real de `FieldConfig`).
+
+**Lo que este hito es, honestamente.** Que las 30 hipótesis alcancen
+`Sufficient` significa que los 7 canales que `HYPOTHESIS_REQUIRES` exige
+son ahora `full` en el modelo de superficie declarado — **no** significa
+que el repo sea "Sufficient en todas partes". `ingestion_time` y
+`provenance_stability` quedan ciegos, fuera del conjunto requerido y
+fuera del alcance de Fase F; cerrarlos es trabajo futuro que este hito no
+reclama. El hito en sí es real y está precisamente acotado: 30/30
+`Sufficient` en el catálogo, `exhaustiveness_marking` `Sufficient`,
+`loss_reconstruction` todavía `InsufficientWithWitness` en dos canales
+nombrados — leído directamente de `audit_results.json`, no asumido.
+
+**Etiqueta de claim:** `experiment` (auditoría offline sobre un modelo
+declarado — igual que el resto de este documento y de
+`graphhunter_sufficiency_audit.md`), no `verified` ni `proved`: no hay
+reproducción externa ni instrumentación de un GraphHunter corriendo en
+producción detrás de este veredicto.
