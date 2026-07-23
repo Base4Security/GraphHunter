@@ -1295,7 +1295,8 @@ mod tests {
     fn run_hunt_coverage_flag_off_stays_clear_even_if_session_incomplete() {
         let _env_guard = lock_env();
         let prior = std::env::var("GRAPHHUNTER_COVERAGE").ok();
-        unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
+        // Coverage now defaults ON; exercise the explicit-off path.
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "0") };
 
         let api = api();
         if let Some(session) = api.sessions().current_session() {
@@ -1317,8 +1318,9 @@ mod tests {
             })
             .expect("run_hunt should not error");
 
-        if let Some(v) = prior {
-            unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) };
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
         }
 
         assert!(!resp.coverage.possibly_incomplete);
@@ -1338,7 +1340,8 @@ mod tests {
     fn session_answer_coverage_flag_off_is_default_no_op() {
         let _env_guard = lock_env();
         let prior = std::env::var("GRAPHHUNTER_COVERAGE").ok();
-        unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
+        // Coverage now defaults ON; exercise the explicit-off path.
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "0") };
 
         let api = api();
         let session = api
@@ -1358,8 +1361,9 @@ mod tests {
 
         let coverage = session_answer_coverage(&session).expect("must not error");
 
-        if let Some(v) = prior {
-            unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) };
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
         }
 
         assert_eq!(coverage, crate::coverage::AnswerCoverage::default());

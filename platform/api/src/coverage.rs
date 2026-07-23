@@ -280,7 +280,8 @@ mod tests {
     #[test]
     fn answer_coverage_off_is_all_clear() {
         let _guard = lock_env();
-        unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
+        // Coverage now defaults ON; this test exercises the explicit-off path.
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "0") };
         let ic = IngestCoverage {
             possibly_incomplete: true,
             incomplete_reasons: vec!["stopped_early".into()],
@@ -292,6 +293,7 @@ mod tests {
             std::collections::BTreeMap::new(),
             vec![],
         );
+        unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
         // flag off: no marking, no coverage span leaked.
         assert!(!ac.possibly_incomplete);
         assert!(ac.coverage_start.is_none());
@@ -325,8 +327,9 @@ mod tests {
     #[test]
     fn answer_coverage_off_omits_source_fields() {
         let _g = lock_env();
-        unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") }; // and COVERAGE off
-        unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
+        // Both flags now default ON; exercise the explicit-off path.
+        unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", "0") };
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "0") };
         let ic = IngestCoverage::default();
         let ac = answer_coverage(
             &ic,
@@ -335,6 +338,8 @@ mod tests {
             std::collections::BTreeMap::from([("la:ws".into(), 100i64)]),
             vec!["xdr".into()],
         );
+        unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") };
+        unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
         assert!(ac.source_watermarks.is_empty());
         assert!(ac.missing_sources.is_empty());
     }

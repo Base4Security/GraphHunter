@@ -1121,7 +1121,8 @@ mod pause_tests {
     #[tokio::test]
     async fn coverage_off_by_default_records_nothing() {
         let _guard = lock_env();
-        unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") };
+        // Source coverage now defaults ON; exercise the explicit-off path.
+        unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", "0") };
 
         let api = GraphHunterApi::new_noop();
         api.create_session(CreateSessionRequest {
@@ -1172,10 +1173,11 @@ mod pause_tests {
         let (watermarks, missing) = session.source_coverage.read().unwrap().snapshot();
         assert!(
             watermarks.is_empty() && missing.is_empty(),
-            "flag unset: source_coverage must stay untouched (zero recordings), \
+            "flag off: source_coverage must stay untouched (zero recordings), \
              got watermarks={watermarks:?} missing={missing:?}"
         );
 
+        unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") };
         cancel.cancel();
         let _ = loop_handle.await;
     }
