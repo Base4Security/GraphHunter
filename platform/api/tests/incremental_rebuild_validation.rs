@@ -6,10 +6,7 @@
 //! against hand-built synthetic envelopes. This file is the "métricas sobre
 //! un dataset real" half of Fase G's precondition: it ingests a REAL
 //! multi-source dataset — parsed by the actual shipping `LogParser` impls,
-//! not synthetic `sample_event`s — through both the incremental
-//! (journal + `apply_batch_idempotent`) path and the from-scratch journal
-//! rebuild, and asserts the rich comparator reports full observable
-//! equality.
+//! not synthetic `sample_event`s.
 //!
 //! **Fixtures used (git-tracked, ort-free — no `demo_data/*.json`, which
 //! are absent from the working tree per the recon note in the task brief):**
@@ -20,23 +17,42 @@
 //! certificate actually covers cross-source decoupling, not just a single
 //! parser's shape.
 //!
-//! **Ingest path chosen:** direct `LogParser::parse` → `RawIngestEvent`
-//! → `journal_batch` → `apply_batch_idempotent`, mirroring the exact
-//! construction path `journal.rs`'s own
-//! `journal_batch_writes_one_insert_per_event_plus_one_skipped_per_sample`
-//! and `rebuild_from_journal_matches_live_after_idempotent_apply` tests use
-//! (see `sample_event`/`insert_envelope_for` there), rather than
-//! `GraphHunterApi::load_data` — `load_data`'s demo-scenario template reads
-//! from `demo_data/*.json`, which are the exact fixtures recon found
-//! missing. Going straight through the parser + journal primitives keeps
-//! this test on fixtures that are actually in the tree while still
-//! exercising every real production seam: real parser → real
-//! `RawIngestEvent` → real `journal_batch` → real `apply_batch_idempotent`
-//! → real `check_incremental_equivalence`.
+//! **What the positive certificate genuinely exercises (whole-phase review
+//! fix — see Fix 1):** the SAME parsed `RawIngestEvent`s are applied to two
+//! INDEPENDENTLY-built graphs through two DIFFERENT production paths:
+//!
+//! - `live`: a purely IN-MEMORY incremental build. Each source's events are
+//!   wrapped straight into a `GraphDelta` (`graph_hunter_core::delta`) and
+//!   applied via `GraphHunter::apply_delta` — one batch per source
+//!   (sysmon, then sentinel, then forti) — WITHOUT ever constructing a
+//!   `CanonicalEnvelope` or touching a `JournalStore`. The sysmon batch is
+//!   then re-applied a second time (a crash-and-reingest replay) to exercise
+//!   `apply_delta`'s identity dedup on real parsed data, not a synthetic
+//!   fixture.
+//! - `rebuilt` (via `check_incremental_equivalence`): the SAME events are
+//!   separately journaled to DISK (`journal_batch`, one call per source,
+//!   same as `live`'s batching) and then rebuilt FROM SCRATCH by reading the
+//!   journal back (`rebuild_from_journal` → `apply_batch_idempotent`) — a
+//!   single from-disk replay, never touching the in-memory path above.
+//!
+//! So this is a genuine memory-vs-disk AND incremental-vs-batch-rebuild
+//! comparison, plus a real-data idempotent-dedup property (the crash replay
+//! must not inflate `live`'s counts) — not `f(x) == filter(x) |> f` on the
+//! identical deserialized stream, which is what an earlier version of this
+//! test did (`live` was built by calling `apply_batch_idempotent` on
+//! `store.read_all()`, the exact same disk-round-tripped envelopes the
+//! rebuild itself replays — that proved nothing about memory-vs-disk
+//! separation). This certificate does NOT claim to exercise "every real
+//! production seam": `GraphHunterApi::load_data` (the actual API entry
+//! point, which also runs `run_full_scoring` post-ingest) is a separate,
+//! untested seam here — see `journal.rs`'s `anomaly_scores` doc for why
+//! scoring is deliberately out of scope for this comparator.
 
 use graph_hunter_api::journal::{
-    JournalStore, apply_batch_idempotent, check_incremental_equivalence, journal_batch,
+    DimensionResult, JournalStore, apply_batch_idempotent, check_incremental_equivalence,
+    journal_batch,
 };
+use graph_hunter_core::delta::GraphDelta;
 use graph_hunter_core::graph::GraphHunter;
 use graph_hunter_core::parser::{LogParser, RawIngestEvent};
 use graph_hunter_core::{SentinelJsonParser, SysmonJsonParser};
@@ -78,12 +94,13 @@ const FORTI_TOP_USER_CHART: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
 /// Parse the three real, git-tracked fixtures through the actual shipping
 /// parsers (`SysmonJsonParser`, `SentinelJsonParser`, `FortiAnalyzerXmlParser`)
-/// and journal the resulting `RawIngestEvent`s into `store`, one
-/// `journal_batch` call per source (its own `source_id`/`source_kind`/
-/// `parser_name`, matching how a real multi-source ingest run would stamp
-/// per-batch provenance). Pure w.r.t. the caller beyond `store.append` —
-/// same contract `journal_batch` itself documents.
-fn journal_real_multi_source_fixtures(store: &JournalStore, now_ms: i64) {
+/// into in-memory `RawIngestEvent`s, one `Vec` per source. Pure — no I/O, no
+/// journal, no graph. Shared by both the genuinely-in-memory `live` build and
+/// `journal_parsed_events_per_source` below, so both sides of the certificate
+/// start from byte-identical parsed events, not two separate re-parses that
+/// merely happen to agree.
+fn parse_real_multi_source_events()
+-> (Vec<RawIngestEvent>, Vec<RawIngestEvent>, Vec<RawIngestEvent>) {
     let sysmon_events: Vec<RawIngestEvent> = SysmonJsonParser
         .parse(SYSMON_PROCESS_CREATE_1)
         .into_iter()
@@ -94,17 +111,6 @@ fn journal_real_multi_source_fixtures(store: &JournalStore, now_ms: i64) {
         !sysmon_events.is_empty(),
         "real sysmon fixture must parse into at least one event"
     );
-    journal_batch(
-        store,
-        "ds-sysmon",
-        "sysmon",
-        "ds-sysmon",
-        "sysmon",
-        &sysmon_events,
-        &[],
-        now_ms,
-    )
-    .expect("journal sysmon batch");
 
     let sentinel_events: Vec<RawIngestEvent> = SentinelJsonParser
         .parse(SENTINEL_LOGON)
@@ -115,17 +121,6 @@ fn journal_real_multi_source_fixtures(store: &JournalStore, now_ms: i64) {
         !sentinel_events.is_empty(),
         "real sentinel fixture must parse into at least one event"
     );
-    journal_batch(
-        store,
-        "ds-sentinel",
-        "sentinel",
-        "ds-sentinel",
-        "sentinel",
-        &sentinel_events,
-        &[],
-        now_ms,
-    )
-    .expect("journal sentinel batch");
 
     let forti_events: Vec<RawIngestEvent> = FortiAnalyzerXmlParser::default()
         .parse(FORTI_TOP_USER_CHART)
@@ -136,43 +131,126 @@ fn journal_real_multi_source_fixtures(store: &JournalStore, now_ms: i64) {
         !forti_events.is_empty(),
         "real forti fixture must parse into at least one event"
     );
+
+    (sysmon_events, sentinel_events, forti_events)
+}
+
+/// Journal already-parsed per-source event batches into `store`, one
+/// `journal_batch` call per source (its own `source_id`/`source_kind`/
+/// `dataset_id`/`parser_name`, matching how a real multi-source ingest run
+/// would stamp per-batch provenance on disk). Pure w.r.t. the caller beyond
+/// `store.append` — same contract `journal_batch` itself documents. The
+/// `dataset_id` passed per source ("ds-sysmon"/"ds-sentinel"/"ds-forti") is
+/// the SAME tag `apply_events_in_memory` below stamps on `live`'s entities,
+/// so Fix 3's dataset_id-aware entity comparison still reports `Match` on
+/// this fixture (both build paths agree on dataset attribution).
+fn journal_parsed_events_per_source(
+    store: &JournalStore,
+    sysmon_events: &[RawIngestEvent],
+    sentinel_events: &[RawIngestEvent],
+    forti_events: &[RawIngestEvent],
+    now_ms: i64,
+) {
+    journal_batch(store, "ds-sysmon", "sysmon", "ds-sysmon", "sysmon", sysmon_events, &[], now_ms)
+        .expect("journal sysmon batch");
+    journal_batch(
+        store,
+        "ds-sentinel",
+        "sentinel",
+        "ds-sentinel",
+        "sentinel",
+        sentinel_events,
+        &[],
+        now_ms,
+    )
+    .expect("journal sentinel batch");
     journal_batch(
         store,
         "ds-forti",
         "forti_analyzer",
         "ds-forti",
         "forti_analyzer",
-        &forti_events,
+        forti_events,
         &[],
         now_ms,
     )
     .expect("journal forti batch");
 }
 
+/// Convenience wrapper: parse + journal the three real fixtures into `store`
+/// in one call. Kept for the negative control below, which only needs the
+/// on-disk journal (it reads the envelopes straight back off `store` to seed
+/// BOTH its `live` and its deliberately-truncated rebuild journal — that
+/// same-stream shape is fine there because the negative control's whole
+/// point is a missing-record divergence, not memory-vs-disk separation).
+fn journal_real_multi_source_fixtures(store: &JournalStore, now_ms: i64) {
+    let (sysmon_events, sentinel_events, forti_events) = parse_real_multi_source_events();
+    journal_parsed_events_per_source(store, &sysmon_events, &sentinel_events, &forti_events, now_ms);
+}
+
+/// Apply a slice of already-parsed, purely in-memory `RawIngestEvent`s to
+/// `graph` via `GraphDelta` (`graph_hunter_core::delta`) +
+/// `GraphHunter::apply_delta` — the SAME application primitive
+/// `apply_batch_idempotent` uses internally (via `envelope_to_delta`), but
+/// WITHOUT ever materializing a `CanonicalEnvelope` or touching a
+/// `JournalStore`: these events came straight out of the real `LogParser`s
+/// and never round-tripped through JSON. `event_id` is derived
+/// deterministically from `(source_tag, index-in-batch)` so replaying the
+/// SAME `events` slice a second time (a crash-and-reingest of this batch)
+/// hits `apply_delta`'s identity dedup and applies nothing new — real-data
+/// idempotency, exercised entirely in memory.
+fn apply_events_in_memory(
+    graph: &mut GraphHunter,
+    source_tag: &str,
+    dataset_id: &str,
+    events: &[RawIngestEvent],
+) {
+    for (i, ev) in events.iter().enumerate() {
+        let event_id = format!("{source_tag}-{i}");
+        let delta = GraphDelta::new(ev.clone(), event_id, Some(dataset_id.to_string()));
+        let _ = graph.apply_delta(&delta);
+    }
+}
+
 /// The certificate: a real, heterogeneous-source dataset (Sysmon + Sentinel
-/// + FortiAnalyzer) ingested through the incremental `apply_batch_idempotent`
-/// path and, independently, rebuilt from the journal by
-/// `check_incremental_equivalence` — must report full observable equality
-/// on a non-trivial graph.
+/// + FortiAnalyzer), applied to an in-memory incremental graph via
+/// `GraphDelta`/`apply_delta` (with a crash-replay of one source's batch)
+/// and, INDEPENDENTLY, journaled to disk and rebuilt from scratch by
+/// `check_incremental_equivalence` — must report full observable equality on
+/// a non-trivial graph. See the file header for exactly what "independently"
+/// means here (memory vs. disk, incremental vs. from-scratch batch).
 #[test]
 fn real_multi_source_dataset_incremental_equals_rebuild() {
+    let (sysmon_events, sentinel_events, forti_events) = parse_real_multi_source_events();
+
+    // GENUINE in-memory incremental construction: one batch per real source,
+    // applied directly via GraphDelta + apply_delta — never touching a
+    // CanonicalEnvelope or JournalStore. The sysmon batch is then re-applied
+    // a second time (a crash-and-reingest replay) to exercise apply_delta's
+    // identity dedup on real parsed data.
+    let mut live = GraphHunter::new();
+    apply_events_in_memory(&mut live, "ds-sysmon", "ds-sysmon", &sysmon_events);
+    apply_events_in_memory(&mut live, "ds-sentinel", "ds-sentinel", &sentinel_events);
+    apply_events_in_memory(&mut live, "ds-forti", "ds-forti", &forti_events);
+    apply_events_in_memory(&mut live, "ds-sysmon", "ds-sysmon", &sysmon_events); // crash replay
+
+    // Separately, the SAME parsed events are journaled to DISK — one
+    // journal_batch call per source, mirroring live's per-source batching.
     let dir = tempfile::tempdir().unwrap();
     let store = JournalStore::open(dir.path()).unwrap();
-    journal_real_multi_source_fixtures(&store, 1_753_000_000_000);
-
-    // The live incremental graph is built from exactly the envelopes just
-    // journaled — the same envelope stream a real ingest run with
-    // GRAPHHUNTER_JOURNAL + GRAPHHUNTER_GRAPHDELTA both on would apply.
-    let envelopes = store.read_all().unwrap();
-    assert!(
-        envelopes.len() >= 3,
-        "expected at least one journaled envelope per of the 3 real sources; got {}",
-        envelopes.len()
+    journal_parsed_events_per_source(
+        &store,
+        &sysmon_events,
+        &sentinel_events,
+        &forti_events,
+        1_753_000_000_000,
     );
-    let mut live = GraphHunter::new();
-    apply_batch_idempotent(&mut live, &envelopes);
 
     // The rebuild + rich compare — THE certificate.
+    // `check_incremental_equivalence` rebuilds `rebuilt` FROM SCRATCH by
+    // reading the journal back off disk (`rebuild_from_journal` ->
+    // `apply_batch_idempotent`), a single from-disk replay entirely
+    // independent of how `live` above was constructed.
     let report = check_incremental_equivalence(&live, &store).unwrap();
     eprintln!("{report}");
 
@@ -189,6 +267,17 @@ fn real_multi_source_dataset_incremental_equals_rebuild() {
         report.all_comparable_dimensions_match(),
         "incremental != rebuild on real multi-source dataset:\n{report}"
     );
+    // Machine-enforce the hypothesis dimension: it must be a REAL Match, not
+    // a silent decay to NotComparable/Diff if the battery or fixtures drift —
+    // `all_comparable_dimensions_match()` alone would NOT catch a
+    // hypothesis_results that quietly became NotComparable (NotComparable
+    // doesn't count against equivalence, so the assertion above would still
+    // pass even if this dimension stopped proving anything).
+    assert!(
+        matches!(report.hypothesis_results, DimensionResult::Match),
+        "hypothesis dimension must be a real Match, not NotComparable/Diff: {:?}",
+        report.hypothesis_results
+    );
     // Vacuous-pass guard: the graph must actually be non-trivial.
     assert!(
         report.live_relations > 0,
@@ -197,6 +286,16 @@ fn real_multi_source_dataset_incremental_equals_rebuild() {
     assert!(
         report.live_entities > 0,
         "fixture must produce a non-trivial graph (entities):\n{report}"
+    );
+    // Exact counts, pinned: the crash replay above must NOT inflate them —
+    // that is the whole point of proving dedup on real, parsed data.
+    assert_eq!(
+        report.live_entities, 9,
+        "crash replay of the sysmon batch must not inflate entity count:\n{report}"
+    );
+    assert_eq!(
+        report.live_relations, 7,
+        "crash replay of the sysmon batch must not inflate relation count:\n{report}"
     );
 }
 
