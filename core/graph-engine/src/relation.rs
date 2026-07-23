@@ -28,6 +28,13 @@ where
 ///
 /// The `timestamp` field stores Unix epoch seconds and is critical for
 /// temporal pattern matching (causal monotonicity enforcement).
+/// Default for [`Relation::ingested_at`] when deserializing wire data that
+/// predates this field (see the `#[serde(default = ...)]` below) — the same
+/// 0-delta epoch base used by [`CompactRelation::ingested_at_delta`].
+fn default_ingested_at() -> i64 {
+    INGEST_EPOCH_BASE
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Relation {
     pub source_id: String,
@@ -42,10 +49,22 @@ pub struct Relation {
         serialize_with = "serialize_arc_str"
     )]
     pub dataset_id: Option<Arc<str>>,
+    /// Wall-clock time this edge was written to the graph (epoch seconds),
+    /// i.e. [`CompactRelation::ingested_at`] read back onto the
+    /// materialized struct. Additive field: `#[serde(default = ...)]` keeps
+    /// existing wire consumers (e.g. journal envelopes serialized before
+    /// this field existed) deserializing cleanly, resolving to the same
+    /// `INGEST_EPOCH_BASE` that a legacy `ingested_at_delta` of 0 resolves
+    /// to on the compact side.
+    #[serde(default = "default_ingested_at")]
+    pub ingested_at: i64,
 }
 
 impl Relation {
-    /// Creates a new relation with empty metadata.
+    /// Creates a new relation with empty metadata. `ingested_at` defaults to
+    /// [`INGEST_EPOCH_BASE`] (the 0-delta default) — callers that observed a
+    /// real ingestion time (e.g. `materialize_relation`) should set it
+    /// directly.
     pub fn new(
         source_id: impl Into<String>,
         dest_id: impl Into<String>,
@@ -59,6 +78,7 @@ impl Relation {
             timestamp,
             metadata: HashMap::new(),
             dataset_id: None,
+            ingested_at: INGEST_EPOCH_BASE,
         }
     }
 

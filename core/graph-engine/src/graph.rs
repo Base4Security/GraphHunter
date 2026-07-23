@@ -670,6 +670,7 @@ impl GraphHunter {
             timestamp: compact.timestamp,
             metadata,
             dataset_id: self.resolve_dataset_tag(compact.dataset_tag),
+            ingested_at: compact.ingested_at(),
         }
     }
 
@@ -3664,6 +3665,31 @@ mod tests {
         assert!(
             rels.iter().all(|r| !r.metadata.contains_key("_rel_type")),
             "builtin injects no _rel_type"
+        );
+    }
+
+    /// Close-the-channel Task 2: `materialize_relation` (via `get_relations`)
+    /// must expose the real `ingested_at` that Task 1 started stamping on
+    /// `CompactRelation` — otherwise the value is stamped but unobservable
+    /// on the primary export/hunt path, and the SOT channel cannot honestly
+    /// close as "full".
+    #[test]
+    fn materialized_relation_exposes_ingestion_time() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![(
+                Entity::new("a", EntityType::IP),
+                Relation::new("a", "b", RelationType::Connect, 100),
+                Entity::new("b", EntityType::IP),
+            )],
+            None,
+        )
+        .unwrap();
+        let rels = g.get_relations("a");
+        assert!(
+            rels[0].ingested_at > crate::relation::INGEST_EPOCH_BASE,
+            "materialized Relation must carry a real ingested_at, got {}",
+            rels[0].ingested_at
         );
     }
 

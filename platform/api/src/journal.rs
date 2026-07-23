@@ -765,9 +765,13 @@ pub struct EquivalenceReport {
     /// `hypothesis_results` for the related reason.) Always `NotComparable`.
     pub anomaly_scores: DimensionResult,
     /// Design-spec dimension the graph structurally does NOT observe:
-    /// `ingested_at_delta` (live vs rebuild MVCC ingestion skew) is
-    /// hardcoded 0 on both raw-event paths today, so it carries no signal.
-    /// Always `NotComparable`.
+    /// `ingested_at` is GraphHunter's receive clock (real wall-clock time at
+    /// insert, stamped via `now_seconds()` — see `CompactRelation::ingested_at`
+    /// and `Relation::ingested_at`), so a live graph and a from-scratch
+    /// rebuild genuinely differ on it (the rebuild is ingested at a later
+    /// wall-clock instant than the original live insert). The comparator
+    /// does not compare it — `NotComparable`, never a diff. Always
+    /// `NotComparable`.
     pub mvcc_ingested_at: DimensionResult,
     /// `true` iff every journal envelope this report's rebuild replayed was
     /// an `Insert` or `Skipped`. `rebuild_from_journal` does not yet
@@ -892,7 +896,7 @@ pub fn compare_observable_equality(
             reason: "anomaly/centrality scores are produced by a separate scoring pass (run_full_scoring in load_data), so a live post-ingest graph and a fresh rebuild genuinely diverge on scores in production; the comparator does not inspect score fields — this dimension is NotComparable, never Match".to_string(),
         },
         mvcc_ingested_at: DimensionResult::NotComparable {
-            reason: "ingested_at_delta is hardcoded 0 on both raw-event paths; not a meaningful live-vs-rebuild observable".to_string(),
+            reason: "ingested_at is GraphHunter's receive clock (wall-clock at insert), so a live graph and a from-scratch rebuild genuinely differ on it; the comparator does not compare it — NotComparable, never a diff".to_string(),
         },
         // The faithful guard depends on the JOURNAL's envelope classification
         // (Correction/Tombstone), which this function never sees — it only
