@@ -20,6 +20,7 @@ pub mod evtx;
 pub mod format_registry;
 pub mod ingestors;
 pub mod journal;
+pub mod kql_flags;
 pub mod netflow;
 pub mod pcap;
 pub mod pcap_l7;

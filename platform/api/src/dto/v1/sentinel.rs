@@ -522,6 +522,16 @@ pub struct SentinelEnvStatus {
     pub azure_resource_group: Option<String>,
     pub azure_workspace_id: Option<String>,
     pub azure_workspace_name: Option<String>,
+    /// Fase G: whether one-click hunting templates (`run_hunting_template`)
+    /// are enabled (`GRAPHHUNTER_HUNTING_TEMPLATES`). Default `true`; the
+    /// frontend hides the "Hunting Templates" surface when `false`.
+    #[serde(default = "crate::kql_flags::hunting_templates_enabled")]
+    pub hunting_templates_enabled: bool,
+    /// Fase G: whether the raw-KQL escape hatch (`POST /kql`) is enabled
+    /// (`GRAPHHUNTER_KQL_ESCAPE_HATCH`). Default `true`; the frontend hides
+    /// the raw-KQL entry point when `false`.
+    #[serde(default = "crate::kql_flags::kql_escape_hatch_enabled")]
+    pub kql_escape_hatch_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
