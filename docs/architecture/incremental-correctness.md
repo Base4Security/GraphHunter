@@ -537,6 +537,15 @@ vive el campo (`raw_source_row` en vez de `raw_payload`).
   cablear en producción) y el path en vivo (`ingest_siem`) es una query
   one-shot sin breaker. Cerrarlo exige construir el pipeline de
   streaming en producción — territorio de Fase F, no de esta slice.
+  **SUPERADO por Fase F** (ver `source-independent-ingestion.md` §5):
+  cerrado vía coverage accounting por fallas sobre el path one-shot
+  (`SourceCoverage` + `record_siem_outcome`, probe-every-call en
+  `ingest_siem`) — el pipeline de streaming en producción **no** resultó
+  necesario para cerrar el observable del testigo; el poller sigue
+  dormido y sin cablear (ver la CONDICIÓN DE RETROCESO en §5 de ese
+  documento). Este párrafo original queda como registro histórico de lo
+  que se creía necesario al escribir esta slice, no como la vía por la
+  que efectivamente se cerró.
 - **`row_completeness`** sigue `degraded` (ver 7.1): falta computar
   `ParseStats` (o un contador equivalente) en el path plano de
   `ingest_siem`, y dejar de descartar `skipped_samples` en el sitio de

@@ -373,6 +373,18 @@ veredictos: `sot/validation/graphhunter/ingest_surface.json` y
 `sot/validation/graphhunter/graphhunter_sufficiency_audit.md`, sección
 "Fase F delta — MILESTONE: first `Sufficient` verdict".
 
+> **CONDICIÓN DE RETROCESO (standing walk-back condition).** Si alguna
+> vez el `SourcePoller` dormido (`source_poller::CircuitBreaker` +
+> `ParserTask` + `GraphWriter`, ver §5.1 y §5.4.1) se cablea en
+> producción **sin** su propio coverage accounting, vuelve la ceguera
+> literal de "saltar una ventana de poll" que este cierre de Fase F
+> eliminó, y `source_coverage` **debe** re-degradarse a `degraded`. Toda
+> fase futura de streaming-poller debe tratar esto como precondición
+> dura: no cablear el poller en producción sin, a la vez, extender (o
+> reemplazar con equivalente) `SourceCoverage`/`record_siem_outcome`
+> para cubrir su ciclo de vida de polling, o el veredicto `Sufficient`
+> de las 30 hipótesis (§5.5) deja de sostenerse en ese canal.
+
 ### 5.1 `SourceCoverage`: breaker + watermark por-fuente
 
 `platform/api/src/coverage.rs` gana un tipo nuevo:
@@ -471,18 +483,27 @@ mismo estado real de sesión) ahora lee tres cosas y las funde en un solo
    — nuevo accessor (`core/graph-engine/src/graph.rs`, Fase F Task 1): un
    único pase O(E) sobre `for_each_edge` que calcula el mínimo y máximo
    `timestamp` de arista en todo el grafo (`None` si el grafo no tiene
-   aristas). **Nota de costo, honesta:** la decisión de la fase Coverage
-   (§4.4) había rechazado explícitamente un scan O(E) por-hunt como "un
-   impuesto inaceptable" — ese rechazo era sobre construir el accessor
-   entonces; ahora que el accessor existe, `session_answer_coverage` lo
-   llama en **cada** `run_hunt`/`run_hunt_batch`, incondicionalmente (no
-   detrás de ningún flag) — el flag `GRAPHHUNTER_COVERAGE` solo controla
-   si `answer_coverage` **expone** `coverage_start`/`coverage_end` en la
-   respuesta, no si el scan se ejecuta. `edges_sorted` (ver el comentario
-   en `edge_timestamp_range`) solo ordena aristas dentro de la lista de
-   cada vértice, no globalmente, así que no sirve como atajo O(1) para
-   este cálculo global — es un costo real pagado por cada hunt, no un
-   placeholder.
+   aristas). **Nota de costo, honesta (corregida post-fix-wave):** la
+   decisión de la fase Coverage (§4.4) había rechazado explícitamente un
+   scan O(E) por-hunt como "un impuesto inaceptable" — ese rechazo era
+   sobre construir el accessor entonces. Cuando el accessor se cableó en
+   esta fase, `session_answer_coverage` inicialmente lo llamaba en
+   **cada** `run_hunt`/`run_hunt_batch` incondicionalmente (leía el scan
+   O(E) + los otros dos locks y recién *después* comprobaba
+   `GRAPHHUNTER_COVERAGE`, descartando el resultado si estaba apagado) —
+   exactamente el impuesto per-query que §4.4 había rechazado, solo que
+   ahora aplicado también a `run_hunt_batch` (hasta 30 scans O(E) por
+   lote con el flag apagado). Una revisión de fin de fase lo señaló como
+   must-fix y `session_answer_coverage` ahora chequea
+   `coverage_enabled()` **primero**: con el flag apagado retorna
+   `AnswerCoverage::default()` sin tocar ningún lock ni escanear el
+   grafo — no-op real. Con el flag encendido se mantiene el mismo costo
+   O(E) de antes (tradeoff ahora explícito y aceptado, no accidental).
+   `edges_sorted` (ver el comentario en `edge_timestamp_range`) solo
+   ordena aristas dentro de la lista de cada vértice, no globalmente, así
+   que no sirve como atajo O(1) para este cálculo global — sigue siendo
+   un costo real pagado por cada hunt cuando el flag está encendido, no
+   un placeholder.
 
 `AnswerCoverage.source_watermarks`/`missing_sources` viajan en
 `RunHuntResponse` **y** `RunHuntBatchEntry` — la misma paridad de forma
