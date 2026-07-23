@@ -789,3 +789,16 @@ datasets chicos (los usos reales del journal), no historia completa all-time.
 catálogo. La disclosure de cada canal se actualizó ("default off" → "default on,
 journal acotado"), lo que **fortalece** el cierre: las garantías ahora se cumplen
 en el path por defecto, no solo cuando se togglean los flags.
+
+**Disclosure (fix M-4, whole-phase review) — cambio de semántica en el path de
+apply por defecto:** con `GRAPHHUNTER_GRAPHDELTA` default-on, la ingesta pasa
+por defecto por `apply_batch_idempotent`/`apply_delta` en vez del viejo path
+por defecto `insert_raw_events`. Ese apply idempotente sigue el contrato "debe
+nunca abortar la ingesta": un fallo de `apply_delta` en un delta individual
+solo hace `tracing::warn!` y continúa con el resto del batch (WARN-AND-CONTINUE),
+mientras que el viejo path por defecto (`insert_raw_events`) propagaba el error
+hacia arriba. Es decir, el default-on flip también cambia — por defecto, no solo
+cuando se togglea el flag — la semántica de fallo del path de apply: de
+"propaga el error" a "avisa y continúa". Disclosed, no afecta ningún veredicto
+de los canales (el journal sigue registrando cada envelope antes del apply, así
+que un delta que falla en aplicar sigue siendo reconstructible desde el journal).

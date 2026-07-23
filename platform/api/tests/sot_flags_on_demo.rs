@@ -1,9 +1,15 @@
 //! SOT machinery, end-to-end, with ALL FOUR feature flags turned ON.
 //!
 //! `real_hunt_demo.rs` proves the cross-source hunt works with the flags at
-//! their default (off) setting, plus one flag (`GRAPHHUNTER_COVERAGE`) on in
-//! its second test. This file is the missing "turn every SOT knob on at
-//! once and prove the machinery underneath actually does something" demo:
+//! their default setting — as of the enable-defaults fase that default is
+//! now ON for all four (falsy-to-disable), not off; `real_hunt_demo.rs`'s
+//! first test sets none of them explicitly and so relies on that ambient
+//! default, and its second test additionally forces `GRAPHHUNTER_COVERAGE=1`
+//! explicitly (redundant with the new default, kept for clarity). This file
+//! is the missing "turn every SOT knob on at once and prove the machinery
+//! underneath actually does something" demo — explicit here rather than
+//! ambient, so it stays true regardless of whatever the process-wide default
+//! happens to be:
 //!
 //!   1. `GRAPHHUNTER_JOURNAL`       — append-only journal receives records
 //!   2. `GRAPHHUNTER_GRAPHDELTA`    — idempotent apply dedups a crash-replay
@@ -194,7 +200,18 @@ fn sot_all_flags_on_end_to_end_demo() {
     let journal_count_after_ingest = journal_store
         .count()
         .expect("count journal after ingesting 4 sources");
-    let journal_delta = journal_count_after_ingest - journal_count_baseline;
+    // saturating_sub (fix M-3, whole-phase review): this test reads the REAL
+    // production journal (see the module doc above) and asserts on a
+    // BEFORE/AFTER delta rather than an absolute count, precisely because
+    // that store is shared with whatever else is running against it. Since
+    // `GRAPHHUNTER_JOURNAL` is now default-on, size-based rotation
+    // (`journal_max_bytes`) can fire on ANY concurrent append to that same
+    // global journal — including from another process/test run — and prune
+    // the rotated segment mid-test, so `journal_count_after_ingest` is not
+    // guaranteed to be >= `journal_count_baseline`. A plain `-` would panic
+    // (usize underflow) in that case; `saturating_sub` reports a floor of 0
+    // instead of crashing the test on an ordinary production rotation.
+    let journal_delta = journal_count_after_ingest.saturating_sub(journal_count_baseline);
     eprintln!("\n--- [1/5] JOURNAL (GRAPHHUNTER_JOURNAL=1) ---");
     eprintln!(
         "journal record count: {journal_count_baseline} (before) -> {journal_count_after_ingest} (after) = +{journal_delta} appended by this test"

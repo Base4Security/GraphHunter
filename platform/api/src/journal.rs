@@ -21,19 +21,58 @@ const JOURNAL_FILE: &str = "journal.jsonl";
 const JOURNAL_ROTATED_FILE: &str = "journal.jsonl.1";
 const DEFAULT_JOURNAL_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Defensive floor on `journal_max_bytes()` (fix M-2, whole-phase review of
+/// the enable-defaults fase): a parsed `GRAPHHUNTER_JOURNAL_MAX_BYTES` of `0`
+/// or anything smaller than roughly one serialized record makes `append`
+/// rotate on EVERY call — with retention capped at "active + one rotated
+/// segment," that destroys the retained window down to ~1 record. A typo
+/// (or an operator fat-fingering a much smaller unit) must not be able to do
+/// that, so any parsed value below this floor is raised to it.
+const MIN_JOURNAL_MAX_BYTES: u64 = 1024 * 1024;
+
 /// Cap (in bytes) on the ACTIVE journal segment before `append` rotates it out
 /// to `journal.jsonl.1`, read from `GRAPHHUNTER_JOURNAL_MAX_BYTES` (default
 /// 256 MiB). Bounds total on-disk journal size to ~2x this value (active +
 /// one rotated segment) so the append-only journal can be safely enabled by
 /// default without unbounded disk growth. A missing or unparseable value
 /// falls back to the default defensively — this must never panic or block
-/// ingestion on a malformed env var.
+/// ingestion on a malformed env var. The parsed (or default) value is then
+/// floored to `MIN_JOURNAL_MAX_BYTES` (fix M-2) so an operator typo (e.g. a
+/// stray `0` or a value expressed in the wrong unit) can never shrink the
+/// retained window down to almost nothing.
 fn journal_max_bytes() -> u64 {
-    std::env::var("GRAPHHUNTER_JOURNAL_MAX_BYTES")
+    let parsed = std::env::var("GRAPHHUNTER_JOURNAL_MAX_BYTES")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_JOURNAL_MAX_BYTES)
+        .unwrap_or(DEFAULT_JOURNAL_MAX_BYTES);
+    parsed.max(MIN_JOURNAL_MAX_BYTES)
 }
+
+/// Serializes the entire size-check + rotate + write critical section of
+/// `append` (fix I-1, whole-phase review of the enable-defaults fase). The
+/// journal is ONE global, per-user file
+/// (`dirs::data_dir()/GraphHunter/journal`) shared across every session and
+/// every ingest call IN THIS PROCESS; with `GRAPHHUNTER_JOURNAL` now
+/// default-on, every ingest is a writer. Without this lock, two concurrent
+/// `append` calls that both observe the active segment at-or-over the
+/// rotation cap can both proceed into `rotate()`: the second caller's
+/// `remove_file(.1)` can delete the FIRST caller's just-rotated `.1` segment
+/// (up to a full retained window's worth of data — `DEFAULT_JOURNAL_MAX_BYTES`
+/// bytes) before that first rotation is done being observed, silently
+/// destroying the retained window. Holding this mutex across the whole
+/// check-rotate-write sequence makes every `append` atomic with respect to
+/// every other `append` IN THIS PROCESS, which closes that race.
+///
+/// **Documented scope limit:** this is an in-process, single-`Mutex`
+/// solution — it does nothing for two separate OS PROCESSES appending to the
+/// same global journal path concurrently (e.g. two independent invocations
+/// of a CLI/daemon sharing one user's data dir). Cross-process synchronization
+/// would need a real file lock (e.g. `flock`/`LockFileEx` via a crate such as
+/// `fs2` or `fd-lock`) and is deliberately NOT added here — this fix is
+/// scoped to the in-process race, which is the one the default-on flip
+/// actually introduces (every ingest path in this process is now a writer);
+/// the multi-process case is a separate, deferred concern.
+static ROTATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub struct JournalStore {
     path: PathBuf,
@@ -62,6 +101,16 @@ impl JournalStore {
     /// between the two steps never loses data, it only leaves `.1` briefly
     /// absent while the about-to-be-rotated data is still intact in the
     /// active file. The active file is NEVER deleted except via this rename.
+    ///
+    /// Callers MUST hold `ROTATE_LOCK` for the duration of this call (see
+    /// `append`/`ROTATE_LOCK`'s doc) — `rotate` itself does not acquire it,
+    /// since it's always invoked from inside `append`'s already-locked
+    /// critical section. Two unsynchronized callers racing here is exactly
+    /// the I-1 data-loss bug `ROTATE_LOCK` closes: the second caller's
+    /// `remove_file` can delete the first caller's just-renamed `.1` before
+    /// that rotation is accounted for. `ROTATE_LOCK` only covers callers IN
+    /// THIS PROCESS — see its doc comment for the documented cross-process
+    /// gap.
     fn rotate(&self) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&self.rotated_path);
         std::fs::rename(&self.path, &self.rotated_path)?;
@@ -73,9 +122,43 @@ impl JournalStore {
     /// already reached the size cap (`journal_max_bytes`), so the new line
     /// always starts (or continues) a fresh, under-cap active file and is
     /// never lost — the full prior contents move intact to `.1`.
+    ///
+    /// The ENTIRE size-check + rotate + write sequence runs under
+    /// `ROTATE_LOCK` (fix I-1), so two `append` calls racing IN THIS PROCESS
+    /// are fully serialized — one completes its whole rotate-and-write before
+    /// the other even reads the file size — which is what makes each append
+    /// atomic and prevents a concurrent rotation from deleting a segment the
+    /// other caller just retained. This does NOT synchronize across separate
+    /// OS processes writing to the same global journal path; see
+    /// `ROTATE_LOCK`'s doc comment for that documented, deferred gap.
     pub fn append(&self, env: &CanonicalEnvelope) -> std::io::Result<()> {
+        let _guard = ROTATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        self.append_locked(env, journal_max_bytes())
+    }
+
+    /// Test-only entry point mirroring `append` exactly (same lock, same
+    /// rotate-then-write sequence) but taking the rotation cap directly
+    /// instead of resolving it via `journal_max_bytes()` — which, after fix
+    /// M-2, floors any parsed env value to `MIN_JOURNAL_MAX_BYTES` (1 MiB).
+    /// Rotation/retention/concurrency tests need a cap of a few thousand
+    /// bytes to exercise many rotations quickly; going through the real
+    /// floor would require tens of thousands of appends per test to do the
+    /// same. Exists purely so those tests can drive the SAME production
+    /// rotate/append code path (including `ROTATE_LOCK`) without paying that
+    /// cost — it is not a separate/parallel implementation.
+    #[cfg(test)]
+    pub(crate) fn append_with_cap(&self, env: &CanonicalEnvelope, cap: u64) -> std::io::Result<()> {
+        let _guard = ROTATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        self.append_locked(env, cap)
+    }
+
+    /// The actual rotate-then-write body shared by `append` and (in tests)
+    /// `append_with_cap`. Callers MUST already hold `ROTATE_LOCK` — this
+    /// function does not acquire it itself, so that both public entry points
+    /// share one lock/critical-section, not two independently-locked ones.
+    fn append_locked(&self, env: &CanonicalEnvelope, cap: u64) -> std::io::Result<()> {
         if let Ok(meta) = std::fs::metadata(&self.path) {
-            if meta.len() >= journal_max_bytes() {
+            if meta.len() >= cap {
                 self.rotate()?;
             }
         }
@@ -90,20 +173,44 @@ impl JournalStore {
     /// Read every JSONL record from one segment file in append order.
     /// Missing file → empty. Shared by `read_all` across the rotated +
     /// active segments.
+    ///
+    /// Fix M-1 (whole-phase review of the enable-defaults fase): `append`'s
+    /// `write_all` is not atomic — a crash mid-write leaves the file's LAST
+    /// line a partial/truncated JSON fragment (no trailing newline). Prior
+    /// behavior hard-errored on ANY unparseable line, so a single torn tail
+    /// made `read_all` (and therefore journal rebuild) fail for the WHOLE
+    /// journal, including every valid record before it. Only the trailing
+    /// line can ever be torn this way — a crash mid-`write_all` cannot
+    /// corrupt a line that was already fully written and fsynced-by-the-OS
+    /// in a prior, completed `append` call — so only the LAST line gets this
+    /// leniency: if it fails to parse, it's skipped with a `tracing::warn!`
+    /// instead of failing the read. An unparseable line anywhere else (not
+    /// the last) is real corruption, not a torn tail, and still hard-errors.
     fn read_segment(path: &Path) -> std::io::Result<Vec<CanonicalEnvelope>> {
         if !path.exists() {
             return Ok(Vec::new());
         }
         let f = File::open(path)?;
+        let raw_lines: Vec<String> = BufReader::new(f).lines().collect::<std::io::Result<_>>()?;
+        let last_idx = raw_lines.len().saturating_sub(1);
         let mut out = Vec::new();
-        for line in BufReader::new(f).lines() {
-            let line = line?;
+        for (idx, line) in raw_lines.iter().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            let env: CanonicalEnvelope = serde_json::from_str(&line)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            out.push(env);
+            match serde_json::from_str::<CanonicalEnvelope>(line) {
+                Ok(env) => out.push(env),
+                Err(e) if idx == last_idx => {
+                    tracing::warn!(
+                        target: "journal",
+                        error = %e,
+                        "skipping torn trailing line on read"
+                    );
+                }
+                Err(e) => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
+                }
+            }
         }
         Ok(out)
     }
@@ -130,6 +237,15 @@ impl JournalStore {
     }
 
     /// Count spans the rotated segment + active file, same as `read_all`.
+    ///
+    /// Contract note (fix M-1): unlike `read_all`/`read_segment`, `count`
+    /// never parses a line as JSON — it only counts non-empty raw lines. So
+    /// when the trailing line is torn (see `read_segment`'s doc), `count`
+    /// still counts it (it's a non-empty raw line) while `read_all().len()`
+    /// does not (it's skipped as unparseable). `count()` can therefore be
+    /// exactly one higher than `read_all().len()` while a torn tail is
+    /// present — this is documented, expected skew, not a bug; the two are
+    /// only guaranteed to agree when every line in both segments parses.
     pub fn count(&self) -> std::io::Result<usize> {
         Ok(Self::count_segment(&self.rotated_path)? + Self::count_segment(&self.path)?)
     }
@@ -1074,10 +1190,13 @@ mod tests {
 
     #[test]
     fn append_then_read_all_preserves_order_and_content() {
-        // Guards against GRAPHHUNTER_JOURNAL_MAX_BYTES races with the
-        // rotation/retention tests below, which mutate that env var: see
-        // their doc comments for why every append-using test must serialize
-        // on ENV_LOCK now that append() reads a process-global cap.
+        // Guards against a GRAPHHUNTER_JOURNAL_MAX_BYTES race with
+        // `journal_max_bytes_floors_tiny_or_zero_env_values_to_one_mib`
+        // below, the one remaining test that mutates that env var (the
+        // rotation/retention/concurrency tests now use `append_with_cap`
+        // instead, precisely to avoid needing this lock — see
+        // `TEST_JOURNAL_CAP`'s doc comment). Every test that calls the real,
+        // env-var-driven `append()` must serialize on ENV_LOCK.
         let _guard = lock_env();
         let dir = tempfile::tempdir().unwrap();
         let j = JournalStore::open(dir.path()).unwrap();
@@ -1118,7 +1237,8 @@ mod tests {
 
     // ── rotation / retention ────────────────────────────────────────
 
-    /// The tiny cap used by the rotation/retention tests below. A single
+    /// The tiny cap used by the rotation/retention tests below, via
+    /// `append_with_cap` (fix M-2 test hook — see its doc comment): a single
     /// journaled `CanonicalEnvelope` (via the `env(...)` helper) serializes
     /// to ~535-540 bytes here — it carries a full `ProvenanceCtx` with two
     /// 64-hex-char SHA-256 digests (`canonical_hash`, `raw_event_sha256`)
@@ -1131,18 +1251,18 @@ mod tests {
     /// below (20 appends) hits exactly ONE rotation, comfortably before a
     /// second one would start pruning; `journal_retention_bounds_..` (200
     /// appends) still exercises many rotations and proves the 2-segment cap
-    /// holds over the long run.
-    const TEST_JOURNAL_CAP: &str = "6000";
+    /// holds over the long run. This goes through `append_with_cap` rather
+    /// than mutating `GRAPHHUNTER_JOURNAL_MAX_BYTES`, since fix M-2's
+    /// `MIN_JOURNAL_MAX_BYTES` floor (1 MiB) would otherwise override a cap
+    /// this small and require tens of thousands of appends per test to
+    /// exercise the same rotation behavior.
+    const TEST_JOURNAL_CAP: u64 = 6000;
 
     #[test]
     fn journal_rotates_at_cap_and_read_all_spans_segments() {
         let dir = tempfile::tempdir().unwrap();
-        // Force a tiny cap for the test (env), so a few appends trigger rotation.
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("GRAPHHUNTER_JOURNAL_MAX_BYTES", TEST_JOURNAL_CAP); }
         let j = JournalStore::open(dir.path()).unwrap();
-        for i in 0..20 { j.append(&env(&format!("row-{i}"), i, i*10)).unwrap(); }
-        unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL_MAX_BYTES"); }
+        for i in 0..20 { j.append_with_cap(&env(&format!("row-{i}"), i, i*10), TEST_JOURNAL_CAP).unwrap(); }
         // A rotated segment exists AND read_all returns ALL 20 in order (spans .1 + active).
         assert!(dir.path().join("journal.jsonl.1").exists(), "expected a rotated segment");
         let all = j.read_all().unwrap();
@@ -1158,17 +1278,209 @@ mod tests {
         // exist (older data pruned) — total on-disk stays ~2x cap, not
         // unbounded.
         let dir = tempfile::tempdir().unwrap();
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("GRAPHHUNTER_JOURNAL_MAX_BYTES", TEST_JOURNAL_CAP); }
         let j = JournalStore::open(dir.path()).unwrap();
-        for i in 0..200 { j.append(&env(&format!("r{i}"), i, i)).unwrap(); }
-        unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL_MAX_BYTES"); }
+        for i in 0..200 { j.append_with_cap(&env(&format!("r{i}"), i, i), TEST_JOURNAL_CAP).unwrap(); }
         // No .2 / older segments — retention keeps only active + .1.
         assert!(!dir.path().join("journal.jsonl.2").exists());
         let bytes: u64 = std::fs::read_dir(dir.path()).unwrap()
             .filter_map(|e| e.ok()).map(|e| e.metadata().unwrap().len()).sum();
-        let cap: u64 = TEST_JOURNAL_CAP.parse().unwrap();
-        assert!(bytes < cap * 3, "journal disk must stay bounded (~2x cap), got {bytes}");
+        assert!(bytes < TEST_JOURNAL_CAP * 3, "journal disk must stay bounded (~2x cap), got {bytes}");
+    }
+
+    // ── journal_max_bytes floor (fix M-2) ────────────────────────────
+
+    #[test]
+    fn journal_max_bytes_floors_tiny_or_zero_env_values_to_one_mib() {
+        let _guard = lock_env();
+        for tiny in ["0", "1", "10", "300"] {
+            unsafe { std::env::set_var("GRAPHHUNTER_JOURNAL_MAX_BYTES", tiny) };
+            assert_eq!(
+                journal_max_bytes(),
+                MIN_JOURNAL_MAX_BYTES,
+                "a parsed cap of {tiny:?} must be floored to MIN_JOURNAL_MAX_BYTES, \
+                 not left small enough to rotate on every append"
+            );
+        }
+        // A value already above the floor passes through unchanged.
+        unsafe { std::env::set_var("GRAPHHUNTER_JOURNAL_MAX_BYTES", "5000000") };
+        assert_eq!(journal_max_bytes(), 5_000_000);
+        unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL_MAX_BYTES") };
+    }
+
+    // ── torn trailing line recovery (fix M-1) ────────────────────────
+
+    #[test]
+    fn read_all_skips_a_torn_trailing_line_but_keeps_prior_records() {
+        let _guard = lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let j = JournalStore::open(dir.path()).unwrap();
+        j.append(&env("row-a", 1, 10)).unwrap();
+        // Simulate a crash mid-write_all: append raw, truncated, non-JSON
+        // bytes with NO trailing newline directly to the file, bypassing
+        // `append` (which only ever writes a complete, newline-terminated
+        // line). This is exactly the shape a torn tail takes in practice.
+        {
+            let path = dir.path().join("journal.jsonl");
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(b"{\"change_kind\":\"Insert\",\"raw_pay").unwrap();
+        }
+        let all = j.read_all().unwrap();
+        assert_eq!(
+            all.len(),
+            1,
+            "a torn trailing line must be skipped-with-warn, not fail the whole read"
+        );
+        assert_eq!(all[0].raw_payload, "row-a");
+        // count() still counts the torn line as a raw non-empty line — the
+        // documented count()/read_all() skew (see count's doc comment).
+        assert_eq!(j.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn read_all_still_hard_errors_on_an_interior_corrupt_line() {
+        let _guard = lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let j = JournalStore::open(dir.path()).unwrap();
+        j.append(&env("row-a", 1, 10)).unwrap();
+        j.append(&env("row-b", 2, 20)).unwrap();
+        // Corrupt the FIRST (interior, not trailing) line in place, keeping
+        // its trailing newline — a complete, but garbage, line.
+        {
+            let path = dir.path().join("journal.jsonl");
+            let contents = std::fs::read_to_string(&path).unwrap();
+            let after_first_newline = contents.find('\n').map(|i| i + 1).unwrap_or(0);
+            let mangled = format!("not valid json at all\n{}", &contents[after_first_newline..]);
+            std::fs::write(&path, mangled).unwrap();
+        }
+        let result = j.read_all();
+        assert!(
+            result.is_err(),
+            "an interior corrupt line (not the trailing one) must still hard-error, \
+             since that's real corruption, not a crash-torn tail"
+        );
+    }
+
+    // ── concurrent rotation (fix I-1) ─────────────────────────────────
+
+    /// Simulates the SAME rotate-then-append policy `append_locked`
+    /// implements, operating purely on a record count (not content), valid
+    /// because every record in `concurrent_appends_near_cap_lose_no_records`
+    /// below has an IDENTICAL serialized byte length. That fixed length is
+    /// what makes rotation position (and therefore the final retained
+    /// count) a deterministic function of `total`/`record_len`/`cap` alone —
+    /// independent of which thread's record physically lands at which
+    /// position under real concurrent scheduling. This lets the test assert
+    /// an EXACT expected retained-record count instead of a loose bound.
+    fn simulate_retained_count(total: usize, record_len: u64, cap: u64) -> usize {
+        let mut active_len: u64 = 0;
+        let mut active_count: usize = 0;
+        let mut rotated_count: usize = 0;
+        for _ in 0..total {
+            if active_len >= cap {
+                rotated_count = active_count;
+                active_count = 0;
+                active_len = 0;
+            }
+            active_count += 1;
+            active_len += record_len;
+        }
+        rotated_count + active_count
+    }
+
+    /// Fix I-1 (Important — concurrent-rotation deletes a retained segment):
+    /// spawns several threads appending concurrently through the SAME
+    /// `JournalStore`, deliberately near/over a tiny rotation cap so MANY
+    /// rotations happen while writers race. Before `ROTATE_LOCK`, two
+    /// `append` calls could both observe the cap exceeded and both enter
+    /// `rotate()`, with the second caller's `remove_file(.1)` deleting the
+    /// first caller's just-rotated segment before it's ever read back —
+    /// silent data loss with no error or panic. This test proves that
+    /// doesn't happen: every record's serialized length is fixed (constant
+    /// `et`/`it`, fixed-width payload), so the final retained-record count
+    /// is a deterministic function of total appends / record size / cap
+    /// (see `simulate_retained_count`) REGARDLESS of thread interleaving —
+    /// letting the test assert the real, concurrently-produced count
+    /// matches that prediction exactly, not just "some records survived."
+    #[test]
+    fn concurrent_appends_near_cap_lose_no_records_and_dont_corrupt() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(JournalStore::open(dir.path()).unwrap());
+
+        // Fixed-width payload + constant et/it => every serialized record
+        // has the identical byte length (hashes in ProvenanceCtx are
+        // fixed-length hex regardless of input, so they don't add variance).
+        fn fixed_payload(n: usize) -> String {
+            format!("row-{n:06}")
+        }
+        let record_len: u64 = {
+            let probe = env(&fixed_payload(0), 0, 0);
+            let mut bytes = serde_json::to_vec(&probe).unwrap();
+            bytes.push(b'\n');
+            bytes.len() as u64
+        };
+
+        let threads_n = 4usize;
+        let per_thread = 60usize;
+        let total = threads_n * per_thread;
+        // ~10 records per segment -> ~24 rotations across the full run,
+        // giving the race many chances to manifest if the lock were absent.
+        let cap = record_len * 10;
+
+        let mut handles = Vec::new();
+        for t in 0..threads_n {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                for i in 0..per_thread {
+                    let n = t * per_thread + i;
+                    let e = env(&fixed_payload(n), 0, 0);
+                    store
+                        .append_with_cap(&e, cap)
+                        .expect("append must not error/panic under concurrent rotation");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("writer thread must not panic");
+        }
+
+        // No corruption: read_all() must succeed (a corrupted/torn segment
+        // from an unsynchronized rotate would surface as an Err here) and
+        // must agree with count().
+        let all = store.read_all().expect("read_all must not error — no corruption");
+        assert_eq!(
+            all.len(),
+            store.count().unwrap(),
+            "count() and read_all() must agree when every line is well-formed"
+        );
+
+        // No MORE loss than the documented retention policy: the retained
+        // count must match a correctly-serialized single-threaded run
+        // exactly, not fall short of it (a shortfall would mean a racing
+        // rotation deleted a segment that should still have been retained).
+        let expected = simulate_retained_count(total, record_len, cap);
+        assert_eq!(
+            all.len(),
+            expected,
+            "concurrent appends must retain exactly as many records as a correctly-serialized \
+             run would — fewer means the concurrent-rotation race dropped a retained segment"
+        );
+
+        // Sanity: every surviving record is one of the `total` distinct rows
+        // this test wrote (parses cleanly, no duplicate/garbage content) —
+        // confirms "no corruption" at the content level too, not just counts.
+        let mut seen_ns = std::collections::HashSet::new();
+        for e in &all {
+            let n: usize = e
+                .raw_payload
+                .trim_start_matches("row-")
+                .parse()
+                .expect("every retained record must be one of this test's well-formed rows");
+            assert!(n < total, "retained record index {n} out of the {total} this test wrote");
+            assert!(seen_ns.insert(n), "duplicate record index {n} — corruption");
+        }
     }
 
     // ── journal_enabled ─────────────────────────────────────────────
