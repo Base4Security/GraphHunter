@@ -91,25 +91,43 @@ fn live_tail_coverage_for_session(
     graph.live_tail_coverage("live_tail")
 }
 
-/// Same completeness-metadata read `run_hunt` does at its single-query
-/// call site, factored out so every `run_hunt_batch` entry-construction
-/// path (fast/cache paths included) can populate `coverage` from the
-/// same session `IngestCoverage` rather than defaulting to all-clear.
-/// Cheap — a single `RwLock::read` — so there's no reason for the
-/// LFTJ/Yannakakis fast paths to skip it.
-fn batch_entry_coverage(
+/// Build the [`crate::coverage::AnswerCoverage`] for a session: reads
+/// the session's `IngestCoverage`, the graph's edge-timestamp span
+/// (Fase F Task 1 `GraphHunter::edge_timestamp_range`), and the
+/// per-source watermark/breaker snapshot (Fase F Task 3
+/// `SourceCoverage::snapshot`), then folds all three into
+/// `answer_coverage`. Factored out so both `run_hunt`'s single-query
+/// call site and every `run_hunt_batch` entry-construction path
+/// (fast/cache paths included) populate `coverage` from the same real
+/// session state rather than duplicating the 3 reads per site. Cheap —
+/// three `RwLock::read`s — so there's no reason for the
+/// LFTJ/Yannakakis fast paths to skip it. With `GRAPHHUNTER_COVERAGE`
+/// off, `answer_coverage` still returns the all-clear default
+/// regardless of what's read here.
+fn session_answer_coverage(
     session: &crate::state::Session,
 ) -> ApiResult<crate::coverage::AnswerCoverage> {
     let ic = session
         .ingest_coverage
         .read()
         .map_err(|e| ApiError::Internal(format!("ingest_coverage lock poisoned: {e}")))?;
+    let (source_watermarks, missing_sources) = session
+        .source_coverage
+        .read()
+        .map_err(|e| ApiError::Internal(format!("source_coverage lock poisoned: {e}")))?
+        .snapshot();
+    let (edge_ts_min, edge_ts_max) = session
+        .graph
+        .read()
+        .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?
+        .edge_timestamp_range()
+        .map_or((None, None), |(min, max)| (Some(min), Some(max)));
     Ok(crate::coverage::answer_coverage(
         &ic,
-        None,
-        None,
-        std::collections::BTreeMap::new(),
-        vec![],
+        edge_ts_min,
+        edge_ts_max,
+        source_watermarks,
+        missing_sources,
     ))
 }
 
@@ -227,30 +245,13 @@ impl GraphHunterApi {
         };
         let live_tail_coverage = live_tail_coverage_for_session(&session);
 
-        // Completeness metadata (design spec §17). The graph doesn't
-        // expose a cached global min/max edge timestamp (only per-node /
-        // per-path scans exist, e.g. `graph.rs` path-span helpers), and
-        // a full O(E) scan on every `run_hunt` call would be an
-        // unacceptable per-query tax on large graphs. So the covered
-        // time span (`coverage_start`/`coverage_end`) is left `None` for
-        // now — `possibly_incomplete` (from the session's
-        // `IngestCoverage`) is the primary signal this task wires.
-        // Populating a real span is follow-up work once a cheap
-        // (ideally O(1), maintained incrementally at ingest time)
-        // min/max-timestamp accessor exists on `GraphHunter`.
-        let coverage = {
-            let ic = session
-                .ingest_coverage
-                .read()
-                .map_err(|e| ApiError::Internal(format!("ingest_coverage lock poisoned: {e}")))?;
-            crate::coverage::answer_coverage(
-                &ic,
-                None,
-                None,
-                std::collections::BTreeMap::new(),
-                vec![],
-            )
-        };
+        // Completeness metadata (design spec §17): `IngestCoverage` +
+        // the graph's edge-timestamp span (Fase F Task 1) + the
+        // session's `SourceCoverage` snapshot (Fase F Task 3), folded
+        // together by `session_answer_coverage` (also used by every
+        // `run_hunt_batch` entry so both response shapes see the same
+        // real values).
+        let coverage = session_answer_coverage(&session)?;
 
         // Publish to the shared cache so get_hunt_page can serve it.
         let mut cache = self
@@ -581,7 +582,7 @@ impl GraphHunterApi {
                         truncated,
                         diagnostic: None,
                         live_tail_coverage: batch_live_tail_coverage.clone(),
-                        coverage: batch_entry_coverage(&session_handle)?,
+                        coverage: session_answer_coverage(&session_handle)?,
                         error: None,
                     };
                     result_cache.insert(result_cache_key, entry.clone());
@@ -717,7 +718,7 @@ impl GraphHunterApi {
                     truncated,
                     diagnostic: None,
                     live_tail_coverage: batch_live_tail_coverage.clone(),
-                    coverage: batch_entry_coverage(&session_handle)?,
+                    coverage: session_answer_coverage(&session_handle)?,
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -970,7 +971,7 @@ impl GraphHunterApi {
                     truncated,
                     diagnostic: None,
                     live_tail_coverage: batch_live_tail_coverage.clone(),
-                    coverage: batch_entry_coverage(&session_handle)?,
+                    coverage: session_answer_coverage(&session_handle)?,
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -1314,6 +1315,63 @@ mod tests {
 
         assert!(!resp.coverage.possibly_incomplete);
         assert!(resp.coverage.coverage_start.is_none());
+    }
+
+    /// `RunHuntResponse.coverage` also carries the session's
+    /// `SourceCoverage` snapshot (Fase F Task 3/5): a source with an
+    /// open breaker + `record_missing` shows up in `missing_sources`,
+    /// and a source with a recorded watermark shows up in
+    /// `source_watermarks`. Wiring check that `run_hunt` reads
+    /// `session.source_coverage` — not just `session.ingest_coverage`
+    /// — when building the answer's coverage.
+    #[test]
+    fn run_hunt_answer_carries_missing_sources_when_breaker_open() {
+        let _env_guard = lock_env();
+        let prior_coverage = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        let prior_source_coverage = std::env::var("GRAPHHUNTER_SOURCE_COVERAGE").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "1") };
+        unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", "1") };
+
+        let api = api();
+        let session = api
+            .sessions()
+            .current_session()
+            .expect("test harness session must exist");
+        {
+            let mut sc = session.source_coverage.write().unwrap();
+            sc.record_covered("la:ws", 500);
+            for _ in 0..5 {
+                sc.record_failure("xdr:tenant", 5);
+            }
+            sc.record_missing("xdr:tenant");
+        }
+
+        let resp = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: None,
+                dedup_mode: None,
+            })
+            .expect("run_hunt should not error");
+
+        match prior_coverage {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
+        }
+        match prior_source_coverage {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") },
+        }
+
+        assert!(resp
+            .coverage
+            .missing_sources
+            .contains(&"xdr:tenant".to_string()));
+        assert_eq!(resp.coverage.source_watermarks.get("la:ws"), Some(&500));
+        assert!(resp.coverage.possibly_incomplete);
     }
 
     #[test]
