@@ -136,13 +136,14 @@ impl JournalStore {
 }
 
 /// `GRAPHHUNTER_JOURNAL`: enable the append-only canonical journal on the
-/// ingest write path. Default OFF (no-op) — truthy-to-enable, matching the
-/// engine's `env_flag` convention (core/graph-engine planner.rs); this is
-/// NOT the falsy-to-disable convention some Fase A flags use.
+/// ingest write path. Default ON (falsy-to-disable) as of the enable-defaults
+/// fase; the journal is bounded by GRAPHHUNTER_JOURNAL_MAX_BYTES rotation
+/// (Task 1).
 pub fn journal_enabled() -> bool {
-    std::env::var("GRAPHHUNTER_JOURNAL")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    match std::env::var("GRAPHHUNTER_JOURNAL") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        Err(_) => true,
+    }
 }
 
 /// Build the canonical envelopes for a parsed batch — one per inserted event
@@ -315,13 +316,16 @@ pub fn journal_batch(
 
 /// `GRAPHHUNTER_GRAPHDELTA`: apply journal envelopes to the graph idempotently
 /// (edge multiplicity keyed on event identity, via `GraphHunter::apply_delta`)
-/// instead of the direct, non-deduping `insert_raw_events` path. Default off.
+/// instead of the direct, non-deduping `insert_raw_events` path. Default ON
+/// (falsy-to-disable) as of the enable-defaults fase; the journal is bounded
+/// by GRAPHHUNTER_JOURNAL_MAX_BYTES rotation (Task 1).
 /// Only meaningful when `GRAPHHUNTER_JOURNAL` is also on — the envelopes this
 /// applies come from the same in-memory batch the journal write journals.
 pub fn graphdelta_enabled() -> bool {
-    std::env::var("GRAPHHUNTER_GRAPHDELTA")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    match std::env::var("GRAPHHUNTER_GRAPHDELTA") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        Err(_) => true,
+    }
 }
 
 /// Apply a slice of just-journaled envelopes to the graph idempotently.
@@ -1181,28 +1185,28 @@ mod tests {
     }
 
     #[test]
-    fn journal_enabled_defaults_off() {
+    fn journal_enabled_defaults_on() {
         let _guard = lock_env();
         unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL") };
-        assert!(!journal_enabled());
+        assert!(journal_enabled(), "unset env must default the journal on");
     }
 
     #[test]
-    fn journal_enabled_truthy_values_turn_it_on() {
+    fn journal_enabled_truthy_and_garbage_values_stay_on() {
         let _guard = lock_env();
-        for v in ["1", "true", "TRUE", "True"] {
+        for v in ["1", "true", "TRUE", "True", "yes", "on", "anything"] {
             unsafe { std::env::set_var("GRAPHHUNTER_JOURNAL", v) };
-            assert!(journal_enabled(), "expected {v:?} to enable the journal");
+            assert!(journal_enabled(), "expected {v:?} to leave the journal on");
         }
         unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL") };
     }
 
     #[test]
-    fn journal_enabled_other_values_stay_off() {
+    fn journal_enabled_falsy_values_turn_it_off() {
         let _guard = lock_env();
-        for v in ["0", "false", "no", ""] {
+        for v in ["0", "false", "FALSE", "no", "off", " off "] {
             unsafe { std::env::set_var("GRAPHHUNTER_JOURNAL", v) };
-            assert!(!journal_enabled(), "expected {v:?} to leave the journal off");
+            assert!(!journal_enabled(), "expected {v:?} to disable the journal");
         }
         unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL") };
     }
@@ -1444,12 +1448,19 @@ mod tests {
     // ── graphdelta_enabled ───────────────────────────────────────────
 
     #[test]
-    fn graphdelta_flag_defaults_off() {
+    fn graphdelta_flag_defaults_on_and_respects_explicit_falsy() {
         let _lock = lock_env();
         unsafe { std::env::remove_var("GRAPHHUNTER_GRAPHDELTA") };
-        assert!(!graphdelta_enabled());
-        unsafe { std::env::set_var("GRAPHHUNTER_GRAPHDELTA", "1") };
-        assert!(graphdelta_enabled());
+        assert!(graphdelta_enabled(), "unset env must default graphdelta on");
+
+        for off in ["0", "false", "FALSE", "no", "off", " off "] {
+            unsafe { std::env::set_var("GRAPHHUNTER_GRAPHDELTA", off) };
+            assert!(!graphdelta_enabled(), "{off:?} should disable graphdelta");
+        }
+        for on in ["1", "true", "yes", "on", "anything"] {
+            unsafe { std::env::set_var("GRAPHHUNTER_GRAPHDELTA", on) };
+            assert!(graphdelta_enabled(), "{on:?} should leave graphdelta enabled");
+        }
         unsafe { std::env::remove_var("GRAPHHUNTER_GRAPHDELTA") };
     }
 

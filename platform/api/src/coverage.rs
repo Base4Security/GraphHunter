@@ -14,11 +14,13 @@
 use serde::{Deserialize, Serialize};
 
 /// GRAPHHUNTER_COVERAGE: mark query answers with completeness metadata.
-/// Default off. Truthy-to-enable (env_flag convention).
+/// Default ON (falsy-to-disable) as of the enable-defaults fase; the journal
+/// is bounded by GRAPHHUNTER_JOURNAL_MAX_BYTES rotation (Task 1).
 pub fn coverage_enabled() -> bool {
-    std::env::var("GRAPHHUNTER_COVERAGE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    match std::env::var("GRAPHHUNTER_COVERAGE") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        Err(_) => true,
+    }
 }
 
 /// Running completeness state for a session: set when any ingest into it did
@@ -96,12 +98,14 @@ pub fn answer_coverage(
 }
 
 /// GRAPHHUNTER_SOURCE_COVERAGE: track per-source watermarks + a circuit
-/// breaker for the streaming poller's session marker. Default off.
-/// Truthy-to-enable (same convention as [`coverage_enabled`]).
+/// breaker for the streaming poller's session marker. Default ON
+/// (falsy-to-disable) as of the enable-defaults fase; the journal is bounded
+/// by GRAPHHUNTER_JOURNAL_MAX_BYTES rotation (Task 1).
 pub fn source_coverage_enabled() -> bool {
-    std::env::var("GRAPHHUNTER_SOURCE_COVERAGE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    match std::env::var("GRAPHHUNTER_SOURCE_COVERAGE") {
+        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        Err(_) => true,
+    }
 }
 
 /// Per-source coverage/breaker state tracked by [`SourceCoverage`].
@@ -243,12 +247,19 @@ mod tests {
     }
 
     #[test]
-    fn coverage_flag_defaults_off() {
+    fn coverage_flag_defaults_on_and_respects_explicit_falsy() {
         let _guard = lock_env();
         unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
-        assert!(!coverage_enabled());
-        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "1") };
-        assert!(coverage_enabled());
+        assert!(coverage_enabled(), "unset env must default coverage on");
+
+        for off in ["0", "false", "FALSE", "no", "off", " off "] {
+            unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", off) };
+            assert!(!coverage_enabled(), "{off:?} should disable coverage");
+        }
+        for on in ["1", "true", "yes", "on", "anything"] {
+            unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", on) };
+            assert!(coverage_enabled(), "{on:?} should leave coverage enabled");
+        }
         unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
     }
 
@@ -350,12 +361,25 @@ mod tests {
     // Uses lock_env/ENV_LOCK defined above in this same module.
 
     #[test]
-    fn source_coverage_flag_defaults_off() {
+    fn source_coverage_flag_defaults_on_and_respects_explicit_falsy() {
         let _g = lock_env();
         unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") };
-        assert!(!source_coverage_enabled());
-        unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", "1") };
-        assert!(source_coverage_enabled());
+        assert!(
+            source_coverage_enabled(),
+            "unset env must default source coverage on"
+        );
+
+        for off in ["0", "false", "FALSE", "no", "off", " off "] {
+            unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", off) };
+            assert!(!source_coverage_enabled(), "{off:?} should disable source coverage");
+        }
+        for on in ["1", "true", "yes", "on", "anything"] {
+            unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", on) };
+            assert!(
+                source_coverage_enabled(),
+                "{on:?} should leave source coverage enabled"
+            );
+        }
         unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") };
     }
 
