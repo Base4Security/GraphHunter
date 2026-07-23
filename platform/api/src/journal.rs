@@ -5,6 +5,7 @@
 //! append-only JSONL store (core/graph-engine/src/dlq). Lives in platform/api
 //! (not canonical/core) to avoid a crate cycle: it depends on CanonicalEnvelope.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -333,8 +334,186 @@ pub fn envelope_to_delta(env: &CanonicalEnvelope) -> Option<GraphDelta> {
     Some(GraphDelta::new(event, event_id, dataset_id))
 }
 
-/// Observable-count comparison between a live incremental graph and a
-/// fresh rebuild from the journal.
+/// Result of comparing one observable dimension between the live graph and
+/// the from-scratch journal rebuild.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DimensionResult {
+    /// The dimension is identical on both sides.
+    Match,
+    /// The dimension diverges. `detail` names the first few divergences
+    /// (never the whole set — this is a readable summary, not a dump).
+    Diff { detail: String },
+    /// The dimension could not be compared (e.g. neither graph has any
+    /// edges, so there is no temporal window to compare). This is silence,
+    /// not agreement — it must never be treated as a `Match`.
+    NotComparable { reason: String },
+}
+
+impl DimensionResult {
+    /// True only for `Match`. `Diff` and `NotComparable` both return false —
+    /// callers that want "nothing detectably differs" (tolerating
+    /// `NotComparable`) should use `EquivalenceReport::all_comparable_dimensions_match`
+    /// instead.
+    pub fn is_match(&self) -> bool {
+        matches!(self, DimensionResult::Match)
+    }
+}
+
+/// Multiset key for one observed edge, built entirely from resolved
+/// `String`s — never `StrId`s, which are interner-local and meaningless
+/// across two independently-built graphs. Relation/entity type is captured
+/// via its `Display` string (not `to_u8()`, whose `Other(_)` variants all
+/// collapse to one sentinel byte — see `RelationType::to_u8` doc comment).
+/// Metadata is flattened into a sorted `Vec` so two `HashMap`s holding the
+/// same pairs in different iteration order compare equal.
+type EdgeKey = (String, String, String, i64, Vec<(String, String)>, Option<String>);
+
+fn sorted_metadata(meta: &std::collections::HashMap<String, String>) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = meta.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    v.sort();
+    v
+}
+
+fn edge_key(r: &graph_hunter_core::Relation) -> EdgeKey {
+    (
+        r.source_id.clone(),
+        r.rel_type.to_string(),
+        r.dest_id.clone(),
+        r.timestamp,
+        sorted_metadata(&r.metadata),
+        r.dataset_id.as_ref().map(|s| s.to_string()),
+    )
+}
+
+fn edge_multiset(relations: &[graph_hunter_core::Relation]) -> BTreeMap<EdgeKey, usize> {
+    let mut map: BTreeMap<EdgeKey, usize> = BTreeMap::new();
+    for r in relations {
+        *map.entry(edge_key(r)).or_insert(0) += 1;
+    }
+    map
+}
+
+/// Compare the edge multisets of `live` vs `rebuilt`. Order across (and even
+/// within) vertices is never assumed to match — this is a count-map
+/// comparison, not a positional one.
+fn compare_edges(
+    live: &[graph_hunter_core::Relation],
+    rebuilt: &[graph_hunter_core::Relation],
+) -> DimensionResult {
+    let live_map = edge_multiset(live);
+    let rebuilt_map = edge_multiset(rebuilt);
+    if live_map == rebuilt_map {
+        return DimensionResult::Match;
+    }
+    let mut keys: BTreeSet<&EdgeKey> = live_map.keys().collect();
+    keys.extend(rebuilt_map.keys());
+    let mut divergences: Vec<String> = Vec::new();
+    for k in keys {
+        let lc = live_map.get(k).copied().unwrap_or(0);
+        let rc = rebuilt_map.get(k).copied().unwrap_or(0);
+        if lc != rc {
+            divergences.push(format!(
+                "(src={}, rel={}, dst={}, ts={}, meta={:?}, dataset={:?}): live={} rebuilt={}",
+                k.0, k.1, k.2, k.3, k.4, k.5, lc, rc
+            ));
+            if divergences.len() >= 5 {
+                break;
+            }
+        }
+    }
+    DimensionResult::Diff {
+        detail: format!(
+            "live: {} distinct edge keys / {} total edges; rebuilt: {} distinct edge keys / {} total edges; first divergences: [{}]",
+            live_map.len(),
+            live.len(),
+            rebuilt_map.len(),
+            rebuilt.len(),
+            divergences.join(", ")
+        ),
+    }
+}
+
+/// id -> (type display string, sorted metadata) for order-independent
+/// per-entity comparison.
+fn entity_map(
+    entities: &[graph_hunter_core::Entity],
+) -> BTreeMap<String, (String, Vec<(String, String)>)> {
+    entities
+        .iter()
+        .map(|e| (e.id.clone(), (e.entity_type.to_string(), sorted_metadata(&e.metadata))))
+        .collect()
+}
+
+/// Compare entity id sets (`entities`) and, over the shared id set, entity
+/// type + metadata (`entity_metadata`). Split in two so a metadata typo on
+/// one shared entity doesn't get conflated with an outright missing entity.
+fn compare_entities(
+    live: &[graph_hunter_core::Entity],
+    rebuilt: &[graph_hunter_core::Entity],
+) -> (DimensionResult, DimensionResult) {
+    let live_map = entity_map(live);
+    let rebuilt_map = entity_map(rebuilt);
+    let live_ids: BTreeSet<&String> = live_map.keys().collect();
+    let rebuilt_ids: BTreeSet<&String> = rebuilt_map.keys().collect();
+
+    let entities_result = if live_ids == rebuilt_ids {
+        DimensionResult::Match
+    } else {
+        let only_live: Vec<&&String> = live_ids.difference(&rebuilt_ids).take(5).collect();
+        let only_rebuilt: Vec<&&String> = rebuilt_ids.difference(&live_ids).take(5).collect();
+        DimensionResult::Diff {
+            detail: format!(
+                "live has {} entities, rebuilt has {}; only in live (first 5): {:?}; only in rebuilt (first 5): {:?}",
+                live_map.len(),
+                rebuilt_map.len(),
+                only_live,
+                only_rebuilt,
+            ),
+        }
+    };
+
+    let mut divergences: Vec<String> = Vec::new();
+    for id in live_ids.intersection(&rebuilt_ids) {
+        let l = &live_map[*id];
+        let r = &rebuilt_map[*id];
+        if l != r {
+            divergences.push(format!("{id}: live={l:?} rebuilt={r:?}"));
+            if divergences.len() >= 5 {
+                break;
+            }
+        }
+    }
+    let entity_metadata_result = if divergences.is_empty() {
+        DimensionResult::Match
+    } else {
+        DimensionResult::Diff { detail: divergences.join("; ") }
+    };
+
+    (entities_result, entity_metadata_result)
+}
+
+/// Compare `edge_timestamp_range()` on both sides. `None` on both sides
+/// (neither graph has edges) is `NotComparable`, not `Match` — there is
+/// nothing to have agreed on.
+fn compare_temporal_window(
+    live: &graph_hunter_core::graph::GraphHunter,
+    rebuilt: &graph_hunter_core::graph::GraphHunter,
+) -> DimensionResult {
+    match (live.edge_timestamp_range(), rebuilt.edge_timestamp_range()) {
+        (None, None) => {
+            DimensionResult::NotComparable { reason: "neither graph has any edges".to_string() }
+        }
+        (Some(l), Some(r)) if l == r => DimensionResult::Match,
+        (l, r) => DimensionResult::Diff { detail: format!("live range={l:?}, rebuilt range={r:?}") },
+    }
+}
+
+/// Observable-equality comparison between a live incremental graph and a
+/// fresh rebuild from the journal. Extends the original count-only fields
+/// (kept for backward compatibility) with rich per-dimension structural
+/// results covering the full observable surface `to_snapshot()` exposes:
+/// entities (id set), entity metadata (type + kv pairs), the edge multiset,
+/// and the temporal window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EquivalenceReport {
     pub entity_count_matches: bool,
@@ -343,14 +522,72 @@ pub struct EquivalenceReport {
     pub rebuilt_entities: usize,
     pub live_relations: usize,
     pub rebuilt_relations: usize,
+    /// Entity id sets match.
+    pub entities: DimensionResult,
+    /// Over the shared id set, entity type + metadata match.
+    pub entity_metadata: DimensionResult,
+    /// The edge multiset — keyed on (source, rel_type, dest, timestamp,
+    /// sorted metadata, dataset) — matches with full multiplicity.
+    pub edges_multiset: DimensionResult,
+    /// `edge_timestamp_range()` matches.
+    pub temporal_window: DimensionResult,
+}
+
+impl EquivalenceReport {
+    /// True when every dimension that *could* be compared agrees — i.e. none
+    /// of `entities`, `entity_metadata`, `edges_multiset`, `temporal_window`
+    /// is `Diff`. `NotComparable` dimensions don't count against
+    /// equivalence (absence of evidence, not evidence of absence) but they
+    /// also don't count for it; they're surfaced for a human to judge.
+    pub fn all_comparable_dimensions_match(&self) -> bool {
+        [&self.entities, &self.entity_metadata, &self.edges_multiset, &self.temporal_window]
+            .into_iter()
+            .all(|d| !matches!(d, DimensionResult::Diff { .. }))
+    }
+}
+
+/// Compare the FULL observable surface of `live` against `rebuilt`: entities,
+/// entity metadata, the edge multiset, and the temporal window — never just
+/// counts. Cross-graph identity is established purely through resolved
+/// `String` keys from `to_snapshot()`; `StrId`s are never compared across
+/// the two graphs (they're interner-local and meaningless across
+/// independently-built graphs). Pure function: no I/O, no tracing (metrics
+/// land in a later task).
+pub fn compare_observable_equality(
+    live: &graph_hunter_core::graph::GraphHunter,
+    rebuilt: &graph_hunter_core::graph::GraphHunter,
+) -> EquivalenceReport {
+    let (live_entities, live_relations) = live.to_snapshot();
+    let (rebuilt_entities, rebuilt_relations) = rebuilt.to_snapshot();
+
+    let live_e = live_entities.len();
+    let reb_e = rebuilt_entities.len();
+    let live_r = live_relations.len();
+    let reb_r = rebuilt_relations.len();
+
+    let (entities, entity_metadata) = compare_entities(&live_entities, &rebuilt_entities);
+    let edges_multiset = compare_edges(&live_relations, &rebuilt_relations);
+    let temporal_window = compare_temporal_window(live, rebuilt);
+
+    EquivalenceReport {
+        entity_count_matches: live_e == reb_e,
+        relation_count_matches: live_r == reb_r,
+        live_entities: live_e,
+        rebuilt_entities: reb_e,
+        live_relations: live_r,
+        rebuilt_relations: reb_r,
+        entities,
+        entity_metadata,
+        edges_multiset,
+        temporal_window,
+    }
 }
 
 /// Rebuild a fresh graph from the journal (idempotent apply of every inserted
-/// envelope) and compare observable counts against the live graph. This is the
-/// translation-validation check (SOT-VM framing): the from-scratch rebuild is
-/// the trusted reference; the live graph is the untrusted incremental artifact.
-/// Fase C-1 compares entity/relation counts; richer observable equality (query
-/// outputs) is future work.
+/// envelope) and compare full observable equality against the live graph.
+/// This is the translation-validation check (SOT-VM framing): the
+/// from-scratch rebuild is the trusted reference; the live graph is the
+/// untrusted incremental artifact.
 pub fn check_incremental_equivalence(
     live: &graph_hunter_core::graph::GraphHunter,
     store: &JournalStore,
@@ -358,18 +595,7 @@ pub fn check_incremental_equivalence(
     let recon = rebuild_from_journal(store)?;
     let mut rebuilt = graph_hunter_core::graph::GraphHunter::new();
     apply_batch_idempotent(&mut rebuilt, &recon.inserted);
-    let live_e = live.entity_count();
-    let live_r = live.relation_count();
-    let reb_e = rebuilt.entity_count();
-    let reb_r = rebuilt.relation_count();
-    Ok(EquivalenceReport {
-        entity_count_matches: live_e == reb_e,
-        relation_count_matches: live_r == reb_r,
-        live_entities: live_e,
-        rebuilt_entities: reb_e,
-        live_relations: live_r,
-        rebuilt_relations: reb_r,
-    })
+    Ok(compare_observable_equality(live, &rebuilt))
 }
 
 #[cfg(test)]
@@ -937,5 +1163,91 @@ mod tests {
         assert!(rep.relation_count_matches, "{rep:?}");
         assert_eq!(rep.live_relations, 3); // multiplicity: 3, not 6
         assert_eq!(rep.rebuilt_relations, 3);
+    }
+
+    // ── compare_observable_equality (rich structural comparator) ─────
+
+    /// Build a `(live, rebuilt)` GraphHunter pair from the same journaled
+    /// envelopes. Mirrors
+    /// `rebuild_from_journal_matches_live_after_idempotent_apply` above (same
+    /// 3 inserts + 1 skipped + a crash replay on the live side) so the rich
+    /// comparator tests exercise the identical shape.
+    fn build_live_and_rebuilt_from_same_envelopes() -> (
+        graph_hunter_core::graph::GraphHunter,
+        graph_hunter_core::graph::GraphHunter,
+    ) {
+        use graph_hunter_core::graph::GraphHunter;
+        let dir = tempfile::tempdir().unwrap();
+        let store = JournalStore::open(dir.path()).unwrap();
+        let inserts = vec![
+            insert_envelope_for(&sample_event(100)),
+            insert_envelope_for(&sample_event(200)),
+            insert_envelope_for(&sample_event(300)),
+        ];
+        for e in &inserts {
+            store.append(e).unwrap();
+        }
+        store.append(&env("skip-1", 0, 11).as_skipped("no_triple".into())).unwrap();
+
+        let mut live = GraphHunter::new();
+        apply_batch_idempotent(&mut live, &inserts);
+        apply_batch_idempotent(&mut live, &inserts); // crash replay: idempotent
+
+        let recon = rebuild_from_journal(&store).unwrap();
+        let mut rebuilt = GraphHunter::new();
+        apply_batch_idempotent(&mut rebuilt, &recon.inserted);
+
+        (live, rebuilt)
+    }
+
+    #[test]
+    fn rich_compare_identical_graphs_match_all_structural_dimensions() {
+        let (live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
+        let report = compare_observable_equality(&live, &rebuilt);
+        assert!(matches!(report.entities, DimensionResult::Match), "entities: {:?}", report.entities);
+        assert!(
+            matches!(report.entity_metadata, DimensionResult::Match),
+            "metadata: {:?}",
+            report.entity_metadata
+        );
+        assert!(
+            matches!(report.edges_multiset, DimensionResult::Match),
+            "edges: {:?}",
+            report.edges_multiset
+        );
+        assert!(
+            matches!(report.temporal_window, DimensionResult::Match),
+            "window: {:?}",
+            report.temporal_window
+        );
+        assert!(report.all_comparable_dimensions_match());
+        // Legacy count fields stay populated too — the report is self-contained.
+        assert!(report.entity_count_matches);
+        assert!(report.relation_count_matches);
+    }
+
+    #[test]
+    fn rich_compare_catches_injected_edge_and_metadata_divergence() {
+        let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
+        // Mutate the LIVE graph after the fact so it diverges from the
+        // rebuild: one extra edge the journal never recorded. Both endpoints
+        // ("1.2.3.4", "host-1") already exist in `live` from the journaled
+        // batch (sample_event uses them for all three timestamps), so
+        // add_relation succeeds without needing new entities.
+        live.add_relation(graph_hunter_core::Relation::new(
+            "1.2.3.4",
+            "host-1",
+            graph_hunter_core::RelationType::Connect,
+            999,
+        ))
+        .expect("both endpoints already exist in the live graph");
+
+        let report = compare_observable_equality(&live, &rebuilt);
+        assert!(
+            matches!(report.edges_multiset, DimensionResult::Diff { .. }),
+            "expected edge multiset divergence, got {:?}",
+            report.edges_multiset
+        );
+        assert!(!report.all_comparable_dimensions_match());
     }
 }
