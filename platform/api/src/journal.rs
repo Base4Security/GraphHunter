@@ -574,11 +574,19 @@ fn path_multiset(
 /// A battery entry that fails to `parse_dsl`, or whose
 /// `search_temporal_pattern` call errors on either graph, surfaces as a
 /// `Diff` naming the failure — it is never swallowed into a silent `Match`.
+///
+/// **Vacuous-match discipline (mirrors `compare_temporal_window`):** if every
+/// battery entry returns zero paths on BOTH graphs, that is silence, not
+/// agreement — the battery never actually exercised anything comparable, so
+/// this returns `NotComparable` rather than `Match`. `Match` is reserved for
+/// the case where the multisets agree AND at least one battery entry
+/// produced a non-empty path set on at least one graph.
 pub fn compare_hypothesis_results(
     live: &graph_hunter_core::graph::GraphHunter,
     rebuilt: &graph_hunter_core::graph::GraphHunter,
     battery: &[&str],
 ) -> DimensionResult {
+    let mut any_signal = false;
     for dsl in battery {
         let hypothesis = match graph_hunter_core::parse_dsl(dsl, Some("validation")) {
             Ok(parsed) => parsed.hypothesis,
@@ -620,8 +628,18 @@ pub fn compare_hypothesis_results(
                 ),
             };
         }
+        if !live_paths.is_empty() || !rebuilt_paths.is_empty() {
+            any_signal = true;
+        }
     }
-    DimensionResult::Match
+    if any_signal {
+        DimensionResult::Match
+    } else {
+        DimensionResult::NotComparable {
+            reason: "hypothesis battery produced no paths on either graph — no evidence of agreement"
+                .to_string(),
+        }
+    }
 }
 
 /// Default hunt battery for `compare_observable_equality`'s
@@ -1543,6 +1561,34 @@ mod tests {
             full.hypothesis_results
         );
         assert!(!full.all_comparable_dimensions_match());
+    }
+
+    /// Honesty fix: a battery that is entirely inert against the fixture —
+    /// every entry returns zero paths on BOTH `live` and `rebuilt` — must
+    /// surface as `NotComparable`, never as a silent `Match`. "The whole
+    /// battery was inert against this data" and "the graphs genuinely agree
+    /// on real, non-empty path sets" are NOT the same signal, and reporting
+    /// both as `Match` would be false confidence. The fixture
+    /// (`build_live_and_rebuilt_from_same_envelopes` / `sample_event`) only
+    /// ever produces IP "1.2.3.4" -[Connect]-> Host "host-1" edges — there is
+    /// no `Process` entity or `Execute` relation anywhere in it — so
+    /// "Process -[Execute]-> Process" is guaranteed to return zero paths on
+    /// both graphs.
+    #[test]
+    fn rich_compare_hypothesis_results_inert_battery_is_not_comparable() {
+        let (live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
+        let battery = ["Process -[Execute]-> Process"];
+        let report = compare_hypothesis_results(&live, &rebuilt, &battery);
+        match &report {
+            DimensionResult::NotComparable { reason } => {
+                assert!(!reason.is_empty(), "reason should explain the vacuity");
+            }
+            other => panic!(
+                "expected NotComparable for an all-inert battery, got {:?}",
+                other
+            ),
+        }
+        assert!(!report.is_match(), "an inert battery must never report Match");
     }
 
     /// A battery DSL string that fails to parse must surface honestly as a
