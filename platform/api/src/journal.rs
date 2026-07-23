@@ -531,12 +531,118 @@ fn compare_temporal_window(
     }
 }
 
+/// Normalize a hunt's `Vec<HuntResult>` into an order-independent multiset of
+/// paths. Order WITHIN a path is semantic (it's the walk through the graph:
+/// step 0 is the origin, step N is N hops downstream) and is preserved
+/// verbatim in the `Vec<String>` key; the SET of paths a hunt returns is NOT
+/// guaranteed to come back in the same order across two independently-built
+/// graphs (traversal order depends on internal edge/vertex layout, which
+/// differs between the incrementally-built live graph and the from-scratch
+/// rebuild), so the multiset — not the `Vec` — is what gets compared.
+/// `Arc<str>` is resolved to owned `String` because `Arc<str>` pointer
+/// identity is meaningless across two independently-built string interners.
+fn path_multiset(
+    paths: &[graph_hunter_core::graph::HuntResult],
+) -> BTreeMap<Vec<String>, usize> {
+    let mut map: BTreeMap<Vec<String>, usize> = BTreeMap::new();
+    for p in paths {
+        let owned: Vec<String> = p.iter().map(|id| id.to_string()).collect();
+        *map.entry(owned).or_insert(0) += 1;
+    }
+    map
+}
+
+/// Compare hypothesis-result equivalence: run every DSL in `battery` on both
+/// `live` and `rebuilt` and check the returned path multisets agree. This is
+/// a behavioral dimension, not a structural one — it proves the two build
+/// paths (incremental graph vs. from-scratch journal rebuild) *answer
+/// hunts* identically, which the entity/edge/temporal dimensions above don't
+/// directly establish (they compare storage, not query results).
+///
+/// **Honesty (deliberate scope limit):** this uses ONLY
+/// `search_temporal_pattern` — the structural matcher. It never calls
+/// `search_temporal_pattern_smart`. Anomaly scores are computed by
+/// `AnomalyScorer` state that ingestion never populates on EITHER side —
+/// live or rebuilt both read a flat 0 — so running the smart/anomaly-ranked
+/// path here would compare 0 == 0 on both graphs and report `Match` without
+/// having tested anything about scoring. That would be a dishonest
+/// dimension: it would look like it validated anomaly-ranking equivalence
+/// while actually validating nothing (scores are not an ingestion
+/// observable). If scoring ever becomes one, it belongs in its own
+/// `NotComparable`-until-then dimension, not folded silently into this one.
+///
+/// A battery entry that fails to `parse_dsl`, or whose
+/// `search_temporal_pattern` call errors on either graph, surfaces as a
+/// `Diff` naming the failure — it is never swallowed into a silent `Match`.
+pub fn compare_hypothesis_results(
+    live: &graph_hunter_core::graph::GraphHunter,
+    rebuilt: &graph_hunter_core::graph::GraphHunter,
+    battery: &[&str],
+) -> DimensionResult {
+    for dsl in battery {
+        let hypothesis = match graph_hunter_core::parse_dsl(dsl, Some("validation")) {
+            Ok(parsed) => parsed.hypothesis,
+            Err(e) => {
+                return DimensionResult::Diff {
+                    detail: format!("hypothesis {dsl:?} failed to parse: {e}"),
+                };
+            }
+        };
+
+        let live_paths = match live.search_temporal_pattern(&hypothesis, None, Some(10_000)) {
+            Ok((paths, _truncated)) => paths,
+            Err(e) => {
+                return DimensionResult::Diff {
+                    detail: format!("hypothesis {dsl:?} errored on live graph: {e}"),
+                };
+            }
+        };
+        let rebuilt_paths = match rebuilt.search_temporal_pattern(&hypothesis, None, Some(10_000))
+        {
+            Ok((paths, _truncated)) => paths,
+            Err(e) => {
+                return DimensionResult::Diff {
+                    detail: format!("hypothesis {dsl:?} errored on rebuilt graph: {e}"),
+                };
+            }
+        };
+
+        let live_multiset = path_multiset(&live_paths);
+        let rebuilt_multiset = path_multiset(&rebuilt_paths);
+        if live_multiset != rebuilt_multiset {
+            return DimensionResult::Diff {
+                detail: format!(
+                    "hypothesis {dsl:?} diverges: live returned {} paths ({} distinct), rebuilt returned {} paths ({} distinct)",
+                    live_paths.len(),
+                    live_multiset.len(),
+                    rebuilt_paths.len(),
+                    rebuilt_multiset.len(),
+                ),
+            };
+        }
+    }
+    DimensionResult::Match
+}
+
+/// Default hunt battery for `compare_observable_equality`'s
+/// `hypothesis_results` dimension: a small, fixed set of single/multi-hop
+/// patterns spanning the entity/relation types the built-in parsers
+/// actually emit (auth, process-execution, network-connect). Callers with a
+/// narrower or wider schema should call `compare_hypothesis_results`
+/// directly with their own battery instead of relying on this default.
+pub const DEFAULT_HYPOTHESIS_BATTERY: &[&str] = &[
+    "User -[Auth]-> Host",
+    "Host -[Execute]-> Process",
+    "IP -[Connect]-> Host",
+];
+
 /// Observable-equality comparison between a live incremental graph and a
 /// fresh rebuild from the journal. Extends the original count-only fields
 /// (kept for backward compatibility) with rich per-dimension structural
 /// results covering the full observable surface `to_snapshot()` exposes:
 /// entities (id set), entity metadata (type + kv pairs), the edge multiset,
-/// and the temporal window.
+/// and the temporal window — plus the behavioral `hypothesis_results`
+/// dimension (do the two graphs answer the SAME hunts the SAME way).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EquivalenceReport {
     pub entity_count_matches: bool,
@@ -554,31 +660,46 @@ pub struct EquivalenceReport {
     pub edges_multiset: DimensionResult,
     /// `edge_timestamp_range()` matches.
     pub temporal_window: DimensionResult,
+    /// Running the same fixed DSL battery through `search_temporal_pattern`
+    /// on both graphs yields the same path multiset per hypothesis.
+    /// Anomaly-ranked (`search_temporal_pattern_smart`) results are
+    /// deliberately excluded — see `compare_hypothesis_results`'s doc
+    /// comment for why comparing them would be dishonest.
+    pub hypothesis_results: DimensionResult,
 }
 
 impl EquivalenceReport {
     /// True when every dimension that *could* be compared agrees — i.e. none
-    /// of `entities`, `entity_metadata`, `edges_multiset`, `temporal_window`
-    /// is `Diff`. `NotComparable` dimensions don't count against
-    /// equivalence (absence of evidence, not evidence of absence) but they
-    /// also don't count for it; they're surfaced for a human to judge.
+    /// of `entities`, `entity_metadata`, `edges_multiset`, `temporal_window`,
+    /// `hypothesis_results` is `Diff`. `NotComparable` dimensions don't
+    /// count against equivalence (absence of evidence, not evidence of
+    /// absence) but they also don't count for it; they're surfaced for a
+    /// human to judge.
     pub fn all_comparable_dimensions_match(&self) -> bool {
-        [&self.entities, &self.entity_metadata, &self.edges_multiset, &self.temporal_window]
-            .into_iter()
-            .all(|d| !matches!(d, DimensionResult::Diff { .. }))
+        [
+            &self.entities,
+            &self.entity_metadata,
+            &self.edges_multiset,
+            &self.temporal_window,
+            &self.hypothesis_results,
+        ]
+        .into_iter()
+        .all(|d| !matches!(d, DimensionResult::Diff { .. }))
     }
 }
 
 /// Compare the FULL observable surface of `live` against `rebuilt`: entities,
-/// entity metadata, the edge multiset, and the temporal window — never just
-/// counts. Cross-graph identity is established purely through resolved
-/// `String` keys from `to_snapshot()`; `StrId`s are never compared across
-/// the two graphs (they're interner-local and meaningless across
-/// independently-built graphs). Pure function: no I/O, no tracing (metrics
-/// land in a later task).
+/// entity metadata, the edge multiset, the temporal window, and — via
+/// `battery` — hypothesis-result equivalence. Cross-graph identity is
+/// established purely through resolved `String` keys from `to_snapshot()`
+/// (and, for hypotheses, resolved `Arc<str>` path ids); `StrId`s are never
+/// compared across the two graphs (they're interner-local and meaningless
+/// across independently-built graphs). Pure function: no I/O, no tracing
+/// (metrics land in a later task).
 pub fn compare_observable_equality(
     live: &graph_hunter_core::graph::GraphHunter,
     rebuilt: &graph_hunter_core::graph::GraphHunter,
+    battery: &[&str],
 ) -> EquivalenceReport {
     let (live_entities, live_relations) = live.to_snapshot();
     let (rebuilt_entities, rebuilt_relations) = rebuilt.to_snapshot();
@@ -591,6 +712,7 @@ pub fn compare_observable_equality(
     let (entities, entity_metadata) = compare_entities(&live_entities, &rebuilt_entities);
     let edges_multiset = compare_edges(&live_relations, &rebuilt_relations);
     let temporal_window = compare_temporal_window(live, rebuilt);
+    let hypothesis_results = compare_hypothesis_results(live, rebuilt, battery);
 
     EquivalenceReport {
         entity_count_matches: live_e == reb_e,
@@ -603,6 +725,7 @@ pub fn compare_observable_equality(
         entity_metadata,
         edges_multiset,
         temporal_window,
+        hypothesis_results,
     }
 }
 
@@ -618,7 +741,7 @@ pub fn check_incremental_equivalence(
     let recon = rebuild_from_journal(store)?;
     let mut rebuilt = graph_hunter_core::graph::GraphHunter::new();
     apply_batch_idempotent(&mut rebuilt, &recon.inserted);
-    Ok(compare_observable_equality(live, &rebuilt))
+    Ok(compare_observable_equality(live, &rebuilt, DEFAULT_HYPOTHESIS_BATTERY))
 }
 
 #[cfg(test)]
@@ -1226,7 +1349,7 @@ mod tests {
     #[test]
     fn rich_compare_identical_graphs_match_all_structural_dimensions() {
         let (live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
-        let report = compare_observable_equality(&live, &rebuilt);
+        let report = compare_observable_equality(&live, &rebuilt, DEFAULT_HYPOTHESIS_BATTERY);
         assert!(matches!(report.entities, DimensionResult::Match), "entities: {:?}", report.entities);
         assert!(
             matches!(report.entity_metadata, DimensionResult::Match),
@@ -1242,6 +1365,11 @@ mod tests {
             matches!(report.temporal_window, DimensionResult::Match),
             "window: {:?}",
             report.temporal_window
+        );
+        assert!(
+            matches!(report.hypothesis_results, DimensionResult::Match),
+            "hypothesis_results: {:?}",
+            report.hypothesis_results
         );
         assert!(report.all_comparable_dimensions_match());
         // Legacy count fields stay populated too — the report is self-contained.
@@ -1269,7 +1397,7 @@ mod tests {
         ))
         .expect("both endpoints already exist in the live graph");
 
-        let report = compare_observable_equality(&live, &rebuilt);
+        let report = compare_observable_equality(&live, &rebuilt, DEFAULT_HYPOTHESIS_BATTERY);
         assert!(
             matches!(report.edges_multiset, DimensionResult::Diff { .. }),
             "expected edge multiset divergence, got {:?}",
@@ -1291,7 +1419,7 @@ mod tests {
         ))
         .expect("fresh id, not already present in live");
 
-        let report = compare_observable_equality(&live, &rebuilt);
+        let report = compare_observable_equality(&live, &rebuilt, DEFAULT_HYPOTHESIS_BATTERY);
         assert!(
             matches!(report.entities, DimensionResult::Diff { .. }),
             "expected entity id-set divergence, got {:?}",
@@ -1317,7 +1445,7 @@ mod tests {
         assert_eq!(ent.entity_type, graph_hunter_core::EntityType::IP);
         ent.entity_type = graph_hunter_core::EntityType::Other("IP".to_string());
 
-        let report = compare_observable_equality(&live, &rebuilt);
+        let report = compare_observable_equality(&live, &rebuilt, DEFAULT_HYPOTHESIS_BATTERY);
         assert!(
             matches!(report.entities, DimensionResult::Match),
             "id sets still agree, expected Match, got {:?}",
@@ -1350,12 +1478,86 @@ mod tests {
         ))
         .expect("both endpoints already exist in the live graph");
 
-        let report = compare_observable_equality(&live, &rebuilt);
+        let report = compare_observable_equality(&live, &rebuilt, DEFAULT_HYPOTHESIS_BATTERY);
         assert!(
             matches!(report.temporal_window, DimensionResult::Diff { .. }),
             "expected temporal window divergence, got {:?}",
             report.temporal_window
         );
         assert!(!report.all_comparable_dimensions_match());
+    }
+
+    // ── compare_hypothesis_results (hypothesis-result equivalence) ───
+
+    #[test]
+    fn rich_compare_hypothesis_results_match_across_incremental_and_rebuild() {
+        let (live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
+        // The plan doc's illustrative battery ("User -[Auth]-> Host",
+        // "Host -[Execute]-> Process") uses entity/relation types that do
+        // NOT exist in this fixture. `build_live_and_rebuilt_from_same_envelopes`
+        // journals `sample_event`s, which are IP "1.2.3.4" -[Connect]->
+        // Host "host-1" (see `sample_event` above) — so the battery here
+        // uses THOSE types, matching the actual fixture schema.
+        let battery = ["IP -[Connect]-> Host"];
+        let report = compare_hypothesis_results(&live, &rebuilt, &battery);
+        assert!(matches!(report, DimensionResult::Match), "hypothesis results: {:?}", report);
+    }
+
+    /// Negative control: a battery hypothesis whose path multiset diverges
+    /// between `live` and a deliberately-divergent rebuild. Reuses the
+    /// divergence-injection style from `rich_compare_catches_injected_edge_divergence`,
+    /// but adds a brand-new entity + edge (not a duplicate edge between
+    /// already-matched entities) so the extra path is unambiguous in the
+    /// multiset regardless of whether the matcher deduplicates multiple
+    /// edge instances between the same vertex pair.
+    #[test]
+    fn rich_compare_hypothesis_results_catches_divergent_rebuild() {
+        let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
+        live.add_entity(graph_hunter_core::Entity::new(
+            "host-2",
+            graph_hunter_core::EntityType::Host,
+        ))
+        .expect("fresh id, not already present in live");
+        live.add_relation(graph_hunter_core::Relation::new(
+            "1.2.3.4",
+            "host-2",
+            graph_hunter_core::RelationType::Connect,
+            400,
+        ))
+        .expect("both endpoints now exist in the live graph");
+
+        let battery = ["IP -[Connect]-> Host"];
+        let report = compare_hypothesis_results(&live, &rebuilt, &battery);
+        assert!(
+            matches!(report, DimensionResult::Diff { .. }),
+            "expected hypothesis-result divergence, got {:?}",
+            report
+        );
+
+        // Surfaces through the full comparator too, and drags down the
+        // overall equivalence verdict.
+        let full = compare_observable_equality(&live, &rebuilt, &battery);
+        assert!(
+            matches!(full.hypothesis_results, DimensionResult::Diff { .. }),
+            "expected hypothesis_results Diff in the full report, got {:?}",
+            full.hypothesis_results
+        );
+        assert!(!full.all_comparable_dimensions_match());
+    }
+
+    /// A battery DSL string that fails to parse must surface honestly as a
+    /// `Diff`, never as a silent `Match` — an error is not evidence of
+    /// agreement.
+    #[test]
+    fn rich_compare_hypothesis_results_surfaces_unparseable_battery_entries() {
+        let (live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
+        let battery = ["not a valid dsl string"];
+        let report = compare_hypothesis_results(&live, &rebuilt, &battery);
+        match report {
+            DimensionResult::Diff { detail } => {
+                assert!(detail.contains("failed to parse"), "detail: {detail}");
+            }
+            other => panic!("expected Diff surfacing the parse failure, got {:?}", other),
+        }
     }
 }
