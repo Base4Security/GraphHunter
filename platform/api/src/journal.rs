@@ -684,6 +684,39 @@ pub struct EquivalenceReport {
     /// deliberately excluded — see `compare_hypothesis_results`'s doc
     /// comment for why comparing them would be dishonest.
     pub hypothesis_results: DimensionResult,
+    /// Design-spec dimension the graph structurally does NOT observe:
+    /// beyond `dataset_id`, provenance lives only in the journal envelope
+    /// (`mapping_hash`, `raw_event_sha256`, `confidence`, `canonical_hash`),
+    /// never on the graph's entities/relations. Always `NotComparable` —
+    /// there is nothing on either graph to compare.
+    pub provenance: DimensionResult,
+    /// Design-spec dimension the graph structurally does NOT observe:
+    /// anomaly/centrality scores come from a separate scoring pass that
+    /// ingestion never runs, so both graphs read a flat 0 — comparing them
+    /// would report a false `Match` without validating anything (see
+    /// `compare_hypothesis_results`'s doc comment on why the smart/
+    /// anomaly-ranked matcher is deliberately excluded from
+    /// `hypothesis_results` for the same reason). Always `NotComparable`.
+    pub anomaly_scores: DimensionResult,
+    /// Design-spec dimension the graph structurally does NOT observe:
+    /// `ingested_at_delta` (live vs rebuild MVCC ingestion skew) is
+    /// hardcoded 0 on both raw-event paths today, so it carries no signal.
+    /// Always `NotComparable`.
+    pub mvcc_ingested_at: DimensionResult,
+    /// `true` iff every journal envelope this report's rebuild replayed was
+    /// an `Insert` or `Skipped`. `rebuild_from_journal` does not yet
+    /// faithfully replay `Correction`/`Tombstone` envelopes (they fall
+    /// through to `inserted`/ignored — see `rebuild_from_journal`'s doc
+    /// comment), so a journal containing either makes the rebuild an
+    /// UNFAITHFUL reference: a comparable-dimensions `Match` in that case
+    /// proves incremental-matches-a-stale-rebuild, not
+    /// incremental-matches-truth. Callers must check this before trusting
+    /// `all_comparable_dimensions_match()`.
+    pub rebuild_faithful: bool,
+    /// Human-readable caveats explaining why `rebuild_faithful` is `false`
+    /// (e.g. naming how many Correction/Tombstone envelopes were skipped).
+    /// Empty when `rebuild_faithful` is `true`.
+    pub rebuild_caveats: Vec<String>,
 }
 
 impl EquivalenceReport {
@@ -692,7 +725,11 @@ impl EquivalenceReport {
     /// `hypothesis_results` is `Diff`. `NotComparable` dimensions don't
     /// count against equivalence (absence of evidence, not evidence of
     /// absence) but they also don't count for it; they're surfaced for a
-    /// human to judge.
+    /// human to judge. The always-`NotComparable` honesty dimensions
+    /// (`provenance`, `anomaly_scores`, `mvcc_ingested_at`) are deliberately
+    /// excluded from this list — they can never be anything but
+    /// `NotComparable`, so including them would be a no-op that just
+    /// invites confusion.
     pub fn all_comparable_dimensions_match(&self) -> bool {
         [
             &self.entities,
@@ -703,6 +740,44 @@ impl EquivalenceReport {
         ]
         .into_iter()
         .all(|d| !matches!(d, DimensionResult::Diff { .. }))
+    }
+}
+
+/// Render one dimension as a single readable line: `PASS`, `DIFF: <detail>`,
+/// or `NOT-COMPARABLE: <reason>`.
+fn fmt_dimension(f: &mut std::fmt::Formatter<'_>, name: &str, result: &DimensionResult) -> std::fmt::Result {
+    match result {
+        DimensionResult::Match => writeln!(f, "  {name}: PASS"),
+        DimensionResult::Diff { detail } => writeln!(f, "  {name}: DIFF: {detail}"),
+        DimensionResult::NotComparable { reason } => writeln!(f, "  {name}: NOT-COMPARABLE: {reason}"),
+    }
+}
+
+/// Human-readable diff report — the spec's "reporte de diferencias legible".
+/// A header with entity/relation counts and the `rebuild_faithful` verdict,
+/// followed by one line per dimension (`PASS` / `DIFF: <detail>` /
+/// `NOT-COMPARABLE: <reason>`).
+impl std::fmt::Display for EquivalenceReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "EquivalenceReport: live_entities={} rebuilt_entities={} live_relations={} rebuilt_relations={}",
+            self.live_entities, self.rebuilt_entities, self.live_relations, self.rebuilt_relations,
+        )?;
+        if self.rebuild_faithful {
+            writeln!(f, "  rebuild_faithful: true")?;
+        } else {
+            writeln!(f, "  rebuild_faithful: false ({})", self.rebuild_caveats.join("; "))?;
+        }
+        fmt_dimension(f, "entities", &self.entities)?;
+        fmt_dimension(f, "entity_metadata", &self.entity_metadata)?;
+        fmt_dimension(f, "edges_multiset", &self.edges_multiset)?;
+        fmt_dimension(f, "temporal_window", &self.temporal_window)?;
+        fmt_dimension(f, "hypothesis_results", &self.hypothesis_results)?;
+        fmt_dimension(f, "provenance", &self.provenance)?;
+        fmt_dimension(f, "anomaly_scores", &self.anomaly_scores)?;
+        fmt_dimension(f, "mvcc_ingested_at", &self.mvcc_ingested_at)?;
+        Ok(())
     }
 }
 
@@ -744,6 +819,54 @@ pub fn compare_observable_equality(
         edges_multiset,
         temporal_window,
         hypothesis_results,
+        provenance: DimensionResult::NotComparable {
+            reason: "beyond dataset-id, provenance is journal-envelope-only (mapping_hash, raw_event_sha256, confidence, canonical_hash); not a graph observable".to_string(),
+        },
+        anomaly_scores: DimensionResult::NotComparable {
+            reason: "anomaly/centrality scores are produced by a separate scoring pass, 0 on both ingested graphs; not an ingestion observable".to_string(),
+        },
+        mvcc_ingested_at: DimensionResult::NotComparable {
+            reason: "ingested_at_delta is hardcoded 0 on both raw-event paths; not a meaningful live-vs-rebuild observable".to_string(),
+        },
+        // The faithful guard depends on the JOURNAL's envelope classification
+        // (Correction/Tombstone), which this function never sees — it only
+        // gets the two already-built graphs. Callers going through
+        // `check_incremental_equivalence` get the real guard computed there;
+        // direct callers of this pure comparator (as the existing rich-compare
+        // tests do, building `live`/`rebuilt` by hand) get the conservative
+        // default of `true` with no caveats, since there is no journal here
+        // to have been unfaithful to.
+        rebuild_faithful: true,
+        rebuild_caveats: Vec::new(),
+    }
+}
+
+/// Scan a journal's raw envelopes for `Correction`/`Tombstone` records.
+/// `rebuild_from_journal` does not yet faithfully replay those — they fall
+/// through to `inserted`/ignored (see its doc comment, journal.rs ~310-313)
+/// — so their presence means a from-scratch rebuild is NOT a faithful
+/// reference: it reflects "as if those corrections/tombstones never
+/// happened," not truth. Insert/Skipped-only journals are fully faithful.
+/// Exposed (not just inlined into `check_incremental_equivalence`) so the
+/// classification itself is directly testable, independent of the full
+/// rebuild-and-compare pipeline.
+fn classify_rebuild_faithfulness(
+    envelopes: &[CanonicalEnvelope],
+) -> (bool, Vec<String>) {
+    use graph_hunter_canonical::ChangeKind;
+    let unfaithful = envelopes
+        .iter()
+        .filter(|e| matches!(e.change_kind, ChangeKind::Correction | ChangeKind::Tombstone))
+        .count();
+    if unfaithful == 0 {
+        (true, Vec::new())
+    } else {
+        (
+            false,
+            vec![format!(
+                "{unfaithful} Correction/Tombstone envelope(s) in the journal are not yet faithfully replayed by rebuild_from_journal"
+            )],
+        )
     }
 }
 
@@ -752,14 +875,49 @@ pub fn compare_observable_equality(
 /// This is the translation-validation check (SOT-VM framing): the
 /// from-scratch rebuild is the trusted reference; the live graph is the
 /// untrusted incremental artifact.
+///
+/// Also runs the `rebuild_faithful` honesty guard (see
+/// `classify_rebuild_faithfulness`) and emits a single structured
+/// `tracing::info!(target: "validation", ...)` metric line summarizing the
+/// comparison — the §20 observability requirement.
 pub fn check_incremental_equivalence(
     live: &graph_hunter_core::graph::GraphHunter,
     store: &JournalStore,
 ) -> std::io::Result<EquivalenceReport> {
+    let all_envelopes = store.read_all()?;
+    let (rebuild_faithful, rebuild_caveats) = classify_rebuild_faithfulness(&all_envelopes);
+
     let recon = rebuild_from_journal(store)?;
     let mut rebuilt = graph_hunter_core::graph::GraphHunter::new();
     apply_batch_idempotent(&mut rebuilt, &recon.inserted);
-    Ok(compare_observable_equality(live, &rebuilt, DEFAULT_HYPOTHESIS_BATTERY))
+
+    let mut report = compare_observable_equality(live, &rebuilt, DEFAULT_HYPOTHESIS_BATTERY);
+    report.rebuild_faithful = rebuild_faithful;
+    report.rebuild_caveats = rebuild_caveats;
+
+    // `is_match()` alone would collapse `Diff` and `NotComparable` into the
+    // same `false` — genuinely different signals (a real divergence vs. an
+    // inert/vacuous battery) — so the metric line carries the 3-way status
+    // as a string rather than a bool.
+    let hypotheses_match = match report.hypothesis_results {
+        DimensionResult::Match => "match",
+        DimensionResult::Diff { .. } => "diff",
+        DimensionResult::NotComparable { .. } => "not_comparable",
+    };
+
+    tracing::info!(
+        target: "validation",
+        live_entities = report.live_entities,
+        rebuilt_entities = report.rebuilt_entities,
+        live_relations = report.live_relations,
+        rebuilt_relations = report.rebuilt_relations,
+        edges_match = report.edges_multiset.is_match(),
+        hypotheses_match,
+        rebuild_faithful = report.rebuild_faithful,
+        "incremental-vs-rebuild validation"
+    );
+
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -1327,6 +1485,114 @@ mod tests {
         assert!(rep.relation_count_matches, "{rep:?}");
         assert_eq!(rep.live_relations, 3); // multiplicity: 3, not 6
         assert_eq!(rep.rebuilt_relations, 3);
+    }
+
+    /// Build a `(live, store, _tempdir)` triple whose journal contains only
+    /// Insert/Skipped envelopes — same shape as
+    /// `rebuild_from_journal_matches_live_after_idempotent_apply` above (3
+    /// inserts + 1 skipped + a crash replay on the live side). Shared by the
+    /// NotComparable/readable-render test and as the faithful baseline for
+    /// the rebuild_faithful guard test. The `TempDir` guard MUST be kept
+    /// alive by the caller (its `Drop` deletes the directory `store` reads
+    /// from) — `JournalStore` only holds a `PathBuf`, not the guard itself.
+    fn build_live_graph_and_its_journal(
+    ) -> (graph_hunter_core::graph::GraphHunter, JournalStore, tempfile::TempDir) {
+        use graph_hunter_core::graph::GraphHunter;
+        let dir = tempfile::tempdir().unwrap();
+        let store = JournalStore::open(dir.path()).unwrap();
+        let inserts = vec![
+            insert_envelope_for(&sample_event(100)),
+            insert_envelope_for(&sample_event(200)),
+            insert_envelope_for(&sample_event(300)),
+        ];
+        for e in &inserts {
+            store.append(e).unwrap();
+        }
+        store.append(&env("skip-1", 0, 11).as_skipped("no_triple".into())).unwrap();
+        let mut live = GraphHunter::new();
+        apply_batch_idempotent(&mut live, &inserts);
+        apply_batch_idempotent(&mut live, &inserts); // crash replay: idempotent
+        (live, store, dir)
+    }
+
+    /// Step 1/3 of the brief: the design-spec dimensions the graph does NOT
+    /// observe (`provenance`, `anomaly_scores`) must surface as
+    /// `NotComparable`, never `Match`/`Diff` — this is the honesty
+    /// requirement, not an accuracy one. An Insert/Skipped-only journal must
+    /// report `rebuild_faithful == true`. And `Display` must render a
+    /// readable report: a header mentioning entity counts, plus at least one
+    /// `NOT-COMPARABLE` marker for the honesty dimensions.
+    #[test]
+    fn report_marks_uncomparable_dimensions_and_renders_readably() {
+        let (live, store, _dir) = build_live_graph_and_its_journal();
+        let report = check_incremental_equivalence(&live, &store).unwrap();
+
+        assert!(
+            matches!(report.provenance, DimensionResult::NotComparable { .. }),
+            "provenance: {:?}",
+            report.provenance
+        );
+        assert!(
+            matches!(report.anomaly_scores, DimensionResult::NotComparable { .. }),
+            "anomaly_scores: {:?}",
+            report.anomaly_scores
+        );
+        assert!(
+            matches!(report.mvcc_ingested_at, DimensionResult::NotComparable { .. }),
+            "mvcc_ingested_at: {:?}",
+            report.mvcc_ingested_at
+        );
+        assert!(report.rebuild_faithful, "journal has only Insert/Skipped -> faithful");
+        assert!(report.rebuild_caveats.is_empty());
+
+        let rendered = format!("{}", report);
+        assert!(rendered.contains("entities"), "rendered report: {rendered}");
+        assert!(
+            rendered.contains("NOT-COMPARABLE") || rendered.contains("not comparable"),
+            "rendered report: {rendered}"
+        );
+    }
+
+    /// Step 2 of the brief: the rebuild_faithful guard. A journal containing
+    /// a `Correction` envelope (constructed by taking an `Insert` envelope —
+    /// there is no dedicated `CanonicalEnvelope::new_correction` constructor
+    /// on this branch — and setting its `change_kind` directly; the field is
+    /// `pub` and `ChangeKind` is `Copy`, so this is a legitimate way to build
+    /// one from the test surface, not a workaround) must flip
+    /// `rebuild_faithful` to `false` and record a caveat naming the count.
+    /// `rebuild_from_journal` does not yet replay Correction/Tombstone
+    /// records faithfully (journal.rs ~310-313: they fall through to
+    /// `inserted`/ignored), so a rebuild against such a journal is not a
+    /// trustworthy reference — the guard exists precisely to flag that.
+    #[test]
+    fn journal_with_correction_envelope_marks_rebuild_unfaithful() {
+        use graph_hunter_canonical::ChangeKind;
+        let (live, store, _dir) = build_live_graph_and_its_journal();
+
+        // One Correction envelope, distinct from every existing Insert (a
+        // fresh timestamp keeps its raw_payload/canonical_hash unique).
+        let mut correction = insert_envelope_for(&sample_event(400));
+        correction.change_kind = ChangeKind::Correction;
+        store.append(&correction).unwrap();
+
+        let report = check_incremental_equivalence(&live, &store).unwrap();
+        assert!(
+            !report.rebuild_faithful,
+            "a Correction envelope in the journal must mark the rebuild unfaithful"
+        );
+        assert_eq!(report.rebuild_caveats.len(), 1, "{:?}", report.rebuild_caveats);
+        assert!(
+            report.rebuild_caveats[0].contains('1'),
+            "caveat should name the count of unfaithful envelopes: {}",
+            report.rebuild_caveats[0]
+        );
+
+        // The classification helper itself is independently exercised too,
+        // decoupled from the full rebuild-and-compare pipeline.
+        let all = store.read_all().unwrap();
+        let (faithful, caveats) = classify_rebuild_faithfulness(&all);
+        assert!(!faithful);
+        assert_eq!(caveats.len(), 1);
     }
 
     // ── compare_observable_equality (rich structural comparator) ─────
