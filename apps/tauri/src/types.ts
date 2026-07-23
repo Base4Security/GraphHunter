@@ -717,6 +717,16 @@ export interface SentinelEnvStatus {
   azure_resource_group: string | null;
   azure_workspace_id: string | null;
   azure_workspace_name: string | null;
+  /** Fase G: whether one-click hunting templates are enabled
+   * (GRAPHHUNTER_HUNTING_TEMPLATES). Default true server-side;
+   * treat undefined the same as true (default-visible) so a
+   * frontend built against an older backend still shows the
+   * surface. */
+  hunting_templates_enabled?: boolean;
+  /** Fase G: whether the raw-KQL escape hatch is enabled
+   * (GRAPHHUNTER_KQL_ESCAPE_HATCH). Default true server-side;
+   * same undefined-as-true default-visible handling. */
+  kql_escape_hatch_enabled?: boolean;
 }
 
 /** Emitted by the backend every time a KQL query executes (polling or ad-hoc). */

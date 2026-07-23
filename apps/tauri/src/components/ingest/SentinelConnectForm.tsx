@@ -47,6 +47,14 @@ interface SentinelConnectFormProps {
     onRunHuntingTemplate: (template: HuntingTemplateId) => void;
     /** Phase N: latest KQL result summary for the at-a-glance badge. */
     lastKqlSummary: { rows: number; tookMs: number; truncated: boolean } | null;
+    /** Fase G: server-side gate for the hunting-templates surface
+     * (GRAPHHUNTER_HUNTING_TEMPLATES). `undefined`/`true` are both
+     * treated as visible (default ON) — only an explicit `false`
+     * hides it. */
+    huntingTemplatesEnabled?: boolean;
+    /** Fase G: server-side gate for the ad-hoc raw-KQL escape hatch
+     * (GRAPHHUNTER_KQL_ESCAPE_HATCH). Same default-visible handling. */
+    kqlEscapeHatchEnabled?: boolean;
   };
 }
 
@@ -215,7 +223,7 @@ export default function SentinelConnectForm({
         />
       )}
 
-      {extended && (
+      {extended && extended.huntingTemplatesEnabled !== false && (
         <HuntingTemplatesSection
           loading={extended.adhocLoading}
           preset={extended.lookbackPreset}
@@ -252,7 +260,7 @@ export default function SentinelConnectForm({
         </div>
       )}
 
-      {extended && (
+      {extended && extended.kqlEscapeHatchEnabled !== false && (
         <AdhocKqlSection
           kql={extended.adhocKql}
           setKql={extended.setAdhocKql}
