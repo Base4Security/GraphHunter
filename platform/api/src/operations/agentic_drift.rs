@@ -575,6 +575,7 @@ mod tests {
                 field_config: Some(cfg()),
                 ingest_stats: None,
                 parser: None,
+                mapping_hash: None,
             });
         }
         // Seed two triples (alice->cmd, bob->whoami) tagged to ds.

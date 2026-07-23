@@ -234,6 +234,11 @@ fn dataset_with_field_config_stamps_real_cfg_hash() {
             field_config: Some(cfg),
             ingest_stats: None,
             parser: None,
+            // Export now derives `provenance.mapping_hash` from this
+            // frozen field, never from `field_config` above (see
+            // `DatasetInfo::mapping_hash`) — set it explicitly here to
+            // the same hash `expected_hash` was computed from above.
+            mapping_hash: Some(expected_hash.clone()),
         });
     }
     {

@@ -16,6 +16,7 @@ use graph_hunter_core::{
     ConfigurableParser, EntityType, FieldConfig, FieldMapping, FieldRole, GenericParser,
     GraphHunter, LogParser,
 };
+use graph_hunter_canonical::ProvenanceCtx;
 use graph_hunter_parsers::extract_fields_header;
 use uuid::Uuid;
 
@@ -498,6 +499,12 @@ impl GraphHunterApi {
                 } else {
                     resolved_format.clone()
                 }),
+                // FROZEN mapping identity, set once here at ingest and never
+                // touched again — see `DatasetInfo::mapping_hash`. Computed
+                // from the auto-built config directly, independent of the
+                // `field_config` field above (which a later mapping-review
+                // promotion may overwrite for display purposes).
+                mapping_hash: auto_config.as_ref().map(ProvenanceCtx::mapping_hash_for_config),
             });
         }
         let resume_phase = resume_phase_after_finalize(session.phase());
@@ -788,6 +795,10 @@ impl GraphHunterApi {
                 // "sentinel" is the real frozen parser identity for both
                 // the Sentinel and Elastic branches of this op today.
                 parser: Some("sentinel".to_string()),
+                // No FieldConfig on this path — builtin identity via
+                // `parser` above (`builtin:sentinel`) is the frozen
+                // mapping identity for this dataset.
+                mapping_hash: None,
             });
         }
 
@@ -970,9 +981,15 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: Some(req.config.clone()),
                 ingest_stats: None,
-                // Unused by export's provenance identity when `field_config`
+                // Unused by export's provenance identity when `mapping_hash`
                 // is `Some` (always true on this path) — left unset.
                 parser: None,
+                // FROZEN mapping identity, set once here at ingest and never
+                // touched again — see `DatasetInfo::mapping_hash`. A later
+                // mapping-review promotion may overwrite `field_config`
+                // above for display, but this hash is what export actually
+                // stamps into `provenance.mapping_hash`.
+                mapping_hash: Some(ProvenanceCtx::mapping_hash_for_config(&req.config)),
             });
         }
 
@@ -1178,6 +1195,17 @@ impl GraphHunterApi {
                 // determined in the background task below, from a content
                 // peek); patched in once that happens.
                 parser: None,
+                // FROZEN mapping identity, set once here at ingest and
+                // never touched again — see `DatasetInfo::mapping_hash`.
+                // Only known now if the caller supplied an explicit config
+                // upfront; the heuristic auto-config case (no explicit
+                // config) is frozen later, in the background task below,
+                // BEFORE any event is parsed under it — still "at ingest",
+                // never a post-ingest mutation.
+                mapping_hash: req
+                    .config
+                    .as_ref()
+                    .map(ProvenanceCtx::mapping_hash_for_config),
             });
         }
 
@@ -1241,6 +1269,21 @@ impl GraphHunterApi {
                 if let Some(ingestor) =
                     crate::ingestors::resolve_ingestor(&bg_path, &bg_format)
                 {
+                    // Freeze the resolved ingestor identity onto the
+                    // dataset BEFORE any event is parsed under it — this
+                    // registry branch (EVTX/PCAP/Zeek/Suricata/Netflow)
+                    // used to `return` without ever setting `ds.parser`,
+                    // leaving these datasets stamped `builtin:unknown` at
+                    // export instead of e.g. `builtin:evtx`. Mirrors the
+                    // `ds.parser = Some(resolved.clone())` patch below for
+                    // the tabular path.
+                    if let Ok(mut datasets) = bg_session.datasets.write() {
+                        if let Some(ds) =
+                            datasets.iter_mut().find(|d| d.id == bg_dataset_id)
+                        {
+                            ds.parser = Some(ingestor.name().to_string());
+                        }
+                    }
                     let result = ingestor.ingest(crate::ingestors::IngestContext {
                         path: &bg_path,
                         session: &bg_session,
@@ -1424,6 +1467,12 @@ impl GraphHunterApi {
                     if let Some(ds) = datasets.iter_mut().find(|d| d.id == bg_dataset_id) {
                         if let Some(cfg) = &auto_config {
                             ds.field_config = Some(cfg.clone());
+                            // FROZEN mapping identity, set once here
+                            // (still before any event is parsed under this
+                            // dataset — see `DatasetInfo::mapping_hash`)
+                            // and never touched again after this point.
+                            ds.mapping_hash =
+                                Some(ProvenanceCtx::mapping_hash_for_config(cfg));
                         }
                         ds.parser = Some(resolved.clone());
                     }

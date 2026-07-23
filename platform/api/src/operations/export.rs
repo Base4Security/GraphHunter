@@ -207,13 +207,18 @@ impl GraphHunterApi {
         // consults anything but the frozen `DatasetInfo` for the dataset
         // the edge was tagged with at ingest.
         //
-        // Datasets with a `field_config` get `cfg:sha256(serde_json(cfg))`
-        // (see `ProvenanceCtx::for_configurable`) — hashed directly from
-        // the frozen config, not from any downstream VRL/compiler
-        // representation of it. Datasets without one fall back to the
-        // `builtin:{parser}` identity using the parser/format resolved and
-        // frozen on `DatasetInfo` at ingest (`"unknown"` for datasets
-        // ingested before that field existed).
+        // Datasets carrying a FROZEN `mapping_hash` (set once at ingest,
+        // see `DatasetInfo::mapping_hash`) stamp that hash directly —
+        // deliberately NOT derived from the (mutable) `field_config`
+        // below it, so a post-ingest mapping edit (e.g. mapping-review
+        // promotion via `promote_field_config_to_latest_dataset`, which
+        // updates `field_config` for UI/replay display but never touches
+        // `mapping_hash`) cannot retroactively relabel the provenance of
+        // edges already ingested under the OLD config. Datasets without a
+        // frozen `mapping_hash` fall back to the `builtin:{parser}`
+        // identity using the parser/format resolved and frozen on
+        // `DatasetInfo` at ingest (`"unknown"` for datasets ingested
+        // before either field existed).
         let session = self.resolve_session(req.session.as_ref())?;
         let identity_by_dataset: HashMap<String, ProvenanceCtx> = {
             let infos = session
@@ -223,8 +228,8 @@ impl GraphHunterApi {
             infos
                 .iter()
                 .map(|d| {
-                    let ctx = match &d.field_config {
-                        Some(cfg) => ProvenanceCtx::for_configurable(cfg, d.id.clone(), &[]),
+                    let ctx = match &d.mapping_hash {
+                        Some(hash) => ProvenanceCtx::with_mapping_hash(hash.clone(), d.id.clone(), &[]),
                         None => {
                             let parser = d.parser.as_deref().unwrap_or("unknown");
                             ProvenanceCtx::for_builtin_parser(parser, d.id.clone(), &[])

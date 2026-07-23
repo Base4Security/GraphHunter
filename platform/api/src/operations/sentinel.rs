@@ -152,7 +152,15 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
-                parser: None,
+                // `polling_loop` below resolves `make_parser_for_format(
+                // "sentinel")` for every batch — freeze that real
+                // identity now instead of leaving this a `builtin:unknown`
+                // live-tail dataset.
+                parser: Some("sentinel".to_string()),
+                // No FieldConfig on the live-connector path — builtin
+                // identity via `parser` above is the frozen mapping
+                // identity for this dataset.
+                mapping_hash: None,
             });
         }
 
@@ -470,7 +478,11 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
-                parser: None,
+                // `make_parser_for_format("sentinel")` below is the real
+                // (hardcoded) parser for this ad-hoc KQL path — freeze it
+                // now instead of leaving `builtin:unknown`.
+                parser: Some("sentinel".to_string()),
+                mapping_hash: None,
             });
         }
 
@@ -779,7 +791,10 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
-                parser: None,
+                // Materialized from a Sentinel KQL proposal — freeze the
+                // real source identity instead of leaving `builtin:unknown`.
+                parser: Some("sentinel".to_string()),
+                mapping_hash: None,
             });
         }
 

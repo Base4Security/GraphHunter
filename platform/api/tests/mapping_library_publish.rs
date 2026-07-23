@@ -29,6 +29,7 @@ fn api_with_library() -> (GraphHunterApi, tempfile::TempDir) {
         field_config: None,
         ingest_stats: None,
         parser: None,
+        mapping_hash: None,
     });
     (api, dir)
 }
@@ -128,6 +129,7 @@ fn approving_with_no_library_is_graceful_noop() {
         field_config: None,
         ingest_stats: None,
         parser: None,
+        mapping_hash: None,
     });
 
     let draft = api

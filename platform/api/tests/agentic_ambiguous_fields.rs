@@ -59,6 +59,7 @@ fn fresh_api_with_dataset(name: &str) -> (GraphHunterApi, String) {
             field_config: None,
             ingest_stats: None,
             parser: None,
+            mapping_hash: None,
         });
     }
     (api, dataset_id)

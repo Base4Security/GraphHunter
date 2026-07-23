@@ -29,6 +29,7 @@ fn api_with_library() -> (GraphHunterApi, tempfile::TempDir) {
         field_config: None,
         ingest_stats: None,
         parser: None,
+        mapping_hash: None,
     });
     (api, dir)
 }

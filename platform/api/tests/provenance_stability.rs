@@ -180,6 +180,115 @@ fn provenance_mapping_hash_is_frozen_and_distinguishes_configs() {
     );
 }
 
+/// THE REAL WITNESS: an actual mapping edit performed *between* two
+/// exports of the *same* dataset, proving the freeze survives it.
+///
+/// The previous version of this file only re-exported a session that was
+/// never touched between exports — a tautology that could never fail,
+/// because nothing ever tried to change anything. The real regression
+/// this channel exists to close is `promote_field_config_to_latest_dataset`
+/// (`agentic_review.rs`, reachable via `agentic_review_approve`)
+/// overwriting `DatasetInfo.field_config` post-ingest. Before the freeze,
+/// export derived `provenance.mapping_hash` from that same (now mutated)
+/// `field_config`, so approving a renegotiated mapping retroactively
+/// relabeled every edge the dataset had already produced under the OLD
+/// config — contaminating already-ingested evidence with a hash it was
+/// never actually processed under.
+///
+/// This test ingests under configA, exports and captures the frozen
+/// hash, then performs the exact mutation `promote_field_config_to_latest_
+/// dataset` performs (`datasets.last_mut().field_config = Some(configB)`)
+/// — simulating an `agentic_review_approve` on a negotiated draft without
+/// having to drive the full negotiate/draft/approve machinery — and
+/// re-exports. The OLD edges must still carry configA's hash.
+#[test]
+fn mapping_edit_after_ingest_does_not_contaminate_already_exported_provenance() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let api = GraphHunterApi::new_noop();
+    api.create_session(CreateSessionRequest {
+        name: Some("provenance-stability-real-witness".into()),
+    })
+    .expect("create_session");
+
+    let path = write_csv(&dir, "witness.csv");
+    let cfg_a = config_with_host_type("Host");
+    let cfg_b = config_with_host_type("Service");
+
+    let result = api
+        .load_data_with_config(LoadDataWithConfigRequest {
+            session: None,
+            path,
+            config: cfg_a.clone(),
+        })
+        .expect("load_data_with_config (configA)");
+    assert!(result.new_relations > 0, "ingest under configA must produce edges");
+
+    let export_once = |api: &GraphHunterApi| {
+        api.export_ocsf(ExportOcsfRequest {
+            session: None,
+            dataset_id: None,
+            format: "ndjson".into(),
+            page_size: None,
+            offset: None,
+        })
+        .expect("export_ocsf")
+    };
+
+    // Export #1: capture the hash the OLD edges are stamped with. Must be
+    // configA's content hash.
+    let out1 = export_once(&api);
+    let by_dataset_1 = mapping_hashes_by_dataset(&out1);
+    assert_eq!(by_dataset_1.len(), 1, "expected exactly 1 dataset before the edit");
+    let hashes_1 = by_dataset_1.values().next().expect("dataset's hashes");
+    let hash_before = hashes_1.first().expect("at least one edge").clone();
+    let expected_a =
+        graph_hunter_canonical::ProvenanceCtx::for_configurable(&cfg_a, "x", &[]).mapping_hash;
+    assert_eq!(
+        hash_before, expected_a,
+        "before any edit, the exported hash must be configA's content hash"
+    );
+
+    // THE CONTAMINATION, reproduced directly: this is exactly what
+    // `promote_field_config_to_latest_dataset` (agentic_review.rs) does to
+    // the most-recently-ingested dataset when a negotiated draft is
+    // approved via `agentic_review_approve` — it stamps a NEW FieldConfig
+    // onto `DatasetInfo.field_config` for UI/replay display. No new data is
+    // ingested; the dataset's edges are untouched. Only the *mutable*
+    // display copy of the mapping changes.
+    let session = api.sessions().current_session().expect("current session");
+    {
+        let mut datasets = session.datasets.write().expect("datasets lock");
+        let target = datasets.last_mut().expect("dataset exists");
+        target.field_config = Some(cfg_b.clone());
+        // Deliberately NOT touching `mapping_hash` — this is the freeze
+        // `promote_field_config_to_latest_dataset` relies on.
+    }
+
+    // Export #2: the SAME edges, re-exported after the mapping edit. If
+    // export derived `mapping_hash` from `field_config` (the pre-fix
+    // bug), this would now show configB's hash — contaminating the old
+    // edges' provenance with a mapping they were never processed under.
+    let out2 = export_once(&api);
+    let by_dataset_2 = mapping_hashes_by_dataset(&out2);
+    assert_eq!(by_dataset_2.len(), 1, "expected exactly 1 dataset after the edit");
+    let hashes_2 = by_dataset_2.values().next().expect("dataset's hashes");
+    let hash_after = hashes_2.first().expect("at least one edge").clone();
+
+    let contaminated_b =
+        graph_hunter_canonical::ProvenanceCtx::for_configurable(&cfg_b, "x", &[]).mapping_hash;
+    assert_eq!(
+        hash_after, hash_before,
+        "mapping_hash must stay frozen at configA's hash after a post-ingest \
+         field_config edit — got {hash_after}, expected the frozen {hash_before} \
+         (contaminated with configB's {contaminated_b} would mean the witness is OPEN)"
+    );
+    assert_ne!(
+        hash_after, contaminated_b,
+        "the re-exported hash must NOT be configB's hash — that would be exactly \
+         the mapping_edit contamination this channel exists to close"
+    );
+}
+
 #[test]
 fn builtin_parser_dataset_gets_real_parser_identity_not_unknown() {
     let dir = tempfile::tempdir().expect("tempdir");

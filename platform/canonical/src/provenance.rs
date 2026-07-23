@@ -97,8 +97,38 @@ impl ProvenanceCtx {
         dataset_id: impl Into<String>,
         raw_event: &[u8],
     ) -> Self {
+        Self::with_mapping_hash(
+            Self::mapping_hash_for_config(field_config),
+            dataset_id,
+            raw_event,
+        )
+    }
+
+    /// Compute just the `mapping_hash` string for a `FieldConfig` —
+    /// `"cfg:" + sha256(serde_json(field_config))` — without building a
+    /// full `ProvenanceCtx`. This is the single source of truth for that
+    /// hash: `for_configurable` calls it, and ingest sites call it
+    /// directly to freeze `DatasetInfo.mapping_hash` at ingest time, so
+    /// the two never drift apart.
+    pub fn mapping_hash_for_config(field_config: &FieldConfig) -> String {
         let bytes = serde_json::to_vec(field_config).unwrap_or_default();
-        let mapping_hash = format!("cfg:{}", sha256_hex(&bytes));
+        format!("cfg:{}", sha256_hex(&bytes))
+    }
+
+    /// Construct a provenance context from a pre-computed, already-frozen
+    /// `mapping_hash` (e.g. `DatasetInfo.mapping_hash`, set once at ingest
+    /// and never mutated afterward). Export must use this — instead of
+    /// re-deriving the hash from a dataset's *current* `field_config` —
+    /// so a post-ingest mapping edit (e.g. mapping-review promotion
+    /// stamping a renegotiated `FieldConfig` onto the dataset for UI
+    /// display) cannot retroactively change the exported provenance of
+    /// edges that were created under the OLD config.
+    pub fn with_mapping_hash(
+        mapping_hash: impl Into<String>,
+        dataset_id: impl Into<String>,
+        raw_event: &[u8],
+    ) -> Self {
+        let mapping_hash = mapping_hash.into();
         Self {
             schema_version: Self::SCHEMA_TAG.to_string(),
             source_dataset_id: dataset_id.into(),
