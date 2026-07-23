@@ -658,3 +658,48 @@ reproduzca; el auto-run en producción sería flag-gated/muestreado (trabajo
 futuro). **Flipear el default de producción (retirar el KQL viejo) sigue
 requiriendo OK explícito del usuario** — es un cambio de default de
 producción, no una consecuencia automática de esta evidencia.
+
+## 10. Canal `ingestion_time` cerrado (receive-time real; witness desplazado)
+
+El insert path hardcodeaba `ingested_at_delta: 0` en todos los sitios de
+mass-ingest, dejando el canal `ingestion_time` del audit **ciego** — su
+`same_observed` estaba definido literalmente como *"identical edge
+(ingested_at_delta hardcoded 0)"*, así que una llegada tardía era
+indistinguible de una puntual en la arista.
+
+**Qué se hizo (tres cosas, todas necesarias para "full" honesto):**
+1. **Stamp real:** los sitios de mass-ingest (`insert_raw_events`,
+   `insert_triples`, `ingest_logs_with_policy`, `ingest_logs_chunked` y las
+   variantes `_chunk`) ahora stampean `encode_ingested_at(now_seconds())` una
+   vez por llamada (no por-arista), en vez de `0`.
+2. **Preservación en compaction:** `compact_before` **conserva** el delta
+   original de cada arista (antes lo reseteaba a `0` en cada rebuild — lo que
+   borraba el receive-time).
+3. **Read-back:** `Relation` ahora lleva `pub ingested_at: i64`, poblado por
+   `materialize_relation` desde `CompactRelation::ingested_at()` — el valor es
+   **observable** en la arista materializada / resultado de hunt, no solo
+   escrito.
+
+Con eso, un evento tardío (`event_time << receive_time`) stampea un
+`ingested_at` estrictamente posterior a uno puntual → **se rompe el witness**.
+
+**El flip del audit (honesto, congelado en `a5f5dbd`):**
+`ingestion_time` → `fidelity: full`, sale del blind set de
+`loss_reconstruction`. **Pero `loss_reconstruction` sigue
+`InsufficientWithWitness`** — `provenance_stability` (degraded) permanece ciego
+y pasa a ser el witness líder. El witness se **desplazó**, la transversal **no**
+quedó Sufficient. Los 30/30 del catálogo + `exhaustiveness_marking` no se
+tocaron (`ingestion_time` es transversal-only, no está en los 7
+HYPOTHESIS_REQUIRES).
+
+**Límites honestos (declarados en la nota del canal):**
+- Es el **reloj de recepción de GraphHunter** (wall-clock al insertar), no el
+  `ingestion_time()` del source upstream.
+- **No es reproducible entre incremental y rebuild** (el rebuild re-stampea
+  `now`) — por eso el comparador de equivalencia mantiene `mvcc_ingested_at`
+  como `NotComparable` y la clave de igualdad de aristas **no** incluye
+  `ingested_at`; el certificado incremental=rebuild sigue valiendo.
+- El `CanonicalEnvelope` ya lleva un `ingestion_time` congelado (epoch-ms) que
+  **sí** sería rebuild-reproducible; threadearlo por
+  `envelope_to_delta → GraphDelta → insert_raw_events` es trabajo futuro para
+  reproducibilidad plena.
