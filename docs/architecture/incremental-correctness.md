@@ -555,3 +555,106 @@ vive el campo (`raw_source_row` en vez de `raw_payload`).
 - Sin Differential Dataflow (decisión de spec #4, sin cambios): la
   equivalencia incremental-vs-rebuild sigue siendo un chequeo de
   conteos por rebuild completo.
+
+## 9. Modo de validación incremental-vs-rebuild rico (evidencia Fase G)
+
+La sección 4 dejó `check_incremental_equivalence` como un chequeo de
+**conteos** (entidades/relaciones). Esta fase lo eleva al modo de validación
+rico que el spec §18 describe: igualdad observable completa entre el grafo
+incremental vivo y una reconstrucción desde cero del journal, con reporte de
+diferencias legible y métricas §20. Vive en `platform/api/src/journal.rs`,
+corre **sin ONNX** (ni `core/graph-engine` ni `platform/api` linkean `ort`
+por default), y produce la **mitad de métricas** de la precondición de Fase G.
+
+### Qué compara (dimensiones observables — `DimensionResult::Match`/`Diff`)
+
+Sobre `GraphHunter::to_snapshot()` (dump completo, StrIds ya resueltos a
+`String` — nunca se comparan StrIds entre grafos, son índices locales del
+interner):
+
+- **entidades** — conjunto de ids.
+- **entity_metadata** — por id compartido: `EntityType` (comparado por
+  **valor**, no por Display — cierra la colisión `IP` vs `Other("IP")`),
+  metadata (order-independiente vía sort), y **`dataset_id`** (atribución de
+  fuente por entidad).
+- **edges_multiset** — multiset `HashMap<EdgeKey,usize>` con clave
+  `(source, rel_type-por-valor, dest, timestamp, metadata ordenada,
+  dataset)` — la multiplicidad se atrapa por construcción, el orden
+  cross-vertex no se asume.
+- **temporal_window** — `edge_timestamp_range()`.
+- **hypothesis_results** — batería DSL corrida en ambos grafos vía
+  `search_temporal_pattern` (estructural); paths comparados como multiset de
+  `Vec<String>`. Batería **inerte** (0 paths en ambos) ⇒ `NotComparable`, no
+  `Match` (silencio ≠ acuerdo). Si la búsqueda **trunca** a 10k paths ⇒
+  `NotComparable` (comparar prefijos order-dependientes sería deshonesto).
+
+### Qué NO compara (honestidad — `NotComparable`, nunca `Match`/`Diff`)
+
+Dimensiones que el grafo estructuralmente no observa, marcadas constantes con
+razón exacta:
+
+- **provenance** — más allá de `dataset_id` (ya comparado en aristas y
+  entidades), la procedencia (mapping_hash, raw_event_sha256, confidence,
+  canonical_hash) vive sólo en el `CanonicalEnvelope` del journal; no es
+  observable del grafo.
+- **anomaly_scores** — los scores de anomalía/centralidad los produce un
+  pase de scoring separado (`run_full_scoring` dentro de `load_data`), así
+  que un grafo vivo post-ingesta y una reconstrucción fresca **genuinamente
+  divergen** en scores; el comparador no inspecciona esos campos — por eso es
+  `NotComparable`, no `Match`.
+- **mvcc_ingested_at** — `ingested_at_delta` hardcodeado a 0 en ambos paths
+  de raw-event; no es un observable live-vs-rebuild significativo.
+
+`all_comparable_dimensions_match()` excluye las tres.
+
+### Guarda `rebuild_faithful`
+
+`rebuild_from_journal` todavía no reproduce fielmente sobres
+`Correction`/`Tombstone` (caen a `inserted`/se ignoran). Si el journal
+validado contiene alguno, el reporte marca `rebuild_faithful: false` + un
+caveat con el conteo — la equivalencia **no se afirma** sobre un journal con
+correcciones.
+
+### El certificado (dataset real, `tests/incremental_rebuild_validation.rs`)
+
+Ingesta un dataset real **multi-fuente** (Sysmon EventID 1, Sentinel
+SecurityEvent 4624, FortiAnalyzer XML — vía los parsers reales sobre fixtures
+git-tracked) por **dos caminos genuinamente distintos**: el grafo `live` se
+construye en memoria, **incrementalmente en batches por-fuente + un crash
+replay** (probando dedup idempotente sobre datos reales, vía `apply_delta`
+público); el grafo `rebuilt` se reconstruye desde cero **leyendo el journal
+de disco**. Es una equivalencia real memory-vs-disk + incremental-vs-batch,
+no una tautología. Resultado: 9 entidades / 7 relaciones, las 5 dimensiones
+comparables `PASS` (incl. `hypothesis_results` como `Match` real —
+`alice -[Auth]-> WORKSTATION-01` de Sentinel, aseverado por el test, no
+vacuo), provenance/scores/mvcc `NotComparable`, `rebuild_faithful: true`. Un
+**control negativo** (dropear el último registro del journal) lo hace `DIFF`
+correctamente — el certificado tiene dientes.
+
+La separación de paths más fuerte (memory-vs-disk con crash replay sobre
+datos **sintéticos**) también vive en el unit test
+`rebuild_from_journal_matches_live_after_idempotent_apply`; el certificado
+agrega la cobertura de **datos reales multi-fuente** encima.
+
+### Métricas §20
+
+`tracing::info!(target: "validation", live_entities=…, rebuilt_entities=…,
+edges_match=…, hypotheses_match=<match|diff|not_comparable>,
+rebuild_faithful=…, "incremental-vs-rebuild validation")` — sin payloads
+crudos ni PII.
+
+### Estado honesto frente a la precondición de Fase G
+
+Esto satisface la **mitad de métricas** de la precondición de Fase G
+("tests AND métricas demuestran equivalencia operacional") **para las
+dimensiones observables**: property-tests en verde (idempotencia,
+incremental=rebuild, preservación de multiplicidad, reanudación crash-safe,
+determinismo — sección 4 + `journal::` 36/36) **más** el modo de validación
+rico + certificado de dataset real en verde. **Límites declarados, no
+reclamados:** procedencia (más allá de dataset-id), scores de anomalía y MVCC
+quedan fuera del alcance (no son observables del grafo); journals con
+`Correction`/`Tombstone` quedan fuera hasta que `rebuild_from_journal` los
+reproduzca; el auto-run en producción sería flag-gated/muestreado (trabajo
+futuro). **Flipear el default de producción (retirar el KQL viejo) sigue
+requiriendo OK explícito del usuario** — es un cambio de default de
+producción, no una consecuencia automática de esta evidencia.
