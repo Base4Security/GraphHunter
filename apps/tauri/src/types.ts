@@ -181,6 +181,11 @@ export interface HuntResults {
     tail_edge_count: number;
     index_coverage: number;
   };
+  /** Fase D/E: core's answer-coverage (missing_sources/source_watermarks),
+   * omitted from the wire when default/all-clear. No TS type exists for
+   * `graph_hunter_api::coverage::AnswerCoverage` yet — typed as `unknown`
+   * on purpose; no UI consumes this field (YAGNI). */
+  coverage?: unknown;
 }
 
 export interface ScoreBreakdown {

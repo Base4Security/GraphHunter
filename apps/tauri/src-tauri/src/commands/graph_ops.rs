@@ -67,6 +67,7 @@ pub fn cmd_run_hunt(
         truncated: resp.truncated,
         diagnostic: resp.diagnostic,
         live_tail_coverage: resp.live_tail_coverage,
+        coverage: resp.coverage,
     })
 }
 
