@@ -60,6 +60,49 @@ pub struct Relation {
     pub ingested_at: i64,
 }
 
+/// Wire layout of [`Relation`] as it existed before `ingested_at` was
+/// added (session `BODY_FORMAT_VERSION` 1). `bincode` is positional, not
+/// self-describing, so `#[serde(default = ...)]` on `Relation::ingested_at`
+/// has NO effect when deserializing a v1 body — the decoder still expects
+/// trailing `ingested_at` bytes that a v1 file never wrote, which fails
+/// with a bincode EOF error. This struct mirrors the exact pre-Task-2
+/// field set (`dataset_id` already existed at v1; only `ingested_at` is
+/// new) so a v1 session body can still be read: deserialize with this
+/// type, then `.into()` to get a `Relation` with `ingested_at` defaulted
+/// to [`INGEST_EPOCH_BASE`] — the same fallback JSON callers get via
+/// `default_ingested_at`. Used only by the session-binary v1 body reader;
+/// new code should never construct this directly. `Serialize` is derived
+/// too (not just `Deserialize`) so tests in other crates can encode v1
+/// fixture bytes without reaching into private helpers.
+#[derive(Serialize, Deserialize)]
+pub struct RelationV1 {
+    pub source_id: String,
+    pub dest_id: String,
+    pub rel_type: RelationType,
+    pub timestamp: i64,
+    pub metadata: HashMap<String, String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_arc_str",
+        serialize_with = "serialize_arc_str"
+    )]
+    pub dataset_id: Option<Arc<str>>,
+}
+
+impl From<RelationV1> for Relation {
+    fn from(v1: RelationV1) -> Self {
+        Relation {
+            source_id: v1.source_id,
+            dest_id: v1.dest_id,
+            rel_type: v1.rel_type,
+            timestamp: v1.timestamp,
+            metadata: v1.metadata,
+            dataset_id: v1.dataset_id,
+            ingested_at: default_ingested_at(),
+        }
+    }
+}
+
 impl Relation {
     /// Creates a new relation with empty metadata. `ingested_at` defaults to
     /// [`INGEST_EPOCH_BASE`] (the 0-delta default) — callers that observed a

@@ -458,8 +458,48 @@ impl GraphHunter {
         Ok(())
     }
 
-    /// Adds a relation (directed edge) to the graph.
+    /// Adds a relation (directed edge) to the graph, stamping it with the
+    /// current wall-clock time as its `ingested_at` (receive time). This is
+    /// the right choice for genuinely NEW edges (live ingest, tests, GNN
+    /// bridges): the graph is learning about them right now.
     pub fn add_relation(&mut self, relation: Relation) -> Result<(), GraphError> {
+        let ingested_at = now_seconds();
+        self.insert_relation_stamped(relation, ingested_at)
+    }
+
+    /// Adds a relation, preserving its own `ingested_at` when the caller
+    /// already knows a real one (non-[`crate::relation::INGEST_EPOCH_BASE`]) —
+    /// e.g. re-inserting relations materialized from a saved session, where
+    /// `relation.ingested_at` is the ORIGINAL receive time. Restamping to
+    /// "now" on every reload would silently rewrite every edge's receive
+    /// time to the reload instant (false receive-times; late/prompt
+    /// collapse) — this is the load-specific path that avoids that.
+    ///
+    /// When `relation.ingested_at` is still the epoch-base default (it was
+    /// never really stamped — e.g. a v1 session body with no ingested_at at
+    /// all), this falls back to `add_relation`'s now-stamp behavior, same
+    /// as before this method existed: a base value can't be told apart from
+    /// "never stamped", so there's nothing genuine to preserve.
+    pub fn add_relation_preserving_ingested_at(
+        &mut self,
+        relation: Relation,
+    ) -> Result<(), GraphError> {
+        let ingested_at = if relation.ingested_at > crate::relation::INGEST_EPOCH_BASE {
+            relation.ingested_at
+        } else {
+            now_seconds()
+        };
+        self.insert_relation_stamped(relation, ingested_at)
+    }
+
+    /// Shared insert body for [`Self::add_relation`] and
+    /// [`Self::add_relation_preserving_ingested_at`] — identical except for
+    /// which `ingested_at` instant gets encoded into the stored delta.
+    fn insert_relation_stamped(
+        &mut self,
+        relation: Relation,
+        ingested_at: i64,
+    ) -> Result<(), GraphError> {
         let src_sid = self
             .interner
             .get(&relation.source_id)
@@ -494,7 +534,7 @@ impl GraphHunter {
             timestamp: relation.timestamp,
             metadata_offset: meta_offset,
             dataset_tag: ds_tag,
-            ingested_at_delta: encode_ingested_at(now_seconds()),
+            ingested_at_delta: encode_ingested_at(ingested_at),
         };
 
         // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).

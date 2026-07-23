@@ -280,3 +280,72 @@ fn compact_before_preserves_ingested_at_delta_not_reset() {
         "compaction must preserve the original ingested_at_delta, not reset it to 0"
     );
 }
+
+#[test]
+fn add_relation_preserving_ingested_at_honors_a_real_receive_time() {
+    // Channel-close fix wave, Fix 2: session reload must not silently
+    // re-stamp every edge's ingested_at to the reload instant.
+    // add_relation_preserving_ingested_at is the load-path insert that
+    // honors a genuine (non-epoch-base) ingested_at carried on the
+    // Relation itself — e.g. one materialized from a saved session.
+    let mut g = GraphHunter::new();
+    g.add_entity(Entity::new("alice", EntityType::User))
+        .unwrap();
+    g.add_entity(Entity::new("web-01", EntityType::Host))
+        .unwrap();
+
+    let mut rel = Relation::new(
+        "alice".to_string(),
+        "web-01".to_string(),
+        RelationType::Auth,
+        1_700_000_000,
+    );
+    let real_ingested_at = INGEST_EPOCH_BASE + 42;
+    rel.ingested_at = real_ingested_at;
+
+    g.add_relation_preserving_ingested_at(rel)
+        .expect("insert should succeed");
+
+    let edges = g.get_compact_relations("alice");
+    assert_eq!(edges.len(), 1);
+    assert_eq!(
+        edges[0].ingested_at(),
+        real_ingested_at,
+        "a real (non-base) ingested_at on the Relation must be preserved, not overwritten by now()"
+    );
+}
+
+#[test]
+fn add_relation_preserving_ingested_at_falls_back_to_now_for_never_stamped_relations() {
+    // A Relation whose ingested_at is still the bare epoch-base default
+    // (e.g. one recovered from a v1 session body, or any caller that never
+    // set it) carries no genuine receive-time to preserve — indistinguishable
+    // from "never stamped". Falling back to now() matches add_relation's
+    // existing behavior for such callers, so this is not a regression for them.
+    let mut g = GraphHunter::new();
+    g.add_entity(Entity::new("alice", EntityType::User))
+        .unwrap();
+    g.add_entity(Entity::new("web-01", EntityType::Host))
+        .unwrap();
+
+    let rel = Relation::new(
+        "alice".to_string(),
+        "web-01".to_string(),
+        RelationType::Auth,
+        1_700_000_000,
+    );
+    assert_eq!(rel.ingested_at, INGEST_EPOCH_BASE, "precondition");
+
+    let before = now_seconds();
+    g.add_relation_preserving_ingested_at(rel)
+        .expect("insert should succeed");
+    let after = now_seconds();
+
+    let edges = g.get_compact_relations("alice");
+    assert_eq!(edges.len(), 1);
+    let ingested = edges[0].ingested_at();
+    assert!(
+        ingested >= before && ingested <= after,
+        "a never-stamped relation should fall back to reload-time (now), got {ingested}"
+    );
+}
