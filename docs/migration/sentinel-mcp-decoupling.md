@@ -334,3 +334,67 @@ Salida real capturada tras el fix del transporte. El hito de Fase F (30/30
 Sufficient) se mantiene sin delta atribuible a D/E — la convergencia y la
 corrección del transporte **fortalecen** el hito end-to-end sin alterar la
 superficie de suficiencia.
+
+## 5. Fase G — retirada del KQL analítico (gating opt-in)
+
+**El criterio ya estaba satisfecho por la arquitectura.** El "camino KQL
+analítico viejo" que Fase G debía retirar —evaluar hipótesis mandando KQL a
+Sentinel en vez de al motor local— **no existe**: `run_hunt`/`run_hunt_batch`
+son 100% locales sin ningún fallback a KQL (`operations/hunt.rs` — ninguna
+rama rutea una hipótesis a KQL; el planner sólo elige entre algoritmos
+locales LFTJ/Yannakakis/DFS), los tools de hipótesis del MCP no generan KQL
+(Fase D/E), y el escape hatch de KQL crudo ya estaba gateado en el borde HTTP
+(Fase A). Ese es el contenido real del criterio de aceptación §25.2 "MCP sin
+KQL para hipótesis" — **cumplido por construcción, no por el código de esta
+fase.** El scoping de Fase G confirmó además que lo que el recon previo
+señalaba como "el path analítico" (las 4 plantillas de hunting) es
+**colección** por diseño: traen filas crudas (sin `summarize`), y la caza
+pasa en el grafo local ("bring logs to GH, hunt in GH, not in Azure",
+`operations/sentinel.rs:2031`).
+
+**Lo que esta fase agregó (defensa-en-profundidad, opt-in, default sin
+cambiar):**
+
+- **Flag `GRAPHHUNTER_HUNTING_TEMPLATES`** (default ON) gateando
+  `run_hunting_template` en la **capa API** (`platform/api`,
+  `ApiError::FeatureDisabled` → 403), de modo que *todos* los callers
+  (hoy el comando Tauri `cmd_run_hunting_template`) quedan gateados
+  uniformemente. Verde-testeado en `platform/api` (ort-free).
+- **Gap de seguridad real cerrado:** el `cmd_run_kql` de la GUI **bypasaba**
+  la gate del escape hatch que HTTP `/kql` sí aplica. Ahora `cmd_run_kql`
+  chequea `GRAPHHUNTER_KQL_ESCAPE_HATCH` (vía el lector canónico único en
+  `platform/api`, al que `apps/tauri` delega) — el KQL crudo de la GUI honra
+  la misma gate que HTTP y MCP. Los callers internos/de colección de
+  `api.run_kql` (journal expand, `graph_build`/`graph_propose`) **quedan sin
+  gatear**, como debe ser.
+- **Frontend:** `HuntingTemplatesSection` y el textarea de KQL ad-hoc se
+  esconden cuando su flag está en `false` (condición `flag !== false`, es
+  decir default-visible: `undefined`/`true` renderiza como hoy). Reporta los
+  estados vía `cmd_sentinel_check_env` (`SentinelEnvStatus` + 2 bools).
+
+**Ambos flags default ON ⇒ cero cambio de comportamiento en producción.**
+
+**Límites honestos + la decisión pendiente:**
+- El KQL de **colección** (materialización `graph_build`/`propose`,
+  schema-discovery, hidratación, `seed_from_ioc`, poll de streaming) **se
+  queda** — es recolección de datos, no análisis, por spec.
+- Los cambios de `apps/tauri` (comando + frontend) son **compile/build-
+  verified** (la semántica de los flags está verde-testeada en `platform/api`;
+  la ejecución de tests de `apps/tauri` está bloqueada por un problema
+  pre-existente de entorno con la DLL de ONNX Runtime, ajeno a esta fase).
+- **Flipear cualquiera de los dos defaults a OFF en producción (retirar de
+  verdad una superficie) es una decisión separada y explícita del usuario, y
+  NO se hizo acá.** Esta fase hace la retirada *posible y reversible* detrás
+  de un flag opt-in; no la ejerce.
+
+### Evidencia: no-op de la auditoría (criterio §17)
+
+Fase G no toca ningún canal de telemetría declarado en `ingest_surface.json`:
+
+```
+$ cd /c/Users/lsotomayor/sot
+$ python scripts/sot_sys/audit_graphhunter.py --check
+audit_results.json up to date
+```
+
+El hito de Fase F (30/30 Sufficient) se mantiene sin delta atribuible a G.
