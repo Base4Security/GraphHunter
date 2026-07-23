@@ -350,7 +350,7 @@ fase.** El scoping de Fase G confirmó además que lo que el recon previo
 señalaba como "el path analítico" (las 4 plantillas de hunting) es
 **colección** por diseño: traen filas crudas (sin `summarize`), y la caza
 pasa en el grafo local ("bring logs to GH, hunt in GH, not in Azure",
-`operations/sentinel.rs:2031`).
+`operations/sentinel.rs:2053`).
 
 **Lo que esta fase agregó (defensa-en-profundidad, opt-in, default sin
 cambiar):**
