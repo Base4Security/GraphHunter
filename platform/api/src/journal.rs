@@ -299,11 +299,14 @@ pub struct JournalReconstruction {
     pub total: usize,
 }
 
-/// Replay the whole journal and split records by change kind. Preserves append
-/// order within each bucket. (Corrections/tombstones are Fase C — for now they
-/// fall through to `inserted`/ignored; documented, not yet applied.)
-pub fn rebuild_from_journal(store: &JournalStore) -> std::io::Result<JournalReconstruction> {
-    let all = store.read_all()?;
+/// Split already-read envelopes by change kind. Preserves append order within
+/// each bucket. (Corrections/tombstones are Fase C — for now they fall
+/// through to `inserted`/ignored; documented, not yet applied.) Factored out
+/// of `rebuild_from_journal` so callers that already hold the envelopes
+/// in-memory (e.g. `check_incremental_equivalence`, which also needs them for
+/// `classify_rebuild_faithfulness`) don't have to pay for a second
+/// `store.read_all()` disk read of the same data.
+fn reconstruct_from_envelopes(all: Vec<CanonicalEnvelope>) -> JournalReconstruction {
     let total = all.len();
     let mut inserted = Vec::new();
     let mut skipped = Vec::new();
@@ -313,7 +316,14 @@ pub fn rebuild_from_journal(store: &JournalStore) -> std::io::Result<JournalReco
             _ => inserted.push(env), // Insert (Correction/Tombstone deferred to Fase C)
         }
     }
-    Ok(JournalReconstruction { inserted, skipped, total })
+    JournalReconstruction { inserted, skipped, total }
+}
+
+/// Replay the whole journal and split records by change kind. Preserves append
+/// order within each bucket. (Corrections/tombstones are Fase C — for now they
+/// fall through to `inserted`/ignored; documented, not yet applied.)
+pub fn rebuild_from_journal(store: &JournalStore) -> std::io::Result<JournalReconstruction> {
+    Ok(reconstruct_from_envelopes(store.read_all()?))
 }
 
 /// Turn a canonical envelope back into an applicable GraphDelta. Insert
@@ -451,19 +461,37 @@ fn compare_edges(
     }
 }
 
-/// id -> (entity type, sorted metadata) for order-independent per-entity
-/// comparison. Keyed on the actual `EntityType` VALUE, not its `Display`
-/// string: `Display` is not injective (e.g. `EntityType::IP` and
+/// id -> (entity type, dataset_id, sorted metadata) for order-independent
+/// per-entity comparison. Keyed on the actual `EntityType` VALUE, not its
+/// `Display` string: `Display` is not injective (e.g. `EntityType::IP` and
 /// `EntityType::Other("IP")` both render `"IP"`), so comparing printed
 /// strings could report `Match` for a genuine type divergence. The outer
 /// map stays a `BTreeMap<String, _>` — `id` is a plain `String` (`Ord`),
 /// only the VALUE's type field needed to move off `Display`.
+///
+/// `dataset_id` is included (resolved `Option<Arc<str>>` -> `Option<String>`,
+/// since `Arc<str>` pointer identity is meaningless across two
+/// independently-built graphs' string interners) so an entity-level dataset
+/// misattribution is caught here, not silently ignored. Before this, the
+/// entity comparison was blind to `dataset_id` even though it IS observable
+/// via `to_snapshot()` and IS stamped by the delta path (Fase C-1's
+/// dataset-id fix) — the edge comparison (`EdgeKey.dataset`) already covered
+/// it, but entities didn't.
 fn entity_map(
     entities: &[graph_hunter_core::Entity],
-) -> BTreeMap<String, (EntityType, Vec<(String, String)>)> {
+) -> BTreeMap<String, (EntityType, Option<String>, Vec<(String, String)>)> {
     entities
         .iter()
-        .map(|e| (e.id.clone(), (e.entity_type.clone(), sorted_metadata(&e.metadata))))
+        .map(|e| {
+            (
+                e.id.clone(),
+                (
+                    e.entity_type.clone(),
+                    e.dataset_id.as_ref().map(|s| s.to_string()),
+                    sorted_metadata(&e.metadata),
+                ),
+            )
+        })
         .collect()
 }
 
@@ -561,19 +589,36 @@ fn path_multiset(
 ///
 /// **Honesty (deliberate scope limit):** this uses ONLY
 /// `search_temporal_pattern` — the structural matcher. It never calls
-/// `search_temporal_pattern_smart`. Anomaly scores are computed by
-/// `AnomalyScorer` state that ingestion never populates on EITHER side —
-/// live or rebuilt both read a flat 0 — so running the smart/anomaly-ranked
-/// path here would compare 0 == 0 on both graphs and report `Match` without
-/// having tested anything about scoring. That would be a dishonest
-/// dimension: it would look like it validated anomaly-ranking equivalence
-/// while actually validating nothing (scores are not an ingestion
-/// observable). If scoring ever becomes one, it belongs in its own
+/// `search_temporal_pattern_smart`. Anomaly/centrality scores are produced by
+/// a SEPARATE scoring pass (`run_full_scoring`, invoked by
+/// `GraphHunterApi::load_data` right after apply —
+/// `platform/api/src/operations/ingestion.rs`) that neither `live` nor
+/// `rebuilt` in THIS module's construction path ever runs — both graphs here
+/// read a flat 0, so running the smart/anomaly-ranked matcher would compare
+/// 0 == 0 and report `Match` without having tested anything about scoring.
+/// That would be a dishonest dimension here. (Note this is NOT the same claim
+/// as "ingestion never runs scoring" — in production, `load_data` DOES run
+/// `run_full_scoring` right after ingest, so a real live post-ingest graph
+/// and a from-scratch rebuild genuinely DIVERGE on scores; see
+/// `anomaly_scores`'s field doc for that carve-out's accurate wording.) If
+/// scoring ever becomes an observable this module's `live`/`rebuilt`
+/// construction actually exercises, it belongs in its own
 /// `NotComparable`-until-then dimension, not folded silently into this one.
 ///
 /// A battery entry that fails to `parse_dsl`, or whose
 /// `search_temporal_pattern` call errors on either graph, surfaces as a
 /// `Diff` naming the failure — it is never swallowed into a silent `Match`.
+///
+/// **Truncation honesty:** `search_temporal_pattern` is called with a
+/// `Some(10_000)` path cap and returns `(paths, truncated)`. If EITHER
+/// graph's search truncates for a battery entry, the returned path lists are
+/// order-dependent PREFIXES of the true result — comparing their multisets
+/// could report a false `Diff` (the two graphs' internal traversal orders
+/// differ, so they'd keep different prefixes of an otherwise-identical true
+/// set) or a false `Match` (two prefixes can coincidentally agree while the
+/// untruncated tails diverge). Rather than risk either, a truncated entry
+/// immediately turns the WHOLE dimension `NotComparable` for this run — see
+/// the truncation branch below.
 ///
 /// **Vacuous-match discipline (mirrors `compare_temporal_window`):** if every
 /// battery entry returns zero paths on BOTH graphs, that is silence, not
@@ -597,23 +642,37 @@ pub fn compare_hypothesis_results(
             }
         };
 
-        let live_paths = match live.search_temporal_pattern(&hypothesis, None, Some(10_000)) {
-            Ok((paths, _truncated)) => paths,
-            Err(e) => {
-                return DimensionResult::Diff {
-                    detail: format!("hypothesis {dsl:?} errored on live graph: {e}"),
-                };
-            }
-        };
-        let rebuilt_paths = match rebuilt.search_temporal_pattern(&hypothesis, None, Some(10_000))
-        {
-            Ok((paths, _truncated)) => paths,
-            Err(e) => {
-                return DimensionResult::Diff {
-                    detail: format!("hypothesis {dsl:?} errored on rebuilt graph: {e}"),
-                };
-            }
-        };
+        let (live_paths, live_truncated) =
+            match live.search_temporal_pattern(&hypothesis, None, Some(10_000)) {
+                Ok(result) => result,
+                Err(e) => {
+                    return DimensionResult::Diff {
+                        detail: format!("hypothesis {dsl:?} errored on live graph: {e}"),
+                    };
+                }
+            };
+        let (rebuilt_paths, rebuilt_truncated) =
+            match rebuilt.search_temporal_pattern(&hypothesis, None, Some(10_000)) {
+                Ok(result) => result,
+                Err(e) => {
+                    return DimensionResult::Diff {
+                        detail: format!("hypothesis {dsl:?} errored on rebuilt graph: {e}"),
+                    };
+                }
+            };
+        if live_truncated || rebuilt_truncated {
+            let where_ = match (live_truncated, rebuilt_truncated) {
+                (true, true) => "both graphs",
+                (true, false) => "the live graph",
+                (false, true) => "the rebuilt graph",
+                (false, false) => unreachable!(),
+            };
+            return DimensionResult::NotComparable {
+                reason: format!(
+                    "hypothesis {dsl:?} search truncated at 10k paths on {where_}; multiset comparison would be an order-dependent prefix, not real evidence of (dis)agreement"
+                ),
+            };
+        }
 
         let live_multiset = path_multiset(&live_paths);
         let rebuilt_multiset = path_multiset(&rebuilt_paths);
@@ -690,13 +749,20 @@ pub struct EquivalenceReport {
     /// never on the graph's entities/relations. Always `NotComparable` —
     /// there is nothing on either graph to compare.
     pub provenance: DimensionResult,
-    /// Design-spec dimension the graph structurally does NOT observe:
-    /// anomaly/centrality scores come from a separate scoring pass that
-    /// ingestion never runs, so both graphs read a flat 0 — comparing them
-    /// would report a false `Match` without validating anything (see
-    /// `compare_hypothesis_results`'s doc comment on why the smart/
+    /// Design-spec dimension the graph structurally does NOT observe here:
+    /// anomaly/centrality scores are produced by a SEPARATE scoring pass
+    /// (`run_full_scoring`, invoked by `GraphHunterApi::load_data` right
+    /// after apply — `platform/api/src/operations/ingestion.rs`), not by
+    /// ingestion itself. That means in PRODUCTION a live post-ingest graph
+    /// and a fresh from-scratch rebuild genuinely DIVERGE on scores (the
+    /// rebuild never re-runs scoring) — the `NotComparable` verdict here is
+    /// therefore MORE justified than "nothing to compare," not less; the
+    /// actual reason is that the comparator does not inspect score fields at
+    /// all, so it is `NotComparable`, never `Match`, regardless of whether
+    /// the two graphs' scores happen to agree or diverge. (See
+    /// `compare_hypothesis_results`'s doc comment for why the smart/
     /// anomaly-ranked matcher is deliberately excluded from
-    /// `hypothesis_results` for the same reason). Always `NotComparable`.
+    /// `hypothesis_results` for the related reason.) Always `NotComparable`.
     pub anomaly_scores: DimensionResult,
     /// Design-spec dimension the graph structurally does NOT observe:
     /// `ingested_at_delta` (live vs rebuild MVCC ingestion skew) is
@@ -820,10 +886,10 @@ pub fn compare_observable_equality(
         temporal_window,
         hypothesis_results,
         provenance: DimensionResult::NotComparable {
-            reason: "beyond dataset-id, provenance is journal-envelope-only (mapping_hash, raw_event_sha256, confidence, canonical_hash); not a graph observable".to_string(),
+            reason: "beyond dataset-id (now compared via both entity_metadata and edges_multiset), provenance is journal-envelope-only (mapping_hash, raw_event_sha256, confidence, canonical_hash); not a graph observable".to_string(),
         },
         anomaly_scores: DimensionResult::NotComparable {
-            reason: "anomaly/centrality scores are produced by a separate scoring pass, 0 on both ingested graphs; not an ingestion observable".to_string(),
+            reason: "anomaly/centrality scores are produced by a separate scoring pass (run_full_scoring in load_data), so a live post-ingest graph and a fresh rebuild genuinely diverge on scores in production; the comparator does not inspect score fields — this dimension is NotComparable, never Match".to_string(),
         },
         mvcc_ingested_at: DimensionResult::NotComparable {
             reason: "ingested_at_delta is hardcoded 0 on both raw-event paths; not a meaningful live-vs-rebuild observable".to_string(),
@@ -887,7 +953,10 @@ pub fn check_incremental_equivalence(
     let all_envelopes = store.read_all()?;
     let (rebuild_faithful, rebuild_caveats) = classify_rebuild_faithfulness(&all_envelopes);
 
-    let recon = rebuild_from_journal(store)?;
+    // Reuse the envelopes already read above instead of a second
+    // `store.read_all()` disk read (`rebuild_from_journal` would otherwise
+    // re-read the same file for the faithful-classification and the rebuild).
+    let recon = reconstruct_from_envelopes(all_envelopes);
     let mut rebuilt = graph_hunter_core::graph::GraphHunter::new();
     apply_batch_idempotent(&mut rebuilt, &recon.inserted);
 
@@ -1769,6 +1838,40 @@ mod tests {
             report.temporal_window
         );
         assert!(!report.all_comparable_dimensions_match());
+    }
+
+    /// Fix 6 (minor, whole-phase review): the `Display` impl's `Diff` branch
+    /// (`fmt_dimension`'s `DimensionResult::Diff { detail } => "DIFF: {detail}"`)
+    /// had no direct test — `report_marks_uncomparable_dimensions_and_renders_readably`
+    /// only ever exercised the `NotComparable` branch. Reuses the same
+    /// divergence-injection as `rich_compare_catches_injected_edge_divergence`
+    /// to force a real `Diff` on `edges_multiset`, then asserts the rendered
+    /// report contains both the `DIFF` marker and a substring of that
+    /// dimension's actual detail message.
+    #[test]
+    fn display_renders_diff_dimension_with_its_detail() {
+        let (mut live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
+        live.add_relation(graph_hunter_core::Relation::new(
+            "1.2.3.4",
+            "host-1",
+            graph_hunter_core::RelationType::Connect,
+            999,
+        ))
+        .expect("both endpoints already exist in the live graph");
+
+        let report = compare_observable_equality(&live, &rebuilt, DEFAULT_HYPOTHESIS_BATTERY);
+        assert!(
+            matches!(report.edges_multiset, DimensionResult::Diff { .. }),
+            "expected edge multiset divergence, got {:?}",
+            report.edges_multiset
+        );
+
+        let rendered = format!("{report}");
+        assert!(rendered.contains("DIFF"), "rendered report: {rendered}");
+        assert!(
+            rendered.contains("distinct edge keys"),
+            "rendered report should carry the Diff's detail text: {rendered}"
+        );
     }
 
     // ── compare_hypothesis_results (hypothesis-result equivalence) ───
