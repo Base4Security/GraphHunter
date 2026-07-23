@@ -40,6 +40,10 @@ const MAX_AUTH_FAILURES: u32 = 3;
 /// Brief delay (seconds) before the first poll so frontend listeners are ready.
 const FIRST_POLL_DELAY_SECS: u64 = 2;
 
+/// Backstop against a pathological non-advancing cursor: caps how many
+/// times a single table can be drained within one poll.
+const MAX_DRAIN_ITERS: u32 = 100;
+
 // ── Connector status ──
 
 /// Live status of the Sentinel connector, broadcast via watch channel.
@@ -214,113 +218,152 @@ pub async fn polling_loop<T: SentinelTransport>(
             if cancel.is_cancelled() {
                 break;
             }
-            let watermark = {
-                let store = watermarks.read().await;
-                store.get(table).cloned()
-            };
-            let kql = KqlQueryBuilder::build(
-                table,
-                watermark.as_deref(),
-                config.batch_size,
-                config.initial_time_window_filter.as_deref(),
-            );
 
-            tracing::info!("SENTINEL: querying table {}", table);
-            match transport
-                .execute_query(&config.workspace_id, &kql, &token)
-                .await
-            {
-                Ok(raw) => match normalize_response(&raw) {
-                    Ok(result) => {
-                        if !result.data.is_empty() && result.data != "[]" {
-                            let row_count = result.data.matches('{').count();
-                            let triples = parser.parse(&result.data);
-                            tracing::info!(
-                                "SENTINEL: table {} -> {} rows, {} triples",
-                                table,
-                                row_count,
-                                triples.len()
-                            );
-                            if triples.is_empty() {
-                                emit_error(
-                                    &emitter,
-                                    format!(
-                                        "Table {table}: received ~{row_count} rows but parser produced 0 triples (check that the table schema matches expected Sentinel fields)"
-                                    ),
-                                    0,
-                                    true,
+            // Drain this table's backlog within the current poll: keep
+            // pulling+ingesting batches until caught up (a partial or
+            // empty batch), the cursor stops advancing (guards against
+            // an infinite loop), or the iteration backstop is hit.
+            // Cancel-checked per iteration; the graph write lock is
+            // acquired per-batch, never held across iterations.
+            let mut drained = 0u32;
+            loop {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                let watermark = {
+                    let store = watermarks.read().await;
+                    store.get(table).cloned()
+                };
+                let kql = KqlQueryBuilder::build(
+                    table,
+                    watermark.as_deref(),
+                    config.batch_size,
+                    config.initial_time_window_filter.as_deref(),
+                );
+
+                tracing::info!("SENTINEL: querying table {}", table);
+                let row_count;
+                let mut advanced = false;
+                match transport
+                    .execute_query(&config.workspace_id, &kql, &token)
+                    .await
+                {
+                    Ok(raw) => match normalize_response(&raw) {
+                        Ok(result) => {
+                            if !result.data.is_empty() && result.data != "[]" {
+                                row_count = result.data.matches('{').count();
+                                let triples = parser.parse(&result.data);
+                                tracing::info!(
+                                    "SENTINEL: table {} -> {} rows, {} triples",
+                                    table,
+                                    row_count,
+                                    triples.len()
                                 );
-                            } else {
-                                match session.graph.write() {
-                                    Ok(mut graph) => {
-                                        match graph.insert_triples(triples, Some(&dataset_id)) {
-                                            Ok((ne, nr)) => {
-                                                total_new_entities += ne;
-                                                total_new_relations += nr;
-                                                emitter.emit(
-                                                    "kql-executed",
-                                                    serde_json::to_value(KqlQueryExecutedEvent {
-                                                        kql: kql.clone(),
-                                                        source: "polling".into(),
-                                                        target: table.clone(),
-                                                        row_count,
-                                                        entities_created: ne,
-                                                        relations_created: nr,
-                                                    })
-                                                    .unwrap_or(serde_json::Value::Null),
-                                                );
-                                            }
-                                            Err(e) => {
-                                                emit_error(
-                                                    &emitter,
-                                                    format!("Spill store error: {e}"),
-                                                    0,
-                                                    true,
-                                                );
+                                if triples.is_empty() {
+                                    emit_error(
+                                        &emitter,
+                                        format!(
+                                            "Table {table}: received ~{row_count} rows but parser produced 0 triples (check that the table schema matches expected Sentinel fields)"
+                                        ),
+                                        0,
+                                        true,
+                                    );
+                                } else {
+                                    match session.graph.write() {
+                                        Ok(mut graph) => {
+                                            match graph.insert_triples(triples, Some(&dataset_id))
+                                            {
+                                                Ok((ne, nr)) => {
+                                                    total_new_entities += ne;
+                                                    total_new_relations += nr;
+                                                    emitter.emit(
+                                                        "kql-executed",
+                                                        serde_json::to_value(
+                                                            KqlQueryExecutedEvent {
+                                                                kql: kql.clone(),
+                                                                source: "polling".into(),
+                                                                target: table.clone(),
+                                                                row_count,
+                                                                entities_created: ne,
+                                                                relations_created: nr,
+                                                            },
+                                                        )
+                                                        .unwrap_or(serde_json::Value::Null),
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    emit_error(
+                                                        &emitter,
+                                                        format!("Spill store error: {e}"),
+                                                        0,
+                                                        true,
+                                                    );
+                                                }
                                             }
                                         }
-                                    }
-                                    Err(e) => {
-                                        emit_error(
-                                            &emitter,
-                                            format!("Graph lock poisoned: {e}"),
-                                            0,
-                                            false,
-                                        );
-                                        let _ = status_tx.send(ConnectorStatus::Disconnected);
-                                        return;
+                                        Err(e) => {
+                                            emit_error(
+                                                &emitter,
+                                                format!("Graph lock poisoned: {e}"),
+                                                0,
+                                                false,
+                                            );
+                                            let _ = status_tx.send(ConnectorStatus::Disconnected);
+                                            return;
+                                        }
                                     }
                                 }
+                            } else {
+                                row_count = 0;
+                                tracing::debug!("SENTINEL: table {} -> 0 rows (empty)", table);
                             }
-                        } else {
-                            tracing::debug!("SENTINEL: table {} -> 0 rows (empty)", table);
+                            if let Some(next) = result.next_query_start {
+                                let mut store = watermarks.write().await;
+                                let prev = store.get(table).cloned();
+                                if prev.as_deref() != Some(next.as_str()) {
+                                    store.set(table, next);
+                                    advanced = true;
+                                }
+                            }
+                            consecutive_errors = 0;
                         }
-                        if let Some(next) = result.next_query_start {
-                            let mut store = watermarks.write().await;
-                            store.set(table, next);
+                        Err(e) => {
+                            tracing::error!("SENTINEL: table {} normalize error: {}", table, e);
+                            consecutive_errors += 1;
+                            emit_error(
+                                &emitter,
+                                format!("Table {table} normalize error: {e}"),
+                                consecutive_errors,
+                                true,
+                            );
+                            // Don't spin on a broken response for this table.
+                            break;
                         }
-                        consecutive_errors = 0;
-                    }
+                    },
                     Err(e) => {
-                        tracing::error!("SENTINEL: table {} normalize error: {}", table, e);
+                        tracing::error!("SENTINEL: table {} query error: {}", table, e);
                         consecutive_errors += 1;
                         emit_error(
                             &emitter,
-                            format!("Table {table} normalize error: {e}"),
+                            format!("Table {table} query error: {e}"),
                             consecutive_errors,
                             true,
                         );
+                        // Don't spin on a broken transport for this table.
+                        break;
                     }
-                },
-                Err(e) => {
-                    tracing::error!("SENTINEL: table {} query error: {}", table, e);
-                    consecutive_errors += 1;
-                    emit_error(
-                        &emitter,
-                        format!("Table {table} query error: {e}"),
-                        consecutive_errors,
-                        true,
-                    );
+                }
+
+                drained += 1;
+                // Stop draining this table when: caught up (partial
+                // batch), empty, the cursor didn't advance (guards
+                // infinite loop), or the backstop is hit.
+                if row_count < config.batch_size as usize
+                    || row_count == 0
+                    || !advanced
+                    || drained >= MAX_DRAIN_ITERS
+                {
+                    break;
                 }
             }
         }
@@ -519,6 +562,185 @@ mod pause_tests {
             transport.queries.load(Ordering::SeqCst),
             after_pause,
             "paused again -> no new queries"
+        );
+
+        cancel.cancel();
+        let _ = loop_handle.await;
+    }
+
+    // ── Drain test ──
+    //
+    // Mock transport that scripts a fixed row count per call (in order)
+    // and records every KQL string it receives. Proves the connector
+    // drains a table's backlog within a single poll: it must issue one
+    // query per drain iteration until a batch returns fewer rows than
+    // `batch_size` (caught up), not stop after the first batch.
+    struct DrainMockTransport {
+        /// Row counts to return, indexed by call order (0-based).
+        row_counts: Vec<usize>,
+        /// Running offset into the synthetic user/IP id space, so every
+        /// row across every call gets a distinct entity pair.
+        rows_emitted: AtomicUsize,
+        call_count: AtomicUsize,
+        queries_seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl DrainMockTransport {
+        fn new(row_counts: Vec<usize>) -> Self {
+            Self {
+                row_counts,
+                rows_emitted: AtomicUsize::new(0),
+                call_count: AtomicUsize::new(0),
+                queries_seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    /// Builds a synthetic Log Analytics response for `count` SigninLogs
+    /// rows starting at global row index `start_idx`. Each row gets a
+    /// unique `UserPrincipalName`/`IPAddress` pair (so ingestion counts
+    /// are checkable) and a strictly increasing `_ingest_ts` (so the
+    /// watermark advances every call and the next KQL differs).
+    fn build_signin_rows(start_idx: usize, count: usize) -> serde_json::Value {
+        let rows: Vec<serde_json::Value> = (0..count)
+            .map(|i| {
+                let idx = start_idx + i;
+                serde_json::json!([
+                    "SigninLogs",
+                    "2024-01-15T10:00:00Z",
+                    format!("2024-01-15T00:00:00.{:07}Z", idx),
+                    format!("user{idx}@contoso.com"),
+                    format!("10.0.{}.{}", idx / 256, idx % 256)
+                ])
+            })
+            .collect();
+        serde_json::json!({
+            "tables": [{
+                "name": "PrimaryResult",
+                "columns": [
+                    {"name": "Type", "type": "string"},
+                    {"name": "TimeGenerated", "type": "datetime"},
+                    {"name": "_ingest_ts", "type": "datetime"},
+                    {"name": "UserPrincipalName", "type": "string"},
+                    {"name": "IPAddress", "type": "string"}
+                ],
+                "rows": rows
+            }]
+        })
+    }
+
+    impl SentinelTransport for DrainMockTransport {
+        async fn acquire_token(
+            &self,
+            _t: &str,
+            _c: &str,
+            _s: &str,
+        ) -> Result<TokenResponse, String> {
+            Ok(TokenResponse {
+                access_token: "tok".into(),
+                expires_in: 3600,
+            })
+        }
+
+        async fn execute_query(
+            &self,
+            _ws: &str,
+            q: &str,
+            _b: &str,
+        ) -> Result<serde_json::Value, String> {
+            let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.queries_seen.lock().unwrap().push(q.to_string());
+            let count = self.row_counts.get(idx).copied().unwrap_or(0);
+            let start = self.rows_emitted.fetch_add(count, Ordering::SeqCst);
+            Ok(build_signin_rows(start, count))
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_within_one_poll_issues_multiple_queries_until_caught_up() {
+        let api = GraphHunterApi::new_noop();
+        api.create_session(CreateSessionRequest {
+            name: Some("drain-test".into()),
+        })
+        .expect("session");
+        let session = api.sessions().current_session().expect("session");
+
+        // batch_size (100) rows on calls 1-2 (still behind), fewer on
+        // call 3 (10, caught up) -> drain must stop after exactly 3 calls.
+        let transport = Arc::new(DrainMockTransport::new(vec![100, 100, 10]));
+        let cache = Arc::new(SentinelTokenCache::new());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (status_tx, _status_rx) = tokio::sync::watch::channel(ConnectorStatus::Connecting);
+        let (_pause_tx, pause_rx) = tokio::sync::watch::channel(false);
+
+        let mut config = test_config();
+        // Long poll interval so the whole test happens inside ONE poll;
+        // a second poll (if it ever fired) would add a spurious 4th query.
+        config.poll_interval_secs = 300;
+
+        let loop_handle = tokio::spawn(polling_loop(
+            config,
+            transport.clone(),
+            cache,
+            session.clone(),
+            "sid".into(),
+            Arc::new(NoopEmitter) as Arc<dyn EventEmitter>,
+            cancel.clone(),
+            status_tx,
+            "ds".into(),
+            pause_rx,
+        ));
+
+        // Bounded wait: the drain loop fires all 3 queries back-to-back
+        // (no sleeps between them), so this resolves quickly once the
+        // fixed first-poll delay elapses.
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if transport.call_count.load(Ordering::SeqCst) >= 3 {
+                break;
+            }
+        }
+        // Give the loop a brief moment past the 3rd call to make sure it
+        // doesn't fire a 4th query before we snapshot (it shouldn't: the
+        // 3rd batch was a partial batch, i.e. caught up).
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let calls = transport.call_count.load(Ordering::SeqCst);
+        assert_eq!(
+            calls, 3,
+            "drain must issue exactly 3 queries within one poll, got {calls}"
+        );
+
+        let queries = transport.queries_seen.lock().unwrap().clone();
+        assert_eq!(queries.len(), 3);
+        assert!(
+            !queries[0].contains("datetime("),
+            "first query has no watermark yet: {}",
+            queries[0]
+        );
+        assert!(
+            queries[1].contains("datetime(") && queries[1] != queries[0],
+            "second query must cursor on the watermark advanced by call 1: {}",
+            queries[1]
+        );
+        assert!(
+            queries[2].contains("datetime(") && queries[2] != queries[1],
+            "third query must cursor on the watermark advanced by call 2: {}",
+            queries[2]
+        );
+
+        let (entities, relations) = session
+            .graph
+            .read()
+            .map(|g| (g.entity_count(), g.relation_count()))
+            .unwrap_or((0, 0));
+        assert_eq!(
+            entities, 420,
+            "expected 210 distinct users + 210 distinct IPs ingested across all 3 drain batches"
+        );
+        assert_eq!(
+            relations, 210,
+            "expected all 210 rows ingested as relations (proves drain didn't stop after batch 1)"
         );
 
         cancel.cancel();
