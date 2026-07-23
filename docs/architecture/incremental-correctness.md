@@ -765,3 +765,27 @@ estado Suficiente completo para las familias declaradas, con los límites
 disclosed que la nota de cada canal arrastra (flag-gating de journal/coverage,
 receive-clock de ingestion_time, identidad builtin code-versioned). No se afirma
 más que eso.
+
+## 12. SOT habilitado por defecto (journal acotado + dedup + coverage)
+
+Los 4 flags SOT pasaron de default-**off** a default-**on** (falsy-to-disable,
+mismo patrón que el escape hatch): `GRAPHHUNTER_JOURNAL`, `GRAPHHUNTER_GRAPHDELTA`,
+`GRAPHHUNTER_COVERAGE`, `GRAPHHUNTER_SOURCE_COVERAGE`. Cada uno sigue siendo un
+escape hatch — se apaga con `0/false/no/off`. En producción, por defecto:
+journal append-only, dedup idempotente (re-ingesta no duplica), cobertura en las
+respuestas de hunt, y breaker de cobertura por-fuente.
+
+**Precondición de seguridad — journal acotado:** antes de habilitar
+`GRAPHHUNTER_JOURNAL` por defecto, el journal ganó **rotación por tamaño +
+retención** (`GRAPHHUNTER_JOURNAL_MAX_BYTES`, default 256 MiB): al exceder el cap,
+`journal.jsonl` rota a `journal.jsonl.1` (rename atómico) y arranca fresco;
+`read_all`/`count` abarcan `.1`+activo. Disco acotado a ~2× cap. **Tradeoff
+declarado:** la ventana retenida es reciente-only (los registros más viejos se
+podan) — suficiente para el dedup de crash-reingest y el rebuild/equivalencia de
+datasets chicos (los usos reales del journal), no historia completa all-time.
+
+**Estado del audit:** el flip no cambia ningún veredicto — los 11 canales siguen
+`full`, `loss_reconstruction` + `exhaustiveness_marking` Sufficient, 30/30
+catálogo. La disclosure de cada canal se actualizó ("default off" → "default on,
+journal acotado"), lo que **fortalece** el cierre: las garantías ahora se cumplen
+en el path por defecto, no solo cuando se togglean los flags.
