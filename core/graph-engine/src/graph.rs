@@ -419,6 +419,28 @@ impl GraphHunter {
         self.streaming_edge_count()
     }
 
+    /// Min and max edge timestamp across the graph, or `None` if there are
+    /// no edges. Used to report the covered time span on query answers
+    /// (coverage_start/coverage_end). A single O(E) pass over `for_each_edge`
+    /// — the streaming backend's edge iterator visits base per-vertex lists
+    /// plus post-finalize tail buffers (see `InMemoryStreamingBackend::
+    /// for_each_edge`, streaming.rs:995), so this is one bounded query over
+    /// the timestamp column, not a per-edge caller cost. `edges_sorted`
+    /// (set by `sort_edges_by_timestamp`) only orders edges within each
+    /// vertex's own list, not across vertices, so it can't be used for an
+    /// O(1) global min/max shortcut here.
+    pub fn edge_timestamp_range(&self) -> Option<(i64, i64)> {
+        let mut range: Option<(i64, i64)> = None;
+        self.streaming.for_each_edge(|_src, edge| {
+            let ts = edge.timestamp;
+            range = Some(match range {
+                None => (ts, ts),
+                Some((lo, hi)) => (lo.min(ts), hi.max(ts)),
+            });
+        });
+        range
+    }
+
     /// Adds an entity to the graph.
     pub fn add_entity(&mut self, entity: Entity) -> Result<(), GraphError> {
         let sid = self.interner.intern(&entity.id);
@@ -3898,5 +3920,40 @@ mod tests {
             g.entity_type_counts().into_iter().collect();
         assert_eq!(counts2.get("IP").copied().unwrap_or(0), 4, "IP count after late insert");
         assert_eq!(g.entity_count(), 7, "entity_count() after late insert");
+    }
+
+    /// Fase F Task 1: `edge_timestamp_range` must report (min_ts, max_ts)
+    /// across all edges regardless of insertion order.
+    #[test]
+    fn edge_timestamp_range_reports_min_and_max() {
+        fn ev(src: &str, dst: &str, ts: i64) -> crate::parser::RawIngestEvent {
+            crate::parser::RawIngestEvent {
+                src_id: src.into(),
+                src_type: EntityType::User,
+                src_metadata: std::collections::HashMap::new(),
+                dst_id: dst.into(),
+                dst_type: EntityType::Host,
+                dst_metadata: std::collections::HashMap::new(),
+                rel_type: RelationType::Auth,
+                rel_metadata: std::collections::HashMap::new(),
+                timestamp: ts,
+                raw_line: None,
+            }
+        }
+
+        let mut g = GraphHunter::new();
+        // insert 3 events with timestamps 100, 300, 200 (unsorted on purpose)
+        g.insert_raw_events(
+            vec![ev("u1", "h1", 100), ev("u2", "h2", 300), ev("u3", "h3", 200)],
+            None,
+        )
+        .unwrap();
+        assert_eq!(g.edge_timestamp_range(), Some((100, 300)));
+    }
+
+    #[test]
+    fn edge_timestamp_range_empty_graph_is_none() {
+        let g = GraphHunter::new();
+        assert_eq!(g.edge_timestamp_range(), None);
     }
 }
