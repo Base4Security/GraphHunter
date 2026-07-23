@@ -602,8 +602,17 @@ razón exacta:
   que un grafo vivo post-ingesta y una reconstrucción fresca **genuinamente
   divergen** en scores; el comparador no inspecciona esos campos — por eso es
   `NotComparable`, no `Match`.
-- **mvcc_ingested_at** — `ingested_at_delta` hardcodeado a 0 en ambos paths
-  de raw-event; no es un observable live-vs-rebuild significativo.
+- **mvcc_ingested_at** — sigue `NotComparable`, pero la razón de arriba está
+  **superseded por §10** (canal `ingestion_time` cerrado): ya NO es
+  `ingested_at_delta` hardcodeado a 0 en ambos paths — desde el channel-close
+  fase, el insert path stampea `encode_ingested_at(now_seconds())` real. La
+  razón actual de `NotComparable` es la opuesta: `ingested_at` es el
+  wall-clock de GraphHunter en el momento del insert, así que un rebuild
+  desde el journal lo re-stampea a SU propio momento de rebuild — `live` y
+  `rebuilt` divergen genuinamente en `ingested_at` (no por un bug, sino
+  porque el valor no es journal-reproducible todavía). Ver §10 para el
+  detalle completo y el trabajo futuro (hilar el `ingestion_time` congelado
+  del `CanonicalEnvelope` para hacerlo reproducible).
 
 `all_comparable_dimensions_match()` excluye las tres.
 

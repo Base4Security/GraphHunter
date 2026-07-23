@@ -258,12 +258,26 @@ to date`):
   indistinguibles en la procedencia congelada. Fase C: cablear el path
   en vivo + identidad real de mapping configurable.
 - **`ingestion_time`** → **`absent`** (su fidelidad original; no
-  cierra). `CanonicalEnvelope.ingestion_time` (envelope.rs:43-45) es
+  cierra, EN ESTE PUNTO DE LA HISTORIA — ver nota HISTÓRICA abajo).
+  `CanonicalEnvelope.ingestion_time` (envelope.rs:43-45) es
   una lectura de reloj real, congelada en `journal_batch`
   (journal.rs:104-117 `now_ms`) — pero solo en los 2 paths de carga de
   archivo, no en el path en vivo declarado. La arista del grafo sigue
   hardcodeando `ingested_at_delta = 0` sin cambios. Fase C: cablear el
   path en vivo + propagar el `ingestion_time` del sobre hacia la arista.
+  **HISTÓRICO / SUPERSEDED:** esta entrada describe el estado de Fase B
+  al momento de escribirse. Una fase posterior (el "ingestion_time
+  channel-close fase", ver `docs/architecture/incremental-correctness.md`
+  §10) stampeó `ingested_at_delta` real en todos los sitios de
+  mass-ingest y lo hizo legible en `Relation.ingested_at`, subiendo
+  `ingestion_time` a `fidelity: full` para el contexto `late_arrival` en
+  `validation/graphhunter/ingest_surface.json` (no para el `system`
+  declarado de este documento — sigue sin cablearse en el path en vivo
+  `ingest_siem` en el sentido de journal-freeze de este párrafo; el fix
+  fue en la representación del grafo, no en el journal). La afirmación
+  "la arista del grafo sigue hardcodeando `ingested_at_delta = 0`" ya NO
+  es cierta desde esa fase — no borrar este párrafo (es historia real de
+  Fase B), pero no leerlo como el estado actual del código.
 
 **Delta de veredictos, leído de `audit_results.json` (sin inflar):**
 las 30 hipótesis del catálogo siguen `InsufficientWithWitness` — ninguna
@@ -316,7 +330,16 @@ canales requeridos fue tocado por Fase B. Detalle completo en
 6. `ingestion_time` no cierra para el path en vivo declarado (ver punto
    2); y la arista del grafo sigue hardcodeando `ingested_at_delta = 0`
    sin cambios — eso es un problema de representación del grafo,
-   territorio de Fase C.
+   territorio de Fase C. **HISTÓRICO / SUPERSEDED:** la mitad de este
+   punto (el hardcoded `ingested_at_delta = 0` en la arista) fue resuelta
+   por el "ingestion_time channel-close fase" posterior — ver
+   `docs/architecture/incremental-correctness.md` §10 y
+   `validation/graphhunter/ingest_surface.json`'s `ingestion_time` entry
+   (`fidelity: full` para `late_arrival`). El resto del punto (no cierra
+   para el path en vivo declarado, en el sentido de journal-freeze de
+   Fase B) sigue vigente — este punto ahora describe dos cosas distintas
+   que dejaron de ser verdad al mismo tiempo; no leer "hardcodeando
+   `ingested_at_delta = 0`" como el estado actual del código.
 7. La captura de skips en Sentinel tiene solo **cobertura de test
    indirecta**; Sysmon tiene el test dedicado. El cap de reservoir-
    sampling no es una constante única: 50 en los fast paths nativos
