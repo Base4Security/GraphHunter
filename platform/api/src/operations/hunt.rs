@@ -104,7 +104,13 @@ fn batch_entry_coverage(
         .ingest_coverage
         .read()
         .map_err(|e| ApiError::Internal(format!("ingest_coverage lock poisoned: {e}")))?;
-    Ok(crate::coverage::answer_coverage(&ic, None, None))
+    Ok(crate::coverage::answer_coverage(
+        &ic,
+        None,
+        None,
+        std::collections::BTreeMap::new(),
+        vec![],
+    ))
 }
 
 impl GraphHunterApi {
@@ -237,7 +243,13 @@ impl GraphHunterApi {
                 .ingest_coverage
                 .read()
                 .map_err(|e| ApiError::Internal(format!("ingest_coverage lock poisoned: {e}")))?;
-            crate::coverage::answer_coverage(&ic, None, None)
+            crate::coverage::answer_coverage(
+                &ic,
+                None,
+                None,
+                std::collections::BTreeMap::new(),
+                vec![],
+            )
         };
 
         // Publish to the shared cache so get_hunt_page can serve it.

@@ -3,8 +3,10 @@
 //! answers as possibly_incomplete + a coverage time span. Behind
 //! GRAPHHUNTER_COVERAGE (default off): with the flag off, answers are never
 //! marked (current behavior). Closes ingest_completeness + completeness_flag
-//! (design spec §17). source_watermarks/missing_sources need the streaming
-//! poller (Fase F) and are NOT produced here.
+//! (design spec §17). `answer_coverage` also carries source_watermarks/
+//! missing_sources through to `AnswerCoverage`, but call sites still pass
+//! empty placeholders until the streaming poller (Fase F, Task 5) populates
+//! them from real ingest state.
 
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +56,10 @@ pub struct AnswerCoverage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage_end: Option<i64>,
     pub incomplete_reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub source_watermarks: std::collections::BTreeMap<String, i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_sources: Vec<String>,
 }
 
 /// Build answer coverage from the session's ingest coverage and the graph's
@@ -62,15 +68,27 @@ pub fn answer_coverage(
     ic: &IngestCoverage,
     edge_ts_min: Option<i64>,
     edge_ts_max: Option<i64>,
+    source_watermarks: std::collections::BTreeMap<String, i64>,
+    missing_sources: Vec<String>,
 ) -> AnswerCoverage {
     if !coverage_enabled() {
         return AnswerCoverage::default();
     }
+    let possibly_incomplete = ic.possibly_incomplete || !missing_sources.is_empty();
+    let mut incomplete_reasons = ic.incomplete_reasons.clone();
+    if !missing_sources.is_empty() {
+        incomplete_reasons.push(format!(
+            "missing_sources: {} source(s) blind in the queried window",
+            missing_sources.len()
+        ));
+    }
     AnswerCoverage {
-        possibly_incomplete: ic.possibly_incomplete,
+        possibly_incomplete,
         coverage_start: edge_ts_min,
         coverage_end: edge_ts_max,
-        incomplete_reasons: ic.incomplete_reasons.clone(),
+        incomplete_reasons,
+        source_watermarks,
+        missing_sources,
     }
 }
 
@@ -120,7 +138,13 @@ mod tests {
             possibly_incomplete: true,
             incomplete_reasons: vec!["stopped_early".into()],
         };
-        let ac = answer_coverage(&ic, Some(100), Some(200));
+        let ac = answer_coverage(
+            &ic,
+            Some(100),
+            Some(200),
+            std::collections::BTreeMap::new(),
+            vec![],
+        );
         // flag off: no marking, no coverage span leaked.
         assert!(!ac.possibly_incomplete);
         assert!(ac.coverage_start.is_none());
@@ -134,7 +158,13 @@ mod tests {
             possibly_incomplete: true,
             incomplete_reasons: vec!["stopped_early".into()],
         };
-        let ac = answer_coverage(&ic, Some(100), Some(200));
+        let ac = answer_coverage(
+            &ic,
+            Some(100),
+            Some(200),
+            std::collections::BTreeMap::new(),
+            vec![],
+        );
         unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
         assert!(ac.possibly_incomplete);
         assert_eq!(ac.coverage_start, Some(100));
@@ -143,5 +173,41 @@ mod tests {
             .incomplete_reasons
             .iter()
             .any(|r| r.contains("stopped_early")));
+    }
+
+    #[test]
+    fn answer_coverage_off_omits_source_fields() {
+        let _g = lock_env();
+        unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") }; // and COVERAGE off
+        unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
+        let ic = IngestCoverage::default();
+        let ac = answer_coverage(
+            &ic,
+            Some(1),
+            Some(2),
+            std::collections::BTreeMap::from([("la:ws".into(), 100i64)]),
+            vec!["xdr".into()],
+        );
+        assert!(ac.source_watermarks.is_empty());
+        assert!(ac.missing_sources.is_empty());
+    }
+
+    #[test]
+    fn answer_coverage_on_carries_source_watermarks_and_missing() {
+        let _g = lock_env();
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "1") };
+        let ic = IngestCoverage::default();
+        let ac = answer_coverage(
+            &ic,
+            Some(1),
+            Some(2),
+            std::collections::BTreeMap::from([("la:ws".into(), 100i64)]),
+            vec!["xdr".into()],
+        );
+        unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") };
+        assert_eq!(ac.source_watermarks.get("la:ws"), Some(&100));
+        assert_eq!(ac.missing_sources, vec!["xdr".to_string()]);
+        // a missing source makes the answer possibly_incomplete.
+        assert!(ac.possibly_incomplete);
     }
 }

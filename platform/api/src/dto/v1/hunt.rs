@@ -346,6 +346,8 @@ mod tests {
             coverage_start: Some(100),
             coverage_end: Some(200),
             incomplete_reasons: vec!["stopped_early: ingest cut short".into()],
+            source_watermarks: std::collections::BTreeMap::new(),
+            missing_sources: vec![],
         };
         let r = RunHuntResponse {
             paths: Vec::new(),
