@@ -91,6 +91,22 @@ fn live_tail_coverage_for_session(
     graph.live_tail_coverage("live_tail")
 }
 
+/// Same completeness-metadata read `run_hunt` does at its single-query
+/// call site, factored out so every `run_hunt_batch` entry-construction
+/// path (fast/cache paths included) can populate `coverage` from the
+/// same session `IngestCoverage` rather than defaulting to all-clear.
+/// Cheap — a single `RwLock::read` — so there's no reason for the
+/// LFTJ/Yannakakis fast paths to skip it.
+fn batch_entry_coverage(
+    session: &crate::state::Session,
+) -> ApiResult<crate::coverage::AnswerCoverage> {
+    let ic = session
+        .ingest_coverage
+        .read()
+        .map_err(|e| ApiError::Internal(format!("ingest_coverage lock poisoned: {e}")))?;
+    Ok(crate::coverage::answer_coverage(&ic, None, None))
+}
+
 impl GraphHunterApi {
     /// Execute a temporal pattern search. Populates the hunt cache and
     /// returns either the paths inline (when ≤ 100) or just the count
@@ -553,6 +569,7 @@ impl GraphHunterApi {
                         truncated,
                         diagnostic: None,
                         live_tail_coverage: batch_live_tail_coverage.clone(),
+                        coverage: batch_entry_coverage(&session_handle)?,
                         error: None,
                     };
                     result_cache.insert(result_cache_key, entry.clone());
@@ -688,6 +705,7 @@ impl GraphHunterApi {
                     truncated,
                     diagnostic: None,
                     live_tail_coverage: batch_live_tail_coverage.clone(),
+                    coverage: batch_entry_coverage(&session_handle)?,
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -940,6 +958,7 @@ impl GraphHunterApi {
                     truncated,
                     diagnostic: None,
                     live_tail_coverage: batch_live_tail_coverage.clone(),
+                    coverage: batch_entry_coverage(&session_handle)?,
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -965,6 +984,7 @@ impl GraphHunterApi {
                         truncated: resp.truncated,
                         diagnostic: resp.diagnostic,
                         live_tail_coverage: resp.live_tail_coverage,
+                        coverage: resp.coverage,
                         error: None,
                     },
                     Err(e) => RunHuntBatchEntry {
@@ -973,6 +993,7 @@ impl GraphHunterApi {
                         truncated: false,
                         diagnostic: None,
                         live_tail_coverage: batch_live_tail_coverage.clone(),
+                        coverage: crate::coverage::AnswerCoverage::default(),
                         error: Some(e.to_string()),
                     },
                 };

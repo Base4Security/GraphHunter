@@ -10,6 +10,17 @@ use crate::state::SessionHandle;
 use graph_hunter_core::{DedupMode, HuntDiagnostic, Hypothesis, LiveTailCoverage, ScoredPath};
 use serde::{Deserialize, Serialize};
 
+/// `skip_serializing_if` predicate for `coverage` fields on `RunHuntResponse`
+/// / `RunHuntBatchEntry`: true when the coverage is the all-clear default
+/// (flag off, or flag on but nothing incomplete). Omitting it in that case
+/// keeps the wire shape byte-identical to the pre-coverage contract — the
+/// no-op-when-off guarantee the parity gate (`tests/parity/dto_shapes.rs`)
+/// enforces. Callers that DO have something to report (possibly_incomplete
+/// or a populated span) always see the field.
+fn is_default_coverage(c: &crate::coverage::AnswerCoverage) -> bool {
+    *c == crate::coverage::AnswerCoverage::default()
+}
+
 /// Per-call scoring mode (v2 follow-up — replaces the
 /// `enable_anomaly_scoring` latch).
 ///
@@ -90,13 +101,13 @@ pub struct RunHuntResponse {
     /// `IngestCoverage` when `GRAPHHUNTER_COVERAGE` is on and the
     /// session had an incomplete ingest. Default clear — with the
     /// flag off (or on a session with no incomplete ingests) this is
-    /// `AnswerCoverage::default()`, so existing callers see no
-    /// behavior change. `#[serde(default)]` documents intent for any
-    /// future Deserialize impl on this type; today `RunHuntResponse`
-    /// is Serialize-only (wire-outgoing), so backward compatibility
-    /// for JSON consumers already holds structurally — old clients
-    /// ignore the new field.
-    #[serde(default)]
+    /// `AnswerCoverage::default()`, and `skip_serializing_if` omits
+    /// the field from the wire entirely in that case, so existing
+    /// callers see byte-identical JSON to the pre-coverage contract
+    /// (enforced by `tests/parity/dto_shapes.rs`). Only sessions with
+    /// something to report (`possibly_incomplete` or a populated
+    /// span) grow this field.
+    #[serde(default, skip_serializing_if = "is_default_coverage")]
     pub coverage: crate::coverage::AnswerCoverage,
 }
 
@@ -145,11 +156,13 @@ pub struct RunHuntBatchRequest {
 }
 
 /// One element per hypothesis in the request, in order. Each entry
-/// carries the same shape as a single `RunHuntResponse`. Errors
-/// for individual hypotheses surface as a string in
-/// `error` instead of failing the whole batch — partial success is
-/// the right shape for SOC-style template batteries where one bad
-/// query shouldn't poison the rest.
+/// carries the same shape as a single `RunHuntResponse` — including
+/// `coverage`, so batch-run answers (how the 30-hypothesis catalog is
+/// actually fired as a battery) get the same completeness marking as
+/// a single `run_hunt` call. Errors for individual hypotheses surface
+/// as a string in `error` instead of failing the whole batch — partial
+/// success is the right shape for SOC-style template batteries where
+/// one bad query shouldn't poison the rest.
 #[derive(Debug, Clone, Serialize)]
 pub struct RunHuntBatchEntry {
     pub paths: Vec<Vec<std::sync::Arc<str>>>,
@@ -159,6 +172,10 @@ pub struct RunHuntBatchEntry {
     pub diagnostic: Option<HuntDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_tail_coverage: Option<LiveTailCoverage>,
+    /// Same semantics as `RunHuntResponse::coverage`; omitted from the
+    /// wire when default-clear.
+    #[serde(default, skip_serializing_if = "is_default_coverage")]
+    pub coverage: crate::coverage::AnswerCoverage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -295,11 +312,13 @@ mod tests {
     /// construction + serialization boundary rather than round-tripping
     /// JSON: a response built without touching `coverage` explicitly
     /// (i.e. `AnswerCoverage::default()`) reports `possibly_incomplete ==
-    /// false` and serializes coverage as the all-clear shape — old
-    /// clients that don't know the field ignore it; clients that do see
-    /// unambiguous "clear" rather than absence.
+    /// false` in Rust, and — per the final-review fix — is OMITTED from
+    /// the wire entirely (`skip_serializing_if`), so the flags-off JSON
+    /// shape stays byte-identical to the pre-coverage contract. This is
+    /// what `tests/parity/dto_shapes.rs::run_hunt_response_shape_with_
+    /// inline_paths` enforces at the DTO-shape-parity level.
     #[test]
-    fn run_hunt_response_carries_coverage_default_clear() {
+    fn run_hunt_response_omits_coverage_when_default_clear() {
         let r = RunHuntResponse {
             paths: Vec::new(),
             path_count: 0,
@@ -310,7 +329,35 @@ mod tests {
         };
         assert!(!r.coverage.possibly_incomplete);
         let json = serde_json::to_value(&r).unwrap();
-        assert_eq!(json["coverage"]["possibly_incomplete"], false);
-        assert!(json["coverage"]["coverage_start"].is_null());
+        assert!(
+            json.get("coverage").is_none(),
+            "default-clear coverage must be absent from the wire, got: {json}"
+        );
+    }
+
+    /// The flip side: once there's something to report (possibly_incomplete
+    /// or a populated span), `coverage` is NOT the default and so IS
+    /// present on the wire — clients that understand the field see an
+    /// unambiguous marking rather than silence.
+    #[test]
+    fn run_hunt_response_includes_coverage_when_not_default() {
+        let coverage = crate::coverage::AnswerCoverage {
+            possibly_incomplete: true,
+            coverage_start: Some(100),
+            coverage_end: Some(200),
+            incomplete_reasons: vec!["stopped_early: ingest cut short".into()],
+        };
+        let r = RunHuntResponse {
+            paths: Vec::new(),
+            path_count: 0,
+            truncated: false,
+            diagnostic: None,
+            live_tail_coverage: None,
+            coverage,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["coverage"]["possibly_incomplete"], true);
+        assert_eq!(json["coverage"]["coverage_start"], 100);
+        assert_eq!(json["coverage"]["coverage_end"], 200);
     }
 }
