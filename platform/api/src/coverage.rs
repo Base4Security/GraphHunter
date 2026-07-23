@@ -4,9 +4,12 @@
 //! GRAPHHUNTER_COVERAGE (default off): with the flag off, answers are never
 //! marked (current behavior). Closes ingest_completeness + completeness_flag
 //! (design spec §17). `answer_coverage` also carries source_watermarks/
-//! missing_sources through to `AnswerCoverage`, but call sites still pass
-//! empty placeholders until the streaming poller (Fase F, Task 5) populates
-//! them from real ingest state.
+//! missing_sources through to `AnswerCoverage`; call sites (see
+//! `operations::hunt::session_answer_coverage`) pass real values sourced
+//! from `SourceCoverage::snapshot`, populated by the one-shot `ingest_siem`
+//! probe-every-call path (Fase F, Task 4) — not by a streaming poller, which
+//! remains dormant/unwired (see `docs/architecture/source-independent-
+//! ingestion.md` §5 for the standing walk-back condition on that gap).
 
 use serde::{Deserialize, Serialize};
 
@@ -160,7 +163,13 @@ impl SourceCoverage {
         entry.open
     }
 
-    /// Is the source's breaker currently open (skip the pull)?
+    /// Is the source's breaker currently open? A **reporting** signal only
+    /// — it does not gate anything here. `ingest_siem`'s probe-every-call
+    /// design (see [`record_siem_outcome`]) deliberately never checks this
+    /// to decide whether to skip a pull: skipping would leave a source
+    /// blind forever, since nothing else would call `record_covered` to
+    /// close it again. Surfaced on answers via `SourceCoverage::snapshot`
+    /// so callers can see it, recoverable on the very next successful call.
     pub fn is_open(&self, source_id: &str) -> bool {
         self.sources.get(source_id).map(|s| s.open).unwrap_or(false)
     }
