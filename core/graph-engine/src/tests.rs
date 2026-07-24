@@ -3979,18 +3979,20 @@ fn field_preview_limited_parsing() {
 
 #[test]
 fn configurable_parser_promotes_field_to_node() {
+    // "Detection" carries a text label (pure-numeric values like EventID
+    // are no longer promotable — they mint one junk node per row).
     let data = r#"[{
         "User": "admin",
         "Image": "cmd.exe",
-        "EventID": "1",
+        "Detection": "CredentialDumping",
         "UtcTime": "2024-01-15 10:00:00.000"
     }]"#;
 
     let config = FieldConfig {
         mappings: vec![FieldMapping {
-            raw_name: "EventID".to_string(),
+            raw_name: "Detection".to_string(),
             role: FieldRole::Node,
-            entity_type: Some("Process".to_string()),
+            entity_type: Some("Signature".to_string()),
             timestamp_format: None,
             locale: None,
         }],
@@ -3999,12 +4001,18 @@ fn configurable_parser_promotes_field_to_node() {
     let parser = ConfigurableParser::new(config);
     let triples = parser.parse(data);
 
-    // Should have standard GenericParser triples PLUS the promoted EventID triple
+    // Should have standard GenericParser triples PLUS the promoted triple
     assert!(!triples.is_empty());
 
-    // Find the promoted EventID entity
-    let has_event_id = triples.iter().any(|(_, _, dst)| dst.id == "EventID:1");
-    assert!(has_event_id, "Should have promoted EventID:1 as a node");
+    // Other-typed promotions keep the column prefix (cross-field value
+    // collision guard); canonical types use the bare value.
+    let has_detection = triples
+        .iter()
+        .any(|(_, _, dst)| dst.id == "Detection:CredentialDumping");
+    assert!(
+        has_detection,
+        "Should have promoted Detection:CredentialDumping as a node"
+    );
 }
 
 #[test]
@@ -4055,22 +4063,25 @@ fn configurable_parser_backwards_compatible() {
 
 #[test]
 fn configurable_parser_integration_ingest_and_hunt() {
+    // Numeric fields (EventID, ports) are no longer promotable — text
+    // labels and canonical-typed values are. "SharedIP" proves the
+    // bare-ID merge rule for canonical types.
     let data = r#"[
-        {"User": "attacker", "Image": "mimikatz.exe", "EventID": "1", "TargetPort": "445"},
-        {"User": "attacker", "hostname": "dc01", "EventID": "4624"}
+        {"User": "attacker", "Image": "mimikatz.exe", "Detection": "T1003", "SharedIP": "10.9.9.9"},
+        {"User": "attacker", "hostname": "dc01", "Detection": "T1078"}
     ]"#;
 
     let config = FieldConfig {
         mappings: vec![
             FieldMapping {
-                raw_name: "EventID".to_string(),
+                raw_name: "Detection".to_string(),
                 role: FieldRole::Node,
-                entity_type: Some("Process".to_string()),
+                entity_type: Some("Signature".to_string()),
                 timestamp_format: None,
                 locale: None,
             },
             FieldMapping {
-                raw_name: "TargetPort".to_string(),
+                raw_name: "SharedIP".to_string(),
                 role: FieldRole::Node,
                 entity_type: Some("IP".to_string()),
                 timestamp_format: None,
@@ -4086,14 +4097,16 @@ fn configurable_parser_integration_ingest_and_hunt() {
     assert!(entities > 0, "Should have ingested entities");
     assert!(relations > 0, "Should have ingested relations");
 
-    // Verify promoted fields exist as entities
+    // Other-typed promotion keeps the column prefix…
     assert!(
-        graph.get_entity("EventID:1").is_some(),
-        "EventID:1 should exist as entity"
+        graph.get_entity("Detection:T1003").is_some(),
+        "Detection:T1003 should exist as entity"
     );
+    // …canonical-typed promotion uses the bare value so it merges with
+    // canonical-path entities.
     assert!(
-        graph.get_entity("TargetPort:445").is_some(),
-        "TargetPort:445 should exist as entity"
+        graph.get_entity("10.9.9.9").is_some(),
+        "promoted IP should exist under its bare id"
     );
 }
 

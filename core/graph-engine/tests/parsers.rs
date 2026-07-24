@@ -175,6 +175,63 @@ fn configurable_parser_does_not_promote_pathological_values_to_nodes() {
 }
 
 #[test]
+fn configurable_parser_numeric_id_columns_never_become_nodes() {
+    // PID / logon-id style columns match the name heuristic ("Process Id"
+    // → Process) but their values are opaque numbers — promoting them
+    // mints one junk node per row.
+    let csv = "user,process id\nalice,27008\n";
+    let config = FieldConfig {
+        mappings: vec![FieldMapping {
+            raw_name: "process id".to_string(),
+            role: FieldRole::Node,
+            entity_type: Some("Process".to_string()),
+            timestamp_format: None,
+            locale: None,
+        }],
+    };
+    let triples = ConfigurableParser::new(config).parse(csv);
+    assert!(
+        !triples
+            .iter()
+            .flat_map(|(s, _, d)| [s.id.as_str(), d.id.as_str()])
+            .any(|id| id.contains("27008")),
+        "pure-numeric value must not become a node id; got {triples:?}"
+    );
+}
+
+#[test]
+fn configurable_parser_promoted_canonical_types_use_bare_ids() {
+    // An IP is the same IP whichever column it came from. Promoted
+    // canonical-type entities must use the bare value as ID so they merge
+    // with entities the canonical path creates — the column-prefixed form
+    // ("File Origin IP:8.8.8.8") made the same address exist 2-3 times in
+    // the MDE graph (13,283 IP entities vs 706 via the canonical path).
+    let csv = "user,file origin ip\nalice,8.8.8.8\n";
+    let config = FieldConfig {
+        mappings: vec![FieldMapping {
+            raw_name: "file origin ip".to_string(),
+            role: FieldRole::Node,
+            entity_type: Some("IP".to_string()),
+            timestamp_format: None,
+            locale: None,
+        }],
+    };
+    let triples = ConfigurableParser::new(config).parse(csv);
+    let ids: Vec<&str> = triples
+        .iter()
+        .flat_map(|(s, _, d)| [s.id.as_str(), d.id.as_str()])
+        .collect();
+    assert!(
+        ids.contains(&"8.8.8.8"),
+        "promoted IP must use the bare value as id; got {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id.contains("file origin ip:")),
+        "no column-prefixed IP duplicate; got {ids:?}"
+    );
+}
+
+#[test]
 fn csv_parser_empty_input_yields_empty() {
     assert!(CsvParser.parse("").is_empty());
     assert!(CsvParser.parse("   \n\t\n").is_empty());

@@ -923,7 +923,11 @@ impl ConfigurableParser {
                         // event. The value stays available as raw metadata.
                         if val_str.len() > MAX_NODE_VALUE_LEN
                             || value_looks_like_timestamp(&val_str)
+                            || val_str.chars().all(|c| c.is_ascii_digit())
                         {
+                            // Pure-numeric values (PIDs, logon ids, report
+                            // ids) are opaque row-local numbers, one junk
+                            // node per event.
                             continue;
                         }
                         // Promote to entity node
@@ -934,8 +938,20 @@ impl ConfigurableParser {
                             .or_else(|| suggest_entity_type(key, &[val_str.clone()]))
                             .unwrap_or(EntityType::Process);
 
-                        // Entity ID prefixed with field name to avoid collisions
-                        let entity_id = format!("{}:{}", key, val_str);
+                        // Canonical entity types carry globally identifying
+                        // values — an IP is the same IP whichever column it
+                        // came from — so they use the bare value as ID and
+                        // merge with entities the canonical path created.
+                        // Only free-form Other/Any types keep the column
+                        // prefix, guarding against cross-field value
+                        // collisions ("Severity:High" vs "Status:High").
+                        let entity_id = match &et {
+                            EntityType::Other(t) if t != "Hash" => {
+                                format!("{}:{}", key, val_str)
+                            }
+                            EntityType::Any => format!("{}:{}", key, val_str),
+                            _ => val_str.clone(),
+                        };
                         let dst = Entity::new(&entity_id, et.clone())
                             .with_metadata("raw_field", key)
                             .with_metadata("raw_value", &val_str);
