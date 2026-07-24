@@ -95,7 +95,11 @@ impl GraphHunterApi {
         self.with_graph_read(req.session.as_ref(), |graph| {
             let mut edges: Vec<SubgraphEdge> = Vec::new();
 
-            for compact in graph.get_compact_relations(&req.node_id) {
+            // Tail-aware: base-only reads miss every edge appended after the
+            // last finalize (graph_build / second-dataset ingest), which made
+            // this endpoint return 0 events for fully-connected nodes. Sorted
+            // below, so tail ordering is harmless.
+            for compact in graph.neighbors_incl_tail_by_id(&req.node_id) {
                 if edges.len() >= MAX_EVENTS {
                     break;
                 }
@@ -119,7 +123,7 @@ impl GraphHunterApi {
                 if !seen_sources.insert(source_sid) {
                     continue;
                 }
-                for compact in graph.get_relations_by_sid(source_sid) {
+                for compact in graph.neighbors_incl_tail(source_sid) {
                     if Some(compact.dest_sid) == target_sid {
                         edges.push(subgraph_edge_from_compact(graph, &compact));
                         break;
@@ -148,7 +152,9 @@ impl GraphHunterApi {
         self.with_graph_read(req.session.as_ref(), |graph| {
             let mut compacts: Vec<graph_hunter_core::CompactRelation> = Vec::new();
 
-            for compact in graph.get_compact_relations(&req.node_id) {
+            // Tail-aware (see get_events_for_node): base-only would drop
+            // post-finalize appends. Sorted below, so tail order is fine.
+            for compact in graph.neighbors_incl_tail_by_id(&req.node_id) {
                 compacts.push(compact);
             }
             let target_sid = graph.interner.get(&req.node_id);
@@ -162,7 +168,7 @@ impl GraphHunterApi {
                 if !seen_sources.insert(source_sid) {
                     continue;
                 }
-                for compact in graph.get_relations_by_sid(source_sid) {
+                for compact in graph.neighbors_incl_tail(source_sid) {
                     if Some(compact.dest_sid) == target_sid {
                         compacts.push(compact);
                     }

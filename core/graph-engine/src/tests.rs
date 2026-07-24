@@ -2625,6 +2625,53 @@ fn get_node_details_includes_post_finalize_tail_edges() {
 }
 
 #[test]
+fn finalize_makes_post_finalize_appends_visible_to_neighborhood_readers() {
+    // Regression for the /expand-shows-0-edges bug on graph_build graphs:
+    // get_node_details is tail-aware (reads base+tail), but the
+    // neighborhood/edge readers that /expand and /events_for_node use
+    // (get_neighborhood, get_compact_relations) go through base-only
+    // `neighbors_arc` and silently drop post-finalize tail edges. When a
+    // build appends into an already-finalized session, every such reader
+    // reports 0 edges even though the graph is fully connected.
+    //
+    // `sort_edges_by_timestamp()` merges the tail back into the sorted
+    // base — this test pins that as the fix graph_build relies on.
+    let mut g = GraphHunter::new();
+    g.add_entity(Entity::new("src-ip", EntityType::IP)).unwrap();
+    g.add_entity(Entity::new("host-a", EntityType::Host)).unwrap();
+    g.add_relation(Relation::new("src-ip", "host-a", RelationType::Connect, 100))
+        .unwrap();
+
+    // Finalize (mimics a restored/prior-built session), then append.
+    g.sort_edges_by_timestamp().unwrap();
+    assert!(g.streaming_is_finalized());
+    g.add_entity(Entity::new("host-b", EntityType::Host)).unwrap();
+    for ts in 200..205 {
+        g.add_relation(Relation::new("src-ip", "host-b", RelationType::Connect, ts))
+            .unwrap();
+    }
+
+    // node_details is already tail-aware (base+tail = 6). `expand` must
+    // agree — before the fix, get_neighborhood read base-only and returned
+    // just host-a (the 5 tail edges to host-b were invisible), so /expand
+    // rendered the node as if it had one neighbor.
+    assert_eq!(g.get_node_details("src-ip").unwrap().out_degree, 6);
+
+    let hood = g.get_neighborhood("src-ip", 1, 50, None).unwrap();
+    let neighbor_ids: std::collections::HashSet<&str> =
+        hood.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert!(
+        neighbor_ids.contains("host-a") && neighbor_ids.contains("host-b"),
+        "get_neighborhood must include the post-finalize tail neighbor host-b; got {neighbor_ids:?}"
+    );
+    assert!(
+        hood.edges.len() >= 6,
+        "get_neighborhood must surface base+tail edges (>=6), got {}",
+        hood.edges.len()
+    );
+}
+
+#[test]
 fn get_graph_summary_complete() {
     let mut g = build_lateral_movement_graph();
 

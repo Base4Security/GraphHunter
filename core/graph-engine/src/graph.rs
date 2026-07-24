@@ -831,6 +831,51 @@ impl GraphHunter {
         compact_slice.to_vec()
     }
 
+    /// Tail-aware outgoing edges for `sid`: the sorted base list PLUS the
+    /// post-finalize tail buffer, as owned `CompactRelation`s.
+    ///
+    /// [`Self::get_relations_by_sid`] is base-only on purpose — its
+    /// consumers (the matcher via `GraphRead::neighbors`, the anomaly
+    /// path-walk, `edge_range_sid`'s binary search) rely on the sorted
+    /// invariant and the tail is unsorted relative to base. This variant
+    /// is for the read-only "what are this node's neighbors" paths
+    /// (`get_neighborhood`/`get_events_for_node`) that either re-sort or
+    /// just collect: after the first finalize, every edge a `graph_build`
+    /// or second-dataset ingest appends lands in the tail, and a base-only
+    /// read renders the node as isolated even though it is fully connected
+    /// (this is why /expand showed 0 edges on freshly built graphs while
+    /// `get_node_details` — already tail-aware via `degree_of` — showed
+    /// the right degree).
+    pub fn neighbors_incl_tail(&self, sid: StrId) -> Vec<CompactRelation> {
+        self.streaming
+            .with_neighbors_and_tail(sid, |base, tail| {
+                let mut out = Vec::with_capacity(base.len() + tail.len());
+                for slice in [base, tail] {
+                    // SAFETY: StreamEdge and CompactRelation are #[repr(C)]
+                    // layout-compatible — identical transmute to the one in
+                    // `get_relations_by_sid` above.
+                    let compact: &[CompactRelation] = unsafe {
+                        std::slice::from_raw_parts(
+                            slice.as_ptr() as *const CompactRelation,
+                            slice.len(),
+                        )
+                    };
+                    out.extend_from_slice(compact);
+                }
+                out
+            })
+            .unwrap_or_default()
+    }
+
+    /// String-id convenience for [`Self::neighbors_incl_tail`]. Empty when
+    /// the id is unknown.
+    pub fn neighbors_incl_tail_by_id(&self, id: &str) -> Vec<CompactRelation> {
+        match self.interner.get(id) {
+            Some(sid) => self.neighbors_incl_tail(sid),
+            None => Vec::new(),
+        }
+    }
+
     /// L3 stage 2c part 2 — streaming-side edge count. Replaces
     /// `edge_store.len()` for consumers that only need the running
     /// total (relation count, schema-cache fingerprint). Walks the
