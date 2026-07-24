@@ -835,6 +835,19 @@ impl GraphHunterApi {
             }
         }
 
+        // Re-pin the built session as current. `graph_build` resolved
+        // `session` once at the top and correctly wrote the whole graph into
+        // that Arc, but the materialization KQL above `await`s for seconds —
+        // long enough for the frontend's async session-restore (which fires
+        // `set_current` after the webview mounts) to move `current` to a
+        // different session mid-build. When that happens the freshly built
+        // graph is orphaned: every read endpoint resolves `current` and sees
+        // the OTHER session, so the analyst's build appears to have vanished.
+        // Pinning here enforces the user-visible invariant "after I build a
+        // graph, that graph is what I'm looking at" and makes the
+        // `enrich_ip(session: None)` calls below resolve to the built session.
+        self.sessions().set_current(Some(session.id.clone()));
+
         // Enrichment ONCE, at build (design principle §2): resolve geoip+asn for
         // the IP nodes and store on entity metadata. threat_intel is a stub.
         let want = |name: &str| {
