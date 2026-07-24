@@ -1704,6 +1704,10 @@ fn name_to_class(leaf_lower: &str) -> Option<&'static str> {
         ("userprincipalname", "User"), ("useridentityarn", "User"), ("useridentity", "User"),
         ("username", "User"), ("samaccountname", "User"), ("accountname", "User"),
         ("subjectusername", "User"), ("targetusername", "User"), ("principalid", "User"),
+        // UPN is the strongest identity key — it unifies device/endpoint
+        // activity (InitiatingProcessAccountUpn, AccountUpn) with Azure AD
+        // SigninLogs (UserPrincipalName) on one User node.
+        ("accountupn", "User"), ("userupn", "User"),
         // Host
         ("hostname", "Host"), ("devicename", "Host"), ("machinename", "Host"),
         ("workstation", "Host"), ("computer", "Host"),
@@ -2517,6 +2521,28 @@ mod graph_propose_tests {
 
     fn sf(table: &str, field: &str) -> SelectedField {
         SelectedField { table: table.into(), field: field.into() }
+    }
+
+    #[test]
+    fn account_upn_field_classifies_as_user_node_for_identity_correlation() {
+        // Device tables carry the SAM account name (InitiatingProcessAccountName,
+        // a short name) as the User node AND the UPN (InitiatingProcessAccountUpn,
+        // e.g. "jsalas@niubiz.com.pe") as an attribute. But the UPN is the key
+        // that unifies endpoint activity with Azure AD SigninLogs (also UPN),
+        // so a hunt can pivot identity -> endpoint on one User node. Selecting
+        // the UPN field must therefore produce a User node, not an attribute.
+        let selected = vec![
+            sf("DeviceNetworkEvents", "InitiatingProcessAccountUpn"),
+            sf("DeviceNetworkEvents", "RemoteIP"),
+        ];
+        let props = build_proposals(&selected, None, "where TimeGenerated > ago(1h)");
+        assert_eq!(props.len(), 1);
+        let p = &props[0];
+        assert!(
+            p.nodes.iter().any(|n| n.class == "User"),
+            "InitiatingProcessAccountUpn must be a User node; got {:?}",
+            p.nodes
+        );
     }
 
     #[test]
