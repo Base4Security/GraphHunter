@@ -827,11 +827,15 @@ impl GenericParser {
                     "timestamp" => {
                         timestamp = Self::parse_timestamp(&val_str).unwrap_or(0);
                     }
+                    // Windows account/domain names (and email addresses in
+                    // practice) are case-insensitive: lowercase at extraction
+                    // so "LOMANEGRA\\JPerez" and "lomanegra\\jperez" resolve
+                    // to ONE User entity. Same rule as source_host below.
                     "source_user" if source_user.is_none() => {
-                        source_user = Some(val_str);
+                        source_user = Some(val_str.to_lowercase());
                     }
                     "target_user" if target_user.is_none() => {
-                        target_user = Some(val_str);
+                        target_user = Some(val_str.to_lowercase());
                     }
                     "source_ip" if source_ip.is_none() => {
                         source_ip = Some(val_str);

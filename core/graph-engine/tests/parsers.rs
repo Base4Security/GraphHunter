@@ -291,6 +291,56 @@ timestamp,computer,remote box,user
 }
 
 #[test]
+fn user_ids_are_case_normalized() {
+    // Windows account/domain names are case-insensitive; the MDE export
+    // carried "LOMANEGRA" and "lomanegra" as two distinct User entities.
+    let csv = "\
+timestamp,user,computer
+2026-06-18T10:00:00Z,LOMANEGRA\\JPerez,dc01
+2026-06-18T11:00:00Z,lomanegra\\jperez,dc01
+";
+    let triples = CsvParser.parse(csv);
+    let user_ids: std::collections::HashSet<&str> = triples
+        .iter()
+        .flat_map(|(s, _, d)| [s, d])
+        .filter(|e| e.entity_type == EntityType::User)
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        user_ids,
+        std::collections::HashSet::from(["lomanegra\\jperez"]),
+        "same account in different casing must be ONE User entity"
+    );
+
+    // Promotion path merges with canonical the same way.
+    let config = FieldConfig {
+        mappings: vec![FieldMapping {
+            raw_name: "approver".to_string(),
+            role: FieldRole::Node,
+            entity_type: Some("User".to_string()),
+            timestamp_format: None,
+            locale: None,
+        }],
+    };
+    let csv2 = "\
+timestamp,user,approver
+2026-06-18T10:00:00Z,jperez,JPEREZ
+";
+    let triples2 = ConfigurableParser::new(config).parse(csv2);
+    let user_ids2: std::collections::HashSet<&str> = triples2
+        .iter()
+        .flat_map(|(s, _, d)| [s, d])
+        .filter(|e| e.entity_type == EntityType::User)
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        user_ids2,
+        std::collections::HashSet::from(["jperez"]),
+        "promoted User must merge with canonical User under one lowercase id"
+    );
+}
+
+#[test]
 fn csv_parser_empty_input_yields_empty() {
     assert!(CsvParser.parse("").is_empty());
     assert!(CsvParser.parse("   \n\t\n").is_empty());
@@ -384,7 +434,8 @@ EVENT_BY,TIME,IP_ADDRESS,DEVICE,OS,BROWSER
     assert_eq!(stats.rows_with_triples, 1, "1 row processed");
     // The canonical user (no column-prefix) must be present — proves we did
     // NOT strip when the user accepted the canonical default.
-    let has_clean_user = triples.iter().any(|(s, _, _)| s.id == "Joel Canepa");
+    // User ids are case-normalized to lowercase at creation.
+    let has_clean_user = triples.iter().any(|(s, _, _)| s.id == "joel canepa");
     assert!(
         has_clean_user,
         "canonical User entity must be preserved when user accepts default; got {triples:?}"
@@ -634,8 +685,8 @@ fn configurable_parser_applies_timestamp_hint_to_zoho_csv() {
         .timestamp();
     let joel = triples
         .iter()
-        .find(|(s, _, _)| s.id == "Joel Canepa")
-        .expect("Joel Canepa User entity should be in triples");
+        .find(|(s, _, _)| s.id == "joel canepa")
+        .expect("joel canepa User entity should be in triples");
     assert_eq!(
         joel.1.timestamp, expected,
         "timestamp_format + locale hint must translate Spanish month and parse the date"
