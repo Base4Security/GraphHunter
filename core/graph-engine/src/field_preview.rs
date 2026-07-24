@@ -950,6 +950,10 @@ impl ConfigurableParser {
                                 format!("{}:{}", key, val_str)
                             }
                             EntityType::Any => format!("{}:{}", key, val_str),
+                            // Hostnames/domains are case-insensitive; match
+                            // the lowercase normalization the canonical path
+                            // applies so both create the same entity.
+                            EntityType::Host | EntityType::Domain => val_str.to_lowercase(),
                             _ => val_str.clone(),
                         };
                         let dst = Entity::new(&entity_id, et.clone())

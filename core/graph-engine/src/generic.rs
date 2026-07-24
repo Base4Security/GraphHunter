@@ -839,8 +839,12 @@ impl GenericParser {
                     "target_ip" if target_ip.is_none() => {
                         target_ip = Some(val_str);
                     }
+                    // Hostnames are case-insensitive (DNS/NetBIOS): lowercase
+                    // at extraction so "arlmldcc…" (Computer Name) and
+                    // "ARLMLDCC…" (Remote Computer Name) resolve to ONE Host
+                    // entity instead of one per casing.
                     "source_host" if source_host.is_none() => {
-                        source_host = Some(val_str);
+                        source_host = Some(val_str.to_lowercase());
                     }
                     "source_process" if source_process.is_none() => {
                         source_process = Some(val_str);
@@ -854,8 +858,9 @@ impl GenericParser {
                     "target_file" if target_file.is_none() => {
                         target_file = Some(val_str);
                     }
+                    // Domains are case-insensitive like hostnames.
                     "target_domain" if target_domain.is_none() => {
-                        target_domain = Some(val_str);
+                        target_domain = Some(val_str.to_lowercase());
                     }
                     "target_url" if target_url.is_none() => {
                         target_url = Some(val_str);

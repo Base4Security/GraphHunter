@@ -232,6 +232,65 @@ fn configurable_parser_promoted_canonical_types_use_bare_ids() {
 }
 
 #[test]
+fn host_and_domain_ids_are_case_normalized() {
+    use graph_hunter_core::RelationType;
+    // Hostnames and domains are case-insensitive (DNS/NetBIOS). The MDE
+    // export carries the same machine as "arlmldcc…" (Computer Name) and
+    // "ARLMLDCC…" (Remote Computer Name); without normalization the graph
+    // grew one Host entity per casing.
+    let csv = "\
+timestamp,computer,image,queryname,user
+2026-06-18T10:00:00Z,DC01.CORP.LOCAL,chrome.exe,EXAMPLE.COM,alice
+";
+    let triples = CsvParser.parse(csv);
+    let ids: Vec<&str> = triples
+        .iter()
+        .flat_map(|(s, _, d)| [s.id.as_str(), d.id.as_str()])
+        .collect();
+    assert!(
+        ids.contains(&"dc01.corp.local"),
+        "canonical Host id must be lowercased; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"example.com"),
+        "canonical Domain id must be lowercased; got {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id.contains("DC01") || id.contains("EXAMPLE")),
+        "no uppercase host/domain ids may remain; got {ids:?}"
+    );
+    let _ = RelationType::Connect;
+
+    // Promotion path: a config-promoted Host merges with the canonical
+    // one regardless of source casing.
+    let csv2 = "\
+timestamp,computer,remote box,user
+2026-06-18T10:00:00Z,dc01.corp.local,DC01.CORP.LOCAL,alice
+";
+    let config = FieldConfig {
+        mappings: vec![FieldMapping {
+            raw_name: "remote box".to_string(),
+            role: FieldRole::Node,
+            entity_type: Some("Host".to_string()),
+            timestamp_format: None,
+            locale: None,
+        }],
+    };
+    let triples2 = ConfigurableParser::new(config).parse(csv2);
+    let host_ids: std::collections::HashSet<&str> = triples2
+        .iter()
+        .flat_map(|(s, _, d)| [s, d])
+        .filter(|e| e.entity_type == EntityType::Host)
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        host_ids,
+        std::collections::HashSet::from(["dc01.corp.local"]),
+        "promoted Host must merge with canonical Host under one lowercase id"
+    );
+}
+
+#[test]
 fn csv_parser_empty_input_yields_empty() {
     assert!(CsvParser.parse("").is_empty());
     assert!(CsvParser.parse("   \n\t\n").is_empty());
@@ -468,9 +527,10 @@ EVENT_BY,IP_ADDRESS
         "User override must prevent canonical User entity; got {triples:?}"
     );
     // And there should be a Host-typed entity promoted from EVENT_BY.
+    // Host ids are case-normalized to lowercase at creation.
     let has_host = triples.iter().any(|(s, _, d)| {
-        (s.entity_type == EntityType::Host && s.id.contains("Joel Canepa"))
-            || (d.entity_type == EntityType::Host && d.id.contains("Joel Canepa"))
+        (s.entity_type == EntityType::Host && s.id.contains("joel canepa"))
+            || (d.entity_type == EntityType::Host && d.id.contains("joel canepa"))
     });
     assert!(
         has_host,
