@@ -987,6 +987,8 @@ fn canonical_field_recognizes_mde_timeline_spaced_headers() {
         GenericParser::canonical_field("Remote IP"),
         Some("target_ip")
     );
+    // AWS Network Firewall flow-log column (SrcIp/DestIp pair).
+    assert_eq!(GenericParser::canonical_field("DestIp"), Some("target_ip"));
     assert_eq!(
         GenericParser::canonical_field("Local IP"),
         Some("source_ip")

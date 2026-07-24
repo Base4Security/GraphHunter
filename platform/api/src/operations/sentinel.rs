@@ -2507,6 +2507,41 @@ mod graph_propose_tests {
     }
 
     #[test]
+    fn proposes_ip_to_ip_flow_graph_from_aws_firewall() {
+        // AWS Network Firewall flow logs name their columns SrcIp/DestIp.
+        // "destip" was missing from the canonical alias table, so DestIp
+        // classified as attribute and the proposal came out edge-less:
+        // graph_build materialized 4K isolated IP nodes with 0 relations.
+        let selected = vec![
+            sf("AWSNetworkFirewallFlow", "SrcIp"),
+            sf("AWSNetworkFirewallFlow", "DestIp"),
+            sf("AWSNetworkFirewallFlow", "DestPort"),
+            sf("AWSNetworkFirewallFlow", "AppProto"),
+        ];
+        let props =
+            build_proposals(&selected, Some("egress"), "where TimeGenerated > ago(1h)");
+        assert_eq!(props.len(), 1);
+        let p = &props[0];
+        assert_eq!(
+            p.nodes.len(),
+            2,
+            "SrcIp and DestIp must both be IP nodes; got {:?}",
+            p.nodes
+        );
+        assert_eq!(
+            p.edges.len(),
+            1,
+            "flow table must propose an IP->IP edge; got {:?}",
+            p.edges
+        );
+        assert_eq!(p.edges[0].from, "IP");
+        assert_eq!(p.edges[0].to, "IP");
+        // Ports/protocol ride the edge as attributes.
+        assert!(p.edges[0].attributes.iter().any(|a| a == "DestPort"));
+        assert!(p.edges[0].attributes.iter().any(|a| a == "AppProto"));
+    }
+
+    #[test]
     fn proposes_identity_ip_graph_from_signinlogs() {
         let selected = vec![
             sf("SigninLogs", "UserPrincipalName"),

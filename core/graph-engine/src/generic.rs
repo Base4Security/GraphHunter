@@ -264,7 +264,7 @@ impl GenericParser {
             | "local_ip" => Some("source_ip"),
 
             // Target IP (also used for client connecting IPs in RDP/TerminalServices)
-            "destinationip" | "dst_ip" | "dest_ip" | "target_ip" | "dstip" | "remoteip"
+            "destinationip" | "dst_ip" | "dest_ip" | "target_ip" | "dstip" | "destip" | "remoteip"
             | "remote_ip" | "dst_addr" | "destinationaddress" | "server_ip" | "remoteaddress"
             | "targetaddress" | "address" | "clientaddressv4" | "clientaddressv6"
             | "remoteaddresses" => Some("target_ip"),
