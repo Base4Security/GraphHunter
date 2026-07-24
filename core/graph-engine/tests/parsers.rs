@@ -66,6 +66,115 @@ Event Time,Computer Name,Action Type,File Name,Account Name,Remote IP,Remote Por
 }
 
 #[test]
+fn action_relation_process_created_is_execute_not_write() {
+    use graph_hunter_core::RelationType;
+    use graph_hunter_core::field_preview::infer_relation_from_action;
+    // Process-creation actions must not fall into the generic
+    // create→Write branch.
+    assert_eq!(
+        infer_relation_from_action("ProcessCreated"),
+        Some(RelationType::Execute)
+    );
+    assert_eq!(
+        infer_relation_from_action("CreateProcess"),
+        Some(RelationType::Execute)
+    );
+    assert_eq!(
+        infer_relation_from_action("process_started"),
+        Some(RelationType::Execute)
+    );
+    // File actions keep their existing labels.
+    assert_eq!(
+        infer_relation_from_action("FileCreated"),
+        Some(RelationType::Write)
+    );
+    assert_eq!(
+        infer_relation_from_action("FileDeleted"),
+        Some(RelationType::Delete)
+    );
+}
+
+#[test]
+fn mde_file_events_route_file_name_to_file_not_process() {
+    use graph_hunter_core::RelationType;
+    // For MDE file events the bare "File Name" column is the file being
+    // acted on and the actor is "Initiating Process File Name". Without the
+    // action-aware reroute the file surfaced as a Process entity and the
+    // initiating process was dropped.
+    let csv = "\
+Event Time,Computer Name,Action Type,File Name,Folder Path,Initiating Process File Name,Account Name
+2026-06-18T16:02:00.000,arlmldcc44714js.lomanegra.root,FileCreated,payload.dll,C:\\Temp,powershell.exe,jperez
+";
+    let triples = CsvParser.parse(csv);
+    assert!(
+        triples.iter().any(|(src, rel, dst)| {
+            src.entity_type == EntityType::Process
+                && src.id.contains("powershell.exe")
+                && rel.rel_type == RelationType::Write
+                && dst.entity_type == EntityType::File
+                && dst.id.contains("payload.dll")
+        }),
+        "expected powershell.exe -[Write]-> payload.dll, got: {:?}",
+        triples
+            .iter()
+            .map(|(s, r, d)| format!("{} -[{:?}]-> {}", s.id, r.rel_type, d.id))
+            .collect::<Vec<_>>()
+    );
+    // The created file must never surface as a Process entity.
+    assert!(
+        !triples.iter().any(|(src, _, dst)| {
+            (src.entity_type == EntityType::Process && src.id.contains("payload.dll"))
+                || (dst.entity_type == EntityType::Process && dst.id.contains("payload.dll"))
+        }),
+        "payload.dll must not be a Process entity"
+    );
+}
+
+#[test]
+fn configurable_parser_does_not_promote_pathological_values_to_nodes() {
+    // Defense-in-depth against node-ID explosions: even when a config
+    // (user-supplied or auto-generated) promotes a field to Node, values
+    // that cannot be meaningful entity IDs — very long strings (command
+    // lines) and timestamps — must stay off the graph as nodes.
+    let long_cmdline = format!("\"updater.exe\" {}", "--flag=value ".repeat(40));
+    let csv = format!(
+        "user,cmdline,created\nalice,{},2026-06-18T15:56:13.736\n",
+        long_cmdline.replace(',', ";")
+    );
+    let config = FieldConfig {
+        mappings: vec![
+            FieldMapping {
+                raw_name: "cmdline".to_string(),
+                role: FieldRole::Node,
+                entity_type: Some("Process".to_string()),
+                timestamp_format: None,
+                locale: None,
+            },
+            FieldMapping {
+                raw_name: "created".to_string(),
+                role: FieldRole::Node,
+                entity_type: Some("Process".to_string()),
+                timestamp_format: None,
+                locale: None,
+            },
+        ],
+    };
+    let triples = ConfigurableParser::new(config).parse(&csv);
+    for (src, _, dst) in &triples {
+        assert!(
+            src.id.len() <= 300 && dst.id.len() <= 300,
+            "pathological long value must not become a node id: {}…",
+            &dst.id[..dst.id.len().min(80)]
+        );
+        assert!(
+            !dst.id.contains("2026-06-18T15:56:13"),
+            "timestamp value must not become a node id: {}",
+            dst.id
+        );
+    }
+}
+
+#[test]
 fn csv_parser_empty_input_yields_empty() {
     assert!(CsvParser.parse("").is_empty());
     assert!(CsvParser.parse("   \n\t\n").is_empty());

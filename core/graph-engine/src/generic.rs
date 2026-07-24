@@ -791,6 +791,8 @@ impl GenericParser {
         let mut protocol: Option<String> = None;
         let mut source_port: Option<String> = None;
         let mut target_port: Option<String> = None;
+        let mut action_value: Option<String> = None;
+        let mut bare_file_name: Option<String> = None;
 
         for (key, value) in obj {
             let val_str = match value.as_str() {
@@ -802,7 +804,26 @@ impl GenericParser {
             };
 
             if let Some(canonical) = Self::canonical_field(key) {
+                // A bare "FileName"/"File Name" column is ambiguous: it names
+                // the acted-on process image for process/network events but
+                // the file itself for file events (MDE timeline exports use
+                // one column for both). Stash it and resolve after the loop,
+                // once the action label is known.
+                let stripped: String = key
+                    .to_lowercase()
+                    .chars()
+                    .filter(|c| !matches!(c, ' ' | '_' | '-'))
+                    .collect();
+                if stripped == "filename" {
+                    if bare_file_name.is_none() {
+                        bare_file_name = Some(val_str);
+                    }
+                    continue;
+                }
                 match canonical {
+                    "action" if action_value.is_none() => {
+                        action_value = Some(val_str);
+                    }
                     "timestamp" => {
                         timestamp = Self::parse_timestamp(&val_str).unwrap_or(0);
                     }
@@ -853,6 +874,40 @@ impl GenericParser {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Resolve the stashed bare file name. For file actions
+        // ("FileCreated", "FileModified", "file_downloaded"…) it is the file
+        // itself — joined onto the folder path when one was captured so the
+        // entity carries the full path. For everything else it keeps its
+        // historical meaning: the acted-on process image, overriding
+        // initiating-process columns (the MDE ProcessCreated child must beat
+        // its parent for the Execute/Spawn edges to point at the new process).
+        if let Some(fname) = bare_file_name {
+            let is_file_action = action_value
+                .as_deref()
+                .map(|a| a.to_lowercase().contains("file"))
+                .unwrap_or(false);
+            if is_file_action {
+                target_file = Some(match target_file.take() {
+                    Some(folder)
+                        if !folder
+                            .to_ascii_lowercase()
+                            .ends_with(&fname.to_ascii_lowercase()) =>
+                    {
+                        let sep = if folder.contains('/') && !folder.contains('\\') {
+                            '/'
+                        } else {
+                            '\\'
+                        };
+                        format!("{}{}{}", folder.trim_end_matches(['\\', '/']), sep, fname)
+                    }
+                    Some(full_path) => full_path,
+                    None => fname,
+                });
+            } else {
+                source_process = Some(fname);
             }
         }
 

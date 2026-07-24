@@ -535,6 +535,43 @@ fn suggest_by_values(samples: &[String]) -> Option<EntityType> {
     }
 }
 
+/// Values longer than this never become node IDs, no matter what a
+/// FieldConfig says. Command lines and similar free-text payloads are
+/// unique per row — promoting them mints one giant-ID node per event
+/// (26K entities from a 13K-row MDE export before this cap existed).
+pub const MAX_NODE_VALUE_LEN: usize = 256;
+
+/// True when `v` looks like an ISO-ish timestamp (`2026-06-18T15:56:13`,
+/// `2026-06-18 15:56:13`). Used to keep timestamp-valued columns from
+/// being promoted to entity nodes.
+pub fn value_looks_like_timestamp(v: &str) -> bool {
+    let b = v.trim().as_bytes();
+    b.len() >= 19
+        && b[..4].iter().all(|c| c.is_ascii_digit())
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && (b[10] == b'T' || b[10] == b' ')
+        && v.contains(':')
+}
+
+/// True when at least 60% of the non-empty samples look like timestamps.
+/// Mirrors the majority rule `suggest_by_values` uses.
+pub fn values_look_like_timestamps(samples: &[String]) -> bool {
+    let non_empty: Vec<&str> = samples
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        return false;
+    }
+    let hits = non_empty
+        .iter()
+        .filter(|v| value_looks_like_timestamp(v))
+        .count();
+    hits * 5 >= non_empty.len() * 3
+}
+
 /// Infers the relation type to use when connecting a promoted field entity to
 /// its context anchor.
 fn infer_relation_type(entity_type: &EntityType) -> RelationType {
@@ -582,6 +619,12 @@ pub fn infer_relation_from_action(action: &str) -> Option<RelationType> {
     // Spawn (process-specific; keep before generic "run"/"exec").
     if a.contains("spawn") || a.contains("fork") {
         return Some(RelationType::Spawn);
+    }
+    // Process lifecycle ("ProcessCreated", "CreateProcess", "ProcessStarted"):
+    // must beat the generic create→Write branch below or MDE/EDR process
+    // events get labeled Write.
+    if a.contains("process") && (a.contains("creat") || a.contains("start")) {
+        return Some(RelationType::Execute);
     }
     // Execute / run / launch.
     if a.contains("execute")
@@ -872,6 +915,17 @@ impl ConfigurableParser {
             if let Some(mapping) = user_override {
                 match mapping.role {
                     FieldRole::Node => {
+                        // Defense-in-depth against node-ID explosions: values
+                        // that cannot be meaningful entity IDs stay off the
+                        // graph even when a (user or auto) config promotes
+                        // the field — long free-text payloads and timestamps
+                        // are unique per row and would mint one node per
+                        // event. The value stays available as raw metadata.
+                        if val_str.len() > MAX_NODE_VALUE_LEN
+                            || value_looks_like_timestamp(&val_str)
+                        {
+                            continue;
+                        }
                         // Promote to entity node
                         let et = mapping
                             .entity_type

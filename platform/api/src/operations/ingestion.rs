@@ -237,12 +237,42 @@ pub fn auto_field_config_for(format_name: &str, contents: &str) -> Option<FieldC
             // value-regex heuristic nor a canonical mapping has an
             // opinion, default to Metadata so the analyst can opt in
             // explicitly instead of opt out after seeing junk nodes.
-            let suggested = match (fi.suggested_entity_type.clone(), canonical_default) {
-                (Some(t), _) => t,
-                (None, _) if is_timestamp => "Skip".to_string(),
-                (None, Some(canonical)) => canonical,
-                (None, None) => "Skip".to_string(),
+            // 2026-07-24 (MDE node-explosion fix): the canonical Skip
+            // verdict outranks the name-heuristic suggestion. Ports,
+            // command lines, timestamps, actions and severities are
+            // structural metadata — the heuristic used to promote them
+            // anyway ("Remote Port" → IP, "Process Command Line" →
+            // Process), minting one junk node per unique value: a 13K-row
+            // MDE timeline export produced 26K entities and a ~7-minute
+            // "hung" ingest in the UI.
+            let canonical_skip = fi
+                .canonical_target
+                .as_deref()
+                .map(|ct| GenericParser::canonical_to_entity_type(ct) == "Skip")
+                .unwrap_or(false);
+            let mut suggested = if canonical_skip {
+                "Skip".to_string()
+            } else {
+                match (fi.suggested_entity_type.clone(), canonical_default) {
+                    (Some(t), _) => t,
+                    (None, _) if is_timestamp => "Skip".to_string(),
+                    (None, Some(canonical)) => canonical,
+                    (None, None) => "Skip".to_string(),
+                }
             };
+            // Same fix, value tier: a name-heuristic match on a
+            // timestamp-valued column ("Process Creation Time" → Process)
+            // would create one entity per timestamp value. Only the
+            // name tier can make this mistake — the value tier already
+            // classifies timestamps as non-entities.
+            if suggested != "Skip"
+                && fi.suggestion_source.as_deref() == Some("name")
+                && graph_hunter_core::field_preview::values_look_like_timestamps(
+                    &fi.sample_values,
+                )
+            {
+                suggested = "Skip".to_string();
+            }
             let (role, entity_type) = if suggested == "Skip" {
                 (FieldRole::Metadata, None)
             } else {
