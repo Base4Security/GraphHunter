@@ -245,11 +245,21 @@ impl GraphHunterApi {
         // Zero-match diagnostic: read-only schema probe so the analyst
         // knows whether the hypothesis direction / type was plausible at
         // all. Skipped on non-zero to avoid the cost in the happy path.
-        let diagnostic = if path_count == 0 {
+        // The two opposite failure modes, each probed only in the branch
+        // where it can occur: zero paths may mean the pattern is
+        // structurally impossible against this graph, while a large
+        // result set may mean it matches most of the population and
+        // discriminates nothing.
+        let (diagnostic, non_discriminating) = if path_count == 0 {
             let graph = session.graph.read().ok();
-            graph.map(|g| g.hunt_diagnostic(&req.hypothesis))
+            (graph.map(|g| g.hunt_diagnostic(&req.hypothesis)), None)
         } else {
-            None
+            let flag = session
+                .graph
+                .read()
+                .ok()
+                .and_then(|g| crate::operations::precision::assess(&req.hypothesis, &paths, &g));
+            (None, flag)
         };
         let live_tail_coverage = live_tail_coverage_for_session(&session);
 
@@ -278,6 +288,7 @@ impl GraphHunterApi {
                 diagnostic,
                 live_tail_coverage,
                 coverage,
+                non_discriminating,
             })
         } else {
             *cache = paths;
@@ -288,6 +299,7 @@ impl GraphHunterApi {
                 diagnostic,
                 live_tail_coverage,
                 coverage,
+                non_discriminating,
             })
         }
     }

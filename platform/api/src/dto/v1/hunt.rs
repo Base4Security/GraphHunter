@@ -109,6 +109,43 @@ pub struct RunHuntResponse {
     /// span) grow this field.
     #[serde(default, skip_serializing_if = "is_default_coverage")]
     pub coverage: crate::coverage::AnswerCoverage,
+    /// Present **only** when the pattern matched so much of the
+    /// population that it cannot discriminate. Absent is the normal
+    /// case, so existing responses stay byte-identical on the wire and
+    /// the field's mere presence is the warning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub non_discriminating: Option<PatternPrecision>,
+}
+
+/// Why a result set should not be read as a set of findings.
+///
+/// The graph already guards the opposite failure — `check_catalog_compatibility`
+/// detects a pattern that can never match this dataset, i.e. zero results
+/// by construction. Nothing detected the mirror image: a pattern that
+/// matches most of the population, where a large result set looks like a
+/// large discovery.
+///
+/// The case that motivated this: on a real 4,627-user Keycloak corpus,
+/// `User -[Auth]-> IP HAVING count(distinct IP) >= 2 WITHIN 6h` returned
+/// 4,996 paths. That population reaches the portal over Argentine CGNAT,
+/// where a single legitimate account genuinely authenticates from dozens
+/// of addresses in a month — one account in that hunt used 62. An
+/// indicator that fires on nearly everyone is not an indicator, and the
+/// analyst had to work that out by hand.
+#[derive(Debug, Clone, Serialize)]
+pub struct PatternPrecision {
+    /// Entity type the pattern seeds from (`steps[0].origin_type`).
+    pub seed_type: String,
+    /// Distinct seed entities appearing in the result set.
+    pub matched_entities: usize,
+    /// How many entities of that type exist in the graph.
+    pub population: usize,
+    /// `matched_entities / population`, 0.0–1.0.
+    pub prevalence: f64,
+    /// Prevalence at or above which the pattern is called out.
+    pub threshold: f64,
+    /// Plain-language explanation, safe to surface verbatim in a report.
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,6 +363,7 @@ mod tests {
             diagnostic: None,
             live_tail_coverage: None,
             coverage: crate::coverage::AnswerCoverage::default(),
+            non_discriminating: None,
         };
         assert!(!r.coverage.possibly_incomplete);
         let json = serde_json::to_value(&r).unwrap();
@@ -356,6 +394,7 @@ mod tests {
             diagnostic: None,
             live_tail_coverage: None,
             coverage,
+            non_discriminating: None,
         };
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["coverage"]["possibly_incomplete"], true);

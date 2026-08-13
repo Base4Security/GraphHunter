@@ -25,6 +25,7 @@ pub mod hunt;
 pub mod ingestion;
 pub mod invariants;
 pub mod negotiation;
+pub mod precision;
 pub mod mapping_library;
 pub mod schema;
 pub mod sentinel;
