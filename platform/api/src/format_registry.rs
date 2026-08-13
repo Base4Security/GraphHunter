@@ -320,3 +320,60 @@ pub fn rich_preview_for_format(format_name: &str, contents: &str) -> Vec<FieldIn
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HAPROXY_SAMPLE: &str = " 186.19.87.186:36696 [10/Jun/2026:00:00:27.428] https~ cluster_pps_wss/wss_pps_i10 0/0/0/1/1 200 659 - - --NI 619/611/1/0/0 0/0 \"OPTIONS https://www1.hospitalitaliano.org.ar/wssPortal/api/log/INICIO HTTP/2.0\"\n";
+
+    /// Regression guard for the ingest OOM fix: a HAProxy log must resolve
+    /// to the `haproxy` format under auto-detection. The streaming ingest
+    /// path keys its line-based (memory-bounded) routing off this name —
+    /// if auto-detect ever stops returning `haproxy`, the file silently
+    /// falls back to `csv`, lands on the whole-file branch, and a multi-GB
+    /// log aborts the process. See `is_line_based` in `operations/ingestion.rs`.
+    #[test]
+    fn haproxy_auto_detects_to_haproxy() {
+        assert_eq!(resolve_format(HAPROXY_SAMPLE, "auto"), "haproxy");
+    }
+
+    /// Apache combined access logs share the `[date] "METHOD ... HTTP/x"`
+    /// shape but must NOT be mistaken for HAProxy (different field layout).
+    #[test]
+    fn apache_combined_does_not_detect_as_haproxy() {
+        let apache =
+            "127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] \"GET /a HTTP/1.0\" 200 2326\n";
+        assert_ne!(resolve_format(apache, "auto"), "haproxy");
+    }
+
+    /// Keycloak user-events export: double-encoded CSV (each data row is a
+    /// single quoted field wrapping the real row; `details` JSON inside with
+    /// quadruple-quote escaping). Must resolve to `csv`, and the rich
+    /// preview — which feeds `auto_field_config_for` on one-shot ingest —
+    /// must surface the real columns plus the flattened `details` keys so
+    /// User/IP mappings get proposed instead of one garbage `time` blob.
+    const KEYCLOAK_SAMPLE: &str = concat!(
+        "time,type,realmId,clientId,userId,sessionId,ipAddress,error,details\n",
+        r#""1785553172951,LOGIN,realm1,cliente-externo,u-123,sess-1,181.9.227.140,,""{""""auth_method"""":""""openid-connect"""",""""username"""":""""ana@example.com""""}""""#,
+        "\n",
+    );
+
+    #[test]
+    fn keycloak_double_encoded_csv_resolves_to_csv() {
+        assert_eq!(resolve_format(KEYCLOAK_SAMPLE, "auto"), "csv");
+    }
+
+    #[test]
+    fn keycloak_double_encoded_csv_rich_preview_sees_real_fields() {
+        let fields = rich_preview_for_format("csv", KEYCLOAK_SAMPLE);
+        let names: Vec<&str> = fields.iter().map(|f| f.raw_name.as_str()).collect();
+        assert!(names.contains(&"ipAddress"), "missing ipAddress: {names:?}");
+        assert!(names.contains(&"username"), "missing username: {names:?}");
+        assert!(names.contains(&"auth_method"), "missing auth_method: {names:?}");
+        assert!(
+            !names.contains(&"details"),
+            "raw details blob should be expanded away: {names:?}"
+        );
+    }
+}
