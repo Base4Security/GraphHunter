@@ -468,6 +468,24 @@ impl GraphHunterApi {
         })
     }
 
+    /// Snapshot of one background ingest job.
+    ///
+    /// `NotFound` covers three cases a client cannot distinguish and does
+    /// not need to: never existed, evicted from the bounded store, or the
+    /// process restarted (which also killed the detached ingest thread).
+    pub fn ingest_job_status(&self, job_id: &str) -> ApiResult<crate::dto::ingestion::IngestJobSnapshot> {
+        self.inner
+            .ingest_jobs
+            .get(job_id)
+            .ok_or_else(|| ApiError::NotFound(format!("unknown job_id: {job_id}")))
+    }
+
+    /// Recent ingest jobs, most recently updated first. Lets a client
+    /// find a job it lost the id for, or spot one stalled by a restart.
+    pub fn list_ingest_jobs(&self, limit: Option<usize>) -> Vec<crate::dto::ingestion::IngestJobSnapshot> {
+        self.inner.ingest_jobs.list(limit.unwrap_or(32).min(64))
+    }
+
     /// PCAP / PCAPNG preview. Reads up to 10K packets and returns a
     /// non-tabular summary (top src/dst IPs, top dst ports, protocol
     /// mix, time span). Stateless — touches no session. Frontend
@@ -1287,6 +1305,11 @@ impl GraphHunterApi {
             dataset_id: dataset_id.clone(),
         };
 
+        // Register before returning, so a client that polls
+        // `/ingest/status` the instant it receives the job_id finds it
+        // rather than a spurious 404.
+        self.inner.ingest_jobs.register(&job_id, &dataset_id);
+
         // Clones for the background task. `GraphHunterApi` is cheap to
         // clone (it wraps `Arc<ApiState>`), and `emitter`/`session` are
         // already Arc handles.
@@ -1298,7 +1321,20 @@ impl GraphHunterApi {
         let bg_date_from = req.date_from.clone();
         let bg_date_to = req.date_to.clone();
         let bg_session = Arc::clone(&session);
-        let bg_emitter: Arc<dyn EventEmitter> = Arc::clone(self.emitter());
+        // Wrap, don't replace: the scoped emitter tees the ingest
+        // lifecycle into the job store *and* forwards every event to the
+        // process emitter, so the desktop webview keeps receiving exactly
+        // what it did before. Per-job because `ingest-progress` payloads
+        // carry no job_id — a single global recorder could not attribute
+        // events when two ingests run at once. Since this same handle is
+        // what `IngestContext.emitter` carries, every progress site is
+        // captured (including the EVTX / Zeek / PCAP registry ingestors)
+        // without editing a single emit call.
+        let bg_emitter: Arc<dyn EventEmitter> = Arc::new(crate::jobs::JobScopedEmitter::new(
+            job_id.clone(),
+            self.inner.ingest_jobs.clone(),
+            Arc::clone(self.emitter()),
+        ));
         let bg_api: GraphHunterApi = self.clone();
 
         // Fire-and-forget: the caller is sync and we don't await the

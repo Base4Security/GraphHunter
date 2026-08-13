@@ -111,7 +111,15 @@ async fn auth_middleware(
 /// endpoints and the journal's own read API (capturing reads of the
 /// journal would just spam the journal with itself).
 fn journal_capture_skips(path: &str) -> bool {
-    path == "/" || path == "/health" || path == "/metrics" || path.starts_with("/journal")
+    path == "/"
+        || path == "/health"
+        || path == "/metrics"
+        || path.starts_with("/journal")
+        // Ingest-progress polling: a client checking once a second during
+        // a 20-minute ingest would otherwise write ~1200 journal events
+        // that say nothing about the hunt.
+        || path == "/ingest/status"
+        || path == "/ingest/jobs"
 }
 
 /// Cap on how many bytes `capture` will buffer from a *request* body via
@@ -401,6 +409,10 @@ pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> R
             "/ingest/load_with_config/",
             post(ingest_data::handler_load_data_with_config),
         )
+        .route("/ingest/stream", post(ingest_data::handler_load_data_streaming))
+        .route("/ingest/stream/", post(ingest_data::handler_load_data_streaming))
+        .route("/ingest/status", get(ingest_data::handler_ingest_status))
+        .route("/ingest/jobs", get(ingest_data::handler_ingest_jobs))
         .route("/session/create", post(session::handler_create_session))
         .route("/session/create/", post(session::handler_create_session))
         .route("/session/list", get(session::handler_list_sessions))

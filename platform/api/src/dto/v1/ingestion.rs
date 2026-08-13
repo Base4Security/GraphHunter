@@ -98,6 +98,44 @@ pub struct LoadResult {
     pub stopped_early: bool,
 }
 
+/// Poll-able state of a background streaming ingest.
+///
+/// The only completion signal a non-Tauri client has: progress otherwise
+/// travels through the `EventEmitter`, which the desktop build routes to
+/// the webview and a headless build drops. Recorded by
+/// [`crate::jobs::JobScopedEmitter`].
+///
+/// `state == "complete"` does **not** mean the ingest was useful —
+/// `result.zero_triples` (rows parsed, no triples produced, i.e. a wrong
+/// mapping) and `result.stopped_early` (truncated by the memory guard)
+/// both have to be checked.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IngestJobSnapshot {
+    pub job_id: String,
+    pub dataset_id: String,
+    /// `"running"` | `"complete"` | `"error"`.
+    pub state: String,
+    /// `reading` | `parsing` | `inserting` | `scoring` while running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Both are 0 for the registry ingestors (EVTX, PCAP, Zeek), which
+    /// report no byte counts — there `phase` is the only progress signal.
+    pub bytes_read: u64,
+    pub bytes_total: u64,
+    pub entities: usize,
+    pub relations: usize,
+    pub started_at: i64,
+    /// Unix seconds of the last update. A `running` job whose
+    /// `updated_at` is far in the past means the process restarted and
+    /// took the detached ingest thread with it.
+    pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<LoadResult>,
+    /// Caller-relative paths only — never a resolved absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestSiemRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]

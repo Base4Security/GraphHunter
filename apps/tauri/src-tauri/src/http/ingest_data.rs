@@ -95,6 +95,65 @@ pub(super) async fn handler_load_data_with_config(
     .await
 }
 
+#[derive(serde::Deserialize)]
+pub(super) struct IngestStatusQuery {
+    job_id: String,
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct IngestJobsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Starts a background streaming ingest and returns `{job_id, dataset_id}`
+/// immediately. The work runs on a detached thread; poll
+/// `GET /ingest/status?job_id=…` for progress and completion.
+///
+/// Streaming exists for files that would blow RAM through the synchronous
+/// path's whole-file read — that, and the 413 from
+/// `GRAPHHUNTER_INGEST_MAX_BYTES`, is the rule for choosing between this
+/// and `/ingest/load`.
+pub(super) async fn handler_load_data_streaming(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<graph_hunter_api::dto::ingestion::LoadDataStreamingRequest>,
+) -> Response {
+    let policy = match policy_or_err() {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+    // Bound concurrent detached ingests: each one holds a thread plus its
+    // whole parse working set, and none of them can be cancelled.
+    if api.ingest_jobs().running_count() >= graph_hunter_api::jobs::MAX_RUNNING_INGEST_JOBS {
+        return api_err_response(graph_hunter_api::ApiError::Conflict(format!(
+            "too many running ingests (limit {}); poll /ingest/jobs and retry once one finishes",
+            graph_hunter_api::jobs::MAX_RUNNING_INGEST_JOBS
+        )));
+    }
+    // Returns as soon as the dataset is registered — no spawn_blocking.
+    match api.load_data_streaming(body, &policy) {
+        Ok(v) => ok_json(v),
+        Err(e) => api_err_response(e),
+    }
+}
+
+pub(super) async fn handler_ingest_status(
+    State(api): State<Arc<GraphHunterApi>>,
+    axum::extract::Query(q): axum::extract::Query<IngestStatusQuery>,
+) -> Response {
+    match api.ingest_job_status(&q.job_id) {
+        Ok(v) => ok_json(v),
+        Err(e) => api_err_response(e),
+    }
+}
+
+pub(super) async fn handler_ingest_jobs(
+    State(api): State<Arc<GraphHunterApi>>,
+    axum::extract::Query(q): axum::extract::Query<IngestJobsQuery>,
+) -> Response {
+    ok_json(api.list_ingest_jobs(q.limit))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::http::hunt::tests_support::seeded_hunt_fixture;

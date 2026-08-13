@@ -334,6 +334,30 @@ fn known_endpoints() -> Vec<EndpointMeta> {
             true,
         ),
         ep(
+            "/ingest/stream",
+            Post,
+            "Start a background streaming ingest for a file too large for the \
+             synchronous path; returns {job_id, dataset_id} immediately. Poll \
+             /ingest/status. 409 when too many ingests are already running.",
+            false,
+        ),
+        ep(
+            "/ingest/status",
+            Get,
+            "Poll one streaming ingest by job_id: state (running|complete|error), \
+             phase, byte counts, and the LoadResult once complete. Byte counts are \
+             0 for EVTX/PCAP/Zeek, where phase is the only progress signal. 404 \
+             means unknown, evicted, or the process restarted.",
+            false,
+        ),
+        ep(
+            "/ingest/jobs",
+            Get,
+            "List recent ingest jobs, newest first — for finding a lost job_id or \
+             a job stalled by a process restart.",
+            false,
+        ),
+        ep(
             "/session/create",
             Post,
             "Create an empty session and make it the process-global current one. \

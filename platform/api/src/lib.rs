@@ -19,6 +19,7 @@ pub mod events;
 pub mod evtx;
 pub mod format_registry;
 pub mod ingestors;
+pub mod jobs;
 pub mod journal;
 pub mod kql_flags;
 pub mod netflow;
@@ -110,6 +111,9 @@ pub(crate) struct ApiState {
     /// real emitter; HTTP / MCP / CLI use [`NoopEmitter`].
     #[allow(dead_code)] // consumed once transports start emitting
     pub(crate) emitter: Arc<dyn EventEmitter>,
+    /// Background streaming-ingest jobs, recorded so a non-Tauri client
+    /// has a completion signal at all. See [`jobs`].
+    pub(crate) ingest_jobs: jobs::IngestJobStore,
 }
 
 /// Canonical API façade. Cheap to clone (wraps `Arc<ApiState>`).
@@ -144,8 +148,14 @@ impl GraphHunterApi {
                 dlq_store: Arc::new(std::sync::Mutex::new(None)),
                 mapping_library: Arc::new(std::sync::Mutex::new(None)),
                 emitter,
+                ingest_jobs: jobs::IngestJobStore::new(),
             }),
         }
+    }
+
+    /// Registry of background streaming-ingest jobs.
+    pub fn ingest_jobs(&self) -> &jobs::IngestJobStore {
+        &self.inner.ingest_jobs
     }
 
     /// Convenience constructor for unit tests and headless transports.
