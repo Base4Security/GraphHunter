@@ -1527,38 +1527,18 @@ impl LogParser for GenericParser {
             .collect()
     }
 
-    /// Raw-event-with-stats variant of [`parse_raw`]. Reuses
-    /// `parse_events_with_stats` for the aggregate counters (rows_seen,
-    /// per_field_occurrence, drift, skip_reasons, ...) and separately lifts
-    /// each produced triple to a `RawIngestEvent` carrying the row's
-    /// canonical raw_line, mirroring `parse_raw` above.
+    /// Raw-event-with-stats variant of [`parse_raw`]. Single pass: the
+    /// per-event triples computed for the aggregate counters (rows_seen,
+    /// per_field_occurrence, drift, skip_reasons, ...) are reused to build
+    /// the `RawIngestEvent`s, instead of re-running `parse_event` on every
+    /// row a second time as this used to do.
     fn parse_raw_with_stats(
         &self,
         data: &str,
     ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
         let events = Self::parse_events(data);
-        let (_, stats) = parse_events_with_stats(&events, |event| Self::parse_event(event));
-
-        let raw_events: Vec<crate::parser::RawIngestEvent> = events
-            .par_iter()
-            .flat_map(|event| {
-                let triples = Self::parse_event(event);
-                if triples.is_empty() {
-                    return Vec::new();
-                }
-                let raw_line = crate::parser::canonical_value_string(event);
-                triples
-                    .into_iter()
-                    .map(|t| {
-                        let mut e = crate::parser::RawIngestEvent::from_parsed_triple(t);
-                        e.raw_line = Some(raw_line.clone());
-                        e
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-
-        (raw_events, stats)
+        let (each, stats) = parse_events_each_with_stats(&events, |event| Self::parse_event(event));
+        (raw_events_from_each(&events, each), stats)
     }
 
     /// Generic Result variant (RH-P1-012).
@@ -1600,8 +1580,25 @@ pub fn parse_events_with_stats<F>(
     per_event: F,
 ) -> (Vec<ParsedTriple>, crate::parser::ParseStats)
 where
-    F: Fn(&Value) -> Vec<ParsedTriple>,
+    F: Fn(&Value) -> Vec<ParsedTriple> + Sync,
 {
+    let (each, stats) = parse_events_each_with_stats(events, per_event);
+    (each.into_iter().flatten().collect(), stats)
+}
+
+/// Like [`parse_events_with_stats`] but returns the triples still grouped
+/// per input event (index-aligned with `events`). Callers that need the
+/// event↔triples association — e.g. `parse_raw_with_stats` attaching each
+/// event's canonical `raw_line` — use this instead of re-running the
+/// per-event parse a second time.
+pub fn parse_events_each_with_stats<F>(
+    events: &[Value],
+    per_event: F,
+) -> (Vec<Vec<ParsedTriple>>, crate::parser::ParseStats)
+where
+    F: Fn(&Value) -> Vec<ParsedTriple> + Sync,
+{
+    use rayon::prelude::*;
     use std::collections::HashMap;
 
     let mut stats = crate::parser::ParseStats::default();
@@ -1610,16 +1607,22 @@ where
         return (Vec::new(), stats);
     }
 
+    // The per-event parse (canonical matching, entity building) dominates
+    // wall time, so it fans out over rayon. Aggregation below stays
+    // sequential and index-ordered: skipped_samples keep the first 20
+    // skipped rows in input order and drift observation stays
+    // deterministic, exactly as the pre-parallel implementation behaved.
+    let each: Vec<Vec<ParsedTriple>> = events.par_iter().map(|e| per_event(e)).collect();
+
     let mut per_field: HashMap<String, usize> = HashMap::new();
     let mut skip_reasons: HashMap<String, usize> = HashMap::new();
-    let mut all_triples: Vec<ParsedTriple> = Vec::new();
     let mut drift = crate::drift::DriftCollector::new();
     // Reservoir-sampled skipped rows. Deterministic (positional) so tests
     // are stable and the UI sees the first 20 skipped rows in input order.
     const SKIP_SAMPLE_CAP: usize = 20;
     let mut skipped_samples: Vec<(String, String)> = Vec::with_capacity(SKIP_SAMPLE_CAP);
 
-    for event in events {
+    for (event, triples) in events.iter().zip(each.iter()) {
         if let Some(obj) = event.as_object() {
             for (k, v) in obj {
                 let has_value = match v {
@@ -1633,7 +1636,6 @@ where
             }
         }
         drift.observe_event(event);
-        let triples = per_event(event);
         if triples.is_empty() {
             stats.rows_skipped += 1;
             let reason = classify_skip_reason(event);
@@ -1645,7 +1647,6 @@ where
             }
         } else {
             stats.rows_with_triples += 1;
-            all_triples.extend(triples);
         }
     }
 
@@ -1653,7 +1654,36 @@ where
     stats.skip_reasons = skip_reasons;
     stats.skipped_samples = skipped_samples;
     stats.drift = Some(drift.into_snapshot());
-    (all_triples, stats)
+    (each, stats)
+}
+
+/// Lifts per-event triple groups (from [`parse_events_each_with_stats`])
+/// into `RawIngestEvent`s, serializing each event's canonical `raw_line`
+/// exactly once. Shared by the `parse_raw_with_stats` impls that used to
+/// re-run the whole per-event parse just to rebuild this association.
+pub fn raw_events_from_each(
+    events: &[Value],
+    each: Vec<Vec<ParsedTriple>>,
+) -> Vec<crate::parser::RawIngestEvent> {
+    use rayon::prelude::*;
+    events
+        .par_iter()
+        .zip(each.into_par_iter())
+        .flat_map(|(event, triples)| {
+            if triples.is_empty() {
+                return Vec::new();
+            }
+            let raw_line = crate::parser::canonical_value_string(event);
+            triples
+                .into_iter()
+                .map(|t| {
+                    let mut e = crate::parser::RawIngestEvent::from_parsed_triple(t);
+                    e.raw_line = Some(raw_line.clone());
+                    e
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Post-hoc classification of why a row produced no triples. Cheap heuristic

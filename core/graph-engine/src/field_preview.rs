@@ -980,10 +980,45 @@ impl ConfigurableParser {
                         // Do nothing
                     }
                     FieldRole::Metadata => {
-                        // Metadata fields are already handled by GenericParser's
-                        // entity metadata or simply not extracted. No extra action needed
-                        // since we can't easily attach arbitrary metadata to existing
-                        // triples after the fact. The field remains in the JSON source.
+                        // Handled after the loop: Metadata-role fields are
+                        // stamped onto every relation this event produced.
+                    }
+                }
+            }
+        }
+
+        // Stamp Metadata-role fields onto the relations. Each edge
+        // represents exactly one source event, so event-level attributes
+        // (type/error/auth_method/...) belong on the EDGE — attaching them
+        // to the anchor node instead would overwrite them with every later
+        // event touching the same entity. Collisions resolve in favor of
+        // keys the canonical rules already set (protocol, dest_port);
+        // canonical-timestamp fields are skipped because the relation
+        // already carries `timestamp` natively.
+        if !triples.is_empty() {
+            let edge_meta: Vec<(&str, String)> = self
+                .config
+                .mappings
+                .iter()
+                .filter(|m| matches!(m.role, FieldRole::Metadata))
+                .filter(|m| GenericParser::canonical_field(&m.raw_name) != Some("timestamp"))
+                .filter_map(|m| {
+                    let v = obj.get(&m.raw_name)?;
+                    let s = match v {
+                        Value::String(s) if !s.is_empty() => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        Value::Bool(b) => b.to_string(),
+                        _ => return None,
+                    };
+                    Some((m.raw_name.as_str(), s))
+                })
+                .collect();
+            if !edge_meta.is_empty() {
+                for (_, rel, _) in triples.iter_mut() {
+                    for (k, v) in &edge_meta {
+                        rel.metadata
+                            .entry((*k).to_string())
+                            .or_insert_with(|| v.clone());
                     }
                 }
             }
@@ -1059,39 +1094,21 @@ impl LogParser for ConfigurableParser {
             .collect()
     }
 
-    /// Raw-event-with-stats variant of [`parse_raw`]. Reuses
-    /// `parse_events_with_stats` for the aggregate counters and separately
-    /// lifts each produced triple to a `RawIngestEvent` carrying the row's
-    /// canonical raw_line, mirroring `parse_raw` above.
+    /// Raw-event-with-stats variant of [`parse_raw`]. Single pass: the
+    /// per-event triples computed for the aggregate counters are reused to
+    /// build the `RawIngestEvent`s, instead of re-running
+    /// `parse_event_with_config` on every row a second time as this used
+    /// to do — on the whole-file CSV ingest path that double parse was
+    /// pure waste.
     fn parse_raw_with_stats(
         &self,
         data: &str,
     ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
         let events = Self::collect_events(data);
-        let (_, stats) = crate::generic::parse_events_with_stats(&events, |event| {
+        let (each, stats) = crate::generic::parse_events_each_with_stats(&events, |event| {
             self.parse_event_with_config(event)
         });
-
-        let raw_events: Vec<crate::parser::RawIngestEvent> = events
-            .par_iter()
-            .flat_map(|event| {
-                let triples = self.parse_event_with_config(event);
-                if triples.is_empty() {
-                    return Vec::new();
-                }
-                let raw_line = crate::parser::canonical_value_string(event);
-                triples
-                    .into_iter()
-                    .map(|t| {
-                        let mut e = crate::parser::RawIngestEvent::from_parsed_triple(t);
-                        e.raw_line = Some(raw_line.clone());
-                        e
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-
-        (raw_events, stats)
+        (crate::generic::raw_events_from_each(&events, each), stats)
     }
 }
 
@@ -1156,5 +1173,79 @@ mod raw_line_tests {
         assert!(!raw_only.is_empty());
         assert!(raw_only.iter().all(|e| e.raw_line.is_some()));
         assert!(raw_only[0].raw_line.as_ref().unwrap().contains("ignore_me"));
+    }
+
+    /// Parity guard for the single-pass `parse_raw_with_stats` rewrite: it
+    /// must produce exactly what the old two-call shape produced — the same
+    /// raw events as `parse_raw` (order included) and the same counters as
+    /// `parse_with_stats` — just without re-running the per-event parse.
+    #[test]
+    fn raw_with_stats_single_pass_matches_two_call_baseline() {
+        let data = r#"[
+            {"User": "admin", "Image": "cmd.exe"},
+            {"User": "guest", "Image": "powershell.exe"},
+            {"OrphanMetadata": "no anchor here"}
+        ]"#;
+        let parser = ConfigurableParser::new(FieldConfig { mappings: vec![] });
+
+        let (raw, stats) = parser.parse_raw_with_stats(data);
+        let raw_baseline = parser.parse_raw(data);
+        let (triples_baseline, stats_baseline) = parser.parse_with_stats(data);
+
+        assert_eq!(raw.len(), raw_baseline.len());
+        assert_eq!(raw.len(), triples_baseline.len());
+        for (a, b) in raw.iter().zip(raw_baseline.iter()) {
+            assert_eq!(a.raw_line, b.raw_line);
+            assert_eq!(a.src_id, b.src_id);
+            assert_eq!(a.dst_id, b.dst_id);
+        }
+        assert_eq!(stats.rows_seen, stats_baseline.rows_seen);
+        assert_eq!(stats.rows_with_triples, stats_baseline.rows_with_triples);
+        assert_eq!(stats.rows_skipped, stats_baseline.rows_skipped);
+        assert_eq!(stats.skip_reasons, stats_baseline.skip_reasons);
+        assert_eq!(stats.rows_skipped, 1); // the anchorless third event
+    }
+
+    /// `FieldRole::Metadata` used to be a silent no-op — the mapped fields
+    /// went neither to the edge nor to any node (found via the Keycloak
+    /// ingest: 24 of 27 auto-mapped columns vanished). They must land on
+    /// the relation metadata of every triple the event produces; canonical
+    /// timestamp fields stay off the edge (it already carries `timestamp`).
+    #[test]
+    fn metadata_role_fields_land_on_relation_metadata() {
+        let data = r#"[{
+            "username": "ana",
+            "ipaddress": "1.2.3.4",
+            "auth_method": "openid-connect",
+            "error": "invalid_grant",
+            "time": "2026-08-01T00:00:00Z"
+        }]"#;
+        let meta = |name: &str| FieldMapping {
+            raw_name: name.to_string(),
+            role: FieldRole::Metadata,
+            entity_type: None,
+            timestamp_format: None,
+            locale: None,
+        };
+        let parser = ConfigurableParser::new(FieldConfig {
+            mappings: vec![meta("auth_method"), meta("error"), meta("time")],
+        });
+
+        let triples = parser.parse(data);
+        assert!(!triples.is_empty(), "User+IP event must produce triples");
+        for (_, rel, _) in &triples {
+            assert_eq!(
+                rel.metadata.get("auth_method").map(String::as_str),
+                Some("openid-connect")
+            );
+            assert_eq!(
+                rel.metadata.get("error").map(String::as_str),
+                Some("invalid_grant")
+            );
+            assert!(
+                !rel.metadata.contains_key("time"),
+                "canonical timestamp fields must not duplicate onto edge metadata"
+            );
+        }
     }
 }
