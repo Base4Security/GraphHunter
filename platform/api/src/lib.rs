@@ -26,6 +26,7 @@ pub mod pcap;
 pub mod pcap_l7;
 pub mod pcap_l7_auth;
 pub mod pcap_preview;
+pub mod reqwest_client;
 // `local_llm` was lifted into its own crate at platform/local-llm.
 // Re-exported here so call-sites that imported `api::local_llm::X`
 // keep resolving during the migration.
@@ -195,6 +196,103 @@ impl GraphHunterApi {
         &self,
     ) -> Arc<Mutex<Option<Arc<dyn graph_hunter_core::HttpClient>>>> {
         self.inner.http_geoip_client.clone()
+    }
+
+    /// Wires the GeoIP backends. Call once at startup, from every
+    /// transport (desktop *and* headless HTTP) — previously only the
+    /// Tauri entry point populated the MaxMind slot and **nothing at all**
+    /// populated the HTTP slot, so `capabilities.geoip` reported `false`
+    /// on builds that had the `geoip` feature compiled in and a working
+    /// provider available.
+    ///
+    /// Search order for the offline databases, first hit wins:
+    ///   1. `GRAPHHUNTER_GEOIP_DIR` (explicit override)
+    ///   2. `bundled` — the installer's resource directory, when the
+    ///      caller can resolve one
+    ///   3. `<data_dir>/GraphHunter/geoip` (user-managed drop-in)
+    ///
+    /// The ip-api.com HTTP fallback is **opt-in** via
+    /// `GRAPHHUNTER_GEOIP_HTTP=1`. It is off by default on purpose: the
+    /// free tier is plaintext HTTP, so enabling it sends the very IPs
+    /// under investigation to a third party in the clear. During an
+    /// incident that both leaks case data and can tip off an adversary
+    /// who watches their own infrastructure's resolvers. Offline MMDB
+    /// has neither problem, which is also what keeps the air-gapped
+    /// story intact.
+    ///
+    /// Returns `(mmdb_loaded, http_enabled)` so callers can log or badge
+    /// the outcome. Failures are reported, never silent — the previous
+    /// bootstrap logged only on success, which is why a missing database
+    /// looked identical to a working one.
+    pub fn bootstrap_geoip(&self, bundled: Option<std::path::PathBuf>) -> (bool, bool) {
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(dir) = std::env::var("GRAPHHUNTER_GEOIP_DIR") {
+            if !dir.trim().is_empty() {
+                candidates.push(std::path::PathBuf::from(dir));
+            }
+        }
+        if let Some(dir) = bundled {
+            candidates.push(dir);
+        }
+        if let Some(dir) = dirs::data_dir() {
+            candidates.push(dir.join("GraphHunter").join("geoip"));
+        }
+
+        let mut mmdb_loaded = false;
+        for dir in &candidates {
+            match graph_hunter_core::geoip::maxmind::MaxMindProvider::from_directory(dir) {
+                Ok(p) if p.is_available() => {
+                    if let Ok(mut slot) = self.inner.geoip_provider.lock() {
+                        *slot = Some(p);
+                        mmdb_loaded = true;
+                        tracing::info!("GeoIP: MaxMind databases loaded from {}", dir.display());
+                    }
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("GeoIP: failed reading .mmdb from {}: {}", dir.display(), e);
+                }
+            }
+        }
+        if !mmdb_loaded {
+            tracing::warn!(
+                "GeoIP: no MaxMind database found (looked in: {}). Country/ASN enrichment is \
+                 DISABLED — graph_summary will report geoip=false. Drop GeoLite2-City.mmdb and \
+                 GeoLite2-ASN.mmdb into one of those directories, or set GRAPHHUNTER_GEOIP_DIR.",
+                candidates
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        let http_enabled = matches!(
+            std::env::var("GRAPHHUNTER_GEOIP_HTTP")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "1" | "true" | "yes" | "on"
+        );
+        if http_enabled {
+            match crate::reqwest_client::ReqwestHttpClient::new() {
+                Ok(client) => {
+                    if let Ok(mut slot) = self.inner.http_geoip_client.lock() {
+                        *slot = Some(Arc::new(client) as Arc<dyn graph_hunter_core::HttpClient>);
+                        tracing::warn!(
+                            "GeoIP: ip-api.com HTTP fallback ENABLED. Requests are plaintext \
+                             HTTP and disclose looked-up IPs to a third party — do not use on \
+                             sensitive investigations."
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!("GeoIP: could not build HTTP client: {e}"),
+            }
+        }
+
+        (mmdb_loaded, http_enabled)
     }
 
     /// Handle to the Sentinel connector slot. Shared with the legacy

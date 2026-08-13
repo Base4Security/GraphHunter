@@ -88,3 +88,7 @@ audit-tmp/
 # TypeScript / Vite / npm build outputs (untracked post-book-v1.0.0)
 dist/
 *.tsbuildinfo
+
+# GeoLite2 databases: ~70MB of third-party data under the MaxMind EULA.
+# Obtain per apps/tauri/src-tauri/resources/geoip/README.md; never committed.
+*.mmdb

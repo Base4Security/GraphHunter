@@ -107,23 +107,19 @@ pub fn run() {
     // / current / hunt_cache handles from the API so legacy helpers and
     // the canonical operations see the exact same state.
     let api = Arc::new(graph_hunter_api::GraphHunterApi::new(emitter));
-    // Populate the API's GeoIP slot at startup (MaxMind from disk).
-    // AppState no longer holds this handle directly — all GeoIP
-    // ops go through the canonical API.
+    // Populate the API's GeoIP slots at startup. The bootstrap lives on
+    // the API (not here) so the headless HTTP transport gets the same
+    // wiring; this call additionally passes the installer's bundled
+    // resource directory, which only the desktop app can resolve.
+    // Failures are logged loudly inside `bootstrap_geoip` — the previous
+    // version of this block logged only on success, so a missing
+    // database was indistinguishable from a working one and shipped as
+    // a silent `geoip=false`.
     {
-        let handle = api.geoip_provider_handle();
-        let provider = dirs::data_dir()
-            .map(|d| d.join("GraphHunter").join("geoip"))
-            .and_then(|dir| {
-                graph_hunter_core::geoip::maxmind::MaxMindProvider::from_directory(&dir).ok()
-            })
-            .filter(|p| p.is_available());
-        if provider.is_some() {
-            tracing::info!("MaxMind GeoIP databases loaded");
-        }
-        if let Ok(mut g) = handle.lock() {
-            *g = provider;
-        }
+        let bundled = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|p| p.join("resources").join("geoip")));
+        api.bootstrap_geoip(bundled);
     }
     // Initialize the drift store on disk. Placed beside other GraphHunter
     // runtime state. If the directory is unavailable (no HOME?) or SQLite

@@ -18,7 +18,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/models/*"
+      "resources/models/*",
+      "resources/geoip/*"
     ],
     "linux": {
       "deb": {
