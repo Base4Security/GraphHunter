@@ -124,8 +124,36 @@ def process_dataset(dataset_name: str, data_dir: Path):
         print(f"    {p.name}  {p.stat().st_size/2**30:.2f} GiB")
 
     nodes = {}       # uuid -> {id, type, name}
-    edges = []       # [{src, dst, type, timestamp}]
     uuid_to_name = {}
+
+    # Edges stream straight to disk instead of accumulating.
+    #
+    # The full CADETS corpus is ~35 GiB of CDM records yielding millions of
+    # events; holding each as a Python dict cost ~3 GB before this parse was
+    # even half-way through one of three file groups, which does not fit
+    # alongside anything else on a 14 GiB machine. Nodes stay in memory
+    # because they are bounded by the host's unique entities (~10^5) and are
+    # needed for dedup; edges are append-only and never re-read here.
+    #
+    # The on-disk shape is unchanged -- still one JSON array -- so
+    # 02_extract_subgraphs.py needs no modification.
+    out_dir = dataset_dir / "parsed"
+    out_dir.mkdir(exist_ok=True)
+    nodes_file = out_dir / "nodes.json"
+    edges_file = out_dir / "edges.json"
+
+    edge_count = 0
+    rel_counts = defaultdict(int)
+    edges_out = open(edges_file, "w")
+    edges_out.write("[")
+
+    def emit_edge(edge):
+        nonlocal edge_count
+        if edge_count:
+            edges_out.write(",")
+        json.dump(edge, edges_out)
+        edge_count += 1
+        rel_counts[edge["type"]] += 1
 
     for filepath in json_files:
         print(f"  Parsing: {filepath.name}")
@@ -184,7 +212,7 @@ def process_dataset(dataset_name: str, data_dir: Path):
                     timestamp = 0
 
                 if src_uuid and dst_uuid:
-                    edges.append({
+                    emit_edge({
                         "src": src_uuid,
                         "dst": dst_uuid,
                         "type": rel_type,
@@ -195,7 +223,7 @@ def process_dataset(dataset_name: str, data_dir: Path):
                 # Some events also reference predicateObject2
                 if src_uuid and predicate_obj2:
                     dst2_uuid = parse_uuid(predicate_obj2)
-                    edges.append({
+                    emit_edge({
                         "src": src_uuid,
                         "dst": dst2_uuid,
                         "type": rel_type,
@@ -204,19 +232,13 @@ def process_dataset(dataset_name: str, data_dir: Path):
                     })
 
     # ── Save results ───────────────────────────────────────────────────────
-    out_dir = dataset_dir / "parsed"
-    out_dir.mkdir(exist_ok=True)
-
-    nodes_file = out_dir / "nodes.json"
-    edges_file = out_dir / "edges.json"
+    edges_out.write("]")
+    edges_out.close()
+    print(f"  Wrote {edge_count:,} edges -> {edges_file}")
 
     with open(nodes_file, "w") as f:
         json.dump(list(nodes.values()), f)
     print(f"  Wrote {len(nodes):,} nodes -> {nodes_file}")
-
-    with open(edges_file, "w") as f:
-        json.dump(edges, f)
-    print(f"  Wrote {len(edges):,} edges -> {edges_file}")
 
     # ── Stats ──────────────────────────────────────────────────────────────
     type_counts = defaultdict(int)
@@ -226,9 +248,6 @@ def process_dataset(dataset_name: str, data_dir: Path):
     for t, c in sorted(type_counts.items(), key=lambda x: -x[1]):
         print(f"    {t}: {c:,}")
 
-    rel_counts = defaultdict(int)
-    for e in edges:
-        rel_counts[e["type"]] += 1
     print("  Edge types:")
     for t, c in sorted(rel_counts.items(), key=lambda x: -x[1]):
         print(f"    {t}: {c:,}")
