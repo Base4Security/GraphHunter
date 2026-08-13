@@ -92,3 +92,10 @@ dist/
 # GeoLite2 databases: ~70MB of third-party data under the MaxMind EULA.
 # Obtain per apps/tauri/src-tauri/resources/geoip/README.md; never committed.
 *.mmdb
+
+# DARPA TC training corpora + local training venv (multi-GB, never committed)
+training/.venv/
+training/data/**/*.tar.gz
+training/data/**/*.json
+training/data/**/parsed/
+training/data/**/features/
