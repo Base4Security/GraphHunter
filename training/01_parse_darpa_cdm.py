@@ -92,21 +92,36 @@ def process_dataset(dataset_name: str, data_dir: Path):
         print(f"Download the DARPA TC E3 {dataset_name} files first.")
         return
 
-    # Find all json/json.gz files
-    json_files = sorted(
-        list(dataset_dir.glob("*.json")) + list(dataset_dir.glob("*.json.gz"))
-    )
+    # Find all json/json.gz files.
+    #
+    # DARPA splits each archive into numbered continuations —
+    # `ta1-cadets-e3-official.json`, `.json.1`, `.json.2` — which are
+    # plain JSON-lines, not compressed. A `*.json` glob matches only the
+    # first, so the run would silently parse ~4 GB of a ~12 GB corpus and
+    # report success; most ground-truth UUIDs would then resolve to no
+    # node and the training set would be quietly gutted. Match the
+    # continuations explicitly.
+    def collect(globber) -> list:
+        found = (
+            list(globber("*.json"))
+            + list(globber("*.json.gz"))
+            + [p for p in globber("*.json.*") if p.suffix.lstrip(".").isdigit()]
+        )
+        return sorted(set(found))
+
+    json_files = collect(dataset_dir.glob)
     if not json_files:
         # Try inside extracted tar directories
-        json_files = sorted(
-            list(dataset_dir.rglob("*.json")) + list(dataset_dir.rglob("*.json.gz"))
-        )
+        json_files = collect(dataset_dir.rglob)
 
     if not json_files:
         print(f"ERROR: No JSON files found in {dataset_dir}")
         return
 
-    print(f"Found {len(json_files)} files for '{dataset_name}'")
+    total_bytes = sum(p.stat().st_size for p in json_files)
+    print(f"Found {len(json_files)} files for '{dataset_name}' ({total_bytes/2**30:.1f} GiB)")
+    for p in json_files:
+        print(f"    {p.name}  {p.stat().st_size/2**30:.2f} GiB")
 
     nodes = {}       # uuid -> {id, type, name}
     edges = []       # [{src, dst, type, timestamp}]
