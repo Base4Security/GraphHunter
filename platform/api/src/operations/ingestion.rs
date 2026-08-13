@@ -1967,11 +1967,18 @@ impl GraphHunterApi {
                             let contents = std::str::from_utf8(&mmap)
                                 .map_err(|e| format!("File is not valid UTF-8: {}", e))?;
 
+                            // Honest 0%: this branch parses the whole file in
+                            // ONE call with no mid-parse events, so reporting
+                            // `bytes_read: bytes_total` here (as this used to)
+                            // painted a full, frozen bar for the entire parse —
+                            // users read that as a hang. 0% + "parsing" at
+                            // least states the truth: working, size known,
+                            // progress unknowable until the call returns.
                             bg_emitter.emit(
                                 INGEST_PROGRESS,
                                 serde_json::json!({
                                     "phase": "parsing",
-                                    "bytes_read": bytes_total,
+                                    "bytes_read": 0u64,
                                     "bytes_total": bytes_total,
                                     "entities": 0,
                                     "relations": 0,
@@ -1985,6 +1992,22 @@ impl GraphHunterApi {
                             );
                             let (events, stats) = parser.parse_raw_with_stats(contents);
                             tracing::info!("INGEST: parsed {} events", events.len());
+
+                            // Parse done → bar jumps to 100% and the phase
+                            // flips to "inserting". `relations` carries the
+                            // parsed raw-event count (≈ relations about to be
+                            // inserted) so the label shows real output volume
+                            // while the graph insert runs.
+                            bg_emitter.emit(
+                                INGEST_PROGRESS,
+                                serde_json::json!({
+                                    "phase": "inserting",
+                                    "bytes_read": bytes_total,
+                                    "bytes_total": bytes_total,
+                                    "entities": 0,
+                                    "relations": events.len(),
+                                }),
+                            );
 
                             // Journal step: must run BEFORE the graph insert
                             // below so a crash in between is replayable. Gated
