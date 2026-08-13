@@ -307,6 +307,46 @@ fn known_endpoints() -> Vec<EndpointMeta> {
             "Bulk-remove DLQ entries by filter.",
             false,
         ),
+        // --- File ingest ---------------------------------------------
+        // All path-taking routes are confined to GRAPHHUNTER_INGEST_ROOT
+        // and return 403 until an operator configures it.
+        ep(
+            "/ingest/preview",
+            Post,
+            "Detect a log file's format and propose a field -> entity mapping, \
+             without ingesting. Path must be inside GRAPHHUNTER_INGEST_ROOT.",
+            true,
+        ),
+        ep(
+            "/ingest/load",
+            Post,
+            "Parse a log file and insert it into the session graph. HTTP 200 is \
+             not success on its own: check zero_triples (rows parsed but no \
+             triples produced, usually a bad mapping) and stopped_early \
+             (truncated by the memory guard). Large files should use streaming.",
+            true,
+        ),
+        ep(
+            "/ingest/load_with_config",
+            Post,
+            "Like /ingest/load but applies an explicit FieldConfig instead of the \
+             auto-built one. Same zero_triples / stopped_early caveats.",
+            true,
+        ),
+        ep(
+            "/session/create",
+            Post,
+            "Create an empty session and make it the process-global current one. \
+             Ingest needs a session; pass the returned handle explicitly on later \
+             calls, since 'current' is shared across HTTP clients.",
+            false,
+        ),
+        ep(
+            "/session/list",
+            Get,
+            "List sessions, in-memory plus a scan of the session directory.",
+            false,
+        ),
         // --- Agentic slow-lane --------------------------------------
         ep(
             "/ingest_negotiate",

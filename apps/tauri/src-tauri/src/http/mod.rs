@@ -32,10 +32,12 @@ mod graph_meta;
 mod helpers;
 mod hunt;
 mod ingest;
+mod ingest_data;
 mod invariants;
 mod journal;
 mod misc;
 mod notes;
+mod session;
 mod siem;
 mod tags;
 
@@ -383,6 +385,25 @@ pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> R
         .route("/export_ocsf", post(export::handler_export_ocsf))
         .route("/check_invariants", post(invariants::handler_check_invariants))
         .route("/ingest_negotiate", post(ingest::handler_ingest_negotiate))
+        // File ingest over HTTP. All three are gated by
+        // GRAPHHUNTER_INGEST_ROOT (403 until an operator sets it) — see
+        // `graph_hunter_api::paths`. Trailing-slash duplicates match the
+        // existing convention for POSTs that MCP tools hit.
+        .route("/ingest/preview", post(ingest_data::handler_preview_ingest))
+        .route("/ingest/preview/", post(ingest_data::handler_preview_ingest))
+        .route("/ingest/load", post(ingest_data::handler_load_data))
+        .route("/ingest/load/", post(ingest_data::handler_load_data))
+        .route(
+            "/ingest/load_with_config",
+            post(ingest_data::handler_load_data_with_config),
+        )
+        .route(
+            "/ingest/load_with_config/",
+            post(ingest_data::handler_load_data_with_config),
+        )
+        .route("/session/create", post(session::handler_create_session))
+        .route("/session/create/", post(session::handler_create_session))
+        .route("/session/list", get(session::handler_list_sessions))
         .route("/pcap_preview", post(ingest::handler_pcap_preview))
         .route("/canonical_map", post(ingest::handler_canonical_map))
         .route("/parser_generate", post(ingest::handler_parser_generate))
