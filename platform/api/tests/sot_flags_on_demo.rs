@@ -172,7 +172,7 @@ fn sot_all_flags_on_end_to_end_demo() {
                 session: None,
                 path: path.clone(),
                 format: format.to_string(),
-            })
+            }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
             .unwrap_or_else(|e| panic!("load_data failed for {label} ({path}): {e}"));
         eprintln!(
             "[ingest] {label}: +{} entities, +{} relations (zero_triples={})",
@@ -237,7 +237,7 @@ fn sot_all_flags_on_end_to_end_demo() {
             session: None,
             path: fortigate_path.clone(),
             format: "fortigate".to_string(),
-        })
+        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
         .expect("re-ingest (crash replay) load_data must not error");
     let relations_after_replay = {
         let graph = session.graph.read().expect("graph lock");

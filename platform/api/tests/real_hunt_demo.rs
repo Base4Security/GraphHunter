@@ -148,7 +148,7 @@ fn ingest_cross_source_intrusion() -> GraphHunterApi {
                 session: None,
                 path: path.to_string(),
                 format: format.to_string(),
-            })
+            }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
             .unwrap_or_else(|e| panic!("load_data failed for {label} ({path}): {e}"));
         eprintln!(
             "[ingest] {label}: +{} entities, +{} relations (zero_triples={})",

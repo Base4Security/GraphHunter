@@ -328,11 +328,15 @@ pub fn cmd_load_data_with_config(
     path: String,
     config: FieldConfig,
 ) -> Result<LoadResult, CommandError> {
-    api.load_data_with_config(graph_hunter_api::dto::ingestion::LoadDataWithConfigRequest {
-        session: None,
-        path,
-        config,
-    })
+    api.load_data_with_config(
+        graph_hunter_api::dto::ingestion::LoadDataWithConfigRequest {
+            session: None,
+            path,
+            config,
+        },
+        // User-chosen path from the desktop file dialog.
+        &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+    )
     .map_err(CommandError::from)
 }
 

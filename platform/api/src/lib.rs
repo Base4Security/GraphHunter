@@ -25,6 +25,7 @@ pub mod netflow;
 pub mod pcap;
 pub mod pcap_l7;
 pub mod pcap_l7_auth;
+pub mod paths;
 pub mod pcap_preview;
 pub mod reqwest_client;
 // `local_llm` was lifted into its own crate at platform/local-llm.

@@ -65,7 +65,7 @@ fn parse_failures_from_load_data_with_config_land_in_dlq() {
         session: None,
         path,
         config: cfg,
-    })
+    }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
     .expect("load_data_with_config");
 
     let resp = api
@@ -157,7 +157,7 @@ fn reingest_roundtrip_fix_config_then_drain() {
         session: None,
         path,
         config: wrong_cfg,
-    })
+    }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
     .expect("load_data_with_config (wrong config)");
 
     let before = api
@@ -267,7 +267,7 @@ fn no_dlq_entries_when_store_is_unconfigured() {
         session: None,
         path,
         config: cfg,
-    })
+    }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
     .expect("load_data_with_config");
 
     let resp = api

@@ -26,6 +26,7 @@ use crate::dto::ingestion::{
     PcapPreviewRequest, PcapPreviewResult, PreviewIngestRequest, PreviewIngestResult,
 };
 use crate::events::events::{INGEST_COMPLETE, INGEST_ERROR, INGEST_PROGRESS};
+use crate::paths::PathPolicy;
 use crate::evtx::{
     evtx_preview_sample, evtx_to_sysmon_ndjson, file_looks_like_evtx, path_is_evtx,
 };
@@ -384,26 +385,34 @@ pub fn compute_ingest_warnings(graph: &GraphHunter) -> Vec<String> {
 impl GraphHunterApi {
     /// Detect a file's format + propose a field → entity type mapping.
     /// Stateless — reads from disk, doesn't touch any session.
-    pub fn preview_ingest(&self, req: PreviewIngestRequest) -> ApiResult<PreviewIngestResult> {
+    pub fn preview_ingest(
+        &self,
+        req: PreviewIngestRequest,
+        policy: &PathPolicy,
+    ) -> ApiResult<PreviewIngestResult> {
+        let checked = policy.resolve(&req.path)?;
+        let path = checked.as_path().to_string_lossy().to_string();
         let use_evtx = req.format.to_lowercase() == "evtx"
-            || path_is_evtx(&req.path)
-            || (req.format.to_lowercase() == "auto" && file_looks_like_evtx(&req.path));
+            || path_is_evtx(&path)
+            || (req.format.to_lowercase() == "auto" && file_looks_like_evtx(&path));
         let (contents, resolved) = if use_evtx {
             let contents =
-                evtx_preview_sample(&req.path, EVTX_PREVIEW_SAMPLE_SIZE).map_err(ApiError::Io)?;
+                evtx_preview_sample(&path, EVTX_PREVIEW_SAMPLE_SIZE).map_err(ApiError::Io)?;
             (contents, "sysmon".to_string())
         } else {
-            let file_size = std::fs::metadata(&req.path).map(|m| m.len()).unwrap_or(0);
+            let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let contents = if file_size > LARGE_FILE_THRESHOLD {
-                let mut file = std::fs::File::open(&req.path)
-                    .map_err(|e| ApiError::Io(format!("open '{}': {e}", req.path)))?;
+                let mut file = std::fs::File::open(&path).map_err(|e| {
+                    ApiError::Io(format!("open '{}': {e}", checked.display_hint()))
+                })?;
                 let mut buf = vec![0u8; PREVIEW_READ_SIZE];
                 let n = std::io::Read::read(&mut file, &mut buf)
                     .map_err(|e| ApiError::Io(format!("read: {e}")))?;
                 String::from_utf8_lossy(&buf[..n]).to_string()
             } else {
-                std::fs::read_to_string(&req.path)
-                    .map_err(|e| ApiError::Io(format!("read '{}': {e}", req.path)))?
+                std::fs::read_to_string(&path).map_err(|e| {
+                    ApiError::Io(format!("read '{}': {e}", checked.display_hint()))
+                })?
             };
             let resolved = resolve_format(&contents, &req.format);
             (contents, resolved)
@@ -464,30 +473,47 @@ impl GraphHunterApi {
     /// mix, time span). Stateless — touches no session. Frontend
     /// dispatches by extension; the regular [`Self::preview_ingest`]
     /// path would corrupt the binary file via `read_to_string`.
-    pub fn pcap_preview(&self, req: PcapPreviewRequest) -> ApiResult<PcapPreviewResult> {
-        crate::pcap_preview::pcap_preview_sample(&req.path).map_err(ApiError::Io)
+    pub fn pcap_preview(
+        &self,
+        req: PcapPreviewRequest,
+        policy: &PathPolicy,
+    ) -> ApiResult<PcapPreviewResult> {
+        let resolved = policy.resolve(&req.path)?;
+        crate::pcap_preview::pcap_preview_sample(&resolved.as_path().to_string_lossy())
+            .map_err(ApiError::Io)
     }
 
     /// Read a file from disk, parse it, insert triples into the
     /// resolved session's graph, and run full scoring. Synchronous;
     /// callers in async contexts should `spawn_blocking`.
-    pub fn load_data(&self, req: LoadDataRequest) -> ApiResult<LoadResult> {
+    /// Note: the file is read *before* the session is resolved, so a
+    /// caller with no session still pays a full read and then gets a 400.
+    /// Left in this order deliberately — swapping it changes the
+    /// failure-attribution ordering the DLQ comment below depends on. The
+    /// cost is bounded by [`PathPolicy`]'s size cap.
+    pub fn load_data(&self, req: LoadDataRequest, policy: &PathPolicy) -> ApiResult<LoadResult> {
+        let resolved = policy.resolve(&req.path)?;
+        let path = resolved.as_path().to_string_lossy().to_string();
         let use_evtx = req.format.to_lowercase() == "evtx"
-            || path_is_evtx(&req.path)
-            || (req.format.to_lowercase() == "auto" && file_looks_like_evtx(&req.path));
+            || path_is_evtx(&path)
+            || (req.format.to_lowercase() == "auto" && file_looks_like_evtx(&path));
         let (contents, format_for_parser) = if use_evtx {
-            let contents = evtx_to_sysmon_ndjson(&req.path).map_err(ApiError::Io)?;
+            let contents = evtx_to_sysmon_ndjson(&path).map_err(ApiError::Io)?;
             (contents, "generic".to_string())
         } else {
-            let contents = std::fs::read_to_string(&req.path)
-                .map_err(|e| ApiError::Io(format!("read '{}': {e}", req.path)))?;
+            // `display_hint` is the caller's own string: echoing the
+            // canonical absolute path alongside the OS error would be an
+            // existence oracle for paths outside the allowed root.
+            let contents = std::fs::read_to_string(&path).map_err(|e| {
+                ApiError::Io(format!("read '{}': {e}", resolved.display_hint()))
+            })?;
             (contents, req.format)
         };
 
         let session = self.resolve_session(req.session.as_ref())?;
 
         let dataset_id = Uuid::new_v4().to_string();
-        let name = std::path::Path::new(&req.path)
+        let name = std::path::Path::new(&path)
             .file_name()
             .and_then(|p| p.to_str())
             .unwrap_or("ingest")
@@ -509,7 +535,10 @@ impl GraphHunterApi {
             datasets.push(DatasetInfo {
                 id: dataset_id.clone(),
                 name,
-                path: Some(req.path.clone()),
+                // The resolved path, not the caller's string: this is the
+                // provenance record of what was actually read, and DLQ
+                // replay re-opens it later.
+                path: Some(path.clone()),
                 created_at: now_secs(),
                 entity_count: 0,
                 relation_count: 0,
@@ -973,26 +1002,33 @@ impl GraphHunterApi {
     /// mapping). Replaces `cmd_load_data_with_config` from the Tauri
     /// `graph_ops` module. Synchronous — spawn_blocking at the
     /// caller.
-    pub fn load_data_with_config(&self, req: LoadDataWithConfigRequest) -> ApiResult<LoadResult> {
+    pub fn load_data_with_config(
+        &self,
+        req: LoadDataWithConfigRequest,
+        policy: &PathPolicy,
+    ) -> ApiResult<LoadResult> {
         // Auto-upgrade stale mappings (TIME→Ignore, SEVERITY→Node, etc.)
         // so canonical-Skip fields always land as Metadata regardless of
         // what the persisted FieldConfig said.
         let mut req = req;
         let _upgraded = sanitize_field_config(&mut req.config);
 
+        let resolved = policy.resolve(&req.path)?;
+        let path = resolved.as_path().to_string_lossy().to_string();
+
         // Same EVTX-detection path as load_data.
-        let use_evtx = path_is_evtx(&req.path) || file_looks_like_evtx(&req.path);
+        let use_evtx = path_is_evtx(&path) || file_looks_like_evtx(&path);
         let contents = if use_evtx {
-            evtx_to_sysmon_ndjson(&req.path).map_err(ApiError::Io)?
+            evtx_to_sysmon_ndjson(&path).map_err(ApiError::Io)?
         } else {
-            std::fs::read_to_string(&req.path)
-                .map_err(|e| ApiError::Io(format!("read '{}': {e}", req.path)))?
+            std::fs::read_to_string(&path)
+                .map_err(|e| ApiError::Io(format!("read '{}': {e}", resolved.display_hint())))?
         };
 
         let session = self.resolve_session(req.session.as_ref())?;
 
         let dataset_id = Uuid::new_v4().to_string();
-        let name = std::path::Path::new(&req.path)
+        let name = std::path::Path::new(&path)
             .file_name()
             .and_then(|p| p.to_str())
             .unwrap_or("ingest")
@@ -1157,7 +1193,14 @@ impl GraphHunterApi {
     pub fn load_data_streaming(
         &self,
         req: LoadDataStreamingRequest,
+        policy: &PathPolicy,
     ) -> ApiResult<IngestJobStarted> {
+        // Containment first: the background thread mmaps this path, and
+        // by then there is no caller left to return an error to.
+        let checked = policy.resolve(&req.path)?;
+        let mut req = req;
+        req.path = checked.as_path().to_string_lossy().to_string();
+
         // Validate format before any work so callers fail fast.
         // Tabular formats stay hardcoded (they flow through
         // `format_registry`); stateful ingestors (EVTX, PCAP, …) come

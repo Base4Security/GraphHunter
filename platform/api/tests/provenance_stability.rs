@@ -97,7 +97,7 @@ fn provenance_mapping_hash_is_frozen_and_distinguishes_configs() {
             session: None,
             path: path_a,
             config: cfg_a,
-        })
+        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
         .expect("load_data_with_config A");
     assert!(result_a.new_relations > 0, "dataset A must produce edges");
 
@@ -106,7 +106,7 @@ fn provenance_mapping_hash_is_frozen_and_distinguishes_configs() {
             session: None,
             path: path_b,
             config: cfg_b,
-        })
+        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
         .expect("load_data_with_config B");
     assert!(result_b.new_relations > 0, "dataset B must produce edges");
 
@@ -219,7 +219,7 @@ fn mapping_edit_after_ingest_does_not_contaminate_already_exported_provenance() 
             session: None,
             path,
             config: cfg_a.clone(),
-        })
+        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
         .expect("load_data_with_config (configA)");
     assert!(result.new_relations > 0, "ingest under configA must produce edges");
 
@@ -311,7 +311,7 @@ fn builtin_parser_dataset_gets_real_parser_identity_not_unknown() {
             session: None,
             path: path.to_string_lossy().to_string(),
             format: "fortigate".into(),
-        })
+        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
         .expect("load_data fortigate");
     assert!(result.new_relations > 0, "fortigate line must produce edges");
 

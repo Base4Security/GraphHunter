@@ -36,7 +36,7 @@ fn api_with_fixture(session_name: &str, path: &str, format: &str) -> GraphHunter
             session: None,
             path: path.into(),
             format: format.into(),
-        })
+        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
         .expect("load_data");
     assert!(
         !result.zero_triples,
