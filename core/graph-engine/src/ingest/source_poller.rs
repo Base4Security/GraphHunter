@@ -792,13 +792,33 @@ mod tests {
         assert!(metrics.snapshot().consecutive_failures >= 3);
 
         let calls_when_open = failing.call_count();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Wait until a skip is *observed*, instead of sleeping a fixed
+        // 50ms and assuming the poller was scheduled inside it. The old
+        // form failed about one run in five. Two things changed here and
+        // only the pair was measured: the wait ends as soon as the skip
+        // appears, and `raw_rx` keeps being drained while waiting (with a
+        // 4-slot channel and no reader, a blocked send is a plausible way
+        // for the poller never to reach the next tick — plausible, not
+        // confirmed). 25 consecutive runs pass; the loop bound keeps a
+        // real regression failing instead of hanging.
+        for _ in 0..50 {
+            if metrics.snapshot().circuit_open_skips >= 1 {
+                break;
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(20), raw_rx.recv()).await;
+            tokio::task::yield_now().await;
+        }
+
         let calls_after_wait = failing.call_count();
         assert_eq!(
             calls_when_open, calls_after_wait,
             "poll_since should be skipped while circuit is open"
         );
-        assert!(metrics.snapshot().circuit_open_skips >= 1);
+        assert!(
+            metrics.snapshot().circuit_open_skips >= 1,
+            "an open circuit must record at least one skipped tick"
+        );
 
         cancel.cancel();
         drop(raw_rx);

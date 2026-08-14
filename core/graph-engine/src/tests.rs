@@ -6381,7 +6381,15 @@ fn benchmark_ablation_time_window() {
     );
 }
 
+/// Generates the empirical table for the paper over synthetic ER and BA
+/// graphs. Ignored by default because it takes over an hour in a debug
+/// build and the rest of this crate's ~790 tests finish in 1,4 seconds:
+/// left enabled it makes `cargo test` unusable as a gate, which in
+/// practice means nobody runs the gate. Run it deliberately with
+/// `cargo test -- --ignored benchmark_full_report` when regenerating the
+/// table.
 #[test]
+#[ignore = "paper benchmark: >1h in debug, run explicitly with --ignored"]
 fn benchmark_full_report() {
     // Generate the complete benchmark table for the paper
     println!("\n══════════════════════════════════════════════════════════════");
