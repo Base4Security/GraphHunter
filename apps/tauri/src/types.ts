@@ -151,7 +151,9 @@ export interface ParseStats {
   rows_skipped: number;
   per_field_occurrence?: Record<string, number>;
   /** Why rows were skipped, aggregated by short reason tag
-   *  (e.g. `empty_row`, `no_canonical_fields`, `no_anchor`). */
+   *  (`empty_row`, `no_canonical_fields`, `no_anchor`, `single_endpoint`,
+   *  `no_triple_emitted`). `single_endpoint` is a property of the data, not
+   *  a failure: the event names one entity and a relation needs two. */
   skip_reasons?: Record<string, number>;
   /** Up to ~20 sampled skipped rows (raw JSON snippet + reason tag).
    *  Surfaced by the Skipped badge popover so analysts can inspect

@@ -1686,28 +1686,58 @@ pub fn raw_events_from_each(
         .collect()
 }
 
+/// Canonical fields that can become one end of a relation. A row needs at
+/// least two of these filled in to produce a triple at all, which is what
+/// [`classify_skip_reason`] uses to tell a data property apart from a
+/// parser failure.
+const ENDPOINT_FIELDS: &[&str] = &[
+    "source_user",
+    "target_user",
+    "source_ip",
+    "target_ip",
+    "source_host",
+    "source_process",
+    "parent_process",
+    "target_file",
+];
+
 /// Post-hoc classification of why a row produced no triples. Cheap heuristic
 /// so the UI can drill down into skip counts without asking the parser to
 /// emit a reason per-row. Order matters: empty > no_canonical > no_anchor >
-/// other.
+/// single_endpoint > other.
+///
+/// The `single_endpoint` bucket exists because the previous catch-all
+/// conflated two situations that call for opposite responses: a row the
+/// parser failed on (fix the parser) and a row that structurally *cannot*
+/// yield a relation because only one entity is named (fix nothing — the
+/// event is simply one-sided). Both landed in `no_triple_emitted`, so an
+/// analyst reading the skip report could not tell which they had.
+///
+/// This is not hypothetical. In the AD-CAP Keycloak corpus, 642 events
+/// carry an IP and no user, and 399 of them are the `realm_disabled`
+/// rejections from the incident's containment window — the single most
+/// important event of the investigation, silently pooled with parser
+/// noise. See `docs/superpowers/plans/2026-08-13-hoja-de-ruta-auditada.md`
+/// item B1.5.
 pub(crate) fn classify_skip_reason(event: &Value) -> &'static str {
     let obj = match event.as_object() {
         Some(o) if !o.is_empty() => o,
         _ => return "empty_row",
     };
     // Any non-empty cell?
-    let any_value = obj.iter().any(|(_, v)| match v {
-        Value::String(s) => !s.is_empty(),
-        Value::Null => false,
-        _ => true,
-    });
+    let any_value = obj.iter().any(|(_, v)| has_value(v));
     if !any_value {
         return "empty_row";
     }
     // Count canonical-field hits (excluding the ones we know are metadata-only).
     let mut has_canonical = false;
     let mut has_anchor_source = false;
-    for key in obj.keys() {
+    // Distinct *canonical* endpoints carrying a value. Distinct matters:
+    // several raw headers can collapse onto the same canonical (e.g. both
+    // `destinationHostname` and `dst_ip` map to `target_ip`), and that is
+    // one endpoint, not two.
+    let mut endpoints: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    for (key, val) in obj {
         if let Some(c) = GenericParser::canonical_field(key) {
             has_canonical = true;
             if matches!(
@@ -1722,6 +1752,12 @@ pub(crate) fn classify_skip_reason(event: &Value) -> &'static str {
             ) {
                 has_anchor_source = true;
             }
+            // A present-but-empty column is not an endpoint. This is the
+            // whole point: the one-sided rows carry the *key* for the
+            // missing side, just no value in it.
+            if ENDPOINT_FIELDS.contains(&c) && has_value(val) {
+                endpoints.insert(c);
+            }
         }
     }
     if !has_canonical {
@@ -1730,7 +1766,113 @@ pub(crate) fn classify_skip_reason(event: &Value) -> &'static str {
     if !has_anchor_source {
         return "no_anchor";
     }
+    if endpoints.len() == 1 {
+        return "single_endpoint";
+    }
     "no_triple_emitted"
+}
+
+/// Whether a JSON cell holds anything usable. Empty strings and nulls are
+/// both "absent" — CSV ingest produces the former, JSON the latter, and
+/// the distinction is meaningless to the caller.
+fn has_value(v: &Value) -> bool {
+    match v {
+        Value::String(s) => !s.trim().is_empty(),
+        Value::Null => false,
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod skip_reason_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The AD-CAP shape: an IP, no user. Nothing is wrong with the parser
+    /// — a relation needs two ends and this event names one.
+    #[test]
+    fn one_sided_row_is_single_endpoint_not_a_parser_failure() {
+        let event = json!({
+            "time": "1784921286240",
+            "type": "REGISTER_ERROR",
+            "userId": "",
+            "ipAddress": "191.84.42.164",
+            "error": "realm_disabled"
+        });
+        assert_eq!(classify_skip_reason(&event), "single_endpoint");
+    }
+
+    /// A column that exists but is empty must not count as an end. The
+    /// one-sided rows carry the key for the missing side precisely
+    /// because the export has a fixed header.
+    #[test]
+    fn a_present_but_empty_column_is_not_an_endpoint() {
+        let filled = json!({"src_ip": "10.0.0.1", "username": "alice"});
+        let empty = json!({"src_ip": "10.0.0.1", "username": "   "});
+        assert_eq!(classify_skip_reason(&filled), "no_triple_emitted");
+        assert_eq!(classify_skip_reason(&empty), "single_endpoint");
+    }
+
+    /// Two ends present and still no triple: that is the parser's problem,
+    /// and it must stay in its own bucket so the new one keeps meaning
+    /// something.
+    #[test]
+    fn two_endpoints_and_no_triple_stays_a_parser_failure() {
+        let event = json!({"src_ip": "10.0.0.1", "dst_ip": "8.8.8.8"});
+        assert_eq!(classify_skip_reason(&event), "no_triple_emitted");
+    }
+
+    /// Several raw headers can collapse onto one canonical endpoint.
+    /// Counting keys instead of canonicals would call this two ends and
+    /// silently reclassify a one-sided row as a parser bug.
+    #[test]
+    fn distinct_canonicals_are_counted_not_distinct_headers() {
+        // `destinationHostname` and `dst_ip` both canonicalize to target_ip.
+        let event = json!({
+            "destinationHostname": "web01",
+            "dst_ip": "8.8.8.8"
+        });
+        assert_eq!(classify_skip_reason(&event), "single_endpoint");
+    }
+
+    /// The earlier buckets must keep winning — this change adds a rung to
+    /// the ladder, it does not reorder it.
+    #[test]
+    fn earlier_classifications_still_take_precedence() {
+        assert_eq!(classify_skip_reason(&json!({})), "empty_row");
+        assert_eq!(
+            classify_skip_reason(&json!({"src_ip": "", "username": ""})),
+            "empty_row"
+        );
+        assert_eq!(
+            classify_skip_reason(&json!({"colour": "blue", "size": "L"})),
+            "no_canonical_fields"
+        );
+        // Canonical fields, but none that can anchor a relation.
+        assert_eq!(
+            classify_skip_reason(&json!({"timestamp": "2024-01-15T14:30:00Z"})),
+            "no_anchor"
+        );
+    }
+
+    /// End to end: the reason must reach `ParseStats.skip_reasons`, which
+    /// is the surface the analyst actually reads.
+    #[test]
+    fn single_endpoint_reaches_the_ingest_report() {
+        let json = r#"[
+            {"timestamp":"2024-01-15T14:30:00Z","ipAddress":"191.84.42.164","error":"realm_disabled"},
+            {"timestamp":"2024-01-15T14:31:00Z","ipAddress":"191.84.42.165","error":"realm_disabled"}
+        ]"#;
+        let (_, stats) = GenericParser.parse_with_stats(json);
+        assert_eq!(stats.rows_seen, 2);
+        assert_eq!(stats.rows_skipped, 2);
+        assert_eq!(
+            stats.skip_reasons.get("single_endpoint"),
+            Some(&2),
+            "both one-sided rows must be reported as such, got {:?}",
+            stats.skip_reasons
+        );
+    }
 }
 
 /// Fase C-2 Task 3: `raw_line` capture on the generic/config parse path.
