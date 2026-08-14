@@ -6,7 +6,9 @@
 //! The returned report is structurally stable so the MCP tool and the
 //! UI badge can consume the same wire shape.
 
-use graph_hunter_core::invariants::{InvariantReport, Scope, check_invariants};
+use graph_hunter_core::invariants::{
+    InvariantReport, MAX_INVARIANT_RELATIONS, Scope, check_invariants,
+};
 
 use crate::dto::invariants::CheckInvariantsRequest;
 use crate::{ApiError, ApiResult, GraphHunterApi};
@@ -41,6 +43,20 @@ impl GraphHunterApi {
             None => Scope::Session,
         };
         self.with_graph_read(req.session.as_ref(), |graph| {
+            // Guard before `to_snapshot()`: that call materializes every
+            // edge as an owned `Relation` (~144 B), and `check_invariants`
+            // clones the in-scope subset again. On a multi-GB ingest (tens
+            // of millions of relations) the two copies need >9 GB and abort
+            // the process. Above the ceiling, return an all-skipped report
+            // instead of snapshotting. See `MAX_INVARIANT_RELATIONS`.
+            let relation_count = graph.relation_count();
+            if relation_count > MAX_INVARIANT_RELATIONS {
+                return Ok(InvariantReport::skipped_too_large(
+                    scope,
+                    graph.entity_count(),
+                    relation_count,
+                ));
+            }
             let (entities, relations) = graph.to_snapshot();
             Ok(check_invariants(&entities, &relations, scope))
         })
