@@ -48,9 +48,21 @@ fn threshold_from_env() -> f64 {
 pub fn assess(
     hypothesis: &Hypothesis,
     paths: &[Vec<Arc<str>>],
+    truncated: bool,
     graph: &GraphHunter,
 ) -> Option<PatternPrecision> {
     if paths.is_empty() {
+        return None;
+    }
+    // A truncated result set cannot support a prevalence claim in either
+    // direction. The matcher stopped enumerating at the cap, so the
+    // entities observed here are a floor, not a measurement: a pattern
+    // that truly implicates 60% of the population can look like 5% purely
+    // because the cap landed early. Staying silent is the honest failure
+    // mode -- found by running cat-021 against the real Keycloak graph,
+    // where 3,081 paths came back flagged `truncated` and the guard
+    // reported a comfortable prevalence it had no basis to report.
+    if truncated {
         return None;
     }
     let seed_type = hypothesis.steps.first()?.origin_type.to_string();
@@ -159,7 +171,7 @@ mod tests {
     fn flags_a_pattern_that_matches_most_of_the_population() {
         let g = graph_with_users(200);
         let paths = paths_for(0..180);
-        let p = assess(&user_auth_ip(), &paths, &g).expect("must flag 90% prevalence");
+        let p = assess(&user_auth_ip(), &paths, false, &g).expect("must flag 90% prevalence");
         assert_eq!(p.seed_type, "User");
         assert_eq!(p.matched_entities, 180);
         assert_eq!(p.population, 200);
@@ -173,7 +185,7 @@ mod tests {
     fn stays_quiet_for_a_selective_pattern() {
         let g = graph_with_users(200);
         let paths = paths_for(0..10); // 5%
-        assert!(assess(&user_auth_ip(), &paths, &g).is_none());
+        assert!(assess(&user_auth_ip(), &paths, false, &g).is_none());
     }
 
     /// Path count must not drive the verdict: one entity appearing in
@@ -187,7 +199,7 @@ mod tests {
             .map(|k| vec![Arc::from("user0"), Arc::from(format!("ip{k}").as_str())])
             .collect();
         assert!(
-            assess(&user_auth_ip(), &paths, &g).is_none(),
+            assess(&user_auth_ip(), &paths, false, &g).is_none(),
             "500 paths from a single entity is 0.5% prevalence, not 250%"
         );
     }
@@ -198,13 +210,13 @@ mod tests {
     fn exempts_small_populations() {
         let g = graph_with_users(10);
         let paths = paths_for(0..9); // 90%, but of ten nodes
-        assert!(assess(&user_auth_ip(), &paths, &g).is_none());
+        assert!(assess(&user_auth_ip(), &paths, false, &g).is_none());
     }
 
     #[test]
     fn empty_results_are_not_a_precision_problem() {
         let g = graph_with_users(200);
-        assert!(assess(&user_auth_ip(), &[], &g).is_none());
+        assert!(assess(&user_auth_ip(), &[], false, &g).is_none());
     }
 
     #[test]
@@ -212,13 +224,30 @@ mod tests {
         let g = graph_with_users(200);
         let paths = paths_for(0..60); // 30%
         assert!(
-            assess(&user_auth_ip(), &paths, &g).is_some(),
+            assess(&user_auth_ip(), &paths, false, &g).is_some(),
             "30% must trip the 20% default"
         );
         // SAFETY: restored before the test returns.
         unsafe { std::env::set_var("GRAPHHUNTER_PRECISION_THRESHOLD", "0.5") };
-        let quiet = assess(&user_auth_ip(), &paths, &g);
+        let quiet = assess(&user_auth_ip(), &paths, false, &g);
         unsafe { std::env::remove_var("GRAPHHUNTER_PRECISION_THRESHOLD") };
         assert!(quiet.is_none(), "30% must not trip a 50% threshold");
+    }
+
+    /// A capped result set is a floor, not a measurement. Reporting a
+    /// prevalence from it would understate exactly the case the guard
+    /// exists for.
+    #[test]
+    fn stays_silent_on_truncated_results() {
+        let g = graph_with_users(200);
+        let paths = paths_for(0..180); // 90% -- would fire if complete
+        assert!(
+            assess(&user_auth_ip(), &paths, true, &g).is_none(),
+            "must not judge prevalence from a truncated path set"
+        );
+        assert!(
+            assess(&user_auth_ip(), &paths, false, &g).is_some(),
+            "the same set, complete, must still fire"
+        );
     }
 }

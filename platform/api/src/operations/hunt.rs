@@ -258,7 +258,14 @@ impl GraphHunterApi {
                 .graph
                 .read()
                 .ok()
-                .and_then(|g| crate::operations::precision::assess(&req.hypothesis, &paths, &g));
+                .and_then(|g| {
+                    crate::operations::precision::assess(
+                        &req.hypothesis,
+                        &paths,
+                        truncated,
+                        &g,
+                    )
+                });
             (None, flag)
         };
         let live_tail_coverage = live_tail_coverage_for_session(&session);
