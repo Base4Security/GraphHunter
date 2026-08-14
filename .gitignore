@@ -97,5 +97,11 @@ dist/
 training/.venv/
 training/data/**/*.tar.gz
 training/data/**/*.json
+# DARPA ships the big tables split as numbered continuations —
+# ta1-cadets-e3-official-1.json.1, .json.2, ... — which `*.json` does not
+# match. Seven of those files are 24 GB and were sitting untracked, one
+# `git add -A` away from the index.
+training/data/**/*.json.*
+training/data/**/*.txt
 training/data/**/parsed/
 training/data/**/features/
