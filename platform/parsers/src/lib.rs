@@ -27,9 +27,11 @@
 pub mod cognito;
 pub mod forti_analyzer;
 pub mod fortigate;
+pub mod haproxy;
 pub mod iis_w3c;
 
 pub use cognito::{CognitoParser, looks_like_cognito};
+pub use haproxy::{HaproxyParser, looks_like_haproxy};
 pub use forti_analyzer::{
     ChartHandler, CompromisedHostHandler, FortiAnalyzerXmlParser, GenericFortiHandler,
     HandlerRegistry, ReportContext, Row, TopApplicationBySeverityHandler,

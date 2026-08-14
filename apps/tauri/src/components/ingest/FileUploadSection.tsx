@@ -179,6 +179,7 @@ export default function FileUploadSection({
           <option value="sysmon">Sysmon (Event Log)</option>
           <option value="sentinel">Azure Sentinel</option>
           <option value="fortianalyzer">FortiAnalyzer XML Report</option>
+          <option value="haproxy">HAProxy (HTTP log)</option>
           <option value="generic">Generic JSON</option>
           <option value="csv">CSV</option>
         </select>

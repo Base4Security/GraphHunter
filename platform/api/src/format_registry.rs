@@ -12,8 +12,8 @@ use graph_hunter_core::{
     preview_sysmon,
 };
 use graph_hunter_parsers::{
-    CognitoParser, FortiAnalyzerXmlParser, FortiGateParser, IisW3cParser, looks_like_cognito,
-    looks_like_fortigate, looks_like_iis_w3c,
+    CognitoParser, FortiAnalyzerXmlParser, FortiGateParser, HaproxyParser, IisW3cParser,
+    looks_like_cognito, looks_like_fortigate, looks_like_haproxy, looks_like_iis_w3c,
 };
 use serde_json::Value;
 
@@ -56,6 +56,14 @@ fn detect_cognito(contents: &str) -> bool {
 fn detect_iis(contents: &str) -> bool {
     let trimmed = contents.trim();
     !trimmed.starts_with('[') && !trimmed.starts_with('{') && looks_like_iis_w3c(trimmed)
+}
+
+/// Detects HAProxy HTTP-log lines. The native parser splits the
+/// space-delimited prefix and the quoted request line, routing source
+/// IPs to requested domains and URLs — work the generic CSV fallback
+/// can't do (it would treat the whole line as one unstructured column).
+fn detect_haproxy(contents: &str) -> bool {
+    looks_like_haproxy(contents)
 }
 
 /// Detects FortiGate firewall KV log lines (and FortiGate CSV exports
@@ -123,6 +131,18 @@ fn preview_fortigate(_contents: &str) -> Vec<(String, String)> {
     ]
 }
 
+fn preview_haproxy(_contents: &str) -> Vec<(String, String)> {
+    vec![
+        ("client_ip".into(), "IP (Client)".into()),
+        ("url_host".into(), "Domain (Requested)".into()),
+        ("url_path".into(), "URL".into()),
+        ("backend_server".into(), "Host (Backend)".into()),
+        ("method".into(), "metadata".into()),
+        ("status".into(), "metadata".into()),
+        ("backend".into(), "metadata".into()),
+    ]
+}
+
 fn preview_fortianalyzer(_contents: &str) -> Vec<(String, String)> {
     vec![
         ("User_Name".into(), "IP (Top User by Traffic)".into()),
@@ -176,6 +196,13 @@ static FORMAT_REGISTRY: &[FormatDescriptor] = &[
         detect: detect_iis,
         make_parser: || Box::new(IisW3cParser),
         preview: preview_iis,
+    },
+    FormatDescriptor {
+        name: "haproxy",
+        aliases: &["hap", "haproxy_http"],
+        detect: detect_haproxy,
+        make_parser: || Box::new(HaproxyParser),
+        preview: preview_haproxy,
     },
     FormatDescriptor {
         name: "fortianalyzer",
@@ -267,7 +294,7 @@ pub fn make_parser_for_format(
         .map(|desc| (desc.make_parser)())
         .ok_or_else(|| {
             format!(
-                "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', 'fortianalyzer', or 'fortigate'.",
+                "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', 'haproxy', 'fortianalyzer', or 'fortigate'.",
                 format_name
             )
         })
