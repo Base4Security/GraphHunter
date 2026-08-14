@@ -362,6 +362,7 @@ pub fn run() {
             // IP enrichment & subnet analysis
             commands::enrichment::cmd_enrich_ip,
             commands::enrichment::cmd_get_subnet_analysis,
+            commands::enrichment::cmd_get_shared_sessions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Graph Hunter");

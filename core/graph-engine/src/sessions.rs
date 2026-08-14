@@ -19,8 +19,11 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::generic::session_entity_type;
 use crate::graph::GraphHunter;
+use crate::types::EntityType;
 
 /// Metadata keys written onto each session node.
 pub const K_FIRST_SEEN: &str = "session_first_seen";
@@ -40,6 +43,21 @@ impl SessionSpan {
     pub fn duration_seconds(&self) -> i64 {
         self.last_seen - self.first_seen
     }
+}
+
+/// One session that more than one account was seen on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedSession {
+    /// Node id, including the `session:` namespace prefix.
+    pub session_id: String,
+    /// Accounts observed on this session, sorted for stable output.
+    pub accounts: Vec<String>,
+    /// Addresses the session was opened from, sorted.
+    pub addresses: Vec<String>,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    pub duration_seconds: i64,
+    pub event_count: usize,
 }
 
 impl GraphHunter {
@@ -83,6 +101,99 @@ impl GraphHunter {
             }
         }
         written
+    }
+
+    /// Sessions that more than one account was seen on.
+    ///
+    /// A stolen token or a shared cookie shows up here and almost nowhere
+    /// else: one session id, two identities. On the corpus this was built
+    /// for, exactly **one** of 60.145 sessions matched, and it joined the
+    /// two accounts the incident had already confirmed as taken over —
+    /// evidence of a single operator that no time-correlation argument had
+    /// produced.
+    ///
+    /// **Why this is a function and not a catalog pattern.** The DSL's
+    /// `HAVING` groups by the first node of a path, and the session edges
+    /// run `User -[Uses]-> Session`, so a pattern can group by account but
+    /// not by session. Flipping the edge to `Session -[By]-> User` would
+    /// make it expressible and cost the two-hop pivot in `cat-032`;
+    /// measured against real data the flip buys a single row, so the model
+    /// stays as it is and the rare-but-valuable question gets a dedicated
+    /// walk instead. Reverse traversal is something the graph supports
+    /// perfectly well outside the DSL — the limitation was only in the
+    /// aggregation grammar.
+    ///
+    /// Results are sorted by account count descending, then by session id,
+    /// so output is stable across runs.
+    pub fn sessions_with_multiple_accounts(&self) -> Vec<SharedSession> {
+        let ids = match self.entity_ids_for_type(&session_entity_type()) {
+            Some(ids) if !ids.is_empty() => ids,
+            _ => return Vec::new(),
+        };
+
+        let mut out = Vec::new();
+        for id in ids {
+            let accounts = self.accounts_on_session(&id);
+            if accounts.len() < 2 {
+                continue;
+            }
+            let span = self.session_span(&id);
+            let mut addresses: Vec<String> = self
+                .neighbors_incl_tail_by_id(&id)
+                .iter()
+                .filter_map(|e| self.id_for_sid(e.dest_sid))
+                .filter(|n| {
+                    self.get_entity(n)
+                        .is_some_and(|e| e.entity_type == EntityType::IP)
+                })
+                .map(str::to_string)
+                .collect();
+            addresses.sort();
+            addresses.dedup();
+
+            out.push(SharedSession {
+                session_id: id,
+                accounts,
+                addresses,
+                first_seen: span.map(|s| s.first_seen).unwrap_or(0),
+                last_seen: span.map(|s| s.last_seen).unwrap_or(0),
+                duration_seconds: span.map(|s| s.duration_seconds()).unwrap_or(0),
+                event_count: span.map(|s| s.event_count).unwrap_or(0),
+            });
+        }
+
+        out.sort_by(|a, b| {
+            b.accounts
+                .len()
+                .cmp(&a.accounts.len())
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+        out
+    }
+
+    /// Accounts on a session, deduplicated and sorted.
+    ///
+    /// The reverse index lists a predecessor once per edge rather than
+    /// once per node, so an account with twenty events on a session
+    /// appears twenty times. Deduplicating here is what keeps
+    /// `accounts.len() >= 2` meaning "two accounts" rather than "two
+    /// events".
+    fn accounts_on_session(&self, session_id: &str) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut accounts: Vec<String> = self
+            .get_reverse_source_sids(session_id)
+            .iter()
+            .filter(|sid| seen.insert(**sid))
+            .filter_map(|sid| self.id_for_sid(*sid))
+            .filter(|n| {
+                self.get_entity(n)
+                    .is_some_and(|e| e.entity_type == EntityType::User)
+            })
+            .map(str::to_string)
+            .collect();
+        accounts.sort();
+        accounts.dedup();
+        accounts
     }
 
     /// The span of one session, or `None` when it has no edges at all.
@@ -236,6 +347,82 @@ mod tests {
         let mut g = GraphHunter::new();
         g.add_entity(Entity::new("10.0.0.1", EntityType::IP)).ok();
         assert_eq!(g.summarize_sessions(), 0);
+    }
+
+    /// The AD-CAP shape: one session id carrying two victim accounts,
+    /// both from the same hosting address. This is the row the real
+    /// corpus produced -- one hit out of 60.145 sessions, joining the two
+    /// confirmed takeovers.
+    #[test]
+    fn a_session_shared_by_two_accounts_is_reported() {
+        use crate::generic::{session_entity_type, GenericParser};
+        use crate::parser::LogParser;
+
+        let log = r#"[
+          {"timestamp":"2026-07-23T19:57:48Z","username":"victima.uno@example.com",
+           "sessionId":"aaaa0001","ipAddress":"203.0.113.210"},
+          {"timestamp":"2026-07-23T20:12:13Z","username":"victima.dos@example.com",
+           "sessionId":"aaaa0001","ipAddress":"203.0.113.210"},
+          {"timestamp":"2026-07-23T20:15:00Z","username":"innocent@example.com",
+           "sessionId":"other-session","ipAddress":"198.51.100.141"}
+        ]"#;
+
+        let mut g = GraphHunter::new();
+        for (src, rel, dst) in GenericParser.parse(log) {
+            g.add_entity(src).ok();
+            g.add_entity(dst).ok();
+            g.add_relation(rel).ok();
+        }
+        let _ = session_entity_type();
+
+        let shared = g.sessions_with_multiple_accounts();
+        assert_eq!(shared.len(), 1, "only the two-account session qualifies");
+        let s = &shared[0];
+        assert_eq!(s.session_id, "session:aaaa0001");
+        assert_eq!(
+            s.accounts,
+            vec![
+                "victima.dos@example.com".to_string(),
+                "victima.uno@example.com".to_string()
+            ]
+        );
+        assert_eq!(s.addresses, vec!["203.0.113.210".to_string()]);
+        assert_eq!(s.duration_seconds, 865);
+    }
+
+    /// A single account with many events on one session must not read as
+    /// many accounts -- the reverse index lists a predecessor once per
+    /// edge, and that is exactly how this would go wrong.
+    #[test]
+    fn many_events_from_one_account_is_not_many_accounts() {
+        use crate::generic::session_entity_type;
+
+        let mut g = GraphHunter::new();
+        g.add_entity(Entity::new("session:busy", session_entity_type()))
+            .expect("session");
+        g.add_entity(Entity::new("alice", EntityType::User))
+            .expect("user");
+        for ts in 0..25i64 {
+            g.add_relation(Relation::new(
+                "alice",
+                "session:busy",
+                RelationType::Other("Uses".into()),
+                1_000 + ts,
+            ))
+            .expect("edge");
+        }
+        assert!(
+            g.sessions_with_multiple_accounts().is_empty(),
+            "25 events from one account is one account"
+        );
+    }
+
+    /// A graph with no sessions must answer nothing rather than scan.
+    #[test]
+    fn no_sessions_means_no_shared_sessions() {
+        let mut g = GraphHunter::new();
+        g.add_entity(Entity::new("10.0.0.1", EntityType::IP)).ok();
+        assert!(g.sessions_with_multiple_accounts().is_empty());
     }
 
     /// End to end, on the shape that motivated the feature: one session

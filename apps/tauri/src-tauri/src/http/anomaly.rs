@@ -45,6 +45,24 @@ pub(super) async fn handler_subnet_analysis(State(api): State<Arc<GraphHunterApi
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct SharedSessionsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+pub(super) async fn handler_shared_sessions(
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<SharedSessionsQuery>,
+) -> Response {
+    api_response(api.get_shared_sessions(
+        graph_hunter_api::dto::session_analytics::SharedSessionsRequest {
+            session: None,
+            limit: q.limit,
+        },
+    ))
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct EnrichIpBody {
     ip: String,
 }

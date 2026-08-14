@@ -188,6 +188,12 @@ fn known_endpoints() -> Vec<EndpointMeta> {
             "Group IP entities by /24 subnet with aggregates.",
             true,
         ),
+        ep(
+            "/sessions/shared",
+            Get,
+            "Sessions observed under more than one account — a stolen token or shared cookie.",
+            true,
+        ),
         // --- Catalogs ------------------------------------------------
         ep(
             "/catalog",

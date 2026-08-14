@@ -376,6 +376,7 @@ pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> R
         .route("/entity_type_counts", get(graph::handler_entity_type_counts))
         .route("/temporal_heatmap", get(anomaly::handler_temporal_heatmap))
         .route("/subnet_analysis", get(anomaly::handler_subnet_analysis))
+        .route("/sessions/shared", get(anomaly::handler_shared_sessions))
         .route("/enrich_ip", post(anomaly::handler_enrich_ip))
         .route("/catalog", get(catalog::handler_catalog))
         .route("/catalog/status", get(catalog::handler_catalog_with_status))

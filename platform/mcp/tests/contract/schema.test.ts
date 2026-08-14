@@ -85,6 +85,7 @@ test(
       "/entity_type_counts",
       "/relation_schema",
       "/subnet_analysis",
+      "/sessions/shared",
       "/temporal_heatmap",
       "/datasets",
       "/path_nodes",

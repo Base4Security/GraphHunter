@@ -31,5 +31,6 @@ pub mod schema;
 pub mod sentinel;
 pub mod sentinel_publish;
 pub mod session;
+pub mod session_analytics;
 pub mod sigma;
 pub mod ticket;
