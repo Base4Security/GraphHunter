@@ -803,6 +803,21 @@ impl GraphHunter {
             .unwrap_or(&[])
     }
 
+    /// The interned id for `id`, or `None` when the graph has never seen
+    /// it. Callers that already hold a `CompactRelation` (whose endpoints
+    /// are `StrId`s) need this to compare against a node they only know by
+    /// name, without resolving every neighbour back to a string.
+    pub fn sid_for_id(&self, id: &str) -> Option<StrId> {
+        self.interner.get(id)
+    }
+
+    /// The name behind an interned id. Inverse of [`Self::sid_for_id`],
+    /// for callers walking `CompactRelation` endpoints that need to report
+    /// a node by name.
+    pub fn id_for_sid(&self, sid: StrId) -> Option<&str> {
+        Some(self.interner.resolve(sid))
+    }
+
     /// Materializes the outgoing-edge slice for `sid` as an owned
     /// `Vec<CompactRelation>` from the streaming layer. Stage 2c
     /// part 2 final migration — every hot-path matcher caller was

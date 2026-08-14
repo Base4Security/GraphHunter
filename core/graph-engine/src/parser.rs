@@ -155,6 +155,16 @@ pub struct ParseStats {
     /// for parsers that cannot surface per-field shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drift: Option<DriftSnapshot>,
+    /// Distinct session correlation ids seen in this batch. Zero when the
+    /// source carries no session field.
+    #[serde(default)]
+    pub sessions_seen: usize,
+    /// Session nodes the ceiling refused to materialize. Non-zero means
+    /// the graph has NO session nodes for this batch and session patterns
+    /// will return nothing — reported rather than left to be discovered
+    /// by an empty result set.
+    #[serde(default)]
+    pub sessions_dropped: usize,
 }
 
 /// Trait for log format parsers.

@@ -193,6 +193,11 @@ pub struct NormalizedEvent {
     pub protocol: Option<String>,
     pub source_port: Option<String>,
     pub target_port: Option<String>,
+    /// Correlation identifier that threads several events into one logical
+    /// session (`sessionId`, `correlation_id`, `request_id`, `job_id`).
+    /// Carries the raw value; [`GenericParser::session_entity_id`] adds the
+    /// namespace prefix before it becomes a node.
+    pub session: Option<String>,
 }
 
 impl GenericParser {
@@ -771,6 +776,7 @@ impl GenericParser {
                     protocol: None,
                     source_port: None,
                     target_port: None,
+                    session: None,
                 };
             }
         };
@@ -791,6 +797,7 @@ impl GenericParser {
         let mut protocol: Option<String> = None;
         let mut source_port: Option<String> = None;
         let mut target_port: Option<String> = None;
+        let mut session: Option<String> = None;
         let mut action_value: Option<String> = None;
         let mut bare_file_name: Option<String> = None;
 
@@ -881,6 +888,9 @@ impl GenericParser {
                     "target_port" if target_port.is_none() => {
                         target_port = Some(val_str);
                     }
+                    "session" if session.is_none() => {
+                        session = Some(val_str);
+                    }
                     _ => {}
                 }
             }
@@ -937,6 +947,7 @@ impl GenericParser {
             protocol,
             source_port,
             target_port,
+            session,
         }
     }
 
@@ -957,6 +968,31 @@ impl GenericParser {
             }
         }
         None
+    }
+
+    /// Namespaced node id for a session correlation value, or `None` when
+    /// the value cannot be a useful node.
+    ///
+    /// The prefix is not decoration. In the Keycloak export that motivated
+    /// this feature, `userId` and `sessionId` are both UUIDs minted by the
+    /// same generator — a bare value would let a session silently collide
+    /// with a user and fuse two unrelated nodes into one.
+    ///
+    /// Rejections mirror the node-promotion guards used for user-mapped
+    /// fields: over-long free text and timestamp-shaped values are unique
+    /// per row and would mint one dead node per event. Purely numeric ids
+    /// are *kept* here, unlike in that path — `request_id` and `job_id` are
+    /// normally numeric, and dropping them would silently lose exactly the
+    /// correlation this feature exists to capture.
+    pub fn session_entity_id(raw: &str) -> Option<String> {
+        let v = raw.trim();
+        if v.is_empty()
+            || v.len() > crate::field_preview::MAX_NODE_VALUE_LEN
+            || crate::field_preview::value_looks_like_timestamp(v)
+        {
+            return None;
+        }
+        Some(format!("session:{v}"))
     }
 
     /// Generates triples from a single normalized event using relationship inference rules.
@@ -1145,6 +1181,59 @@ impl GenericParser {
                 let rt = action_rel.clone().unwrap_or(RelationType::Auth);
                 let rel = Relation::new(user, ip, rt, n.timestamp);
                 triples.push((src, rel, dst));
+            }
+        }
+
+        // Rule: correlation id → Session hub node.
+        //
+        // A session is what threads many events into one logical visit, and
+        // it is the artefact hunting actually reasons about: "the same
+        // session seen from two addresses" is evidence, while "two events
+        // from two addresses" is not. Before this rule the id sat in the
+        // source data and never reached the graph, so that question had to
+        // be answered with a script over the raw file.
+        //
+        // Topology is a star with the session at the centre:
+        //
+        //     User -[Uses]-> Session -[From]-> IP
+        //
+        // which makes the continuity question one pattern with the session
+        // as the grouping node, rather than a join the analyst does by hand.
+        if let Some(session_id) = n.session.as_deref().and_then(Self::session_entity_id) {
+            let sess = || Entity::new(&session_id, session_entity_type());
+
+            // Prefer the acting user; fall back to the target for logs that
+            // only name the account being acted on.
+            if let Some(user) = n.source_user.as_ref().or(n.target_user.as_ref()) {
+                let src = Entity::new(user, EntityType::User);
+                let rel = Relation::new(
+                    user,
+                    &session_id,
+                    RelationType::Other("Uses".into()),
+                    n.timestamp,
+                );
+                triples.push((src, rel, sess()));
+            }
+
+            // Only `source_ip`: it is the endpoint the session was observed
+            // from. `target_ip` is where the actor went, which is a
+            // different fact and would read as a false origin.
+            if let Some(ip) = &n.source_ip {
+                let rel = Relation::new(
+                    &session_id,
+                    ip,
+                    RelationType::Other("From".into()),
+                    n.timestamp,
+                );
+                triples.push((sess(), rel, Entity::new(ip, EntityType::IP)));
+            } else if let Some(host) = &n.source_host {
+                let rel = Relation::new(
+                    &session_id,
+                    host,
+                    RelationType::Other("From".into()),
+                    n.timestamp,
+                );
+                triples.push((sess(), rel, Entity::new(host, EntityType::Host)));
             }
         }
 
@@ -1612,7 +1701,32 @@ where
     // sequential and index-ordered: skipped_samples keep the first 20
     // skipped rows in input order and drift observation stays
     // deterministic, exactly as the pre-parallel implementation behaved.
-    let each: Vec<Vec<ParsedTriple>> = events.par_iter().map(|e| per_event(e)).collect();
+    let mut each: Vec<Vec<ParsedTriple>> = events.par_iter().map(|e| per_event(e)).collect();
+
+    // Session ceiling. Applied here, before the skip accounting below, so
+    // an event whose only output was a session edge is correctly counted
+    // as skipped once that edge is refused — otherwise the report would
+    // claim rows produced triples that never reached the graph.
+    let distinct_sessions: std::collections::HashSet<&str> = each
+        .iter()
+        .flatten()
+        .filter(|(src, _, _)| is_session_entity(src))
+        .map(|(src, _, _)| src.id.as_str())
+        .chain(
+            each.iter()
+                .flatten()
+                .filter(|(_, _, dst)| is_session_entity(dst))
+                .map(|(_, _, dst)| dst.id.as_str()),
+        )
+        .collect();
+    stats.sessions_seen = distinct_sessions.len();
+    if stats.sessions_seen > max_session_entities() {
+        stats.sessions_dropped = stats.sessions_seen;
+        for group in each.iter_mut() {
+            group.retain(|(src, _, dst)| !is_session_entity(src) && !is_session_entity(dst));
+        }
+    }
+    let each = each;
 
     let mut per_field: HashMap<String, usize> = HashMap::new();
     let mut skip_reasons: HashMap<String, usize> = HashMap::new();
@@ -1684,6 +1798,52 @@ pub fn raw_events_from_each(
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// Type name carried by session hub nodes. Kept in one place because the
+/// parser mints them, the ingest ceiling counts them and the DSL matches
+/// them by `Display` string — three call sites that must not drift.
+pub const SESSION_TYPE_NAME: &str = "Session";
+
+/// The entity type of a session hub node. `Other` rather than a new enum
+/// variant: `EntityType` is serialized into session files and crosses the
+/// FFI boundary by tag, and `Other` already round-trips through the
+/// `OtherTypeMap` without touching either layout.
+pub fn session_entity_type() -> EntityType {
+    EntityType::Other(SESSION_TYPE_NAME.to_string())
+}
+
+/// True when this entity is a session hub node.
+pub fn is_session_entity(e: &Entity) -> bool {
+    matches!(&e.entity_type, EntityType::Other(t) if t == SESSION_TYPE_NAME)
+}
+
+/// Ceiling on how many distinct session nodes one parse batch may create.
+///
+/// Sessions are numerous by nature — roughly one per handful of events —
+/// so a *proportional* rule is the wrong instrument: sessions legitimately
+/// dominate the node count (in the corpus that motivated this feature,
+/// 60.145 sessions against 26.183 other entities, i.e. 70% of the graph),
+/// and a percentage ceiling would reject exactly the case the feature
+/// exists for. What actually needs bounding is memory, so the ceiling is
+/// absolute. At ~200 B per `Entity` plus its id, this default caps session
+/// nodes at roughly 100 MB.
+///
+/// Overridable with `GRAPHHUNTER_MAX_SESSION_ENTITIES` — an escape hatch,
+/// not a required setting: sessions are on by default with no
+/// configuration.
+///
+/// **Scope caveat:** the ceiling is per parse batch. A streaming ingest
+/// that feeds many batches can exceed it in aggregate; bounding the whole
+/// graph needs the count at insert time, which this does not do.
+pub const MAX_SESSION_ENTITIES: usize = 500_000;
+
+fn max_session_entities() -> usize {
+    std::env::var("GRAPHHUNTER_MAX_SESSION_ENTITIES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(MAX_SESSION_ENTITIES)
 }
 
 /// Canonical fields that can become one end of a relation. A row needs at
@@ -1780,6 +1940,156 @@ fn has_value(v: &Value) -> bool {
         Value::String(s) => !s.trim().is_empty(),
         Value::Null => false,
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod session_entity_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn edge(triples: &[ParsedTriple], rel: &str) -> Option<(String, String)> {
+        triples
+            .iter()
+            .find(|(_, r, _)| r.rel_type.to_string() == rel)
+            .map(|(s, _, d)| (s.id.clone(), d.id.clone()))
+    }
+
+    /// The shape the hunt needs: one pattern from user through session to
+    /// address, instead of a join done by hand over the raw file.
+    #[test]
+    fn builds_the_user_session_ip_star() {
+        let event = json!({
+            "timestamp": "2026-07-24T19:42:51Z",
+            "username": "usuario.tres@example.com",
+            "sessionId": "bbbb0001-1111-2222-3333-444455556666",
+            "ipAddress": "203.0.113.21"
+        });
+        let triples = GenericParser::parse_event(&event);
+        assert_eq!(
+            edge(&triples, "Uses"),
+            Some((
+                "usuario.tres@example.com".into(),
+                "session:bbbb0001-1111-2222-3333-444455556666".into()
+            ))
+        );
+        assert_eq!(
+            edge(&triples, "From"),
+            Some((
+                "session:bbbb0001-1111-2222-3333-444455556666".into(),
+                "203.0.113.21".into()
+            ))
+        );
+    }
+
+    /// The prefix is load-bearing: Keycloak mints `userId` and `sessionId`
+    /// from the same UUID generator, so a bare value would fuse a session
+    /// node into an unrelated user node.
+    #[test]
+    fn session_ids_are_namespaced_against_collisions() {
+        let shared = "29ab57e4-3105-4eda-9ce5-18dcc0010c22";
+        assert_eq!(
+            GenericParser::session_entity_id(shared),
+            Some(format!("session:{shared}"))
+        );
+        assert_ne!(
+            GenericParser::session_entity_id(shared).unwrap(),
+            shared,
+            "a bare id would collide with the User node of the same UUID"
+        );
+    }
+
+    /// Numeric correlation ids are the norm for `request_id` / `job_id`.
+    /// The node-promotion path drops all-digit values; doing that here
+    /// would silently lose the correlation this feature is for.
+    #[test]
+    fn numeric_correlation_ids_survive() {
+        assert_eq!(
+            GenericParser::session_entity_id("8814072"),
+            Some("session:8814072".into())
+        );
+    }
+
+    /// Values that are unique per row and mean nothing as a node stay off
+    /// the graph, matching the guards the user-mapping path applies.
+    #[test]
+    fn junk_session_values_are_refused() {
+        assert_eq!(GenericParser::session_entity_id(""), None);
+        assert_eq!(GenericParser::session_entity_id("   "), None);
+        assert_eq!(GenericParser::session_entity_id("2026-06-18T15:56:13"), None);
+        assert_eq!(GenericParser::session_entity_id(&"x".repeat(300)), None);
+    }
+
+    /// No session field must mean no session node — this rule cannot
+    /// invent a hub for sources that do not correlate their events.
+    #[test]
+    fn sources_without_a_session_field_are_untouched() {
+        let event = json!({
+            "timestamp": "2026-07-24T19:42:51Z",
+            "username": "alice",
+            "ipAddress": "10.0.0.1"
+        });
+        let triples = GenericParser::parse_event(&event);
+        assert!(
+            !triples.iter().any(|(s, _, d)| is_session_entity(s) || is_session_entity(d)),
+            "no session field, no session node"
+        );
+        assert!(!triples.is_empty(), "the User->IP edge must still be there");
+    }
+
+    /// `target_ip` is where the actor went, not where the session came
+    /// from. Using it as the origin would read as a false provenance.
+    #[test]
+    fn only_the_source_address_becomes_the_session_origin() {
+        let event = json!({
+            "timestamp": "2026-07-24T19:42:51Z",
+            "sessionId": "abc-123",
+            "src_ip": "10.0.0.1",
+            "dst_ip": "8.8.8.8"
+        });
+        let triples = GenericParser::parse_event(&event);
+        assert_eq!(
+            edge(&triples, "From"),
+            Some(("session:abc-123".into(), "10.0.0.1".into()))
+        );
+    }
+
+    /// The ceiling must refuse the nodes AND say so. A silent drop would
+    /// surface later as an empty session query with no explanation.
+    #[test]
+    fn the_ceiling_drops_sessions_and_reports_it() {
+        // SAFETY: restored before the test returns.
+        unsafe { std::env::set_var("GRAPHHUNTER_MAX_SESSION_ENTITIES", "2") };
+        let json = r#"[
+            {"timestamp":"2026-07-24T19:42:51Z","username":"a","sessionId":"s1","ipAddress":"10.0.0.1"},
+            {"timestamp":"2026-07-24T19:42:52Z","username":"b","sessionId":"s2","ipAddress":"10.0.0.2"},
+            {"timestamp":"2026-07-24T19:42:53Z","username":"c","sessionId":"s3","ipAddress":"10.0.0.3"}
+        ]"#;
+        let (triples, stats) = GenericParser.parse_with_stats(json);
+        unsafe { std::env::remove_var("GRAPHHUNTER_MAX_SESSION_ENTITIES") };
+
+        assert_eq!(stats.sessions_seen, 3);
+        assert_eq!(stats.sessions_dropped, 3, "over the ceiling, none survive");
+        assert!(
+            !triples.iter().any(|(s, _, d)| is_session_entity(s) || is_session_entity(d)),
+            "no session node may reach the graph once the ceiling trips"
+        );
+        // The User->IP edges are unaffected: the ceiling bounds sessions,
+        // not the rest of the ingest.
+        assert_eq!(triples.len(), 3);
+        assert_eq!(stats.rows_skipped, 0);
+    }
+
+    /// Under the ceiling, sessions are on with no configuration at all.
+    #[test]
+    fn under_the_ceiling_sessions_are_on_by_default() {
+        let json = r#"[
+            {"timestamp":"2026-07-24T19:42:51Z","username":"a","sessionId":"s1","ipAddress":"10.0.0.1"}
+        ]"#;
+        let (triples, stats) = GenericParser.parse_with_stats(json);
+        assert_eq!(stats.sessions_seen, 1);
+        assert_eq!(stats.sessions_dropped, 0);
+        assert!(triples.iter().any(|(s, _, _)| is_session_entity(s)));
     }
 }
 

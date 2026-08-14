@@ -20,6 +20,21 @@ pub fn run_full_scoring(graph: &mut GraphHunter) {
     graph.compute_betweenness(None);
     graph.compute_composite_score_hunt_default();
     graph.finalize_anomaly_scorer();
+    summarize_sessions(graph);
+}
+
+/// Folds each session node's edge timestamps into a span on its metadata.
+///
+/// Wired into both scoring pipelines rather than left as an opt-in call:
+/// a session's duration is the property analysts reason about, and this
+/// project has a documented habit of building a capability and leaving it
+/// switched off. Costs one adjacency walk per session node and nothing at
+/// all on graphs that have none.
+fn summarize_sessions(graph: &mut GraphHunter) {
+    let n = graph.summarize_sessions();
+    if n > 0 {
+        tracing::info!("SCORING: summarized {} session nodes", n);
+    }
 }
 
 /// Adaptive scoring: skips PageRank for graphs >500K relations and
@@ -48,6 +63,7 @@ pub fn run_scoring_adaptive(graph: &mut GraphHunter) -> Result<(), String> {
 
     graph.compute_composite_score_hunt_default();
     graph.finalize_anomaly_scorer();
+    summarize_sessions(graph);
     tracing::info!("SCORING: complete");
     Ok(())
 }

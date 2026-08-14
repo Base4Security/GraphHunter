@@ -39,6 +39,7 @@ pub mod preview;
 pub mod relation;
 pub mod scoring;
 pub mod semijoin;
+pub mod sessions;
 pub mod sentinel;
 pub mod service_classifier;
 pub mod simd_rust;
