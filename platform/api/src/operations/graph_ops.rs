@@ -109,14 +109,23 @@ impl GraphHunterApi {
             let target_sid = graph.interner.get(&req.node_id);
             // `reverse_adj` stores one entry per incoming edge, so a single
             // source `S` with `X` incoming edges to `node_id` appears `X`
-            // times. Without dedup, the outer loop fires `X` times per
-            // unique source, and the inner `break` means we push the
-            // same first-match edge `X` times — that's why this endpoint
-            // used to return 500 identical events when a node had one
-            // heavy source.
+            // times. The `seen_sources` dedup below stops the outer loop
+            // from visiting `S` more than once.
+            //
+            // The inner loop must NOT stop at the first match. It used to
+            // `break` there, which capped every neighbour at one incoming
+            // edge and silently dropped the rest: an account that emits
+            // LOGIN, UPDATE_PASSWORD and VERIFY_EMAIL against the same IP
+            // in one second showed up as a single arbitrary event. During
+            // the AD-CAP re-hunt that hid a password change behind an
+            // unrelated event and caused a real indicator to be dismissed
+            // — the analyst only caught it by querying from the other
+            // endpoint. `get_events_paginated` never had the `break` and
+            // has been returning the full set all along; the two had
+            // simply diverged.
             let mut seen_sources: std::collections::HashSet<graph_hunter_core::StrId> =
                 std::collections::HashSet::new();
-            for &source_sid in graph.get_reverse_source_sids(&req.node_id) {
+            'sources: for &source_sid in graph.get_reverse_source_sids(&req.node_id) {
                 if edges.len() >= MAX_EVENTS {
                     break;
                 }
@@ -126,7 +135,11 @@ impl GraphHunterApi {
                 for compact in graph.neighbors_incl_tail(source_sid) {
                     if Some(compact.dest_sid) == target_sid {
                         edges.push(subgraph_edge_from_compact(graph, &compact));
-                        break;
+                        // Bound here too: one heavy source can now
+                        // contribute many edges on its own.
+                        if edges.len() >= MAX_EVENTS {
+                            break 'sources;
+                        }
                     }
                 }
             }
@@ -977,5 +990,70 @@ mod graph_neighbors_tests {
             .expect("graph_neighbors");
         assert!(res.neighbors.iter().all(|n| n.edge == "Auth"), "only Auth edges pass the filter");
         assert!(res.neighbors.iter().any(|n| n.node.value == "203.0.113.7"));
+    }
+
+    /// One account emitting several distinct events against the same IP in
+    /// the same second must surface as several events, not one.
+    ///
+    /// The incoming-edge walk used to `break` at the first match per
+    /// source, so a neighbour with parallel edges contributed exactly one
+    /// arbitrary event. In the AD-CAP re-hunt that hid an UPDATE_PASSWORD
+    /// behind a VERIFY_EMAIL and nearly cost a real indicator.
+    #[test]
+    fn returns_every_parallel_edge_from_one_neighbour() {
+        use crate::state::Session;
+        use graph_hunter_core::{EntityType, GraphHunter, RelationType};
+        use std::sync::Arc;
+
+        let mut g = GraphHunter::new();
+        g.add_entity(Entity::new("user@example.com", EntityType::User))
+            .expect("user");
+        g.add_entity(Entity::new("10.0.0.1", EntityType::IP)).expect("ip");
+        // Three events, same pair, same instant — exactly the Keycloak
+        // shape where one action emits several typed records at once.
+        for t in ["LOGIN", "UPDATE_PASSWORD", "VERIFY_EMAIL"] {
+            let mut r = Relation::new("user@example.com", "10.0.0.1", RelationType::Auth, 1000);
+            r.metadata.insert("type".to_string(), t.to_string());
+            g.add_relation(r).expect("rel");
+        }
+
+        let api = GraphHunterApi::new_noop();
+        api.sessions()
+            .insert(Arc::new(Session::new("s-par", "t", g, 0)));
+        api.sessions().set_current(Some("s-par".into()));
+
+        // From the IP side: this is the direction that was broken.
+        let from_ip = api
+            .get_events_for_node(EventsForNodeRequest {
+                session: None,
+                node_id: "10.0.0.1".to_string(),
+            })
+            .expect("events");
+        assert_eq!(
+            from_ip.len(),
+            3,
+            "expected all three parallel edges, got {from_ip:?}"
+        );
+
+        let mut kinds: Vec<&str> = from_ip
+            .iter()
+            .filter_map(|e| e.metadata.get("type").map(|s| s.as_str()))
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, vec!["LOGIN", "UPDATE_PASSWORD", "VERIFY_EMAIL"]);
+
+        // And the two directions must agree — the divergence between them
+        // is what made the original bug so hard to notice.
+        let from_user = api
+            .get_events_for_node(EventsForNodeRequest {
+                session: None,
+                node_id: "user@example.com".to_string(),
+            })
+            .expect("events");
+        assert_eq!(
+            from_user.len(),
+            from_ip.len(),
+            "querying from either endpoint must return the same edge set"
+        );
     }
 }
