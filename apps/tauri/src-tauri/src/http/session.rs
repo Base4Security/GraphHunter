@@ -39,3 +39,42 @@ pub(super) async fn handler_list_sessions(State(api): State<Arc<GraphHunterApi>>
         ))),
     }
 }
+
+pub(super) async fn handler_current_session(State(api): State<Arc<GraphHunterApi>>) -> Response {
+    match api.get_current_session() {
+        Ok(v) => ok_json(v),
+        Err(e) => api_err_response(e),
+    }
+}
+
+/// Loading and saving both walk the session directory and (de)serialize
+/// the whole graph, so they run off the async runtime.
+pub(super) async fn handler_load_session(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<graph_hunter_api::dto::session::LoadSessionRequest>,
+) -> Response {
+    let api_clone = api.clone();
+    match tokio::task::spawn_blocking(move || api_clone.load_session_blocking(body)).await {
+        Ok(Ok(v)) => ok_json(v),
+        Ok(Err(e)) => api_err_response(e),
+        Err(join) => api_err_response(graph_hunter_api::ApiError::Internal(format!(
+            "load_session task failed: {join}"
+        ))),
+    }
+}
+
+pub(super) async fn handler_save_session(
+    State(api): State<Arc<GraphHunterApi>>,
+    Json(body): Json<graph_hunter_api::dto::session::SaveSessionRequest>,
+) -> Response {
+    let api_clone = api.clone();
+    match tokio::task::spawn_blocking(move || api_clone.save_session_blocking(body)).await {
+        // `()` would serialize to a bare `null`; give callers something
+        // they can actually branch on.
+        Ok(Ok(())) => ok_json(serde_json::json!({ "saved": true })),
+        Ok(Err(e)) => api_err_response(e),
+        Err(join) => api_err_response(graph_hunter_api::ApiError::Internal(format!(
+            "save_session task failed: {join}"
+        ))),
+    }
+}

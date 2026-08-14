@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { defineTool } from "../../lib/types.js";
+import { HEAVY } from "../../lib/api-client.js";
 
 const createInput = z.object({
   name: z
@@ -36,5 +37,51 @@ export const sessionList = defineTool({
   outputSchema: z.unknown(),
   async execute(ctx) {
     return ctx.api.get("/session/list");
+  },
+});
+
+export const sessionCurrent = defineTool({
+  name: "session_current",
+  description:
+    "The session that ingest and hunt calls fall back to when they omit an explicit handle. Returns null when none is selected -- in which case those calls fail, and session_create or session_load is the fix. Worth checking first in any workflow that does not pass session ids explicitly, since 'current' is shared across every client of this GraphHunter process.",
+  category: "session",
+  version: 1,
+  stability: "stable",
+  inputSchema: z.object({}),
+  outputSchema: z.unknown(),
+  async execute(ctx) {
+    return ctx.api.get("/session/current");
+  },
+});
+
+export const sessionLoad = defineTool({
+  name: "session_load",
+  description:
+    "Load a previously saved session from disk and make it current, restoring its graph, datasets and tags. Use session_list to find the id. Deserializing a large graph takes a while, so this is a heavy call.",
+  category: "session",
+  version: 1,
+  stability: "stable",
+  inputSchema: z.object({
+    session_id: z.string().min(1).max(200).describe("Session id, from session_list."),
+  }),
+  outputSchema: z.unknown(),
+  async execute(ctx, { session_id }) {
+    return ctx.api.post("/session/load", { session_id }, HEAVY);
+  },
+});
+
+export const sessionSave = defineTool({
+  name: "session_save",
+  description:
+    "Persist a session's graph and datasets to disk so it survives a restart and can be reopened with session_load. Ingested data is otherwise in-memory only and lost when the process exits.",
+  category: "session",
+  version: 1,
+  stability: "stable",
+  inputSchema: z.object({
+    session_id: z.string().min(1).max(200).describe("Session to persist."),
+  }),
+  outputSchema: z.unknown(),
+  async execute(ctx, { session_id }) {
+    return ctx.api.post("/session/save", { session_id }, HEAVY);
   },
 });

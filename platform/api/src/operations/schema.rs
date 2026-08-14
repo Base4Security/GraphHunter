@@ -358,6 +358,36 @@ fn known_endpoints() -> Vec<EndpointMeta> {
             false,
         ),
         ep(
+            "/sentinel/resume",
+            Post,
+            "Start (or restart) live ingest on the Sentinel connector. The connector              registers PAUSED, so nothing is ingested until this is called -- without              it a client sees a healthy connector and zero rows, with no error.",
+            false,
+        ),
+        ep(
+            "/sentinel/pause",
+            Post,
+            "Stop live ingest without disconnecting. The connector stays registered              and resume picks up from the watermark.",
+            false,
+        ),
+        ep(
+            "/session/current",
+            Get,
+            "The session other calls default to when they omit an explicit handle.              Null when none is selected.",
+            false,
+        ),
+        ep(
+            "/session/load",
+            Post,
+            "Load a saved session from disk and make it current.",
+            true,
+        ),
+        ep(
+            "/session/save",
+            Post,
+            "Persist the current session's graph and datasets to disk.",
+            true,
+        ),
+        ep(
             "/session/create",
             Post,
             "Create an empty session and make it the process-global current one. \
