@@ -1259,6 +1259,30 @@ impl GenericParser {
                 let u = Entity::new(user, EntityType::User);
                 let rel = Relation::new(user, user, RelationType::Auth, n.timestamp);
                 triples.push((u.clone(), rel, u));
+            } else if let Some(ip) = &n.source_ip {
+                // B1.5 piece 2. The chain below already gave `target_ip`
+                // a singleton self-loop, but `source_ip` had none, so an
+                // event whose only entity was the address it came FROM
+                // produced nothing at all and left no trace in the graph
+                // — while the mirror-image event, naming only where it
+                // went, became a node. Nothing principled distinguished
+                // the two; it was an omission.
+                //
+                // It cost real evidence: in the AD-CAP corpus 642 events
+                // carry an IP and no user (their `ipAddress` canonicalizes
+                // to `source_ip`), and 399 of those are the
+                // `realm_disabled` rejections from the incident's
+                // containment window. They were invisible to every graph
+                // query and had to be recovered from the raw CSV.
+                //
+                // The metadata-role stamping in `ConfigurableParser` runs
+                // over every triple an event produced, this one included,
+                // so the edge keeps the event's own attributes: the
+                // containment window becomes reachable as
+                // `IP -[Connect {error="realm_disabled"}]-> IP`.
+                let i = Entity::new(ip, EntityType::IP);
+                let rel = Relation::new(ip, ip, RelationType::Connect, n.timestamp);
+                triples.push((i.clone(), rel, i));
             } else if let Some(ip) = &n.target_ip {
                 let i = Entity::new(ip, EntityType::IP);
                 let rel = Relation::new(ip, ip, RelationType::Connect, n.timestamp);
@@ -2165,21 +2189,49 @@ mod skip_reason_tests {
         );
     }
 
-    /// End to end: the reason must reach `ParseStats.skip_reasons`, which
-    /// is the surface the analyst actually reads.
+    /// B1.5 piece 2 changed this outcome deliberately: a one-sided source
+    /// address now produces a singleton self-loop instead of nothing, so
+    /// these rows are no longer skipped at all. The counter was measuring
+    /// a loss; the loss is fixed at the source.
     #[test]
-    fn single_endpoint_reaches_the_ingest_report() {
+    fn one_sided_source_addresses_now_reach_the_graph() {
         let json = r#"[
             {"timestamp":"2024-01-15T14:30:00Z","ipAddress":"191.84.42.164","error":"realm_disabled"},
             {"timestamp":"2024-01-15T14:31:00Z","ipAddress":"191.84.42.165","error":"realm_disabled"}
         ]"#;
+        let (triples, stats) = GenericParser.parse_with_stats(json);
+        assert_eq!(stats.rows_seen, 2);
+        assert_eq!(
+            stats.rows_skipped, 0,
+            "a lone source address is now a node, not a dropped row: {:?}",
+            stats.skip_reasons
+        );
+        assert_eq!(triples.len(), 2);
+        assert!(
+            triples.iter().all(|(s, _, d)| s.id == d.id),
+            "singleton events are represented as self-loops, matching how \
+             target-side singletons were already handled"
+        );
+        assert_eq!(triples[0].0.entity_type, EntityType::IP);
+    }
+
+    /// The classification outlives the specific gap it was found through:
+    /// a row whose only endpoint has no singleton fallback is still
+    /// reported as one-sided rather than as a parser failure.
+    #[test]
+    fn single_endpoint_still_reaches_the_ingest_report() {
+        // `parentImage` alone: an anchor-capable endpoint with no
+        // singleton rule of its own.
+        let json = r#"[
+            {"timestamp":"2024-01-15T14:30:00Z","parentImage":"C:/Windows/explorer.exe"},
+            {"timestamp":"2024-01-15T14:31:00Z","parentImage":"C:/Windows/svchost.exe"}
+        ]"#;
         let (_, stats) = GenericParser.parse_with_stats(json);
         assert_eq!(stats.rows_seen, 2);
-        assert_eq!(stats.rows_skipped, 2);
         assert_eq!(
             stats.skip_reasons.get("single_endpoint"),
             Some(&2),
-            "both one-sided rows must be reported as such, got {:?}",
+            "one-sided rows must still be told apart from parser failures, got {:?}",
             stats.skip_reasons
         );
     }
