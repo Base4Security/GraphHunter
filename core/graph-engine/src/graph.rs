@@ -1132,6 +1132,17 @@ impl GraphHunter {
             .validate()
             .map_err(GraphError::InvalidHypothesis)?;
 
+        // Clock-skew tolerance is only implemented on the DFS path. The
+        // LFTJ and Yannakakis operators enforce strict monotonicity in
+        // their join structure and would silently ignore δ, returning a
+        // stricter result set than the caller asked for. Rather than let
+        // the planner route a δ query to an operator that drops it, fall
+        // to the DFS whenever δ is active. Correctness over the speed of
+        // the specialized operators — and δ queries are the exception,
+        // not the hot path. (Lifting δ into LFTJ/Yannakakis is future
+        // work; until then this guard keeps the answer honest.)
+        let skew_active = hypothesis.resolve_skew_delta() > 0;
+
         // M1 — planner-driven dispatch. The shape-detection logic that
         // used to live inline (S3) now lives in `planner::plan`, which
         // honors both the legacy name-marker route
@@ -1144,9 +1155,14 @@ impl GraphHunter {
         // is on; otherwise it short-circuits to the legacy plan().
         // Skipping the graph walk on the default path saves O(V)
         // per-query overhead (~300 us at V=100K).
-        match crate::planner::plan_with_hints_lazy(hypothesis, || {
-            crate::planner::CostHints::from_graph(self)
-        }) {
+        let plan = if skew_active {
+            crate::planner::DispatchPlan::DfsMatch
+        } else {
+            crate::planner::plan_with_hints_lazy(hypothesis, || {
+                crate::planner::CostHints::from_graph(self)
+            })
+        };
+        match plan {
             crate::planner::DispatchPlan::TriangleLftj => {
                 return self.search_temporal_pattern_triangle(
                     hypothesis,
@@ -1237,6 +1253,9 @@ impl GraphHunter {
         let symmetry_hint = crate::symmetry::analyze(hypothesis);
 
         let k = hypothesis.k_simplicity.max(1);
+        // Resolve δ once, here, not inside the match loop: it may read an
+        // environment variable, and the hot path must never pay for that.
+        let skew_delta = hypothesis.resolve_skew_delta();
         let result_count = Arc::new(AtomicUsize::new(0));
 
         // Pre-size scratch buffers based on hypothesis depth.
@@ -1294,6 +1313,7 @@ impl GraphHunter {
                         cap,
                         &rc,
                         &mut local_results,
+                        skew_delta,
                         symmetry_hint,
                     );
                     local_results
@@ -1323,6 +1343,7 @@ impl GraphHunter {
                             cap,
                             &rc,
                             &mut local_results,
+                            skew_delta,
                             &mut s_ref.0,
                             &mut s_ref.1,
                             symmetry_hint,
@@ -1348,6 +1369,7 @@ impl GraphHunter {
                     cap,
                     &result_count,
                     &mut results,
+                    skew_delta,
                     &mut path,
                     &mut stack,
                     symmetry_hint,
@@ -1806,6 +1828,7 @@ impl GraphHunter {
         }
 
         let k = hypothesis.k_simplicity.max(1);
+        let skew_delta = hypothesis.resolve_skew_delta();
         let total_steps = hypothesis.steps.len();
         let depth = hypothesis.steps.len();
         let visit_cap = (depth * k).max(8);
@@ -1866,6 +1889,7 @@ impl GraphHunter {
                         k,
                         top_k,
                         total_steps,
+                        skew_delta,
                         heap,
                         path,
                         stack,
@@ -1890,6 +1914,7 @@ impl GraphHunter {
                     k,
                     top_k,
                     total_steps,
+                    skew_delta,
                     &mut heap,
                     &mut path,
                     &mut stack,
@@ -1917,6 +1942,7 @@ impl GraphHunter {
     /// buffers (cleared on entry) so the function can be invoked many times
     /// per search without per-call allocations. The heap is the *only* buffer
     /// that carries information out of the call — the rest is reset.
+    #[allow(clippy::too_many_arguments)]
     fn dfs_match_smart(
         &self,
         start_sid: StrId,
@@ -1925,6 +1951,11 @@ impl GraphHunter {
         k: usize,
         top_k: usize,
         total_steps: usize,
+        // Clock-skew tolerance δ, resolved once by the caller. Lowers the
+        // temporal floor of the next-edge search by δ; the path itself
+        // still advances by the edge's real timestamp, so tolerance is
+        // per-hop, never accumulated. δ = 0 is strict monotonicity.
+        skew_delta: i64,
         heap: &mut SmartHeap,
         path: &mut Vec<StrId>,
         stack: &mut Vec<AnomalyFrame>,
@@ -2112,7 +2143,9 @@ impl GraphHunter {
                     self.edge_range_sid(
                         dest_sid,
                         &steps[next_step_idx],
-                        edge.timestamp,
+                        // δ lowers the floor; the path still advanced by the
+                        // edge's real timestamp above, so this is per-hop.
+                        edge.timestamp.saturating_sub(skew_delta),
                         time_window,
                     )
                 } else {
@@ -2144,6 +2177,7 @@ impl GraphHunter {
     /// thousands of small allocations per search. The function clears them
     /// on entry to make the contract explicit; the buffers are also left
     /// empty by the natural backtrack at the end of the DFS.
+    #[allow(clippy::too_many_arguments)]
     fn dfs_match_iterative(
         &self,
         start_sid: StrId,
@@ -2153,6 +2187,8 @@ impl GraphHunter {
         cap: usize,
         result_count: &AtomicUsize,
         results: &mut Vec<HuntResult>,
+        // Clock-skew tolerance δ; see `dfs_match_smart`.
+        skew_delta: i64,
         path: &mut DfsPath,
         stack: &mut Vec<DfsFrame>,
         symmetry_hint: crate::symmetry::SymmetryHint,
@@ -2312,7 +2348,9 @@ impl GraphHunter {
                     self.edge_range_sid(
                         dest_sid,
                         &steps[next_step_idx],
-                        edge.timestamp,
+                        // δ lowers the floor; the path still advanced by the
+                        // edge's real timestamp above, so this is per-hop.
+                        edge.timestamp.saturating_sub(skew_delta),
                         time_window,
                     )
                 } else {
@@ -2373,6 +2411,7 @@ impl GraphHunter {
         }
         let symmetry_hint = crate::symmetry::analyze(hypothesis);
         let k = hypothesis.k_simplicity.max(1);
+        let skew_delta = hypothesis.resolve_skew_delta();
         let result_count = AtomicUsize::new(0);
         let mut results: Vec<HuntResult> = Vec::new();
         const K: usize = 8;
@@ -2388,6 +2427,7 @@ impl GraphHunter {
                 cap,
                 &result_count,
                 &mut results,
+                skew_delta,
                 symmetry_hint,
             );
         }
@@ -2422,6 +2462,8 @@ impl GraphHunter {
         cap: usize,
         result_count: &AtomicUsize,
         results: &mut Vec<HuntResult>,
+        // Clock-skew tolerance δ; see `dfs_match_smart`.
+        skew_delta: i64,
         symmetry_hint: crate::symmetry::SymmetryHint,
     ) {
         const K: usize = 8;
@@ -2524,6 +2566,7 @@ impl GraphHunter {
                     cap,
                     result_count,
                     results,
+                    skew_delta,
                     symmetry_hint,
                 );
                 if done {
@@ -2541,6 +2584,7 @@ impl GraphHunter {
     /// Each call does at most ONE edge probe — this is the granularity
     /// that lets cross-context prefetch hide DRAM latency.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn amac_step_one_edge(
         &self,
         snap: &crate::streaming::FrozenSnapshot,
@@ -2552,6 +2596,8 @@ impl GraphHunter {
         cap: usize,
         result_count: &AtomicUsize,
         results: &mut Vec<HuntResult>,
+        // Clock-skew tolerance δ; see `dfs_match_smart`.
+        skew_delta: i64,
         symmetry_hint: crate::symmetry::SymmetryHint,
     ) -> bool {
         if result_count.load(Ordering::Relaxed) >= cap {
@@ -2648,7 +2694,12 @@ impl GraphHunter {
         path.push(dest_sid);
         let next_step_idx = frame.step_idx + 1;
         let (next_lo, next_hi) = if next_step_idx < steps.len() {
-            self.edge_range_sid(dest_sid, &steps[next_step_idx], edge.timestamp, time_window)
+            self.edge_range_sid(
+                dest_sid,
+                &steps[next_step_idx],
+                edge.timestamp.saturating_sub(skew_delta),
+                time_window,
+            )
         } else {
             (0, 0)
         };
@@ -3013,6 +3064,7 @@ impl GraphHunter {
 
         let mut results: Vec<HuntResult> = Vec::new();
         let mut nodes_visited: usize = 0;
+        let skew_delta = hypothesis.resolve_skew_delta();
 
         for (&start_sid, _) in &self.entities {
             let mut visited = HashSet::new();
@@ -3023,6 +3075,7 @@ impl GraphHunter {
                 start_sid,
                 &hypothesis.steps,
                 0,
+                skew_delta,
                 &mut visited,
                 &mut path,
                 &mut results,
@@ -3034,11 +3087,13 @@ impl GraphHunter {
     }
 
     /// Naive DFS recursive core.
+    #[allow(clippy::too_many_arguments)]
     fn naive_dfs_recurse(
         &self,
         current_sid: StrId,
         steps: &[crate::hypothesis::HypothesisStep],
         step_idx: usize,
+        skew_delta: i64,
         visited: &mut HashSet<StrId>,
         path: &mut Vec<String>,
         results: &mut Vec<HuntResult>,
@@ -3047,7 +3102,7 @@ impl GraphHunter {
         *nodes_visited += 1;
 
         if step_idx >= steps.len() {
-            let valid = self.verify_path_matches(path, steps);
+            let valid = self.verify_path_matches(path, steps, skew_delta);
             if valid {
                 results.push(
                     path.iter()
@@ -3072,6 +3127,7 @@ impl GraphHunter {
                 dest_sid,
                 steps,
                 step_idx + 1,
+                skew_delta,
                 visited,
                 path,
                 results,
@@ -3083,11 +3139,14 @@ impl GraphHunter {
         }
     }
 
-    /// Verifies that a completed path matches the hypothesis types and temporal order.
+    /// Verifies that a completed path matches the hypothesis types and
+    /// temporal order, allowing each step to fall up to `skew_delta`
+    /// seconds before the previous one (δ = 0 is strict monotonicity).
     fn verify_path_matches(
         &self,
         path: &[String],
         steps: &[crate::hypothesis::HypothesisStep],
+        skew_delta: i64,
     ) -> bool {
         if path.len() != steps.len() + 1 {
             return false;
@@ -3125,8 +3184,10 @@ impl GraphHunter {
                             None => continue,
                         };
                         if entity_type_matches(&step.dest_type, &dest.entity_type)
-                            && edge.timestamp >= last_timestamp
+                            && edge.timestamp >= last_timestamp.saturating_sub(skew_delta)
                         {
+                            // Advance by the real timestamp, not the relaxed
+                            // floor, so tolerance stays per-hop.
                             last_timestamp = edge.timestamp;
                             found = true;
                             break;

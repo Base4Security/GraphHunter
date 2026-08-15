@@ -172,9 +172,34 @@ fn arb_hypothesis() -> impl Strategy<Value = Hypothesis> {
                 k_simplicity: k,
                 aggregations,
                 window_seconds,
+                // δ has its own dedicated round-trip test below; the
+                // property generator leaves it unset so this suite keeps
+                // exercising the pre-existing clauses without a new axis.
+                skew_tolerance_seconds: None,
                 shape: graph_hunter_dsl::hypothesis::HypothesisShape::default(),
             }
         })
+}
+
+/// `SKEW Ns` must survive a parse → format → parse round-trip and compose
+/// with WITHIN and the k-suffix in any order the analyst wrote them.
+#[test]
+fn skew_clause_round_trips() {
+    use graph_hunter_dsl::{format_hypothesis, parse_dsl};
+
+    let h = parse_dsl("IP -[Connect]-> IP WITHIN 60s SKEW 5s {k=2}", None)
+        .expect("parse")
+        .hypothesis;
+    assert_eq!(h.skew_tolerance_seconds, Some(5));
+    assert_eq!(h.window_seconds, Some(60));
+
+    let rendered = format_hypothesis(&h);
+    assert!(rendered.contains("SKEW 5s"), "rendered: {rendered}");
+    let h2 = parse_dsl(&rendered, None).expect("re-parse").hypothesis;
+    assert_eq!(h2.skew_tolerance_seconds, Some(5));
+
+    // A duplicate SKEW is rejected, matching WITHIN's rule.
+    assert!(parse_dsl("IP -[Connect]-> IP SKEW 5s SKEW 9s", None).is_err());
 }
 
 proptest! {

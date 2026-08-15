@@ -208,6 +208,9 @@ pub fn format_hypothesis(h: &Hypothesis) -> String {
     if let Some(secs) = h.window_seconds {
         out.push_str(&format!(" WITHIN {}s", secs));
     }
+    if let Some(secs) = h.skew_tolerance_seconds {
+        out.push_str(&format!(" SKEW {}s", secs));
+    }
     if h.k_simplicity > 1 {
         out.push_str(&format!(" {{k={}}}", h.k_simplicity));
     }
@@ -730,7 +733,8 @@ impl<'a> Cursor<'a> {
         // Optional `HAVING` / `WITHIN` clauses BEFORE the k-simplicity suffix.
         // Grammar note: these are whitespace-separated and may appear in either
         // order; we peek for the keyword and consume it if present.
-        let (aggregations, window_seconds) = self.parse_trailing_clauses(&steps)?;
+        let (aggregations, window_seconds, skew_tolerance_seconds) =
+            self.parse_trailing_clauses(&steps)?;
 
         // Parse optional {k=N} suffix for k-simplicity
         let k_simplicity = self.try_parse_k_suffix()?;
@@ -741,6 +745,7 @@ impl<'a> Cursor<'a> {
             k_simplicity,
             aggregations,
             window_seconds,
+            skew_tolerance_seconds,
             shape,
         })
     }
@@ -919,9 +924,10 @@ impl<'a> Cursor<'a> {
     fn parse_trailing_clauses(
         &mut self,
         steps: &[HypothesisStep],
-    ) -> Result<(Vec<AggClause>, Option<i64>), DslError> {
+    ) -> Result<(Vec<AggClause>, Option<i64>, Option<i64>), DslError> {
         let mut aggregations = Vec::new();
         let mut window_seconds: Option<i64> = None;
+        let mut skew_tolerance_seconds: Option<i64> = None;
 
         loop {
             self.skip_whitespace();
@@ -950,6 +956,18 @@ impl<'a> Cursor<'a> {
                     }
                     window_seconds = Some(self.parse_duration_seconds()?);
                 }
+                // `SKEW 5s` relaxes causal monotonicity by δ to absorb
+                // clock disagreement between log sources. Reuses the same
+                // duration grammar as WITHIN.
+                "SKEW" => {
+                    if skew_tolerance_seconds.is_some() {
+                        return Err(DslError {
+                            message: "Duplicate SKEW clause".into(),
+                            position: save,
+                        });
+                    }
+                    skew_tolerance_seconds = Some(self.parse_duration_seconds()?);
+                }
                 _ => {
                     // Not a known keyword — rewind so `try_parse_k_suffix`
                     // (or the outer error path) can deal with it.
@@ -959,7 +977,7 @@ impl<'a> Cursor<'a> {
             }
         }
 
-        Ok((aggregations, window_seconds))
+        Ok((aggregations, window_seconds, skew_tolerance_seconds))
     }
 
     /// Parse `count(distinct <col>) [>=|>] <N>`. Only `count(distinct ...)`

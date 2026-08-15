@@ -120,6 +120,153 @@ fn hypothesis_builder() {
     assert!(!h.is_empty());
 }
 
+// ── Clock-skew tolerance (δ) ──
+
+/// Builds A -Connect-> B -Connect-> C where B→C carries an *earlier*
+/// timestamp than A→B by `skew` seconds — the shape produced when the
+/// second hop's clock runs behind the first's.
+fn skewed_two_hop(skew: i64) -> GraphHunter {
+    let mut g = GraphHunter::new();
+    for id in ["A", "B", "C"] {
+        g.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    g.add_relation(Relation::new("A", "B", RelationType::Connect, 100))
+        .unwrap();
+    g.add_relation(Relation::new("B", "C", RelationType::Connect, 100 - skew))
+        .unwrap();
+    g.sort_edges_by_timestamp().unwrap();
+    g
+}
+
+fn two_hop_connect() -> Hypothesis {
+    Hypothesis::new("two-hop")
+        .add_step(HypothesisStep::new(
+            EntityType::IP,
+            RelationType::Connect,
+            EntityType::IP,
+        ))
+        .add_step(HypothesisStep::new(
+            EntityType::IP,
+            RelationType::Connect,
+            EntityType::IP,
+        ))
+}
+
+/// Strict monotonicity (δ = 0, the default) drops a chain whose second
+/// hop fell behind the first — the true-negative the feature exists to
+/// stop being a false negative.
+#[test]
+fn strict_monotonicity_drops_a_backward_hop() {
+    let g = skewed_two_hop(5);
+    let (paths, _) = g
+        .search_temporal_pattern(&two_hop_connect(), None, None)
+        .unwrap();
+    assert!(
+        paths.is_empty(),
+        "with δ=0 a 5s-early second hop must not match, got {paths:?}"
+    );
+}
+
+/// A δ at least as wide as the skew recovers the chain.
+#[test]
+fn skew_tolerance_recovers_the_chain() {
+    let g = skewed_two_hop(5);
+    let h = two_hop_connect().with_skew_tolerance(5);
+    let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
+    assert_eq!(paths.len(), 1, "δ=5 must admit a 5s skew, got {paths:?}");
+    assert_eq!(&paths[0][..], &["A".into(), "B".into(), "C".into()][..]);
+}
+
+/// δ narrower than the skew still rejects: the tolerance is a bound, not
+/// an off switch.
+#[test]
+fn skew_tolerance_narrower_than_the_gap_still_rejects() {
+    let g = skewed_two_hop(5);
+    let h = two_hop_connect().with_skew_tolerance(4);
+    let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
+    assert!(paths.is_empty(), "δ=4 must not admit a 5s skew, got {paths:?}");
+}
+
+/// The tolerance is per-hop, not cumulative. Three hops that each fall 5s
+/// behind the *real* previous timestamp accumulate 10s of backward drift
+/// end-to-end, yet δ=5 admits them — because each hop is measured against
+/// the real timestamp of the one before, never a relaxed floor.
+#[test]
+fn skew_tolerance_is_per_hop_not_cumulative() {
+    let mut g = GraphHunter::new();
+    for id in ["A", "B", "C", "D"] {
+        g.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    // 100 → 95 → 90: each hop 5s before the last, 10s total drift.
+    g.add_relation(Relation::new("A", "B", RelationType::Connect, 100)).unwrap();
+    g.add_relation(Relation::new("B", "C", RelationType::Connect, 95)).unwrap();
+    g.add_relation(Relation::new("C", "D", RelationType::Connect, 90)).unwrap();
+    g.sort_edges_by_timestamp().unwrap();
+
+    let h = Hypothesis::new("three-hop")
+        .add_step(HypothesisStep::new(EntityType::IP, RelationType::Connect, EntityType::IP))
+        .add_step(HypothesisStep::new(EntityType::IP, RelationType::Connect, EntityType::IP))
+        .add_step(HypothesisStep::new(EntityType::IP, RelationType::Connect, EntityType::IP))
+        .with_skew_tolerance(5);
+    let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
+    assert_eq!(
+        paths.len(),
+        1,
+        "each hop is within δ=5 of the real previous ts; total drift is irrelevant, got {paths:?}"
+    );
+
+    // But a single hop that jumps back 6s (> δ) breaks the chain, proving
+    // the bound is enforced at every hop.
+    let mut g2 = GraphHunter::new();
+    for id in ["A", "B", "C"] {
+        g2.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    g2.add_relation(Relation::new("A", "B", RelationType::Connect, 100)).unwrap();
+    g2.add_relation(Relation::new("B", "C", RelationType::Connect, 94)).unwrap();
+    g2.sort_edges_by_timestamp().unwrap();
+    let (paths2, _) = g2.search_temporal_pattern(&two_hop_connect().with_skew_tolerance(5), None, None).unwrap();
+    assert!(paths2.is_empty(), "a single 6s backward hop exceeds δ=5, got {paths2:?}");
+}
+
+/// The environment variable is the deployment-level fallback: with no
+/// per-hypothesis δ, `GRAPHHUNTER_SKEW_TOLERANCE_SECONDS` supplies it.
+#[test]
+fn skew_tolerance_falls_back_to_the_env_var() {
+    let g = skewed_two_hop(5);
+    // SAFETY: restored before the test returns.
+    unsafe { std::env::set_var("GRAPHHUNTER_SKEW_TOLERANCE_SECONDS", "5") };
+    let (paths, _) = g
+        .search_temporal_pattern(&two_hop_connect(), None, None)
+        .unwrap();
+    unsafe { std::env::remove_var("GRAPHHUNTER_SKEW_TOLERANCE_SECONDS") };
+    assert_eq!(
+        paths.len(),
+        1,
+        "the env var must supply δ when the hypothesis leaves it unset, got {paths:?}"
+    );
+}
+
+/// δ must win over the LFTJ planner: even with the operator forced on,
+/// a δ query routes to the DFS, because LFTJ ignores δ and would return
+/// a stricter set than asked. Guards against a silent wrong answer.
+#[test]
+fn skew_tolerance_forces_dfs_over_lftj() {
+    let g = skewed_two_hop(5);
+    // SAFETY: env vars restored before return.
+    unsafe { std::env::set_var("GRAPHHUNTER_LFTJ_PLANNER", "1") };
+    unsafe { std::env::set_var("GRAPHHUNTER_LFTJ_AUTO", "1") };
+    let h = two_hop_connect().with_skew_tolerance(5);
+    let res = g.search_temporal_pattern(&h, None, None);
+    unsafe { std::env::remove_var("GRAPHHUNTER_LFTJ_PLANNER") };
+    unsafe { std::env::remove_var("GRAPHHUNTER_LFTJ_AUTO") };
+    let (paths, _) = res.unwrap();
+    assert_eq!(
+        paths.len(),
+        1,
+        "δ must route to the DFS and admit the skew even with LFTJ enabled, got {paths:?}"
+    );
+}
+
 #[test]
 fn hypothesis_validation_ok() {
     let h = Hypothesis::new("DNS Exfil").add_step(HypothesisStep::new(
