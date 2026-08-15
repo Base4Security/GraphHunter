@@ -44,6 +44,12 @@ pub struct SharedSessionsResponse {
     /// True when `limit` cut the list. Callers must not read a capped
     /// list as the complete answer.
     pub truncated: bool,
+    /// Session triples the graph-wide ceiling refused, cumulative over
+    /// this graph's ingests. Non-zero means the session view is
+    /// incomplete and this answer under-reports — surfaced here because
+    /// this is where someone would otherwise mistake a short list for a
+    /// clean result.
+    pub sessions_refused: usize,
     /// Present when `sessions_examined` is zero: why there was nothing
     /// to look at, so the caller does not have to guess.
     #[serde(default, skip_serializing_if = "Option::is_none")]

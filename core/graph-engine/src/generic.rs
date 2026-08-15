@@ -1862,7 +1862,7 @@ pub fn is_session_entity(e: &Entity) -> bool {
 /// graph needs the count at insert time, which this does not do.
 pub const MAX_SESSION_ENTITIES: usize = 500_000;
 
-fn max_session_entities() -> usize {
+pub(crate) fn max_session_entities() -> usize {
     std::env::var("GRAPHHUNTER_MAX_SESSION_ENTITIES")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())

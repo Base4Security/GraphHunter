@@ -417,6 +417,58 @@ mod tests {
         );
     }
 
+    /// The gap the per-batch cap could not close: many small ingests,
+    /// each well under the batch ceiling, must still not take the graph
+    /// past it in aggregate. This is the streaming case.
+    #[test]
+    fn the_ceiling_holds_across_separate_ingests() {
+        use crate::parser::LogParser;
+        use crate::generic::GenericParser;
+
+        // SAFETY: restored before the test returns.
+        unsafe { std::env::set_var("GRAPHHUNTER_MAX_SESSION_ENTITIES", "3") };
+
+        let mut g = GraphHunter::new();
+        // Five separate ingests of one session each: every batch is far
+        // under the cap, so the parser-side guard never fires.
+        for i in 0..5 {
+            let log = format!(
+                r#"[{{"timestamp":"2026-07-24T19:4{i}:51Z","username":"u{i}","sessionId":"s{i}","ipAddress":"10.0.0.{i}"}}]"#
+            );
+            g.ingest_logs(&log, &GenericParser, None).expect("ingest");
+        }
+        unsafe { std::env::remove_var("GRAPHHUNTER_MAX_SESSION_ENTITIES") };
+
+        assert_eq!(
+            g.session_entity_count(),
+            3,
+            "the graph-wide ceiling must hold across batches, not per batch"
+        );
+        assert!(
+            g.sessions_refused() > 0,
+            "refusals must be counted, not silently dropped"
+        );
+        // The non-session part of every event still lands: the ceiling
+        // bounds sessions, not the ingest.
+        assert!(
+            g.get_entity("u4").is_some() && g.get_entity("10.0.0.4").is_some(),
+            "the fifth event's user and address must still be in the graph"
+        );
+    }
+
+    /// Under the ceiling nothing is refused and nothing is reported.
+    #[test]
+    fn an_ingest_under_the_ceiling_refuses_nothing() {
+        use crate::parser::LogParser;
+        use crate::generic::GenericParser;
+
+        let mut g = GraphHunter::new();
+        let log = r#"[{"timestamp":"2026-07-24T19:42:51Z","username":"a","sessionId":"s1","ipAddress":"10.0.0.1"}]"#;
+        g.ingest_logs(log, &GenericParser, None).expect("ingest");
+        assert_eq!(g.session_entity_count(), 1);
+        assert_eq!(g.sessions_refused(), 0);
+    }
+
     /// A graph with no sessions must answer nothing rather than scan.
     #[test]
     fn no_sessions_means_no_shared_sessions() {

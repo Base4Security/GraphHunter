@@ -120,6 +120,15 @@ pub struct GraphHunter {
     pub anomaly_scorer: Option<AnomalyScorer>,
     /// Whether edges have been sorted by timestamp (avoids re-sorting on every search).
     edges_sorted: bool,
+    /// Session triples refused because the graph is at its session
+    /// ceiling. Accumulates across ingests so a long streaming run can
+    /// report the total rather than losing it per batch.
+    ///
+    /// The parser-side cap in `generic::parse_events_each_with_stats`
+    /// bounds one batch; this bounds the graph. Both are needed: a stream
+    /// of a hundred batches, each individually under the batch cap, adds
+    /// up to a hundred times the ceiling without this.
+    sessions_refused: usize,
     /// Memoized relation schema. Keyed by the `(edge_count, meta_bytes)`
     /// fingerprint so it auto-invalidates after any ingest that appends
     /// an edge (and any edge with metadata grows `meta_bytes`). Schema
@@ -244,6 +253,7 @@ impl GraphHunter {
             dataset_tags: vec![Arc::from("")],
             anomaly_scorer: None,
             edges_sorted: false,
+            sessions_refused: 0,
             schema_cache: Arc::new(Mutex::new(None)),
             nlf: std::sync::OnceLock::new(),
             khop_reach: std::sync::OnceLock::new(),
@@ -801,6 +811,30 @@ impl GraphHunter {
             .and_then(|sid| self.reverse_adj.get(&sid))
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// How many session nodes this graph currently holds.
+    pub fn session_entity_count(&self) -> usize {
+        self.type_index
+            .get(&crate::generic::session_entity_type())
+            .map(|s| s.len())
+            .unwrap_or(0)
+    }
+
+    /// How many more session nodes may be created before the graph hits
+    /// [`crate::generic::MAX_SESSION_ENTITIES`].
+    pub fn remaining_session_budget(&self) -> usize {
+        crate::generic::max_session_entities().saturating_sub(self.session_entity_count())
+    }
+
+    /// Session triples refused by the ceiling, cumulative over the life
+    /// of this graph.
+    ///
+    /// Read this after an ingest: a non-zero value means session patterns
+    /// will under-report, and the analyst should know that rather than
+    /// discover it as an unexplained empty result.
+    pub fn sessions_refused(&self) -> usize {
+        self.sessions_refused
     }
 
     /// The interned id for `id`, or `None` when the graph has never seen
@@ -2739,8 +2773,22 @@ impl GraphHunter {
         // computed once, outside the per-edge loop (this is a mass
         // ingest, not a per-event wall-clock sample).
         let ingested_at_delta = encode_ingested_at(now_seconds());
+        // Graph-wide session ceiling. Read once here rather than probed
+        // per triple: this loop runs over every edge of the ingest, and
+        // `session_entity_count` is a HashMap lookup plus a set length.
+        // The budget is then tracked locally as new sessions land.
+        let mut session_budget = self.remaining_session_budget();
 
         for (mut src, rel, mut dst) in triples {
+            // Ordered so the common case — a graph with budget left, or a
+            // triple with no session in it — costs one integer compare.
+            if session_budget == 0
+                && (crate::generic::is_session_entity(&src)
+                    || crate::generic::is_session_entity(&dst))
+            {
+                self.sessions_refused += 1;
+                continue;
+            }
             if let Some(ref id) = ds {
                 src.dataset_id = Some(Arc::clone(id));
                 dst.dataset_id = Some(Arc::clone(id));
@@ -2748,6 +2796,9 @@ impl GraphHunter {
 
             // Upsert source entity
             let src_sid = self.interner.intern(&src.id);
+            if !self.entities.contains_key(&src_sid) && crate::generic::is_session_entity(&src) {
+                session_budget = session_budget.saturating_sub(1);
+            }
             if let Some(existing) = self.entities.get_mut(&src_sid) {
                 Self::merge_metadata(&mut existing.metadata, &src.metadata, merge_policy);
             } else {
@@ -2761,6 +2812,9 @@ impl GraphHunter {
 
             // Upsert destination entity
             let dst_sid = self.interner.intern(&dst.id);
+            if !self.entities.contains_key(&dst_sid) && crate::generic::is_session_entity(&dst) {
+                session_budget = session_budget.saturating_sub(1);
+            }
             if let Some(existing) = self.entities.get_mut(&dst_sid) {
                 Self::merge_metadata(&mut existing.metadata, &dst.metadata, merge_policy);
             } else {

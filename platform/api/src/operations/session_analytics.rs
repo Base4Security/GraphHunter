@@ -36,11 +36,13 @@ impl GraphHunterApi {
             // no session carried two accounts, or the graph holds no
             // sessions to begin with (the source had no correlation id,
             // or the ingest ceiling refused them). Say which.
+            let refused = graph.sessions_refused();
             if examined == 0 {
                 return Ok(SharedSessionsResponse {
                     sessions: Vec::new(),
                     sessions_examined: 0,
                     truncated: false,
+                    sessions_refused: refused,
                     note: Some(
                         "This graph has no session entities, so nothing was examined. Either the \
                          ingested source carries no correlation id (sessionId, correlation_id, \
@@ -70,7 +72,17 @@ impl GraphHunterApi {
                     .collect(),
                 sessions_examined: examined,
                 truncated,
-                note: None,
+                sessions_refused: refused,
+                note: if refused > 0 {
+                    Some(format!(
+                        "The graph-wide session ceiling refused {refused} session triples during \
+                         ingest, so this answer under-reports: a session that would have qualified \
+                         may simply not be in the graph. Raise GRAPHHUNTER_MAX_SESSION_ENTITIES \
+                         and re-ingest to get a complete picture."
+                    ))
+                } else {
+                    None
+                },
             })
         })
     }
