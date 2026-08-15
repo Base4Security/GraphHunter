@@ -36,8 +36,41 @@ use graph_hunter_constrained_decode::{GrammarValidator, VrlSubsetValidator};
 use graph_hunter_core::field_preview::FieldRole;
 use graph_hunter_vrl::field_config_to_vrl;
 
-const CSV_FIXTURE: &str = include_str!("../../../demo_data/ambiguous_fields_csv.csv");
-const FORTI_FIXTURE: &str = include_str!("../../../demo_data/ambiguous_fields_forti.log");
+/// Reads a fixture from `demo_data/`, or `None` when it is not present.
+///
+/// These were `include_str!` constants, which turned an absent fixture
+/// into a **compile error for the whole integration-test target** — every
+/// other test in this file went down with it, and the only symptom was a
+/// build failure that said nothing about test data. `demo_data/` is not
+/// fully committed (see `demo_data/README.md`), so that was reachable on
+/// any fresh clone.
+fn fixture(name: &str) -> Option<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../demo_data")
+        .join(name);
+    std::fs::read_to_string(path).ok()
+}
+
+/// Loads a fixture or returns from the test with a visible notice.
+///
+/// A skipped test is NOT a passing test, so the message goes to stderr
+/// naming the file — silence here would be the false-green failure this
+/// codebase has already been bitten by.
+macro_rules! fixture_or_skip {
+    ($name:expr) => {
+        match fixture($name) {
+            Some(s) => s,
+            None => {
+                eprintln!(
+                    "SKIPPED: demo_data/{} is absent — this test did not run. \
+                     See demo_data/README.md.",
+                    $name
+                );
+                return;
+            }
+        }
+    };
+}
 
 fn fresh_api_with_dataset(name: &str) -> (GraphHunterApi, String) {
     let api = GraphHunterApi::new_noop();
@@ -67,12 +100,13 @@ fn fresh_api_with_dataset(name: &str) -> (GraphHunterApi, String) {
 
 #[test]
 fn ambiguous_csv_still_produces_compilable_draft() {
+    let csv = fixture_or_skip!("ambiguous_fields_csv.csv");
     let (api, dataset_id) = fresh_api_with_dataset("ambig-csv");
     let neg = api
         .ingest_negotiate(IngestNegotiateRequest {
             session: None,
             dataset_id: Some(dataset_id),
-            raw_sample: CSV_FIXTURE.into(),
+            raw_sample: csv,
             hint_format: Some("csv".into()),
             max_rounds: None,
         })
@@ -125,12 +159,13 @@ fn ambiguous_csv_still_produces_compilable_draft() {
 ///    rewriting the fixture.
 #[test]
 fn ambiguous_forti_kv_falls_back_to_compilable_draft() {
+    let forti = fixture_or_skip!("ambiguous_fields_forti.log");
     let (api, dataset_id) = fresh_api_with_dataset("ambig-forti");
     let neg = api
         .ingest_negotiate(IngestNegotiateRequest {
             session: None,
             dataset_id: Some(dataset_id),
-            raw_sample: FORTI_FIXTURE.into(),
+            raw_sample: forti,
             hint_format: None,
             max_rounds: None,
         })
@@ -180,17 +215,34 @@ fn ambiguous_inputs_never_emit_invalid_vrl_under_repeated_runs() {
     // negotiator MUST produce VRL that validates, every time. Five
     // independent runs over both fixtures = ten chances for a flake.
     let validator = VrlSubsetValidator::new();
-    for (name, sample, fmt) in [
-        ("csv", CSV_FIXTURE, Some("csv".to_string())),
-        ("forti", FORTI_FIXTURE, None),
-    ] {
+    // Skip per fixture rather than per test: with one file absent the
+    // other still gets its five runs, so a partial `demo_data/` keeps as
+    // much coverage as it can instead of silently dropping all of it.
+    let available: Vec<(&str, String, Option<String>)> = [
+        ("csv", "ambiguous_fields_csv.csv", Some("csv".to_string())),
+        ("forti", "ambiguous_fields_forti.log", None),
+    ]
+    .into_iter()
+    .filter_map(|(name, file, fmt)| match fixture(file) {
+        Some(s) => Some((name, s, fmt)),
+        None => {
+            eprintln!("SKIPPED fixture demo_data/{file} — absent, see demo_data/README.md");
+            None
+        }
+    })
+    .collect();
+    if available.is_empty() {
+        eprintln!("SKIPPED: no fixtures present — this test did not run.");
+        return;
+    }
+    for (name, sample, fmt) in available {
         for run in 0..5 {
             let (api, dataset_id) = fresh_api_with_dataset(&format!("repeat-{name}-{run}"));
             let neg = api
                 .ingest_negotiate(IngestNegotiateRequest {
                     session: None,
                     dataset_id: Some(dataset_id),
-                    raw_sample: sample.into(),
+                    raw_sample: sample.clone(),
                     hint_format: fmt.clone(),
                     max_rounds: None,
                 })
