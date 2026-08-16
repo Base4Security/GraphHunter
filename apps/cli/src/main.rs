@@ -10,7 +10,79 @@ use std::io::{self, BufRead, Write};
 use commands::CommandHandler;
 use protocol::{Request, Response};
 
+/// Reproducible performance harness (WS1.5). `graph_hunter_cli bench`
+/// runs the fixed synthetic suite and emits a table — the "run → figure"
+/// artifact a paper's evaluation section is checked against, rather than
+/// numbers pasted from a one-off run.
+///
+/// Flags: `--runs N` (default 30, the plan's ≥30 for stable percentiles),
+/// `--seed S` (default 42), `--format csv|json` (default csv), `--out FILE`
+/// (default stdout). Build with `--release` — debug latencies are not
+/// representative, and the harness says so on stderr if it detects debug.
+fn run_bench(args: &[String]) -> ! {
+    use graph_hunter_core::benchmark::{perf_rows_to_csv, run_perf_suite};
+
+    let mut runs: usize = 30;
+    let mut seed: u64 = 42;
+    let mut format = String::from("csv");
+    let mut out_path: Option<String> = None;
+
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--runs" => runs = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| bail("--runs needs a positive integer")),
+            "--seed" => seed = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| bail("--seed needs an integer")),
+            "--format" => format = it.next().cloned().unwrap_or_else(|| bail("--format needs csv|json")),
+            "--out" => out_path = Some(it.next().cloned().unwrap_or_else(|| bail("--out needs a path"))),
+            "-h" | "--help" => bail("usage: graph_hunter_cli bench [--runs N] [--seed S] [--format csv|json] [--out FILE]"),
+            other => bail(&format!("unknown bench flag: {other}")),
+        }
+    }
+
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "warning: debug build — latencies are not representative. \
+             Rebuild with `cargo build --release -p graph_hunter_cli`."
+        );
+    }
+
+    let rows = run_perf_suite(seed, runs);
+    let rendered = match format.as_str() {
+        "csv" => perf_rows_to_csv(&rows),
+        "json" => serde_json::to_string_pretty(&rows).expect("perf rows serialize"),
+        other => bail(&format!("unknown --format '{other}': use csv or json")),
+    };
+
+    match out_path {
+        Some(path) => {
+            if let Err(e) = std::fs::write(&path, &rendered) {
+                bail(&format!("could not write {path}: {e}"));
+            }
+            eprintln!("wrote {} rows to {path}", rows.len());
+        }
+        None => {
+            print!("{rendered}");
+            let _ = io::stdout().flush();
+        }
+    }
+    std::process::exit(0);
+}
+
+/// Prints a bench-mode error to stderr and exits non-zero. Never returns.
+fn bail(msg: &str) -> ! {
+    eprintln!("{msg}");
+    std::process::exit(2);
+}
+
 fn main() {
+    // `bench` subcommand: a one-shot performance run, distinct from the
+    // long-running stdin/stdout daemon below. Dispatched on argv before
+    // the daemon so the two modes never interleave.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("bench") {
+        run_bench(&argv[2..]);
+    }
+
     // M-track perf flags: default-on so the CLI binary picks up the
     // structural K_4 LFTJ dispatch automatically when invoked from
     // the Go gateway. Same conservative dispatcher contract as the

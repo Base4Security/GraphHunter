@@ -577,6 +577,256 @@ pub fn build_lateral_movement_hypothesis(length: usize) -> Hypothesis {
     h
 }
 
+// ── Reproducible performance harness (WS1.5) ──
+//
+// `run_benchmark` above measures one run and pairs it with the naive
+// baseline for the pruning-ablation table. This harness answers a
+// different question — latency *distribution* vs graph size — and is
+// built to be run, not read: a fixed config set, a fixed seed, N repeats
+// per config, and structured rows a script turns into a table or figure.
+//
+// SCOPE, stated honestly: this measures *performance* (latency, scale,
+// approximate memory) on synthetic ER/BA graphs. It does NOT measure
+// *efficacy* (step recall, path precision) — those need ground-truth
+// labels from the DARPA datasets and belong to WS2. Emitting them here
+// with no ground truth would be a fabricated number, so the harness
+// leaves them out rather than invent them.
+//
+// Run under `--release`: debug DFS is several times slower and not
+// representative of the numbers a paper reports.
+
+/// Which synthetic generator produces a config's graph.
+#[derive(Debug, Clone, Copy)]
+pub enum BenchGenerator {
+    /// Erdős–Rényi G(n, p).
+    ErdosRenyi { n: usize, p: f64 },
+    /// Barabási–Albert with m edges per new node.
+    BarabasiAlbert { n: usize, m: usize },
+}
+
+impl BenchGenerator {
+    fn name(&self) -> &'static str {
+        match self {
+            BenchGenerator::ErdosRenyi { .. } => "erdos_renyi",
+            BenchGenerator::BarabasiAlbert { .. } => "barabasi_albert",
+        }
+    }
+
+    fn build(&self, seed: u64) -> GraphHunter {
+        match *self {
+            BenchGenerator::ErdosRenyi { n, p } => {
+                generate_erdos_renyi(n, p, 1_000_000, 2_000_000, seed)
+            }
+            BenchGenerator::BarabasiAlbert { n, m } => {
+                generate_barabasi_albert(n, m, 1_000_000, 2_000_000, seed)
+            }
+        }
+    }
+}
+
+/// One configuration in the performance suite.
+#[derive(Debug, Clone, Copy)]
+pub struct PerfConfig {
+    pub label: &'static str,
+    pub generator: BenchGenerator,
+    /// Hypothesis chain length (lateral-movement shape).
+    pub hypothesis_len: usize,
+}
+
+/// One row of the performance table: a config's latency distribution over
+/// `runs` repeats. Serializable so the CLI can emit CSV or JSON verbatim.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PerfRow {
+    pub config: String,
+    pub generator: String,
+    pub seed: u64,
+    pub n_entities: usize,
+    pub n_relations: usize,
+    pub d_avg: f64,
+    pub hypothesis_len: usize,
+    pub runs: usize,
+    pub paths_found: usize,
+    pub latency_p50_us: u64,
+    pub latency_p95_us: u64,
+    pub latency_mean_us: u64,
+    pub latency_min_us: u64,
+    pub latency_max_us: u64,
+    /// Structural estimate (`approx_memory`), not measured RSS. Labelled
+    /// so no reader mistakes it for a heap measurement.
+    pub memory_bytes_approx: usize,
+}
+
+/// The fixed config set. Deliberately hard-coded, not parameterised: the
+/// point of a reproducible harness is that everyone runs the *same*
+/// configs, so the table is comparable across machines and commits.
+pub fn default_perf_configs() -> Vec<PerfConfig> {
+    use BenchGenerator::{BarabasiAlbert, ErdosRenyi};
+    vec![
+        PerfConfig { label: "ER-100", generator: ErdosRenyi { n: 100, p: 0.10 }, hypothesis_len: 3 },
+        PerfConfig { label: "ER-500", generator: ErdosRenyi { n: 500, p: 0.02 }, hypothesis_len: 3 },
+        PerfConfig { label: "ER-1K", generator: ErdosRenyi { n: 1000, p: 0.01 }, hypothesis_len: 3 },
+        PerfConfig { label: "ER-5K", generator: ErdosRenyi { n: 5000, p: 0.002 }, hypothesis_len: 3 },
+        PerfConfig { label: "BA-100", generator: BarabasiAlbert { n: 100, m: 3 }, hypothesis_len: 3 },
+        PerfConfig { label: "BA-500", generator: BarabasiAlbert { n: 500, m: 3 }, hypothesis_len: 3 },
+        PerfConfig { label: "BA-1K", generator: BarabasiAlbert { n: 1000, m: 3 }, hypothesis_len: 3 },
+        PerfConfig { label: "BA-5K", generator: BarabasiAlbert { n: 5000, m: 3 }, hypothesis_len: 3 },
+    ]
+}
+
+/// The `q`-th percentile (0.0–1.0) of a sorted slice via nearest-rank.
+fn percentile_us(sorted: &[u64], q: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (q * (sorted.len() as f64 - 1.0)).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
+}
+
+/// Runs one config `runs` times and summarises the latency distribution.
+///
+/// The graph is generated once and edges sorted once (so the binary-
+/// search successor path is active), then the *search* is timed `runs`
+/// times. Generation and sort are setup, not the thing being measured.
+pub fn run_perf_config(config: &PerfConfig, seed: u64, runs: usize) -> PerfRow {
+    let mut g = config.generator.build(seed);
+    let _ = g.sort_edges_by_timestamp();
+    let hypothesis = build_lateral_movement_hypothesis(config.hypothesis_len);
+    let (n, m, _d_max, d_avg, _et, _rt) = graph_params(&g);
+
+    let runs = runs.max(1);
+    let mut latencies: Vec<u64> = Vec::with_capacity(runs);
+    let mut paths_found = 0usize;
+    for _ in 0..runs {
+        let start = std::time::Instant::now();
+        let (paths, _truncated) = g
+            .search_temporal_pattern(&hypothesis, None, None)
+            .expect("search must not fail on a generated graph");
+        latencies.push(start.elapsed().as_micros() as u64);
+        paths_found = paths.len();
+    }
+    latencies.sort_unstable();
+    let sum: u128 = latencies.iter().map(|&x| x as u128).sum();
+
+    PerfRow {
+        config: config.label.to_string(),
+        generator: config.generator.name().to_string(),
+        seed,
+        n_entities: n,
+        n_relations: m,
+        d_avg,
+        hypothesis_len: config.hypothesis_len,
+        runs,
+        paths_found,
+        latency_p50_us: percentile_us(&latencies, 0.50),
+        latency_p95_us: percentile_us(&latencies, 0.95),
+        latency_mean_us: (sum / runs as u128) as u64,
+        latency_min_us: *latencies.first().unwrap(),
+        latency_max_us: *latencies.last().unwrap(),
+        memory_bytes_approx: approx_memory(&g),
+    }
+}
+
+/// Runs the full fixed suite. Single-threaded and deterministic: same
+/// seed, same machine → same graphs and comparable latencies.
+///
+/// `paths_found` is typically 0 on these synthetic graphs, and that is
+/// expected, not a bug: types are assigned uniformly at random, so a
+/// specific 3-step *typed* chain almost never closes. What the harness
+/// measures is search *work* — start selection, NLF/k-hop/semijoin
+/// pruning, temporal expansion — which the DFS does in full whether or
+/// not it emits. That is also the common case in real hunting: most
+/// hypotheses run and find nothing, and their latency is what an analyst
+/// waits on. Planting attack subgraphs to exercise the emitter is WS2
+/// work (it needs a ground-truth model), tracked separately.
+pub fn run_perf_suite(seed: u64, runs: usize) -> Vec<PerfRow> {
+    default_perf_configs()
+        .iter()
+        .map(|c| run_perf_config(c, seed, runs))
+        .collect()
+}
+
+/// CSV serialization of a perf table — header plus one row each. Kept
+/// dependency-free (no csv crate) since every field is a plain scalar.
+pub fn perf_rows_to_csv(rows: &[PerfRow]) -> String {
+    let mut out = String::from(
+        "config,generator,seed,n_entities,n_relations,d_avg,hypothesis_len,runs,paths_found,\
+         latency_p50_us,latency_p95_us,latency_mean_us,latency_min_us,latency_max_us,\
+         memory_bytes_approx\n",
+    );
+    for r in rows {
+        out.push_str(&format!(
+            "{},{},{},{},{},{:.4},{},{},{},{},{},{},{},{},{}\n",
+            r.config,
+            r.generator,
+            r.seed,
+            r.n_entities,
+            r.n_relations,
+            r.d_avg,
+            r.hypothesis_len,
+            r.runs,
+            r.paths_found,
+            r.latency_p50_us,
+            r.latency_p95_us,
+            r.latency_mean_us,
+            r.latency_min_us,
+            r.latency_max_us,
+            r.memory_bytes_approx,
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+mod perf_harness_tests {
+    use super::*;
+
+    /// The same seed produces the same graph and therefore the same
+    /// structural numbers — the property the whole harness rests on. (The
+    /// *latencies* are wall-clock and will vary; the graph shape must not.)
+    #[test]
+    fn the_suite_is_deterministic_in_graph_shape() {
+        let a = run_perf_config(&default_perf_configs()[0], 42, 2);
+        let b = run_perf_config(&default_perf_configs()[0], 42, 2);
+        assert_eq!(a.n_entities, b.n_entities);
+        assert_eq!(a.n_relations, b.n_relations);
+        assert_eq!(a.paths_found, b.paths_found);
+        assert_eq!(a.seed, 42);
+    }
+
+    /// Percentiles must be ordered and inside the observed range — a
+    /// guard against an off-by-one in the nearest-rank index.
+    #[test]
+    fn percentiles_are_ordered_and_bounded() {
+        let row = run_perf_config(&default_perf_configs()[0], 7, 20);
+        assert!(row.latency_min_us <= row.latency_p50_us);
+        assert!(row.latency_p50_us <= row.latency_p95_us);
+        assert!(row.latency_p95_us <= row.latency_max_us);
+        assert_eq!(row.runs, 20);
+    }
+
+    #[test]
+    fn percentile_nearest_rank_endpoints() {
+        let xs = [10u64, 20, 30, 40, 50];
+        assert_eq!(percentile_us(&xs, 0.0), 10);
+        assert_eq!(percentile_us(&xs, 1.0), 50);
+        assert_eq!(percentile_us(&xs, 0.5), 30);
+        assert_eq!(percentile_us(&[], 0.5), 0);
+    }
+
+    /// The CSV header column count must match every data row's field
+    /// count, or a downstream parser silently misaligns.
+    #[test]
+    fn csv_header_and_rows_have_equal_arity() {
+        let rows = vec![run_perf_config(&default_perf_configs()[0], 1, 2)];
+        let csv = perf_rows_to_csv(&rows);
+        let mut lines = csv.lines();
+        let header_cols = lines.next().unwrap().split(',').count();
+        for line in lines {
+            assert_eq!(line.split(',').count(), header_cols, "row: {line}");
+        }
+    }
+}
+
 /// Format benchmark results as a LaTeX table row.
 pub fn format_latex_row(r: &BenchmarkResult) -> String {
     let (rr_rel, rr_ent, rr_temp, _rr_win, _rr_cycle) = r.pruning_stats.rejection_rates();
