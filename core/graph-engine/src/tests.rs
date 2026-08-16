@@ -120,6 +120,111 @@ fn hypothesis_builder() {
     assert!(!h.is_empty());
 }
 
+// ── Gap tolerance (g) ──
+
+/// A -Connect-> X -Connect-> B, where the hypothesis only names the two
+/// endpoints. X is the "lost log" between them.
+fn one_gap_chain() -> GraphHunter {
+    let mut g = GraphHunter::new();
+    for id in ["A", "X", "B"] {
+        g.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    g.add_relation(Relation::new("A", "X", RelationType::Connect, 100)).unwrap();
+    g.add_relation(Relation::new("X", "B", RelationType::Connect, 110)).unwrap();
+    g.sort_edges_by_timestamp().unwrap();
+    g
+}
+
+fn a_to_b_connect() -> Hypothesis {
+    Hypothesis::new("a-to-b").add_step(HypothesisStep::new(
+        EntityType::IP,
+        RelationType::Connect,
+        EntityType::IP,
+    ))
+}
+
+/// With g = 0 there is no direct A→B edge, so the strict matcher finds
+/// nothing — the false negative lost logs cause. Uses an explicit `g=0`
+/// rather than the default so a concurrent env-var test cannot perturb
+/// it (the field always wins over `GRAPHHUNTER_MAX_GAP`).
+#[test]
+fn no_gap_misses_a_bridged_chain() {
+    let graph = one_gap_chain();
+    let h = a_to_b_connect().with_max_gap(0);
+    let (paths, _) = graph.search_temporal_pattern(&h, None, None).unwrap();
+    assert!(!paths.iter().any(|p| &*p[0] == "A" && &*p[p.len() - 1] == "B"));
+}
+
+/// g = 1 bridges the single missing hop and recovers A→B.
+#[test]
+fn one_gap_bridges_one_missing_hop() {
+    let graph = one_gap_chain();
+    let h = a_to_b_connect().with_max_gap(1);
+    let (paths, _) = graph.search_temporal_pattern(&h, None, None).unwrap();
+    let hit: Vec<_> = paths.iter().filter(|p| &*p[0] == "A" && &*p[1] == "B").collect();
+    assert_eq!(hit.len(), 1, "g=1 must bridge A→X→B into A→B, got {paths:?}");
+}
+
+/// The bridging vertex X is a match relaxation, not output: the path is
+/// the two anchors, never the three physical vertices.
+#[test]
+fn gap_fill_vertices_are_not_in_the_path() {
+    let graph = one_gap_chain();
+    let h = a_to_b_connect().with_max_gap(1);
+    let (paths, _) = graph.search_temporal_pattern(&h, None, None).unwrap();
+    // The bridged match specifically: A → (gap over X) → B. A→X is also a
+    // valid one-step match, so pick the A…B path deterministically.
+    let bridged = paths
+        .iter()
+        .find(|p| &*p[0] == "A" && &*p[p.len() - 1] == "B")
+        .expect("the A→B bridged match");
+    assert_eq!(bridged.len(), 2, "anchors only: A, B — not X. got {bridged:?}");
+    assert!(!bridged.iter().any(|n| &**n == "X"), "X must not appear: {bridged:?}");
+}
+
+/// g is a bound: a two-hop hole needs g ≥ 2, and g = 1 must still miss it.
+#[test]
+fn gap_bound_is_enforced() {
+    let mut graph = GraphHunter::new();
+    for id in ["A", "X", "Y", "B"] {
+        graph.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    graph.add_relation(Relation::new("A", "X", RelationType::Connect, 100)).unwrap();
+    graph.add_relation(Relation::new("X", "Y", RelationType::Connect, 110)).unwrap();
+    graph.add_relation(Relation::new("Y", "B", RelationType::Connect, 120)).unwrap();
+    graph.sort_edges_by_timestamp().unwrap();
+
+    let (p1, _) = graph.search_temporal_pattern(&a_to_b_connect().with_max_gap(1), None, None).unwrap();
+    assert!(!p1.iter().any(|p| &*p[0] == "A" && &*p[p.len()-1] == "B"),
+        "a 2-hop hole must not be bridged by g=1, got {p1:?}");
+    let (p2, _) = graph.search_temporal_pattern(&a_to_b_connect().with_max_gap(2), None, None).unwrap();
+    assert!(p2.iter().any(|p| p.len() == 2 && &*p[0] == "A" && &*p[1] == "B"),
+        "g=2 must bridge a 2-hop hole, got {p2:?}");
+}
+
+/// The bridge must be temporally monotone: if the middle edge runs
+/// backward past δ, the gap does not connect.
+#[test]
+fn gap_bridge_respects_temporal_order() {
+    let mut graph = GraphHunter::new();
+    for id in ["A", "X", "B"] {
+        graph.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    // A→X at t=100, X→B at t=50 — B happened before the bridge. Strict.
+    graph.add_relation(Relation::new("A", "X", RelationType::Connect, 100)).unwrap();
+    graph.add_relation(Relation::new("X", "B", RelationType::Connect, 50)).unwrap();
+    graph.sort_edges_by_timestamp().unwrap();
+
+    let h = a_to_b_connect().with_max_gap(1);
+    let (paths, _) = graph.search_temporal_pattern(&h, None, None).unwrap();
+    assert!(!paths.iter().any(|p| &*p[0] == "A" && &*p[p.len()-1] == "B"),
+        "a backward bridge edge must not connect, got {paths:?}");
+}
+
+// The env-var fallback for `g` is covered in the DSL crate's
+// `resolve_*` tests, which run without any concurrent search and so
+// cannot leak a mutated global into the 800 default-path tests here.
+
 // ── Clock-skew tolerance (δ) ──
 
 /// Builds A -Connect-> B -Connect-> C where B→C carries an *earlier*
@@ -152,15 +257,15 @@ fn two_hop_connect() -> Hypothesis {
         ))
 }
 
-/// Strict monotonicity (δ = 0, the default) drops a chain whose second
-/// hop fell behind the first — the true-negative the feature exists to
-/// stop being a false negative.
+/// Strict monotonicity (δ = 0) drops a chain whose second hop fell behind
+/// the first — the true-negative the feature exists to stop being a false
+/// negative. Explicit `δ=0` (not the default) so a concurrent env-var
+/// test cannot perturb it.
 #[test]
 fn strict_monotonicity_drops_a_backward_hop() {
     let g = skewed_two_hop(5);
-    let (paths, _) = g
-        .search_temporal_pattern(&two_hop_connect(), None, None)
-        .unwrap();
+    let h = two_hop_connect().with_skew_tolerance(0);
+    let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
     assert!(
         paths.is_empty(),
         "with δ=0 a 5s-early second hop must not match, got {paths:?}"
@@ -228,23 +333,9 @@ fn skew_tolerance_is_per_hop_not_cumulative() {
     assert!(paths2.is_empty(), "a single 6s backward hop exceeds δ=5, got {paths2:?}");
 }
 
-/// The environment variable is the deployment-level fallback: with no
-/// per-hypothesis δ, `GRAPHHUNTER_SKEW_TOLERANCE_SECONDS` supplies it.
-#[test]
-fn skew_tolerance_falls_back_to_the_env_var() {
-    let g = skewed_two_hop(5);
-    // SAFETY: restored before the test returns.
-    unsafe { std::env::set_var("GRAPHHUNTER_SKEW_TOLERANCE_SECONDS", "5") };
-    let (paths, _) = g
-        .search_temporal_pattern(&two_hop_connect(), None, None)
-        .unwrap();
-    unsafe { std::env::remove_var("GRAPHHUNTER_SKEW_TOLERANCE_SECONDS") };
-    assert_eq!(
-        paths.len(),
-        1,
-        "the env var must supply δ when the hypothesis leaves it unset, got {paths:?}"
-    );
-}
+// The env-var fallback for δ is covered in the DSL crate's `resolve_*`
+// tests — kept out of this crate so a mutated global can never leak into
+// the default-path search tests running alongside it.
 
 /// δ must win over the LFTJ planner: even with the operator forced on,
 /// a δ query routes to the DFS, because LFTJ ignores δ and would return

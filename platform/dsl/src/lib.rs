@@ -211,6 +211,9 @@ pub fn format_hypothesis(h: &Hypothesis) -> String {
     if let Some(secs) = h.skew_tolerance_seconds {
         out.push_str(&format!(" SKEW {}s", secs));
     }
+    if let Some(g) = h.max_gap {
+        out.push_str(&format!(" GAP {}", g));
+    }
     if h.k_simplicity > 1 {
         out.push_str(&format!(" {{k={}}}", h.k_simplicity));
     }
@@ -381,7 +384,7 @@ impl<'a> Cursor<'a> {
         // If the identifier is a reserved trailing keyword, it's NOT a
         // binding — rewind and let the outer parser handle it.
         let up = candidate.to_ascii_uppercase();
-        if up == "HAVING" || up == "WITHIN" {
+        if up == "HAVING" || up == "WITHIN" || up == "SKEW" || up == "GAP" {
             self.pos = save;
             return Ok((et, None));
         }
@@ -733,7 +736,7 @@ impl<'a> Cursor<'a> {
         // Optional `HAVING` / `WITHIN` clauses BEFORE the k-simplicity suffix.
         // Grammar note: these are whitespace-separated and may appear in either
         // order; we peek for the keyword and consume it if present.
-        let (aggregations, window_seconds, skew_tolerance_seconds) =
+        let (aggregations, window_seconds, skew_tolerance_seconds, max_gap) =
             self.parse_trailing_clauses(&steps)?;
 
         // Parse optional {k=N} suffix for k-simplicity
@@ -746,6 +749,7 @@ impl<'a> Cursor<'a> {
             aggregations,
             window_seconds,
             skew_tolerance_seconds,
+            max_gap,
             shape,
         })
     }
@@ -921,13 +925,15 @@ impl<'a> Cursor<'a> {
     /// Parse zero or more `HAVING ...` / `WITHIN ...` clauses appearing
     /// after the arrow-chain but before any `{k=N}` suffix. The order is
     /// not fixed — analysts write what feels natural.
+    #[allow(clippy::type_complexity)]
     fn parse_trailing_clauses(
         &mut self,
         steps: &[HypothesisStep],
-    ) -> Result<(Vec<AggClause>, Option<i64>, Option<i64>), DslError> {
+    ) -> Result<(Vec<AggClause>, Option<i64>, Option<i64>, Option<usize>), DslError> {
         let mut aggregations = Vec::new();
         let mut window_seconds: Option<i64> = None;
         let mut skew_tolerance_seconds: Option<i64> = None;
+        let mut max_gap: Option<usize> = None;
 
         loop {
             self.skip_whitespace();
@@ -968,6 +974,19 @@ impl<'a> Cursor<'a> {
                     }
                     skew_tolerance_seconds = Some(self.parse_duration_seconds()?);
                 }
+                // `GAP n` tolerates up to n wildcard edges bridging lost
+                // logs between consecutive steps. A plain count, not a
+                // duration — it counts edges, not seconds.
+                "GAP" => {
+                    if max_gap.is_some() {
+                        return Err(DslError {
+                            message: "Duplicate GAP clause".into(),
+                            position: save,
+                        });
+                    }
+                    self.skip_whitespace();
+                    max_gap = Some(self.parse_usize()?);
+                }
                 _ => {
                     // Not a known keyword — rewind so `try_parse_k_suffix`
                     // (or the outer error path) can deal with it.
@@ -977,7 +996,7 @@ impl<'a> Cursor<'a> {
             }
         }
 
-        Ok((aggregations, window_seconds, skew_tolerance_seconds))
+        Ok((aggregations, window_seconds, skew_tolerance_seconds, max_gap))
     }
 
     /// Parse `count(distinct <col>) [>=|>] <N>`. Only `count(distinct ...)`
@@ -1110,6 +1129,25 @@ impl<'a> Cursor<'a> {
             }
         };
         Ok(n.saturating_mul(multiplier))
+    }
+
+    /// Parses a bare unsigned integer (no unit). Used by `GAP`, which
+    /// counts edges rather than seconds.
+    fn parse_usize(&mut self) -> Result<usize, DslError> {
+        let num_start = self.pos;
+        while self.pos < self.input.len() && self.input.as_bytes()[self.pos].is_ascii_digit() {
+            self.pos += 1;
+        }
+        if self.pos == num_start {
+            return Err(DslError {
+                message: "Expected an integer in GAP clause".into(),
+                position: self.pos,
+            });
+        }
+        self.input[num_start..self.pos].parse().map_err(|_| DslError {
+            message: "Invalid integer in GAP clause".into(),
+            position: num_start,
+        })
     }
 }
 

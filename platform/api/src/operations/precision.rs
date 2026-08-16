@@ -152,6 +152,7 @@ mod tests {
             aggregations: vec![],
             window_seconds: None,
             skew_tolerance_seconds: None,
+            max_gap: None,
             shape: Default::default(),
         }
     }

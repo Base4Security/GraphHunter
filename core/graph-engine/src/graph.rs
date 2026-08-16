@@ -1132,6 +1132,14 @@ impl GraphHunter {
             .validate()
             .map_err(GraphError::InvalidHypothesis)?;
 
+        // Gap tolerance has its own dedicated matcher — it changes what
+        // "the next step" means (a bounded wildcard bridge, not a direct
+        // edge), which the DFS/LFTJ/Yannakakis operators do not model.
+        // Route there before anything else when g > 0.
+        if hypothesis.resolve_max_gap() > 0 {
+            return self.search_temporal_pattern_gapped(hypothesis, time_window, max_results);
+        }
+
         // Clock-skew tolerance is only implemented on the DFS path. The
         // LFTJ and Yannakakis operators enforce strict monotonicity in
         // their join structure and would silently ignore δ, returning a
@@ -3201,6 +3209,247 @@ impl GraphHunter {
         }
 
         true
+    }
+
+    /// Gap-tolerant temporal match: allows up to `g` wildcard edges to
+    /// bridge the hole between consecutive observed steps, for telemetry
+    /// with dropped logs. See [`Hypothesis::max_gap`].
+    ///
+    /// This is a separate, unoptimised path on purpose. Gap tolerance is a
+    /// robustness mode, not the hot path, and folding a per-step bounded
+    /// wildcard walk into the SIMD/AMAC DFS would tax every strict query
+    /// to serve the rare lossy one. `search_temporal_pattern` routes here
+    /// only when `g > 0`; `g = 0` never pays for any of this.
+    ///
+    /// Complexity is O(|S₀| · (d^g) · d) per level in the worst case,
+    /// where d is average out-degree — acceptable because g is small
+    /// (1–3 in practice) and the query is deliberate.
+    pub fn search_temporal_pattern_gapped(
+        &self,
+        hypothesis: &Hypothesis,
+        time_window: Option<(i64, i64)>,
+        max_results: Option<usize>,
+    ) -> Result<(Vec<HuntResult>, bool), GraphError> {
+        hypothesis
+            .validate()
+            .map_err(GraphError::InvalidHypothesis)?;
+
+        let cap = max_results.unwrap_or(10_000);
+        let delta = hypothesis.resolve_skew_delta();
+        let g = hypothesis.resolve_max_gap();
+        let k = hypothesis.k_simplicity.max(1);
+        let steps = &hypothesis.steps;
+
+        let first = &steps[0];
+        let starts: Vec<StrId> = if first.origin_type == EntityType::Any {
+            self.entities.keys().copied().collect()
+        } else {
+            self.type_index
+                .get(&first.origin_type)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default()
+        };
+
+        let mut results: Vec<HuntResult> = Vec::new();
+        let mut path: Vec<StrId> = Vec::with_capacity(steps.len() + 1);
+        for start in starts {
+            if results.len() >= cap {
+                break;
+            }
+            path.clear();
+            path.push(start);
+            self.gapped_recurse(
+                start,
+                steps,
+                0,
+                i64::MIN,
+                delta,
+                g,
+                k,
+                cap,
+                time_window,
+                &mut path,
+                &mut results,
+            );
+        }
+        let truncated = results.len() >= cap;
+        results.truncate(cap);
+        Ok((results, truncated))
+    }
+
+    /// Vertices reachable from `from` in 0..=`g` wildcard hops that are
+    /// temporally monotone (each hop `≥ prev − δ`) and inside the window,
+    /// paired with the timestamp of the last gap edge taken (or `floor`
+    /// itself at depth 0, i.e. no gap consumed).
+    ///
+    /// Depth 0 always yields `(from, floor)` so the no-gap case matches
+    /// the strict path exactly. The walk avoids revisiting a vertex within
+    /// one gap chain, so a cycle cannot inflate the frontier.
+    fn gap_frontier(
+        &self,
+        from: StrId,
+        floor: i64,
+        delta: i64,
+        g: usize,
+        time_window: Option<(i64, i64)>,
+    ) -> Vec<(StrId, i64)> {
+        let mut out: Vec<(StrId, i64)> = vec![(from, floor)];
+        if g == 0 {
+            return out;
+        }
+        let mut seen: HashSet<StrId> = HashSet::new();
+        seen.insert(from);
+        let mut chain: Vec<StrId> = vec![from];
+        self.gap_walk(from, floor, delta, g, time_window, &mut seen, &mut chain, &mut out);
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gap_walk(
+        &self,
+        cur: StrId,
+        prev_ts: i64,
+        delta: i64,
+        remaining: usize,
+        time_window: Option<(i64, i64)>,
+        seen: &mut HashSet<StrId>,
+        chain: &mut Vec<StrId>,
+        out: &mut Vec<(StrId, i64)>,
+    ) {
+        if remaining == 0 {
+            return;
+        }
+        for edge in self.neighbors_incl_tail(cur) {
+            let ts = edge.timestamp;
+            if ts < prev_ts.saturating_sub(delta) {
+                continue;
+            }
+            if let Some((lo, hi)) = time_window {
+                if ts < lo || ts > hi {
+                    continue;
+                }
+            }
+            let next = edge.dest_sid;
+            if seen.contains(&next) {
+                continue;
+            }
+            // A gap-fill edge is a wildcard: no relation-type or predicate
+            // check — that is the whole point of a gap.
+            out.push((next, ts));
+            seen.insert(next);
+            chain.push(next);
+            self.gap_walk(next, ts, delta, remaining - 1, time_window, seen, chain, out);
+            chain.pop();
+            seen.remove(&next);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gapped_recurse(
+        &self,
+        cur: StrId,
+        steps: &[crate::hypothesis::HypothesisStep],
+        step_idx: usize,
+        last_ts: i64,
+        delta: i64,
+        g: usize,
+        k: usize,
+        cap: usize,
+        time_window: Option<(i64, i64)>,
+        path: &mut Vec<StrId>,
+        results: &mut Vec<HuntResult>,
+    ) {
+        if step_idx >= steps.len() {
+            results.push(path.iter().map(|&sid| self.interner.resolve_arc(sid)).collect());
+            return;
+        }
+        if results.len() >= cap {
+            return;
+        }
+        let step = &steps[step_idx];
+
+        // Candidate origins for this step: `cur`, plus anything reachable
+        // from it across a wildcard gap. Dedup on vertex, keeping the
+        // earliest reach timestamp so the tightest monotonicity bound wins.
+        let mut origins: std::collections::HashMap<StrId, i64> =
+            std::collections::HashMap::new();
+        for (v, ts) in self.gap_frontier(cur, last_ts, delta, g, time_window) {
+            origins
+                .entry(v)
+                .and_modify(|e| *e = (*e).min(ts))
+                .or_insert(ts);
+        }
+
+        for (origin, origin_ts) in origins {
+            for edge in self.neighbors_incl_tail(origin) {
+                if results.len() >= cap {
+                    return;
+                }
+                // Real step edge: relation type, dest type, monotonicity,
+                // window and predicates all enforced — the gap relaxed the
+                // hole before this edge, not the edge itself.
+                if !relation_type_matches(&step.relation_type, &edge.rel_type()) {
+                    continue;
+                }
+                let edge_ts = edge.timestamp;
+                if edge_ts < origin_ts.saturating_sub(delta) {
+                    continue;
+                }
+                if let Some((lo, hi)) = time_window {
+                    if edge_ts < lo || edge_ts > hi {
+                        continue;
+                    }
+                }
+                let dest_sid = edge.dest_sid;
+                let dest = match self.entities.get(&dest_sid) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                if !entity_type_matches(&step.dest_type, &dest.entity_type) {
+                    continue;
+                }
+                if !step.edge_predicates.is_empty() {
+                    let metadata = if edge.metadata_offset != 0 {
+                        self.meta_store.get(edge.metadata_offset)
+                    } else {
+                        std::collections::HashMap::new()
+                    };
+                    if !crate::hypothesis::all_predicates_match(&step.edge_predicates, &metadata) {
+                        continue;
+                    }
+                }
+                if !step.dest_predicates.is_empty()
+                    && !crate::hypothesis::all_predicates_match(
+                        &step.dest_predicates,
+                        &dest.metadata,
+                    )
+                {
+                    continue;
+                }
+                // k-simplicity over anchor vertices only — gap-fill
+                // vertices are never in the path, so they never count.
+                let visits = path.iter().filter(|&&s| s == dest_sid).count();
+                if visits >= k {
+                    continue;
+                }
+
+                path.push(dest_sid);
+                self.gapped_recurse(
+                    dest_sid,
+                    steps,
+                    step_idx + 1,
+                    edge_ts,
+                    delta,
+                    g,
+                    k,
+                    cap,
+                    time_window,
+                    path,
+                    results,
+                );
+                path.pop();
+            }
+        }
     }
 
     /// Ingests log data in chunks with progress callback.

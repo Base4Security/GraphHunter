@@ -172,10 +172,12 @@ fn arb_hypothesis() -> impl Strategy<Value = Hypothesis> {
                 k_simplicity: k,
                 aggregations,
                 window_seconds,
-                // δ has its own dedicated round-trip test below; the
-                // property generator leaves it unset so this suite keeps
-                // exercising the pre-existing clauses without a new axis.
+                // δ and the gap knob each have a dedicated round-trip test
+                // below; the property generator leaves them unset so this
+                // suite keeps exercising the pre-existing clauses without
+                // new axes.
                 skew_tolerance_seconds: None,
+                max_gap: None,
                 shape: graph_hunter_dsl::hypothesis::HypothesisShape::default(),
             }
         })
@@ -200,6 +202,27 @@ fn skew_clause_round_trips() {
 
     // A duplicate SKEW is rejected, matching WITHIN's rule.
     assert!(parse_dsl("IP -[Connect]-> IP SKEW 5s SKEW 9s", None).is_err());
+}
+
+/// `GAP n` survives a round-trip and composes with the other clauses.
+#[test]
+fn gap_clause_round_trips() {
+    use graph_hunter_dsl::{format_hypothesis, parse_dsl};
+
+    let h = parse_dsl("IP -[Connect]-> IP GAP 2 SKEW 5s", None)
+        .expect("parse")
+        .hypothesis;
+    assert_eq!(h.max_gap, Some(2));
+    assert_eq!(h.skew_tolerance_seconds, Some(5));
+
+    let rendered = format_hypothesis(&h);
+    assert!(rendered.contains("GAP 2"), "rendered: {rendered}");
+    let h2 = parse_dsl(&rendered, None).expect("re-parse").hypothesis;
+    assert_eq!(h2.max_gap, Some(2));
+
+    // GAP takes a bare integer, not a duration.
+    assert!(parse_dsl("IP -[Connect]-> IP GAP", None).is_err());
+    assert!(parse_dsl("IP -[Connect]-> IP GAP 1 GAP 2", None).is_err());
 }
 
 proptest! {
