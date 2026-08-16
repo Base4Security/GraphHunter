@@ -12,8 +12,9 @@ use graph_hunter_core::{
     preview_sysmon,
 };
 use graph_hunter_parsers::{
-    CognitoParser, FortiAnalyzerXmlParser, FortiGateParser, HaproxyParser, IisW3cParser,
-    looks_like_cognito, looks_like_fortigate, looks_like_haproxy, looks_like_iis_w3c,
+    CdmParser, CognitoParser, FortiAnalyzerXmlParser, FortiGateParser, HaproxyParser, IisW3cParser,
+    looks_like_cdm, looks_like_cognito, looks_like_fortigate, looks_like_haproxy,
+    looks_like_iis_w3c,
 };
 use serde_json::Value;
 
@@ -64,6 +65,15 @@ fn detect_iis(contents: &str) -> bool {
 /// can't do (it would treat the whole line as one unstructured column).
 fn detect_haproxy(contents: &str) -> bool {
     looks_like_haproxy(contents)
+}
+
+/// Detects DARPA TC CDM (E3) provenance JSON. The native parser does the
+/// two-pass UUID resolution — catalogue entities, then wire events to
+/// them — that the generic JSON path cannot: a CDM event references its
+/// endpoints by UUID defined in other records, so a per-record parse
+/// would emit orphan nodes with no edges.
+fn detect_cdm(contents: &str) -> bool {
+    looks_like_cdm(contents)
 }
 
 /// Detects FortiGate firewall KV log lines (and FortiGate CSV exports
@@ -143,6 +153,16 @@ fn preview_haproxy(_contents: &str) -> Vec<(String, String)> {
     ]
 }
 
+fn preview_cdm(_contents: &str) -> Vec<(String, String)> {
+    vec![
+        ("subject".into(), "Process (actor)".into()),
+        ("predicateObject".into(), "File / IP / Process (acted-on)".into()),
+        ("type".into(), "relation (EVENT_* → Execute/Read/Write/Connect/Auth)".into()),
+        ("event_type".into(), "metadata".into()),
+        ("ts_nanos".into(), "metadata (full nanosecond timestamp)".into()),
+    ]
+}
+
 fn preview_fortianalyzer(_contents: &str) -> Vec<(String, String)> {
     vec![
         ("User_Name".into(), "IP (Top User by Traffic)".into()),
@@ -203,6 +223,16 @@ static FORMAT_REGISTRY: &[FormatDescriptor] = &[
         detect: detect_haproxy,
         make_parser: || Box::new(HaproxyParser),
         preview: preview_haproxy,
+    },
+    // CDM is JSON, so it must be probed before `generic`/`csv` swallow it
+    // — its detector keys on the cdm18 schema prefix, which generic JSON
+    // never carries.
+    FormatDescriptor {
+        name: "cdm",
+        aliases: &["darpa", "tc", "cdm18"],
+        detect: detect_cdm,
+        make_parser: || Box::new(CdmParser),
+        preview: preview_cdm,
     },
     FormatDescriptor {
         name: "fortianalyzer",
@@ -294,7 +324,7 @@ pub fn make_parser_for_format(
         .map(|desc| (desc.make_parser)())
         .ok_or_else(|| {
             format!(
-                "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', 'haproxy', 'fortianalyzer', or 'fortigate'.",
+                "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', 'haproxy', 'cdm', 'fortianalyzer', or 'fortigate'.",
                 format_name
             )
         })
@@ -372,6 +402,17 @@ mod tests {
         let apache =
             "127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] \"GET /a HTTP/1.0\" 200 2326\n";
         assert_ne!(resolve_format(apache, "auto"), "haproxy");
+    }
+
+    /// CDM provenance JSON must auto-detect to `cdm`, not `generic`/`csv`.
+    /// Routing it to the generic JSON parser would emit orphan entity
+    /// nodes with no edges, because CDM events reference their endpoints
+    /// by UUID defined in other records — the whole reason for the native
+    /// two-pass parser.
+    #[test]
+    fn cdm_auto_detects_to_cdm() {
+        let cdm = "{\"datum\":{\"com.bbn.tc.schema.avro.cdm18.Event\":{\"uuid\":\"e\",\"type\":\"EVENT_EXECUTE\",\"timestampNanos\":1}}}\n";
+        assert_eq!(resolve_format(cdm, "auto"), "cdm");
     }
 
     /// Keycloak user-events export: double-encoded CSV (each data row is a

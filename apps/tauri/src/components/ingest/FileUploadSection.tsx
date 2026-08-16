@@ -180,6 +180,7 @@ export default function FileUploadSection({
           <option value="sentinel">Azure Sentinel</option>
           <option value="fortianalyzer">FortiAnalyzer XML Report</option>
           <option value="haproxy">HAProxy (HTTP log)</option>
+          <option value="cdm">DARPA TC CDM (E3 provenance)</option>
           <option value="generic">Generic JSON</option>
           <option value="csv">CSV</option>
         </select>

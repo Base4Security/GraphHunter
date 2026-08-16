@@ -24,12 +24,14 @@
 //!   `graph_hunter_core/tests/*.rs` integration tests, which bypass the
 //!   two-copy problem).
 
+pub mod cdm;
 pub mod cognito;
 pub mod forti_analyzer;
 pub mod fortigate;
 pub mod haproxy;
 pub mod iis_w3c;
 
+pub use cdm::{CdmParser, looks_like_cdm};
 pub use cognito::{CognitoParser, looks_like_cognito};
 pub use haproxy::{HaproxyParser, looks_like_haproxy};
 pub use forti_analyzer::{
