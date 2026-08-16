@@ -192,3 +192,18 @@ Encender lo que ya está pago. Mayor salto de capacidad por unidad de esfuerzo d
 | 2026-08-14 | **B1.5 eventos sin contraparte** | 642 eventos invisibles, entre ellos 399 de los 401 `realm_disabled` del corte de contención del 24-07. |
 | 2026-08-14 | B1.5 pieza 2 (asimetría del fallback) | El fallback de evento singleton cubre `target_ip` con un self-loop pero **no `source_ip`** — por eso los eventos de AD-CAP (cuyo `ipAddress` mapea a `source_ip`) no produjeron ni siquiera un self-loop. Hueco encontrado leyendo el código para B1.4. |
 | 2026-08-14 | A0.1 GeoIP/ASN | Sin ASN no se detecta que `206.223.232.0/24` y `103.50.33.0/24` son el mismo AS396356 — el hallazgo que reabrió la ventana del incidente once días. |
+
+## 6. Frente top-tier (plan de paper, §4 del doc de trabajo) — motor
+
+Los deltas de motor codeables del plan de publicación, auditados y hechos 2026-08-15. El resto del plan (evaluación, user study, escritura) no es código.
+
+| Ítem del plan | Estado | Nota |
+|---|---|---|
+| 4.2 CSR + orden (src,ts) + binary search del sucesor | ✅ **ya existía** | `edge_range_sid` hace `partition_point` sobre adyacencia ordenada. Falta **escribirlo** como contribución, no construirlo. |
+| 4.3 LFTJ-SIMD en el camino de consulta | ✅ **ya existía**, off by default | Patrón built-not-wired. |
+| **4.4 Tolerancia δ (clock skew)** | ✅ **hecho** (`3d6afda`) | `τ(eᵢ₊₁) ≥ τ(eᵢ) − δ`, per-hop no acumulativo. `SKEW 5s` en DSL + campo Hypothesis + env `GRAPHHUNTER_SKEW_TOLERANCE_SECONDS`. δ>0 fuerza DFS (LFTJ/Yannakakis lo ignorarían). Aplicado en los 4 paths de match. |
+| **4.4 gaps ≤ g (pérdida de logs)** | ✅ **hecho** (`d7dd995`) | Hasta g comodines temporalmente monótonos entre pasos; los nodos puente **no** entran al path. `GAP 2` en DSL + campo + env. Matcher separado, g=0 no paga nada. |
+| **4.1 Parser CDM nativo Rust** | ✅ **hecho** (`13e6e86`) | Port del `01_parse_darpa_cdm.py`, two-pass UUID. ts en segundos + `ts_nanos` metadata (decisión documentada). Auto-detect antes de generic. |
+| 4.5 Análisis formal (matriz de transición, cota output-sensitive) | ⛔ | Matemática/escritura, no código. |
+
+**Pendiente de motor, anotado:** δ y gaps sólo en el DFS — subirlos a LFTJ/Yannakakis es trabajo futuro (el guard mantiene la respuesta honesta mientras tanto). El timestamp CDM en segundos pierde orden intra-segundo hasta que el motor sea ns-native; `ts_nanos` lo preserva.
