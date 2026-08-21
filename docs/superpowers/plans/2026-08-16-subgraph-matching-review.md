@@ -383,18 +383,40 @@ Dos hallazgos quedan abiertos porque tocarlos requiere decisiones de diseño:
    tests del repo que documentan justamente eso. Angostar esto rompería
    hipótesis autoradas existentes, así que necesita decisión de producto.
 
-2. **La semántica temporal de los enumeradores difiere del DFS**, según la
-   auditoría (verificar antes de actuar):
-   - *Estrictez*: el enumerador de triángulos exige `t_bc > t_ab` (estricto);
-     el DFS usa `>=`. Saltos con timestamp igual que el DFS acepta, el
-     operador los descarta.
-   - *Ventana*: el enumerador usa `[lo, hi)` medio-abierto; el DFS `[lo, hi]`
-     inclusivo. Off-by-one en el borde superior.
-   - *Cobertura de ventana*: el enumerador filtra **solo la primera arista**;
-     el DFS aplica la ventana a cada salto.
-   - *Multi-arista*: `MinTimestampMap` guarda solo el timestamp **mínimo** por
-     par, así que un triángulo válido con una arista posterior puede
-     descartarse.
+2. **La semántica temporal difiere del DFS — VERIFICADO** (2026-08-16, tests
+   propios en `core/graph-engine/tests/triangle_temporal_semantics.rs`, no
+   solo el reporte de la auditoría). Las cuatro se reproducen, cada una con
+   un control que aísla la variable:
+   - *Estrictez*: exige `t_bc > t_ab` y `t_ac > t_bc`
+     (`lftj_query.rs:424,431`); el piso del DFS es no estricto. Un triángulo
+     con timestamps iguales en saltos consecutivos es válido para el DFS y lo
+     descarta el operador. **No es exótico:** las fuentes estampan eventos
+     causalmente ordenados dentro del mismo segundo, y nuestro parser CDM
+     redondea nanosegundos a segundos justamente por compatibilidad del motor.
+   - *Ventana*: medio-abierta sobre la primera arista (`t_ab >= t_hi` se
+     rechaza, `lftj_query.rs:409`) contra el borde superior inclusivo del DFS.
+   - *Cobertura de ventana*: solo se chequea `t_ab`; `t_bc` y `t_ac` nunca.
+     Un triángulo cuyas aristas 2ª y 3ª caen **fuera** de la ventana pedida se
+     emite igual. **Esta sobre-reporta** — devuelve un match que la ventana
+     del analista excluía — y es la más peligrosa de las dos de ventana.
+   - *Multi-arista*: `MinTimestampMap` guarda solo el mínimo por par
+     (`lftj_query.rs:70-72`), así que prueba **un** triple en vez de preguntar
+     si **alguna** combinación de aristas paralelas respeta el tiempo. Con
+     `t_ab=10`, `t_bc∈{5,20}`, `t_ac=30`, el triángulo válido (10,20,30) se
+     descarta porque `min(t_bc)=5` falla. Las aristas paralelas entre el mismo
+     par son la norma en telemetría real.
+
+   **Severidad, calibrada y no asumida:** todos los casos requieren una
+   hipótesis marcada explícitamente con `triangle`. Tras el fix de §8.1 una
+   cadena de 3 pasos sin marcador va al DFS (fijado por un quinto test), y
+   **ningún patrón del catálogo built-in es una cadena homogénea de 3 pasos**.
+   O sea: el default shipeado **no** diverge en silencio; quien opta
+   explícitamente por el operador rápido obtiene otra semántica temporal. Es
+   una tarea de alineación de correctitud, no un incidente.
+
+   Los tests asertan la conducta **actual** (divergente), así que alinear el
+   enumerador los pondrá en rojo con un mensaje que lo explica — la divergencia
+   no puede arreglarse en silencio ni reaparecer sin que nadie lo note.
 
 **Conclusión revisada del ítem #2:** no ampliar el ruteo a WCOJ. El
 prerequisito es alinear la semántica temporal de los enumeradores con la del
