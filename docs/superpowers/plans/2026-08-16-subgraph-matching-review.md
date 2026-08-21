@@ -336,6 +336,71 @@ número definitivo necesita instrumentar el corpus AD-CAP en vivo. Pero la
 señal es lo bastante fuerte —0 formas-Graph, 3/32 tail-rare— como para
 desprioritizar el incremento 2 sin ese número.
 
+## 8. Verificación adversarial de WCOJ (2026-08-16) — el ítem #2 se invierte
+
+Fui a **activar** WCOJ (ítem #2). La auditoría lo dio vuelta.
+
+**Primero, el roadmap estaba desactualizado:** WCOJ no está apagado. Las dos
+apps shipeadas prenden `LFTJ_PLANNER`, `K4_LFTJ` y `YANNAKAKIS` al arrancar
+(`apps/cli/src/main.rs:108`, `apps/tauri/src-tauri/src/lib.rs:65`).
+
+**Segundo, no existía ni un test de paridad.** Los tests verificaban que el
+planner *enrutara*, nunca qué *devolvía*. Escribí los que faltaban
+(`core/graph-engine/tests/lftj_dfs_parity.rs`) y encontraron el defecto de
+fondo.
+
+### 8.1 Arreglado: "la forma no es la intención" (`c9dad27`)
+
+Una cadena homogénea de 6 pasos `T -[r]-> T` es la forma normal de escribir
+"un camino de 6 saltos", y también la cantidad de aristas de un 4-clique. El
+planner despachaba por esa coincidencia **sola**, así que en configuración
+de producción quien pedía un camino recibía **cliques**. Igual a 3 pasos
+(triángulo) y 10 (K5). El planner con costos era peor: usaba `||`, así que
+la forma sola habilitaba al operador como candidato.
+
+Las rutas estructurales ahora exigen el marcador explícito del autor además
+de la forma — patrón que **ya existía** en `is_homogeneous_c6_shape` y que
+las otras tres rutas se habían salteado.
+
+### 8.2 Arreglado: el batch perdía δ y gaps (`569384f`)
+
+`run_hunt_batch` (`platform/api/src/operations/hunt.rs:540`) llamaba al
+planner directo, salteando el guard que impide enrutar hipótesis con δ>0 o
+g>0 a operadores que ignoran esas tolerancias. La rama Yannakakis del mismo
+batch tenía el mismo hueco por otra razón: **reimplementa**
+`yannakakis_dispatch` en espacio de API en vez de llamarlo, y la copia se
+había desincronizado.
+
+### 8.3 NO arreglado — registrado, no parcheado a ciegas
+
+Los 4 auditores dieron **"no seguro para default-on"** en los 4 operadores.
+Dos hallazgos quedan abiertos porque tocarlos requiere decisiones de diseño:
+
+1. **Las rutas name-marker no verifican forma alguna.**
+   `looks_like_triangle()` (`platform/dsl/src/hypothesis.rs:387`) es
+   `name.contains("triangle")`. Una hipótesis de **un solo paso** llamada
+   "Lateral pivot (triangle)" se enruta al enumerador de triángulos — y hay
+   tests del repo que documentan justamente eso. Angostar esto rompería
+   hipótesis autoradas existentes, así que necesita decisión de producto.
+
+2. **La semántica temporal de los enumeradores difiere del DFS**, según la
+   auditoría (verificar antes de actuar):
+   - *Estrictez*: el enumerador de triángulos exige `t_bc > t_ab` (estricto);
+     el DFS usa `>=`. Saltos con timestamp igual que el DFS acepta, el
+     operador los descarta.
+   - *Ventana*: el enumerador usa `[lo, hi)` medio-abierto; el DFS `[lo, hi]`
+     inclusivo. Off-by-one en el borde superior.
+   - *Cobertura de ventana*: el enumerador filtra **solo la primera arista**;
+     el DFS aplica la ventana a cada salto.
+   - *Multi-arista*: `MinTimestampMap` guarda solo el timestamp **mínimo** por
+     par, así que un triángulo válido con una arista posterior puede
+     descartarse.
+
+**Conclusión revisada del ítem #2:** no ampliar el ruteo a WCOJ. El
+prerequisito es alinear la semántica temporal de los enumeradores con la del
+DFS y hacerlos conscientes de los filtros por paso. **Angosto le gana a
+incorrecto.**
+
 ## Apéndice: citas a verificar antes del paper
 Todas las marcadas `[V]` arriba — VF2/VF3 (TPAMI), RI (BMC Bioinformatics
 2013), TurboISO (SIGMOD 2013), CFL-Match (SIGMOD 2016), CECI (SIGMOD 2019),
