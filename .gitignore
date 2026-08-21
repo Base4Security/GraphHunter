@@ -115,4 +115,4 @@ training/data/**/parsed/
 training/data/**/features/
 
 # Scratch probes written by audit subagents into test dirs — never committed.
-**/tests/zz_tmp_*.rs
+**/tests/zz_*.rs

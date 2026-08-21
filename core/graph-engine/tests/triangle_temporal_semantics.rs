@@ -1,16 +1,34 @@
-//! Does the triangle enumerator agree with the DFS on temporal semantics?
+//! The triangle enumerator's temporal semantics, aligned with the DFS.
 //!
 //! An audit reported four divergences between
-//! `enumerate_triangles_lftj_simd_window` and the DFS matcher. Reading the
-//! code confirms all four EXIST as written; these tests establish which
-//! ones actually change results, because a difference that no input can
-//! expose is a code smell, while one that drops a real triangle is a bug.
+//! `enumerate_triangles_lftj_simd_window` and the DFS matcher; all four
+//! were verified to reproduce, and all four are now fixed. These tests
+//! guard the aligned behaviour, one test per former divergence, each with
+//! a control that isolates the variable.
 //!
-//! Each test is built so the DFS and the operator are asked the SAME
-//! question over the same graph, and the operator is invoked through the
-//! shipped routing path (name marker + planner flag) rather than by
-//! reaching into the enumerator, so what is measured is what an analyst
-//! would actually get.
+//! The four, and what each used to do wrong:
+//!
+//! 1. **Strictness.** Required `t_bc > t_ab` (strict) while the DFS floor
+//!    keeps edges whose timestamp *equals* the previous hop's. Dropped
+//!    same-second causal chains — which are the common case, since sources
+//!    stamp ordered events inside one second and our CDM parser floors
+//!    nanoseconds to seconds.
+//! 2. **Window bounds.** Half-open upper bound against the DFS's
+//!    inclusive one.
+//! 3. **Window coverage.** Only the first edge was window-checked, so a
+//!    triangle whose other edges fell outside the window was emitted
+//!    anyway. This one *over*-reported — the only one that could invent a
+//!    finding.
+//! 4. **Multi-edge.** `MinTimestampMap` stored only the minimum timestamp
+//!    per pair, so exactly one candidate combination was tested and valid
+//!    triangles with parallel edges were dropped.
+//!
+//! The last test is the real gate: an independent brute-force reference,
+//! written here rather than reusing any enumerator variant, so this is a
+//! genuine cross-check and not four implementations agreeing with each
+//! other.
+
+use std::collections::BTreeSet;
 
 use graph_hunter_core::{
     Entity, EntityType, GraphHunter, Hypothesis, HypothesisStep, Relation, RelationType,
@@ -35,7 +53,7 @@ fn clear_flags() {
     }
 }
 
-/// Triangle a→b→c→(a→c), with explicit timestamps per edge.
+/// Triangle a→b→c plus the closing a→c, with explicit per-edge stamps.
 fn triangle_with(t_ab: i64, t_bc: i64, t_ac: i64) -> GraphHunter {
     let mut g = GraphHunter::new();
     for id in ["a", "b", "c"] {
@@ -48,8 +66,8 @@ fn triangle_with(t_ab: i64, t_bc: i64, t_ac: i64) -> GraphHunter {
     g
 }
 
-/// A 3-step homogeneous hypothesis carrying the `triangle` marker, i.e.
-/// what actually reaches the triangle operator after the routing fix.
+/// A 3-step homogeneous hypothesis carrying the `triangle` marker — what
+/// actually reaches the triangle operator after the routing fix.
 fn triangle_hypothesis() -> Hypothesis {
     let mut h = Hypothesis::new("triangle probe");
     for _ in 0..3 {
@@ -62,7 +80,6 @@ fn triangle_hypothesis() -> Hypothesis {
     h
 }
 
-/// Runs the marked hypothesis with the triangle operator enabled.
 fn via_operator(g: &GraphHunter, tw: Option<(i64, i64)>) -> usize {
     clear_flags();
     // SAFETY: ENV_LOCK held by the caller.
@@ -74,101 +91,120 @@ fn via_operator(g: &GraphHunter, tw: Option<(i64, i64)>) -> usize {
     paths.len()
 }
 
-/// FINDING 1 — STRICTNESS. The enumerator requires t_bc > t_ab and
-/// t_ac > t_bc (lftj_query.rs:424,431). The DFS's temporal floor is
-/// non-strict (`partition_point(|e| e.timestamp < lo_ts)` keeps edges
-/// with `ts == lo_ts`). So a triangle whose consecutive edges share a
-/// timestamp is temporally valid to the DFS and rejected by the operator.
-///
-/// This matters in practice: log sources routinely stamp causally-ordered
-/// events within the same second, and GraphHunter's CDM parser floors
-/// nanoseconds to seconds precisely for engine compatibility — so
-/// equal-timestamp hops are common, not exotic.
+/// FORMER DIVERGENCE 1 — strictness. Equal timestamps on consecutive hops
+/// are valid to the DFS (its floor is non-strict) and must be valid here.
 #[test]
-fn equal_timestamps_are_accepted_by_the_dfs_and_dropped_by_the_operator() {
+fn equal_timestamps_on_consecutive_hops_are_accepted() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // a→b and b→c share t=100; a→c later. Non-strict monotonicity accepts.
-    let g = triangle_with(100, 100, 200);
-
-    let found = via_operator(&g, None);
+    // a→b and b→c share t=100; a→c later.
     assert_eq!(
-        found, 0,
-        "operator rejects equal-timestamp hops (strict >), got {found} result(s)"
-    );
-
-    // The same shape with strictly increasing stamps IS found, proving the
-    // graph and routing are otherwise sound and the timestamp is the only
-    // difference.
-    let g_strict = triangle_with(100, 150, 200);
-    assert_eq!(
-        via_operator(&g_strict, None),
+        via_operator(&triangle_with(100, 100, 200), None),
         1,
-        "strictly increasing triangle must be found — otherwise this test \
-         proves nothing about strictness"
+        "a same-second causal chain must match, as it does in the DFS"
     );
-}
-
-/// FINDING 2 — WINDOW BOUNDS. The enumerator uses a half-open window on
-/// the first edge (`t_ab < t_lo || t_ab >= t_hi`, lftj_query.rs:409),
-/// while the DFS's upper bound is inclusive
-/// (`partition_point(|e| e.timestamp <= tw_end)`). A triangle whose first
-/// edge lands exactly on `t_hi` is inside the DFS's window and outside the
-/// operator's.
-#[test]
-fn a_first_edge_exactly_on_the_upper_bound_is_dropped_by_the_operator() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let g = triangle_with(200, 300, 400);
-    // Window whose upper bound is exactly t_ab.
-    let found = via_operator(&g, Some((100, 200)));
+    // All three equal is still a valid time-respecting triangle.
     assert_eq!(
-        found, 0,
-        "operator excludes t_ab == t_hi (half-open); got {found}"
-    );
-    // One tick wider and it appears — isolating the boundary as the cause.
-    assert_eq!(
-        via_operator(&g, Some((100, 201))),
+        via_operator(&triangle_with(100, 100, 100), None),
         1,
-        "t_hi = 201 must include a triangle whose first edge is at 200"
+        "three edges in the same second must match"
     );
-}
-
-/// FINDING 3 — WINDOW COVERS ONLY THE FIRST EDGE. The enumerator filters
-/// `t_ab` alone and never window-checks `t_bc` or `t_ac`
-/// (lftj_query.rs:377-382 documents this as deliberate). So a triangle
-/// whose 2nd and 3rd edges fall far outside the requested window is still
-/// emitted — the operator reports a match the analyst's window excluded.
-///
-/// This is the divergence that OVER-reports rather than under-reports,
-/// which makes it the more dangerous of the two window issues.
-#[test]
-fn edges_outside_the_window_are_still_emitted_if_the_first_edge_is_inside() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // First edge inside [100,200); the other two are far in the future.
-    let g = triangle_with(150, 5_000, 9_000);
-    let found = via_operator(&g, Some((100, 200)));
+    // Genuinely backwards still does not.
     assert_eq!(
-        found, 1,
-        "operator emits a triangle whose 2nd/3rd edges are outside the \
-         window because only t_ab is checked; got {found}"
+        via_operator(&triangle_with(100, 50, 200), None),
+        0,
+        "a strictly earlier second hop must NOT match"
     );
 }
 
-/// HOW REACHABLE IS ANY OF THIS? — the calibration that decides severity.
-///
-/// All four divergences above are demonstrated through a hypothesis whose
-/// NAME carries the `triangle` marker. After the shape-is-not-intent fix,
-/// an unmarked 3-step homogeneous chain no longer routes to the operator,
-/// so an analyst writing an ordinary hypothesis gets the DFS and none of
-/// these divergences.
-///
-/// That is the difference between "the shipped default silently diverges"
-/// and "a caller who explicitly opts into the fast operator gets different
-/// temporal semantics". Only the second is still true — which is why the
-/// remaining work is a correctness-alignment task rather than an incident.
+/// FORMER DIVERGENCE 2 — window bounds. The upper bound is inclusive, as
+/// in the DFS, so a triangle sitting exactly on `t_hi` is inside it.
+#[test]
+fn the_window_upper_bound_is_inclusive() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // All three edges exactly on the boundary.
+    let g = triangle_with(200, 200, 200);
+    assert_eq!(
+        via_operator(&g, Some((100, 200))),
+        1,
+        "edges exactly on t_hi are inside an inclusive window"
+    );
+    // One tick below the boundary excludes it — the control proving the
+    // bound is what decides, not something else about the graph.
+    assert_eq!(
+        via_operator(&g, Some((100, 199))),
+        0,
+        "t_hi = 199 must exclude edges at 200"
+    );
+}
+
+/// FORMER DIVERGENCE 3 — window coverage. Every edge is window-checked, so
+/// a triangle whose later edges fall outside the requested window is NOT
+/// emitted. This is the divergence that used to over-report.
+#[test]
+fn edges_outside_the_window_are_no_longer_emitted() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // First edge inside [100,200]; the other two far in the future.
+    assert_eq!(
+        via_operator(&triangle_with(150, 5_000, 9_000), Some((100, 200))),
+        0,
+        "a triangle whose 2nd/3rd edges are outside the window must not be \
+         emitted — the analyst asked for that window"
+    );
+    // Widen the window to cover all three and it appears.
+    assert_eq!(
+        via_operator(&triangle_with(150, 5_000, 9_000), Some((100, 10_000))),
+        1,
+        "with the window covering every edge the same triangle matches"
+    );
+}
+
+/// FORMER DIVERGENCE 4 — multi-edge. The operator now asks whether ANY
+/// combination of parallel edges is time-respecting, not just the one
+/// built from each pair's minimum.
+#[test]
+fn a_valid_combination_of_parallel_edges_is_found() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = GraphHunter::new();
+    for id in ["a", "b", "c"] {
+        g.add_entity(Entity::new(id, EntityType::Host)).unwrap();
+    }
+    g.add_relation(Relation::new("a", "b", RelationType::Connect, 10)).unwrap();
+    // Two parallel b→c edges: one too early to use, one that works.
+    g.add_relation(Relation::new("b", "c", RelationType::Connect, 5)).unwrap();
+    g.add_relation(Relation::new("b", "c", RelationType::Connect, 20)).unwrap();
+    g.add_relation(Relation::new("a", "c", RelationType::Connect, 30)).unwrap();
+    g.sort_edges_by_timestamp().unwrap();
+
+    assert_eq!(
+        via_operator(&g, None),
+        1,
+        "(10,20,30) is time-respecting; the early parallel b→c must not \
+         hide it — that was the min-timestamp bug"
+    );
+
+    // Control: with NO usable parallel edge the triangle really is absent.
+    let mut g2 = GraphHunter::new();
+    for id in ["a", "b", "c"] {
+        g2.add_entity(Entity::new(id, EntityType::Host)).unwrap();
+    }
+    g2.add_relation(Relation::new("a", "b", RelationType::Connect, 10)).unwrap();
+    g2.add_relation(Relation::new("b", "c", RelationType::Connect, 5)).unwrap();
+    g2.add_relation(Relation::new("a", "c", RelationType::Connect, 30)).unwrap();
+    g2.sort_edges_by_timestamp().unwrap();
+    assert_eq!(
+        via_operator(&g2, None),
+        0,
+        "with only the early b→c there is no time-respecting combination"
+    );
+}
+
+/// REACHABILITY — the calibration that sets severity. All of the above
+/// needs a hypothesis explicitly marked `triangle`. An unmarked 3-step
+/// chain routes to the DFS, so the shipped default never depended on any
+/// of these semantics.
 #[test]
 fn an_unmarked_three_step_chain_does_not_reach_the_operator() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // The shape that would trip finding 1, but authored without a marker.
     let g = triangle_with(100, 100, 200);
     let mut h = Hypothesis::new("ordinary three hop");
     for _ in 0..3 {
@@ -180,7 +216,6 @@ fn an_unmarked_three_step_chain_does_not_reach_the_operator() {
     }
 
     clear_flags();
-    // Production configuration: planner on, no explicit operator flag.
     // SAFETY: ENV_LOCK held.
     unsafe { std::env::set_var("GRAPHHUNTER_LFTJ_PLANNER", "1") };
     let (planner_paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
@@ -194,51 +229,135 @@ fn an_unmarked_three_step_chain_does_not_reach_the_operator() {
     );
 }
 
-/// FINDING 4 — MULTI-EDGE / MIN-TIMESTAMP. `MinTimestampMap::build` keeps
-/// only the minimum timestamp per (src,dst) pair (lftj_query.rs:70-72), so
-/// the operator tests ONE candidate triple rather than asking whether ANY
-/// combination of parallel edges is time-respecting. With
-/// t_ab=10, t_bc∈{5,20}, t_ac=30 the combination (10,20,30) is valid, but
-/// min(t_bc)=5 fails `t_bc > t_ab` and the triangle is dropped.
+// ── The gate: an independent reference implementation ──
+
+/// Brute-force "is there a time-respecting triangle on (a,b,c)?", written
+/// directly against the graph's relations.
 ///
-/// Parallel edges between the same pair are the norm in real telemetry
-/// (repeated connections between the same two hosts), so this is not a
-/// contrived shape.
+/// This deliberately shares NO code with any enumerator variant: the
+/// pre-existing `lftj_matches_naive_baseline` compares four
+/// implementations that encode the *same* predicate, so it can only catch
+/// a coding slip, never a wrong shared premise — and a wrong shared
+/// premise is exactly what the four divergences were. This reference
+/// states the semantics from scratch: exists edges a→b, b→c, a→c with
+/// `t_ab <= t_bc <= t_ac`, all inside the inclusive window.
+fn reference_triangles(g: &GraphHunter, tw: Option<(i64, i64)>) -> BTreeSet<Vec<String>> {
+    let (lo, hi) = tw.unwrap_or((i64::MIN, i64::MAX));
+    let (entities, relations) = g.to_snapshot();
+    let ids: Vec<String> = entities.iter().map(|e| e.id.clone()).collect();
+
+    // All timestamps per ordered pair, inside the window.
+    let stamps = |src: &str, dst: &str| -> Vec<i64> {
+        let mut v: Vec<i64> = relations
+            .iter()
+            .filter(|r| r.source_id == src && r.dest_id == dst)
+            .map(|r| r.timestamp)
+            .filter(|t| *t >= lo && *t <= hi)
+            .collect();
+        v.sort_unstable();
+        v
+    };
+
+    let mut out = BTreeSet::new();
+    for a in &ids {
+        for b in &ids {
+            if a == b {
+                continue;
+            }
+            let ab = stamps(a, b);
+            if ab.is_empty() {
+                continue;
+            }
+            for c in &ids {
+                if c == a || c == b {
+                    continue;
+                }
+                let bc = stamps(b, c);
+                let ac = stamps(a, c);
+                if bc.is_empty() || ac.is_empty() {
+                    continue;
+                }
+                // Exists t_ab <= t_bc <= t_ac?
+                let found = ab.iter().any(|&t1| {
+                    bc.iter()
+                        .filter(|&&t2| t2 >= t1)
+                        .any(|&t2| ac.iter().any(|&t3| t3 >= t2))
+                });
+                if found {
+                    out.insert(vec![a.clone(), b.clone(), c.clone()]);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// THE GATE. Deterministic pseudo-random graphs with parallel edges,
+/// duplicate timestamps and windows — precisely the inputs the four
+/// divergences lived in — compared against the independent reference.
 #[test]
-fn a_valid_triangle_is_dropped_when_a_parallel_edge_has_a_lower_timestamp() {
+fn operator_matches_an_independent_reference_across_random_graphs() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut g = GraphHunter::new();
-    for id in ["a", "b", "c"] {
-        g.add_entity(Entity::new(id, EntityType::Host)).unwrap();
-    }
-    g.add_relation(Relation::new("a", "b", RelationType::Connect, 10)).unwrap();
-    // Two parallel b→c edges: one too early, one that works.
-    g.add_relation(Relation::new("b", "c", RelationType::Connect, 5)).unwrap();
-    g.add_relation(Relation::new("b", "c", RelationType::Connect, 20)).unwrap();
-    g.add_relation(Relation::new("a", "c", RelationType::Connect, 30)).unwrap();
-    g.sort_edges_by_timestamp().unwrap();
+    // xorshift64 so the corpus is reproducible without a dependency.
+    let mut state: u64 = 0x2026_08_16;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
 
-    // (10, 20, 30) is a valid time-respecting triangle.
-    let found = via_operator(&g, None);
-    assert_eq!(
-        found, 0,
-        "operator uses min(t_bc)=5 and drops the valid (10,20,30) triangle; \
-         got {found} — if this now finds it, the min-timestamp map was fixed"
-    );
+    for case in 0..40u32 {
+        let n = 4 + (next() % 3) as usize; // 4..6 vertices
+        let mut g = GraphHunter::new();
+        for i in 0..n {
+            g.add_entity(Entity::new(format!("v{i}"), EntityType::Host)).unwrap();
+        }
+        // Edges with deliberately small timestamp range so ties and
+        // parallel edges are frequent, not incidental.
+        let edges = 6 + (next() % 10) as usize;
+        for _ in 0..edges {
+            let s = (next() % n as u64) as usize;
+            let d = (next() % n as u64) as usize;
+            if s == d {
+                continue;
+            }
+            let t = (next() % 8) as i64 * 10;
+            g.add_relation(Relation::new(
+                format!("v{s}"),
+                format!("v{d}"),
+                RelationType::Connect,
+                t,
+            ))
+            .unwrap();
+        }
+        g.sort_edges_by_timestamp().unwrap();
 
-    // Remove the early parallel edge and the same triangle appears,
-    // isolating the min-timestamp map as the cause.
-    let mut g2 = GraphHunter::new();
-    for id in ["a", "b", "c"] {
-        g2.add_entity(Entity::new(id, EntityType::Host)).unwrap();
+        // Half the cases with a window, half without.
+        let tw = if case % 2 == 0 { None } else { Some((10i64, 50i64)) };
+
+        clear_flags();
+        // SAFETY: ENV_LOCK held.
+        unsafe { std::env::set_var("GRAPHHUNTER_TRIANGLE_LFTJ", "1") };
+        let (paths, truncated) = g
+            .search_temporal_pattern(&triangle_hypothesis(), tw, None)
+            .expect("operator search");
+        clear_flags();
+        assert!(!truncated, "case {case}: cap must not interfere");
+
+        let got: BTreeSet<Vec<String>> = paths
+            .iter()
+            .map(|p| p.iter().map(|s| s.to_string()).collect())
+            .collect();
+        let want = reference_triangles(&g, tw);
+
+        assert_eq!(
+            got, want,
+            "case {case} (n={n}, edges={edges}, window={tw:?}): operator and \
+             independent reference disagree.\n  only operator: {:?}\n  only \
+             reference: {:?}",
+            got.difference(&want).collect::<Vec<_>>(),
+            want.difference(&got).collect::<Vec<_>>(),
+        );
     }
-    g2.add_relation(Relation::new("a", "b", RelationType::Connect, 10)).unwrap();
-    g2.add_relation(Relation::new("b", "c", RelationType::Connect, 20)).unwrap();
-    g2.add_relation(Relation::new("a", "c", RelationType::Connect, 30)).unwrap();
-    g2.sort_edges_by_timestamp().unwrap();
-    assert_eq!(
-        via_operator(&g2, None),
-        1,
-        "without the early parallel edge the same triangle is found"
-    );
 }

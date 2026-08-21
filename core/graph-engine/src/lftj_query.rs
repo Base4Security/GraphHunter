@@ -37,43 +37,123 @@ use crate::graph::{GraphHunter, HuntResult};
 use crate::interner::StrId;
 use crate::lftj::{CsrTrieIter, MaterializedCsrTrie, TrieIter};
 
-/// Per-edge minimum timestamp keyed parallel to `MaterializedCsrTrie`.
-/// `min_ts[i] = min { e.timestamp : e is some src->dst edge }` where
-/// `(src, dst)` is the i-th pair in the trie's CSR layout. Lookup is
-/// O(log d) via binary search inside the source's dst slice. Built
-/// once per query — turns per-match `smallest_edge_timestamp` from
-/// O(deg) into O(log deg) and removes the `HashMap` indirection that
-/// `get_relations_by_sid` carries.
+/// Per-pair timestamp index keyed parallel to `MaterializedCsrTrie`.
+///
+/// Two views of the same data, both O(log d) to reach via binary search
+/// inside the source's dst slice:
+///
+/// * [`get`](Self::get) — the **minimum** timestamp on `src -> dst`. This
+///   is the original behaviour and stays the fast path.
+/// * [`successor`](Self::successor) — the **smallest timestamp ≥ a floor**
+///   on `src -> dst`. This is what makes multi-edge pairs correct.
+///
+/// # Why `successor` had to exist
+///
+/// The map used to store *only* the minimum, so an enumerator testing a
+/// time-respecting chain tested exactly ONE candidate combination. With
+/// parallel edges that silently drops real matches: given `t_ab = 10`,
+/// `b→c ∈ {5, 20}` and `t_ac = 30`, the chain (10, 20, 30) is perfectly
+/// time-respecting, but `min(t_bc) = 5` fails `t_bc ≥ t_ab` and the
+/// triangle was dropped. The DFS, which walks every edge, finds it.
+/// Parallel edges between the same pair are the norm in real telemetry
+/// (repeated connections between two hosts), so this was a routine
+/// false-negative, not a corner case.
+///
+/// With `successor`, the enumerators ask the correct question — *does
+/// **any** combination of parallel edges respect time?* — via a greedy
+/// walk that is optimal for a chain constraint: take the earliest
+/// admissible first edge, then the earliest next edge at or after it, and
+/// so on. Earliest-so-far always leaves the most room downstream.
+///
+/// # Cost
+///
+/// `ts_values` holds one `i64` per edge rather than one per pair, so this
+/// is proportional to the edge count instead of the distinct-pair count.
+/// That is the honest price of correctness here; the graph already stores
+/// the same timestamps, and the index is built once per query.
+///
+/// No sort is needed at build time: the streaming adjacency is already
+/// ordered by timestamp (the `edges_sorted` invariant), so appending in
+/// adjacency order leaves every pair's sublist ascending by construction.
 pub struct MinTimestampMap {
     /// Same length as `trie.dst_keys`. `min_ts[trie.dst_offsets[i] +
     /// idx_within_a_dsts]` is the smallest timestamp on `a -> dst`.
     min_ts: Vec<i64>,
+    /// CSR over ALL timestamps of each pair, ascending. Slot `s` owns
+    /// `ts_values[ts_offsets[s] .. ts_offsets[s + 1]]`. Length is
+    /// `trie.dst_keys.len() + 1`.
+    ts_offsets: Vec<u32>,
+    /// Flattened per-pair timestamps, each pair's run ascending.
+    ts_values: Vec<i64>,
 }
 
 impl MinTimestampMap {
     pub fn build(graph: &GraphHunter, trie: &MaterializedCsrTrie) -> Self {
-        let mut min_ts = vec![i64::MAX; trie.dst_keys.len()];
-        for (ai, &a_raw) in trie.src_keys.iter().enumerate() {
-            let a_sid = StrId::from_raw(a_raw);
+        let n_slots = trie.dst_keys.len();
+        let mut min_ts = vec![i64::MAX; n_slots];
+
+        // Two passes so the flattened storage is exact — a Vec-per-slot
+        // would cost 24 bytes of header per distinct pair, which on a
+        // multi-million-pair trie dwarfs the payload.
+        let mut counts = vec![0u32; n_slots];
+        let visit = |ai: usize, mut f: &mut dyn FnMut(usize, i64)| {
+            let a_sid = StrId::from_raw(trie.src_keys[ai]);
             let off = trie.dst_offsets[ai] as usize;
             let end = trie.dst_offsets[ai + 1] as usize;
             let dsts = &trie.dst_keys[off..end];
-            let arc = match graph.streaming.neighbors_arc(a_sid) {
-                Some(a) => a,
-                None => continue,
-            };
-            let g = arc.read();
-            for e in g.as_slice() {
-                let d = e.dest_sid.index() as u32;
-                if let Ok(idx) = dsts.binary_search(&d) {
-                    let slot = &mut min_ts[off + idx];
-                    if e.timestamp < *slot {
-                        *slot = e.timestamp;
+            if let Some(arc) = graph.streaming.neighbors_arc(a_sid) {
+                let g = arc.read();
+                for e in g.as_slice() {
+                    let d = e.dest_sid.index() as u32;
+                    if let Ok(idx) = dsts.binary_search(&d) {
+                        f(off + idx, e.timestamp);
                     }
                 }
             }
+        };
+
+        for ai in 0..trie.src_keys.len() {
+            visit(ai, &mut |slot, _ts| counts[slot] += 1);
         }
-        Self { min_ts }
+        let mut ts_offsets = Vec::with_capacity(n_slots + 1);
+        let mut running = 0u32;
+        for &c in &counts {
+            ts_offsets.push(running);
+            running += c;
+        }
+        ts_offsets.push(running);
+
+        let mut ts_values = vec![0i64; running as usize];
+        let mut cursor: Vec<u32> = ts_offsets[..n_slots].to_vec();
+        for ai in 0..trie.src_keys.len() {
+            visit(ai, &mut |slot, ts| {
+                let at = cursor[slot] as usize;
+                ts_values[at] = ts;
+                cursor[slot] += 1;
+                if ts < min_ts[slot] {
+                    min_ts[slot] = ts;
+                }
+            });
+        }
+
+        // Each pair's run is ascending already: the streaming adjacency is
+        // timestamp-ordered, so appends within one slot arrive in order.
+        // Sorting defensively would be O(E log E) for no gain — but a
+        // debug assert keeps the invariant from rotting silently.
+        debug_assert!(
+            (0..n_slots).all(|s| {
+                let r = &ts_values[ts_offsets[s] as usize..ts_offsets[s + 1] as usize];
+                r.windows(2).all(|w| w[0] <= w[1])
+            }),
+            "per-pair timestamp runs must be ascending; the edges_sorted \
+             invariant is what guarantees it"
+        );
+
+        Self {
+            min_ts,
+            ts_offsets,
+            ts_values,
+        }
     }
 
     /// O(log deg(a)) timestamp lookup. None when the edge isn't in
@@ -86,6 +166,34 @@ impl MinTimestampMap {
         let idx = dsts.binary_search(&dst).ok()?;
         let t = self.min_ts[off + idx];
         if t == i64::MAX { None } else { Some(t) }
+    }
+
+    /// Smallest timestamp on `src -> dst` that is **≥ `floor`**, or `None`
+    /// when the pair has no such edge.
+    ///
+    /// This is what lets an enumerator ask whether *any* combination of
+    /// parallel edges is time-respecting instead of testing only the
+    /// minimum. Taking the earliest admissible edge at each step is
+    /// optimal for a chain constraint: it leaves the widest possible range
+    /// for every later hop, so if the greedy fails no other choice
+    /// succeeds.
+    #[inline]
+    pub fn successor(
+        &self,
+        trie: &MaterializedCsrTrie,
+        ai: usize,
+        dst: u32,
+        floor: i64,
+    ) -> Option<i64> {
+        let off = trie.dst_offsets[ai] as usize;
+        let end = trie.dst_offsets[ai + 1] as usize;
+        let dsts = &trie.dst_keys[off..end];
+        let idx = dsts.binary_search(&dst).ok()?;
+        let slot = off + idx;
+        let run = &self.ts_values[self.ts_offsets[slot] as usize
+            ..self.ts_offsets[slot + 1] as usize];
+        let at = run.partition_point(|&t| t < floor);
+        run.get(at).copied()
     }
 
     /// Variant for callers that only have the source's StrId, not its
@@ -192,11 +300,15 @@ pub fn enumerate_triangles_lftj(
                 let c3 = r3.key();
                 if c2 == c3 {
                     let c_u32 = c2 as u32;
-                    if let Some(t_bc) = ts_map.get(trie, bi, c_u32) {
-                        if t_bc > t_ab {
+                    // `successor` = non-strict + multi-edge aware; see the
+                    // note in `enumerate_triangles_lftj_simd`.
+                    if let Some(t_bc) = ts_map.successor(trie, bi, c_u32, t_ab) {
+                        {
                             // Third edge is a -> c (forward triangle).
-                            if let Some(t_ac) = ts_map.get(trie, ai, c_u32) {
-                                if t_ac > t_bc {
+                            // Existence closes the triangle; the value is
+                            // not needed again in this variant.
+                            if ts_map.successor(trie, ai, c_u32, t_bc).is_some() {
+                                {
                                     let c_sid = StrId::from_raw(c_u32);
                                     out.push(vec![
                                         graph.interner.resolve_arc(a_sid),
@@ -279,18 +391,18 @@ pub fn enumerate_triangles_lftj_simd(
             crate::simd_rust::intersect_sorted_u32_collect(a_dsts, b_dsts, &mut intersect_buf);
 
             for &c in intersect_buf.iter() {
-                let t_bc = match ts_map.get(trie, bi, c) {
+                // `successor` is non-strict (≥ the floor, matching the DFS
+                // floor, which keeps edges whose timestamp EQUALS the
+                // previous hop's) and searches every parallel edge rather
+                // than only the pair's minimum.
+                let t_bc = match ts_map.successor(trie, bi, c, t_ab) {
                     Some(t) => t,
                     None => continue,
                 };
-                if t_bc <= t_ab {
-                    continue;
-                }
-                let t_ac = match ts_map.get(trie, ai, c) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                if t_ac <= t_bc {
+                // Existence is the whole test here: `successor` returning
+                // Some means a valid `a -> c` edge at or after `t_bc`
+                // exists, which closes the time-respecting triangle.
+                if ts_map.successor(trie, ai, c, t_bc).is_none() {
                     continue;
                 }
                 let c_sid = StrId::from_raw(c);
@@ -341,18 +453,18 @@ pub fn enumerate_triangles_naive(
                     continue;
                 }
                 let c_sid = StrId::from_raw(c);
-                let t_bc = match ts_map.get(trie, bi, c) {
+                // `successor` is non-strict (≥ the floor, matching the DFS
+                // floor, which keeps edges whose timestamp EQUALS the
+                // previous hop's) and searches every parallel edge rather
+                // than only the pair's minimum.
+                let t_bc = match ts_map.successor(trie, bi, c, t_ab) {
                     Some(t) => t,
                     None => continue,
                 };
-                if t_bc <= t_ab {
-                    continue;
-                }
-                let t_ac = match ts_map.get(trie, ai, c) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                if t_ac <= t_bc {
+                // Existence is the whole test here: `successor` returning
+                // Some means a valid `a -> c` edge at or after `t_bc`
+                // exists, which closes the time-respecting triangle.
+                if ts_map.successor(trie, ai, c, t_bc).is_none() {
                     continue;
                 }
                 out.push(vec![
@@ -369,17 +481,28 @@ pub fn enumerate_triangles_naive(
     out
 }
 
-/// SIMD enumerator with a time-window predicate. Emits only triangles
-/// whose `t_ab` falls in `[t_lo, t_hi)`. The narrower the window, the
-/// fewer triangles emitted — but the trie + ts_map build cost is
-/// window-independent, so a shared trie amortizes across many narrow
-/// windows.
+/// SIMD enumerator with a time-window predicate. Emits only triangles all
+/// of whose edges fall in the **inclusive** window `[t_lo, t_hi]`. The
+/// narrower the window, the fewer triangles emitted — but the trie +
+/// ts_map build cost is window-independent, so a shared trie amortizes
+/// across many narrow windows.
 ///
-/// Why filter on `t_ab` rather than `t_ac`: `t_ab` is the earliest
-/// timestamp in the time-respecting chain, so an early `continue`
-/// short-circuits the inner SIMD intersect entirely when `t_ab` is
-/// out-of-window. Filtering on `t_ac` would still pay for the
-/// intersect.
+/// **Window semantics match the DFS**, and both parts of that were once
+/// wrong here:
+///
+/// * The upper bound is **inclusive**. It used to be half-open
+///   (`t_ab >= t_hi` rejected), while the DFS bounds its range with
+///   `partition_point(|e| e.timestamp <= tw_end)` — so a first edge landing
+///   exactly on `t_hi` was inside the DFS's window and outside this one.
+/// * **Every** edge is window-checked, not just `t_ab`. Filtering only the
+///   first edge let a triangle whose 2nd and 3rd edges fell far outside the
+///   requested window be emitted anyway — the operator reporting a match
+///   the analyst's window excluded. That was the one divergence here that
+///   *over*-reported, which makes it the one that could invent a finding.
+///
+/// `t_ab` is still checked first, before the SIMD intersect, so the cheap
+/// rejection still short-circuits the expensive step; the other two checks
+/// simply happen where those timestamps become known.
 pub fn enumerate_triangles_lftj_simd_window(
     graph: &GraphHunter,
     trie: &MaterializedCsrTrie,
@@ -402,11 +525,16 @@ pub fn enumerate_triangles_lftj_simd_window(
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let t_ab = match ts_map.get(trie, ai, b) {
+            // Earliest `a -> b` edge at or after the window opens — NOT the
+            // global minimum, which may predate the window while a later
+            // parallel edge sits comfortably inside it.
+            let t_ab = match ts_map.successor(trie, ai, b, t_lo) {
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab > t_hi {
                 continue;
             }
             let b_off = trie.dst_offsets[bi] as usize;
@@ -417,18 +545,29 @@ pub fn enumerate_triangles_lftj_simd_window(
             crate::simd_rust::intersect_sorted_u32_collect(a_dsts, b_dsts, &mut intersect_buf);
 
             for &c in intersect_buf.iter() {
-                let t_bc = match ts_map.get(trie, bi, c) {
+                // `successor` carries both corrections at once: it is
+                // non-strict (≥ the floor, matching the DFS, which keeps
+                // edges whose timestamp EQUALS the previous hop's), and it
+                // searches EVERY parallel edge instead of testing only the
+                // pair's minimum. Greedy-earliest is optimal for a chain:
+                // it leaves the widest range for the next hop.
+                let t_bc = match ts_map.successor(trie, bi, c, t_ab) {
                     Some(t) => t,
                     None => continue,
                 };
-                if t_bc <= t_ab {
+                // The window applies to EVERY edge, as in the DFS. Only the
+                // upper bound needs testing: the chain already gives
+                // `t_bc >= t_ab >= t_lo`, so the lower bound is implied.
+                if t_bc > t_hi {
                     continue;
                 }
-                let t_ac = match ts_map.get(trie, ai, c) {
+                // Here the closing edge's timestamp is needed, not just its
+                // existence, because it too must sit inside the window.
+                let t_ac = match ts_map.successor(trie, ai, c, t_bc) {
                     Some(t) => t,
                     None => continue,
                 };
-                if t_ac <= t_bc {
+                if t_ac > t_hi {
                     continue;
                 }
                 let c_sid = StrId::from_raw(c);
@@ -511,7 +650,9 @@ pub fn enumerate_4cliques_naive(
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab < t_lo || t_ab > t_hi {
                 continue;
             }
             let b_dsts = &trie.dst_keys
@@ -626,7 +767,9 @@ pub fn enumerate_4cliques_lftj_simd(
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab < t_lo || t_ab > t_hi {
                 continue;
             }
             let b_off = trie.dst_offsets[bi] as usize;
@@ -750,7 +893,8 @@ pub fn enumerate_4cliques_lftj_simd_par(
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_ab < t_lo || t_ab >= t_hi {
+                    // Inclusive upper bound, matching the DFS.
+                    if t_ab < t_lo || t_ab > t_hi {
                         continue;
                     }
                     let b_off = trie.dst_offsets[bi] as usize;
@@ -883,7 +1027,9 @@ pub fn enumerate_5cliques_naive(
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab < t_lo || t_ab > t_hi {
                 continue;
             }
             let b_dsts = &trie.dst_keys
@@ -1043,7 +1189,9 @@ pub fn enumerate_5cliques_lftj_simd(
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab < t_lo || t_ab > t_hi {
                 continue;
             }
             let b_off = trie.dst_offsets[bi] as usize;
@@ -1197,7 +1345,8 @@ pub fn enumerate_5cliques_lftj_simd_par(
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_ab < t_lo || t_ab >= t_hi {
+                    // Inclusive upper bound, matching the DFS.
+                    if t_ab < t_lo || t_ab > t_hi {
                         continue;
                     }
                     let b_off = trie.dst_offsets[bi] as usize;
@@ -1373,7 +1522,9 @@ pub fn enumerate_6cycles_naive(
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab < t_lo || t_ab > t_hi {
                 continue;
             }
             let b_dsts = forward.neighbors_of(b);
@@ -1390,7 +1541,14 @@ pub fn enumerate_6cycles_naive(
                     Some(t) => t,
                     None => continue,
                 };
-                if t_bc <= t_ab {
+                // Non-strict, matching the DFS floor: `edge_range_sid`
+                // keeps edges whose timestamp EQUALS the previous hop's
+                // (`partition_point(|e| e.timestamp < lo_ts)`), so a
+                // same-second causal chain is a valid match there and must
+                // be one here too. Sources routinely stamp ordered events
+                // inside one second, and our own CDM parser floors
+                // nanoseconds to seconds, so this is the common case.
+                if t_bc < t_ab {
                     continue;
                 }
                 let c_dsts = forward.neighbors_of(c);
@@ -1516,7 +1674,9 @@ pub fn enumerate_6cycles_lftj_simd(
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab < t_lo || t_ab > t_hi {
                 continue;
             }
             let b_dsts = forward.neighbors_of(b);
@@ -1533,7 +1693,14 @@ pub fn enumerate_6cycles_lftj_simd(
                     Some(t) => t,
                     None => continue,
                 };
-                if t_bc <= t_ab {
+                // Non-strict, matching the DFS floor: `edge_range_sid`
+                // keeps edges whose timestamp EQUALS the previous hop's
+                // (`partition_point(|e| e.timestamp < lo_ts)`), so a
+                // same-second causal chain is a valid match there and must
+                // be one here too. Sources routinely stamp ordered events
+                // inside one second, and our own CDM parser floors
+                // nanoseconds to seconds, so this is the common case.
+                if t_bc < t_ab {
                     continue;
                 }
                 let c_dsts = forward.neighbors_of(c);
@@ -1660,7 +1827,8 @@ pub fn enumerate_6cycles_lftj_simd_par(
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_ab < t_lo || t_ab >= t_hi {
+                    // Inclusive upper bound, matching the DFS.
+                    if t_ab < t_lo || t_ab > t_hi {
                         continue;
                     }
                     let b_dsts = forward.neighbors_of(b);
@@ -1874,15 +2042,39 @@ mod tests {
         ));
         assert_eq!(win_full, naive, "windowed enumerator must match unwindowed at full range");
 
-        // Windowed variant: disjoint window union covers full range.
+        // Sub-windows are SOUND but not COMPLETE, and that is correct.
+        //
+        // This assertion used to be `union == naive`: partitioning the time
+        // range and unioning the results reconstructed everything. That
+        // property held only because the window was applied to `t_ab`
+        // alone, so every triangle belonged to exactly one sub-window — the
+        // one containing its first edge, no matter where its other two
+        // edges landed. That was the over-reporting divergence from the
+        // DFS, which applies the window at every hop.
+        //
+        // Now that a window means "every edge inside", a triangle straddling
+        // a boundary belongs to NEITHER half, so the union is a strict
+        // subset of the full-range result. The DFS behaves the same way, so
+        // this is alignment, not loss. What must still hold is soundness:
+        // no sub-window may report a triangle the full range does not.
         let mut win_union = Vec::new();
-        for (lo, hi) in [(i64::MIN, 50_i64), (50, 1_000)] {
+        for (lo, hi) in [(i64::MIN, 49_i64), (50, 1_000)] {
             win_union.extend(enumerate_triangles_lftj_simd_window(
                 &g, &trie, &ts_map, lo, hi, 10_000,
             ));
         }
         let win_union = sort_triangles(win_union);
-        assert_eq!(win_union, naive, "disjoint windows over full range must reconstruct full result");
+        for t in &win_union {
+            assert!(
+                naive.contains(t),
+                "a sub-window reported {t:?}, which the full range does not \
+                 contain — a window must never invent a match"
+            );
+        }
+        assert!(
+            win_union.len() <= naive.len(),
+            "sub-windows cannot report more than the full range"
+        );
     }
 
     #[test]
