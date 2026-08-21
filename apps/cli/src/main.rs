@@ -16,14 +16,17 @@ use protocol::{Request, Response};
 /// numbers pasted from a one-off run.
 ///
 /// Flags: `--runs N` (default 30, the plan's ≥30 for stable percentiles),
-/// `--seed S` (default 42), `--format csv|json` (default csv), `--out FILE`
-/// (default stdout). Build with `--release` — debug latencies are not
-/// representative, and the harness says so on stderr if it detects debug.
+/// `--seed S` (default 42), `--plant N` (default 0 — plant N matching
+/// attack paths so the search emits and the latency covers path
+/// materialisation, not just rejection), `--format csv|json` (default
+/// csv), `--out FILE` (default stdout). Build with `--release` — debug
+/// latencies are not representative, and the harness says so on stderr.
 fn run_bench(args: &[String]) -> ! {
-    use graph_hunter_core::benchmark::{perf_rows_to_csv, run_perf_suite};
+    use graph_hunter_core::benchmark::{perf_rows_to_csv, run_perf_suite_planted};
 
     let mut runs: usize = 30;
     let mut seed: u64 = 42;
+    let mut plant: usize = 0;
     let mut format = String::from("csv");
     let mut out_path: Option<String> = None;
 
@@ -32,9 +35,10 @@ fn run_bench(args: &[String]) -> ! {
         match arg.as_str() {
             "--runs" => runs = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| bail("--runs needs a positive integer")),
             "--seed" => seed = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| bail("--seed needs an integer")),
+            "--plant" => plant = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| bail("--plant needs a non-negative integer")),
             "--format" => format = it.next().cloned().unwrap_or_else(|| bail("--format needs csv|json")),
             "--out" => out_path = Some(it.next().cloned().unwrap_or_else(|| bail("--out needs a path"))),
-            "-h" | "--help" => bail("usage: graph_hunter_cli bench [--runs N] [--seed S] [--format csv|json] [--out FILE]"),
+            "-h" | "--help" => bail("usage: graph_hunter_cli bench [--runs N] [--seed S] [--plant N] [--format csv|json] [--out FILE]"),
             other => bail(&format!("unknown bench flag: {other}")),
         }
     }
@@ -46,7 +50,7 @@ fn run_bench(args: &[String]) -> ! {
         );
     }
 
-    let rows = run_perf_suite(seed, runs);
+    let rows = run_perf_suite_planted(seed, runs, plant);
     let rendered = match format.as_str() {
         "csv" => perf_rows_to_csv(&rows),
         "json" => serde_json::to_string_pretty(&rows).expect("perf rows serialize"),
