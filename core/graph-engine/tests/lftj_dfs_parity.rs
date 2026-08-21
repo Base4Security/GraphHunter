@@ -171,40 +171,28 @@ fn c6_operator_invents_nothing() {
     );
 }
 
-/// THE FINDING THIS FILE EXISTS TO RECORD.
+/// THE REGRESSION GUARD THIS FILE EXISTS FOR.
 ///
-/// The K4 route is **default-on in both shipped apps**, and it does NOT
-/// return what the DFS returns for the same `Hypothesis` — it returns the
-/// 4-cliques of the graph, while the DFS returns 6-hop temporally-monotone
-/// walks. On a 6-vertex clique graph the operator surfaces all C(6,4)=15
-/// cliques; the DFS surfaces none of them as such.
+/// A plain homogeneous 6-step chain (`T -[r]-> T` ×6) is an ordinary thing
+/// to author meaning "a 6-hop path" — and it is *also* the edge count of a
+/// 4-clique. The planner used to dispatch on that shape ALONE, so with
+/// `GRAPHHUNTER_LFTJ_PLANNER=1` (which both shipped apps set at startup)
+/// such a hypothesis was routed to the clique enumerator and came back
+/// with all C(6,4)=15 four-cliques instead of paths. This test caught that
+/// in production configuration.
 ///
-/// This is NOT a newly-introduced bug — it is the documented limitation in
-/// `planner.rs`'s header ("the K4 enumerator does not consult per-step
-/// entity-type filters, so widening detection risks returning tuples that
-/// don't satisfy the hypothesis") reaching its logical conclusion: the
-/// structural detector `is_homogeneous_k4_shape` accepts ANY homogeneous
-/// 6-step chain, and a homogeneous 6-step chain is a perfectly ordinary
-/// thing for an analyst to write meaning "a 6-hop path".
+/// The fix: the structural routes now require the author's explicit name
+/// marker (`k4-clique`, `triangle`, `k5-clique`) *in addition to* the
+/// shape — mirroring what `is_homogeneous_c6_shape` already did. Shape is
+/// not intent.
 ///
-/// Two readings, and the test pins the factual one rather than the
-/// editorial one:
-///   * Charitable: the two operators answer different questions, and
-///     routing between them by *shape* alone is the design flaw.
-///   * Blunt: a user writing a 6-step chain today can silently get cliques.
-///
-/// The test asserts the divergence EXISTS (so nobody "fixes" the symptom
-/// by weakening a parity test), and is the evidence behind the
-/// recommendation NOT to widen structural WCOJ routing until the operators
-/// consult per-step filters. See docs/superpowers/plans/
-/// 2026-08-16-subgraph-matching-review.md.
+/// So this test now asserts the property that was violated: a 6-hop chain
+/// with the planner enabled must return exactly what the DFS returns.
 #[test]
-fn k4_structural_route_answers_a_different_question_than_the_dfs() {
+fn a_plain_six_hop_chain_is_not_routed_to_the_clique_enumerator() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let g = clique_graph(6);
-    // A plain homogeneous 6-step chain — no `k4-clique` name marker, so
-    // this is the STRUCTURAL route, reachable by any analyst who writes a
-    // 6-hop homogeneous hypothesis.
+    // No `k4-clique` marker: the author asked for a path, not cliques.
     let h = homogeneous("six-hop-path", 6);
 
     let all = [
@@ -222,31 +210,43 @@ fn k4_structural_route_answers_a_different_question_than_the_dfs() {
     }
     let (dfs_paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
 
-    // The structural route needs the planner flag — which both shipped
-    // apps set to "1" at startup.
+    // Production configuration: the planner flag on.
     unsafe { std::env::set_var("GRAPHHUNTER_LFTJ_PLANNER", "1") };
-    let (lftj_paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
+    let (planner_paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
     for f in all {
         unsafe { std::env::remove_var(f) };
     }
 
-    let dfs = vertex_sets(&dfs_paths);
-    let lftj = vertex_sets(&lftj_paths);
-    let only_lftj: Vec<_> = lftj.difference(&dfs).collect();
-
-    assert!(
-        !only_lftj.is_empty(),
-        "expected the structural K4 route to diverge from the DFS on a plain \
-         homogeneous 6-step chain; if this now passes, the operators were made \
-         filter-aware and this test should become a real parity assertion"
+    assert_eq!(
+        vertex_sets(&planner_paths),
+        vertex_sets(&dfs_paths),
+        "a plain 6-hop homogeneous chain must return the DFS result with the \
+         planner enabled; a divergence means shape-based routing sent it to a \
+         clique enumerator again"
     );
-    // Every divergent tuple is a 4-vertex clique — evidence that the
-    // operator is answering "find 4-cliques", not "walk a 6-hop chain".
-    for vs in &only_lftj {
-        assert_eq!(
-            vs.len(),
-            4,
-            "divergent tuples should be 4-cliques, got {vs:?}"
-        );
-    }
+}
+
+/// The complement: an author who explicitly asks for cliques still gets the
+/// fast operator. Narrowing the route must not disable the feature.
+#[test]
+fn an_explicitly_marked_clique_hypothesis_still_reaches_the_operator() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let g = clique_graph(6);
+    let h = homogeneous("k4-clique", 6);
+
+    // SAFETY: ENV_LOCK is held.
+    unsafe { std::env::set_var("GRAPHHUNTER_LFTJ_PLANNER", "1") };
+    let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
+    unsafe { std::env::remove_var("GRAPHHUNTER_LFTJ_PLANNER") };
+
+    let sets = vertex_sets(&paths);
+    assert!(
+        !sets.is_empty(),
+        "a marked k4-clique hypothesis must still route to the clique operator"
+    );
+    assert!(
+        sets.iter().all(|vs| vs.len() == 4),
+        "the clique operator should emit 4-vertex tuples, got {:?}",
+        sets.iter().take(3).collect::<Vec<_>>()
+    );
 }
