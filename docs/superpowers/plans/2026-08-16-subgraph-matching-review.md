@@ -289,6 +289,53 @@ búsqueda**, no la memoria. Eso valida arrancar por **#4.1 (orden de
 variables)** — es exactamente lo que reduce el trabajo que acá crece
 superlinealmente. La medición confirma la recomendación de §5.
 
+## 7. Incremento 1 hecho + medición del gate del incremento 2 (2026-08-16)
+
+**Incremento 1 (Diseño C) — hecho** (`4308e0c`). `selectivity_join_tree`
+reemplaza el orden GYO por uno greedy por cardinalidad de bag para
+hipótesis forma-Graph, dentro de `enumerate_tree`. Result-set preservado
+(gate por test de paridad en 3 órdenes + el star end-to-end). De paso se
+tapó un panic latente de `JoinTree::build` en hipergrafos desconectados.
+
+**Medición estructural del catálogo (gate del incremento 2).** Antes de
+construir la reversión de cadenas (incremento 2, con su CSR temporal
+inverso nuevo), medí qué fracción de los 32 patrones del catálogo built-in
+—los que los analistas corren— son *tail-rare* (destino más selectivo que
+origen, único caso donde la reversión rinde).
+
+| Clase | Patrones | Reverse rinde? |
+|---|---|---|
+| **Forma-Graph** (donde ayuda el incremento 1) | **0 de 32** | — el catálogo es 100% cadenas |
+| Head-anchored (User→…→tipo abundante) | 001,002,003,004,012,029,032 | no-op |
+| Simétricas por tipo (P→P, Host→Host, U→…→U) | 007,008,010,011,013,014,015,016,024 | depende de predicados/corpus, no del tipo |
+| Single-step (n=1, nada que reordenar) | 017-023,026-028,031 (~10) | N/A |
+| **Potencialmente tail-rare** | 005,006,025 | **sí — un puñado, y aun así depende del corpus** |
+
+**Conclusión (disciplina antes de construir):**
+
+1. **El catálogo no tiene ni un patrón forma-Graph**, así que el incremento
+   1 es un no-op sobre todo lo shipeado hoy — su beneficio es *latente*,
+   listo para cuando se autoren hipótesis estrella/árbol (el DSL todavía no
+   las expresa, ver docstring de `yannakakis.rs`). No es esfuerzo tirado:
+   de-riesga el operador Yannakakis (ítem #2) y tapó un panic real.
+2. **El catálogo es abrumadoramente head-anchored o simétrico.** Las
+   cadenas genuinamente tail-rare son 3 de 32, y aun esas dependen de que
+   el corpus haga raro al tipo destino. **Esto confirma el prior del panel:
+   el incremento 2 (reversión + índice inverso, contra una postura de
+   memoria sensible) sería no-op en la gran mayoría y ayudaría a un puñado.**
+3. **Recomendación revisada:** *no* construir el incremento 2 sobre esta
+   evidencia. El lever real contra el cuello medido O(|E|^1.2) es el **ítem
+   #2 (activar/ampliar WCOJ)** — LFTJ es worst-case-optimal y ataca los
+   patrones densos/cíclicos donde el join binario explota, que es
+   exponent-facing, no re-enraizado de constante. El usuario ya lo rankeó
+   siguiente.
+
+*Salvedad honesta:* esta medición usa un prior de selectividad por tipo
+(qué tipos son raros en grafos de amenazas), no cardinalidades medidas. El
+número definitivo necesita instrumentar el corpus AD-CAP en vivo. Pero la
+señal es lo bastante fuerte —0 formas-Graph, 3/32 tail-rare— como para
+desprioritizar el incremento 2 sin ese número.
+
 ## Apéndice: citas a verificar antes del paper
 Todas las marcadas `[V]` arriba — VF2/VF3 (TPAMI), RI (BMC Bioinformatics
 2013), TurboISO (SIGMOD 2013), CFL-Match (SIGMOD 2016), CECI (SIGMOD 2019),
