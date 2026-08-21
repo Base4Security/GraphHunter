@@ -423,6 +423,68 @@ prerequisito es alinear la semántica temporal de los enumeradores con la del
 DFS y hacerlos conscientes de los filtros por paso. **Angosto le gana a
 incorrecto.**
 
+## 9. Alineación de la semántica temporal (2026-08-16) — `575e44f`
+
+**Las cuatro divergencias del triángulo están cerradas.** El enumerador de
+triángulos responde ahora la misma pregunta temporal que el DFS.
+
+| # | Antes | Ahora |
+|---|---|---|
+| 1 Estrictez | `>` estricto | `≥`, como el piso del DFS |
+| 2 Ventana | `[lo, hi)` | `[lo, hi]` inclusivo — **corregido en los 10 sitios**, incluidos K4/K5/C6 |
+| 3 Cobertura | solo `t_ab` | **todas** las aristas |
+| 4 Multi-arista | solo el mínimo por par | `successor(par, piso)` sobre **todas** las paralelas |
+
+La pieza estructural es `MinTimestampMap::successor`: además del mínimo,
+guarda todos los timestamps por par (CSR paralelo al trie) y devuelve el
+menor ≥ un piso. Los enumeradores lo recorren *greedy*, que es óptimo para
+una restricción de cadena — tomar la arista admisible más temprana en cada
+paso deja el rango más ancho para el siguiente, así que si el greedy falla
+ninguna otra elección funciona. `successor` subsume además el arreglo 1,
+porque "≥ el piso" **es** la comparación no estricta.
+
+Costo honesto: `ts_values` guarda un `i64` por **arista** en vez de uno por
+par. No hace falta ordenar — la adyacencia streaming ya está ordenada por
+timestamp, así que cada par queda ascendente por construcción (con
+`debug_assert` para que el invariante no se pudra en silencio).
+
+**El gate es una referencia independiente por fuerza bruta**, escrita en el
+archivo de tests sin compartir código con ningún enumerador. El test
+preexistente `lftj_matches_naive_baseline` compara cuatro implementaciones
+del **mismo** predicado: sirve para un error de tipeo, nunca para una
+premisa compartida equivocada — y una premisa compartida equivocada es
+exactamente lo que eran estos cuatro defectos. La referencia enuncia la
+semántica desde cero y se contrasta sobre 40 grafos pseudoaleatorios
+deterministas, densos justo en lo que rompía: aristas paralelas, timestamps
+repetidos y ventanas.
+
+**Una aserción preexistente tuvo que cambiar, y la razón importa.** El test
+base afirmaba que partir el rango temporal y unir los resultados de las
+sub-ventanas reconstruye el total. Eso valía **solo** porque la ventana se
+aplicaba únicamente a `t_ab`, de modo que cada triángulo caía en exactamente
+una sub-ventana sin importar dónde estuvieran sus otras aristas — o sea, la
+propiedad era un *síntoma* de la divergencia 3. Con la ventana en todas las
+aristas, un triángulo que cruza el borde no cae en ninguna mitad y la unión
+es un subconjunto estricto. El DFS se comporta igual. La aserción ahora
+verifica **solidez** (ninguna sub-ventana puede reportar un triángulo que el
+rango completo no tenga) en vez de completitud.
+
+### 9.1 Alcance y lo que queda abierto
+
+Esto alinea el **triángulo**. K4/K5/C6 reciben el arreglo 2 (el patrón de
+ventana compartido) pero **siguen con 1, 3 y 4**, y permanecen apagados por
+flag.
+
+Y la auditoría encontró un quinto defecto **solo en K4**, que bloquea su
+arreglo de estrictez: las variantes SIMD **carecen de las guardas de
+distinción** que sí tiene la baseline naive (`c != b`, `d != b && d != c`).
+Hoy las comparaciones estrictas las enmascaran por accidente — un `d == b`
+fuerza `t_ad == t_ab`, que la desigualdad estricta rechaza. **Relajar la
+estrictez en K4 sin agregar esas guardas haría aflorar tuplas degeneradas
+con self-loops** que la variante naive rechaza, rompiendo la paridad entre
+variantes. El arreglo de estrictez de K4 debe shipear junto con las guardas
+explícitas.
+
 ## Apéndice: citas a verificar antes del paper
 Todas las marcadas `[V]` arriba — VF2/VF3 (TPAMI), RI (BMC Bioinformatics
 2013), TurboISO (SIGMOD 2013), CFL-Match (SIGMOD 2016), CECI (SIGMOD 2019),
