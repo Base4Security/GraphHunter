@@ -537,14 +537,27 @@ impl GraphHunterApi {
             // in the batch. Yannakakis still wins for α-acyclic chains
             // and is checked below; if neither LFTJ nor Yannakakis
             // applies, the per-call `run_hunt` branch handles it.
+            // Temporal tolerances must survive the batch path too.
+            // `GraphHunter::search_temporal_pattern` refuses to route a
+            // hypothesis with skew δ>0 or gap g>0 to an LFTJ/Yannakakis
+            // operator, because those enumerators enforce strict
+            // monotonicity in their join structure and would silently
+            // ignore the tolerance — returning a STRICTER set than the
+            // analyst asked for. This batch entry point called the
+            // planner directly and skipped that guard, so a δ- or
+            // gap-bearing hypothesis lost its tolerance here while the
+            // single-hunt path honored it. Same guard, same reason.
+            let temporal_tolerance_active =
+                hypothesis.resolve_skew_delta() > 0 || hypothesis.resolve_max_gap() > 0;
             let lftj_plan = graph_hunter_core::planner::plan(&hypothesis);
-            let lftj_routed = matches!(
-                lftj_plan,
-                graph_hunter_core::planner::DispatchPlan::TriangleLftj
-                    | graph_hunter_core::planner::DispatchPlan::K4Lftj
-                    | graph_hunter_core::planner::DispatchPlan::K5Lftj
-                    | graph_hunter_core::planner::DispatchPlan::C6Lftj
-            );
+            let lftj_routed = !temporal_tolerance_active
+                && matches!(
+                    lftj_plan,
+                    graph_hunter_core::planner::DispatchPlan::TriangleLftj
+                        | graph_hunter_core::planner::DispatchPlan::K4Lftj
+                        | graph_hunter_core::planner::DispatchPlan::K5Lftj
+                        | graph_hunter_core::planner::DispatchPlan::C6Lftj
+                );
             if lftj_routed {
                 let session_for_lftj = self.resolve_session(session.as_ref())?;
                 let graph = session_for_lftj
@@ -759,8 +772,16 @@ impl GraphHunterApi {
             // the dispatch needs the env flag check anyway, and the
             // planner is graph-internal; mirror its yannakakis_dispatch
             // logic here for the routing decision.
-            let yannakakis_ok =
-                std::env::var("GRAPHHUNTER_YANNAKAKIS")
+            //
+            // Note the hazard this mirroring creates: because the check
+            // is a COPY of `planner::yannakakis_dispatch` rather than a
+            // call to it, the two drift independently. It had already
+            // drifted — the core matcher refuses to route a hypothesis
+            // carrying skew δ>0 or gap g>0 to Yannakakis (that operator
+            // enforces strict monotonicity and would silently drop the
+            // tolerance), and this copy did not. Same guard, restored.
+            let yannakakis_ok = !temporal_tolerance_active
+                && std::env::var("GRAPHHUNTER_YANNAKAKIS")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false)
                     && !hypothesis.steps.is_empty()
