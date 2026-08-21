@@ -328,7 +328,7 @@ requeridos por las hipótesis del catálogo, y todos están hoy en \textbf{full}
 \end{center}
 
 \begin{ideabox}[Preguntas transversales]
-Además de las 30 hipótesis del catálogo, hay preguntas \emph{transversales} que
+Además de las hipótesis del catálogo, hay preguntas \emph{transversales} que
 combinan canales. La más exigente es \code{loss\_reconstruction}
 (``¿podemos reconstruir qué se perdió y por qué?''), que requiere
 \code{completeness\_flag}, \code{ingestion\_time}, \code{provenance\_stability}
@@ -525,6 +525,111 @@ el grafo real.
 \end{ideabox}
 
 % ======================================================================
+\section{Ceguera encontrada en el campo (agosto 2026)}
+\label{sec:campo}
+
+Las secciones anteriores describen canales cerrados por diseño. Esta describe
+algo distinto y, para SOT, más valioso: puntos ciegos que \textbf{aparecieron
+usando la herramienta en una investigación real} --- un ciclo de caza sobre
+284.781 eventos de Keycloak con un adversario confirmado. Ninguno se detectó
+leyendo código; los tres se detectaron cuando una respuesta no cerraba.
+
+\subsection{El evento de un solo extremo}
+
+Una relación necesita dos entidades. Un evento que trae una IP y \emph{ningún}
+usuario no produce arista --- y por lo tanto es invisible a toda consulta del
+grafo. En el corpus real eran 642 eventos, y entre ellos \textbf{399 de los 401
+\code{realm\_disabled}}: el corte del realm, el evento de contención más
+importante del incidente. El observador no podía verlo, y tampoco decía que no
+podía verlo.
+
+\begin{warnbox}[El peor modo de falla: la pérdida silenciosa]
+El sistema no fallaba: descartaba. La fila entraba, no generaba arista, y nadie
+lo reportaba. Un testigo de ceguera existe precisamente para que esto no pase:
+si el observador descarta evidencia, tiene que \emph{decirlo}.
+\end{warnbox}
+
+Se cerró en dos movimientos. Primero, \code{classify\_skip\_reason} distingue
+ahora \code{single\_endpoint} (``este evento nombra una sola entidad'') de un
+fallo real del parser: antes ambos caían en el mismo balde, mezclando un hecho
+sobre los datos con un defecto del código. Segundo, el evento de un solo
+extremo con \code{source\_ip} produce un self-loop, como \code{target\_ip}
+siempre había hecho --- la asimetría no tenía fundamento. La metadata del
+evento viaja en la arista, así que la ventana de contención es hoy consultable
+como \code{IP -[Connect \{error="realm\_disabled"\}]-> IP}.
+
+\subsection{La sesión que no era una entidad}
+\label{sec:sesiones}
+
+El CSV de origen traía la columna \code{sessionId}, pero el grafo solo tenía
+\code{IP}, \code{URL} y \code{User}. La pregunta ``¿esta sesión se usó desde
+dos direcciones?'' --- la evidencia estructural más fuerte del ciclo --- hubo
+que responderla con un script sobre el archivo crudo. El dato estaba en la
+fuente y se perdía en el modelo.
+
+Hoy la sesión es entidad de primera clase y el parser emite la estrella
+\code{User -[Uses]-> Session -[From]-> IP}. El rango temporal vive en el
+\emph{nodo} (\code{first\_seen}, \code{last\_seen}, \code{duration}), no en la
+arista: una arista es un instante, una sesión es lo que dura.
+
+\begin{ideabox}[Lo que la sesión hizo visible]
+De 60.145 sesiones del corpus, \textbf{exactamente una} fue usada por dos
+cuentas --- y eran las dos apropiaciones que la investigación ya había
+confirmado. Un id de sesión pertenece a una identidad; dos cuentas sobre una
+sesión es la firma de un token robado. Es la única prueba de operador único que
+\emph{no} depende de correlación temporal, y era inconsultable hasta que la
+sesión existió como entidad.
+\end{ideabox}
+
+\subsection{Tolerancias: declarar cuánta ceguera se acepta}
+
+Dos límites nuevos, ambos declarados en la hipótesis en vez de asumidos:
+
+\begin{itemize}\itemsep2pt
+  \item \textbf{Desfasaje de relojes ($\delta$).} Una investigación cose
+  eventos de relojes que no coinciden (Sysmon, un tenant cloud, un sensor CDM).
+  La monotonía causal se relaja a $\tau(e_{i+1}) \ge \tau(e_i) - \delta$, y
+  $\delta$ es el ancho declarado de ese desacuerdo, no un margen difuso. Es
+  \textbf{por salto, nunca acumulativo}: cada arista se compara contra el
+  timestamp \emph{real} de la anterior, así que una cadena de $L$ pasos no
+  puede desviarse más de $\delta$ en ningún salto.
+  \item \textbf{Huecos ($g$).} Hasta $g$ aristas comodín pueden puentear
+  telemetría perdida entre dos pasos observados. La pérdida de logs es
+  literalmente un canal de ceguera; $g$ es cuánta se tolera antes de rechazar.
+  Los vértices puente \textbf{no} entran al camino resultante: el gap relaja el
+  \emph{matching}, no el \emph{resultado}.
+\end{itemize}
+
+\begin{warnbox}[Límite declarado]
+$\delta > 0$ y $g > 0$ fuerzan el camino DFS, porque los operadores LFTJ y
+Yannakakis imponen monotonía estricta en su estructura de join y
+\textbf{ignorarían} la tolerancia --- devolviendo en silencio un conjunto más
+estricto que el pedido. Preferimos perder la velocidad del operador
+especializado antes que devolver una respuesta que no es la que se preguntó.
+\end{warnbox}
+
+\subsection{El observador que respondía otra pregunta}
+
+El hallazgo más incómodo, y el más SOT de todos. Una cadena homogénea de seis
+pasos \code{T -[r]-> T} es la forma normal de escribir ``un camino de seis
+saltos''. También es la cantidad de aristas de un 4-clique. El planner
+despachaba por esa coincidencia \textbf{sola}, así que --- en la configuración
+que ambas aplicaciones activan al arrancar --- quien pedía un camino recibía
+\emph{cliques}.
+
+\begin{keybox}[La forma no es la intención]
+No es que el sistema devolviera un resultado incompleto: devolvía la respuesta
+\emph{a otra pregunta}, sin avisar. Es la falla que SOT considera peor que no
+responder, porque el analista no tiene forma de notarla. La ruta rápida ahora
+exige el marcador explícito del autor además de la forma; angosto le gana a
+incorrecto.
+\end{keybox}
+
+Se descubrió escribiendo el test que faltaba: los tests existentes verificaban
+que el planner \emph{enrutara}, nunca qué \emph{devolvía}. La comparación
+contra el DFS no existía, y el operador rápido llevaba tiempo shipeado.
+
+% ======================================================================
 \section{El estado final: todo Suficiente, con límites honestos}
 
 Tras cerrar los canales, el estado de la auditoría es:
@@ -535,7 +640,8 @@ Tras cerrar los canales, el estado de la auditoría es:
 \toprule
 \textbf{Familia} & \textbf{Veredicto} \\
 \midrule
-30 hipótesis del catálogo ATT\&CK & \textcolor{ghgreen}{\textbf{Sufficient}} (30/30) \\
+30 hipótesis auditadas del catálogo & \textcolor{ghgreen}{\textbf{Sufficient}} (30/30) \\
+2 hipótesis nuevas (sesiones, \S\ref{sec:sesiones}) & \textcolor{ghamber}{\textbf{sin auditar}} \\
 Transversal \code{exhaustiveness\_marking} & \textcolor{ghgreen}{\textbf{Sufficient}} \\
 Transversal \code{loss\_reconstruction} & \textcolor{ghgreen}{\textbf{Sufficient}} \\
 Los 11 canales de telemetría & \textcolor{ghgreen}{\textbf{full}} \\
@@ -548,6 +654,19 @@ Y la maquinaria corre \textbf{por defecto} (journal acotado + dedup idempotente
 puede apagar. Lo que \emph{no} se afirma: que el repositorio sea ``Suficiente
 en todo'' de forma incondicional. Cada garantía arrastra su límite declarado
 --- y eso, precisamente, es lo que la hace confiable.
+
+\begin{warnbox}[Lo que agosto le enseñó a esta tabla]
+Los canales de arriba se derivaron \emph{por diseño}: sentados a pensar en qué
+dimensiones puede fallar un observador. Los cuatro puntos ciegos de la
+\S\ref{sec:campo} no aparecieron en esa lista --- aparecieron \textbf{usando la
+herramienta contra un incidente real}. Ninguno era un canal que hubiéramos
+sabido declarar de antemano.
+
+La conclusión no es que el modelo de canales esté mal, sino que \emph{la lista
+de canales es ella misma incompleta}, y que la fuente más confiable de canales
+nuevos es el campo, no el pizarrón. Un observador honesto sobre su ceguera
+también tiene que serlo sobre su \emph{catálogo} de cegueras.
+\end{warnbox}
 
 \begin{keybox}[La idea para llevarse]
 SOT no le pide al observador que sea omnisciente. Le pide que sea
