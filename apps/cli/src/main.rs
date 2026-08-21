@@ -22,11 +22,12 @@ use protocol::{Request, Response};
 /// csv), `--out FILE` (default stdout). Build with `--release` — debug
 /// latencies are not representative, and the harness says so on stderr.
 fn run_bench(args: &[String]) -> ! {
-    use graph_hunter_core::benchmark::{perf_rows_to_csv, run_perf_suite_planted};
+    use graph_hunter_core::benchmark::{perf_rows_to_csv, run_perf_scaling, run_perf_suite_planted};
 
     let mut runs: usize = 30;
     let mut seed: u64 = 42;
     let mut plant: usize = 0;
+    let mut sweep = false;
     let mut format = String::from("csv");
     let mut out_path: Option<String> = None;
 
@@ -36,9 +37,12 @@ fn run_bench(args: &[String]) -> ! {
             "--runs" => runs = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| bail("--runs needs a positive integer")),
             "--seed" => seed = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| bail("--seed needs an integer")),
             "--plant" => plant = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| bail("--plant needs a non-negative integer")),
+            // Scaling sweep (D3.1): ER at fixed avg degree across growing n,
+            // to find where DFS latency breaks. Overrides the fixed suite.
+            "--sweep" => sweep = true,
             "--format" => format = it.next().cloned().unwrap_or_else(|| bail("--format needs csv|json")),
             "--out" => out_path = Some(it.next().cloned().unwrap_or_else(|| bail("--out needs a path"))),
-            "-h" | "--help" => bail("usage: graph_hunter_cli bench [--runs N] [--seed S] [--plant N] [--format csv|json] [--out FILE]"),
+            "-h" | "--help" => bail("usage: graph_hunter_cli bench [--runs N] [--seed S] [--plant N] [--sweep] [--format csv|json] [--out FILE]"),
             other => bail(&format!("unknown bench flag: {other}")),
         }
     }
@@ -50,7 +54,14 @@ fn run_bench(args: &[String]) -> ! {
         );
     }
 
-    let rows = run_perf_suite_planted(seed, runs, plant);
+    let rows = if sweep {
+        // Fixed avg degree 10, L=3, growing n. The knee in latency-vs-|E|
+        // is the answer to "where does the DFS break".
+        let sizes = [1_000usize, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000];
+        run_perf_scaling(seed, runs, &sizes, 10.0, 3, plant)
+    } else {
+        run_perf_suite_planted(seed, runs, plant)
+    };
     let rendered = match format.as_str() {
         "csv" => perf_rows_to_csv(&rows),
         "json" => serde_json::to_string_pretty(&rows).expect("perf rows serialize"),

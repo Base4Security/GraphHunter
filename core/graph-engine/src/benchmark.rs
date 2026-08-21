@@ -742,12 +742,33 @@ fn percentile_us(sorted: &[u64], q: f64) -> u64 {
 /// search successor path is active), then the *search* is timed `runs`
 /// times. Generation and sort are setup, not the thing being measured.
 pub fn run_perf_config(config: &PerfConfig, seed: u64, runs: usize) -> PerfRow {
-    let mut g = config.generator.build(seed);
-    let hypothesis = build_lateral_movement_hypothesis(config.hypothesis_len);
+    measure_one(
+        config.label.to_string(),
+        config.generator,
+        config.hypothesis_len,
+        config.planted_chains,
+        seed,
+        runs,
+    )
+}
+
+/// The measurement primitive: generate → plant → sort → time the search
+/// `runs` times → summarise. An owned `label` lets callers (the fixed
+/// suite and the scaling sweep) name rows however they need.
+pub fn measure_one(
+    label: String,
+    generator: BenchGenerator,
+    hypothesis_len: usize,
+    planted_chains: usize,
+    seed: u64,
+    runs: usize,
+) -> PerfRow {
+    let mut g = generator.build(seed);
+    let hypothesis = build_lateral_movement_hypothesis(hypothesis_len);
     // Plant BEFORE the sort so the planted edges land in the sorted CSR
     // the binary-search successor path reads. Timestamps are spaced far
     // apart per chain so chains never interleave into a spurious match.
-    for idx in 0..config.planted_chains {
+    for idx in 0..planted_chains {
         plant_chain(&mut g, &hypothesis, idx, 1_500_000 + (idx as i64) * 1000);
     }
     let _ = g.sort_edges_by_timestamp();
@@ -768,14 +789,14 @@ pub fn run_perf_config(config: &PerfConfig, seed: u64, runs: usize) -> PerfRow {
     let sum: u128 = latencies.iter().map(|&x| x as u128).sum();
 
     PerfRow {
-        config: config.label.to_string(),
-        generator: config.generator.name().to_string(),
+        config: label,
+        generator: generator.name().to_string(),
         seed,
         n_entities: n,
         n_relations: m,
         d_avg,
-        hypothesis_len: config.hypothesis_len,
-        planted_chains: config.planted_chains,
+        hypothesis_len,
+        planted_chains,
         runs,
         paths_found,
         latency_p50_us: percentile_us(&latencies, 0.50),
@@ -785,6 +806,39 @@ pub fn run_perf_config(config: &PerfConfig, seed: u64, runs: usize) -> PerfRow {
         latency_max_us: *latencies.last().unwrap(),
         memory_bytes_approx: approx_memory(&g),
     }
+}
+
+/// Scaling sweep for the "where does the DFS break?" study (D3.1).
+///
+/// Erdős–Rényi at a **fixed average degree** — `p = avg_degree / (n−1)`
+/// holds density constant as `n` grows, so the row-to-row change isolates
+/// the effect of |E| rather than confounding it with densification. Sizes
+/// are swept in one place so a latency-vs-|E| curve falls out of the CSV
+/// directly. `plant` guarantees the emitter runs; set 0 for the pure-scan
+/// curve.
+pub fn run_perf_scaling(
+    seed: u64,
+    runs: usize,
+    sizes: &[usize],
+    avg_degree: f64,
+    hypothesis_len: usize,
+    plant: usize,
+) -> Vec<PerfRow> {
+    sizes
+        .iter()
+        .map(|&n| {
+            let denom = n.saturating_sub(1).max(1) as f64;
+            let p = (avg_degree / denom).clamp(0.0, 1.0);
+            measure_one(
+                format!("ER-{n}"),
+                BenchGenerator::ErdosRenyi { n, p },
+                hypothesis_len,
+                plant,
+                seed,
+                runs,
+            )
+        })
+        .collect()
 }
 
 /// Runs the full fixed suite. Single-threaded and deterministic: same
@@ -918,6 +972,20 @@ mod perf_harness_tests {
         assert_eq!(some.planted_chains, 5);
         // Planting adds vertices and edges — the graph really grew.
         assert!(some.n_entities > none.n_entities);
+    }
+
+    /// The scaling sweep holds average degree roughly constant as n grows,
+    /// so latency rows compare on |E| and not on a moving density.
+    #[test]
+    fn scaling_sweep_holds_density_across_sizes() {
+        let rows = run_perf_scaling(9, 2, &[1_000, 4_000], 10.0, 3, 0);
+        assert_eq!(rows.len(), 2);
+        // Avg degree stays near the requested 10 at both sizes.
+        for r in &rows {
+            assert!((r.d_avg - 10.0).abs() < 2.0, "d_avg drifted: {}", r.d_avg);
+        }
+        // Larger n → more edges.
+        assert!(rows[1].n_relations > rows[0].n_relations);
     }
 
     /// A planted chain honours temporal monotonicity, so it survives the
