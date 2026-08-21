@@ -249,6 +249,46 @@ caso.
    cronológico es el cuello.
 5. **4.4 (índice de candidatos)** diferido hasta que 1-3 no alcancen.
 
+## 6. Medición D3.1 — dónde se rompe el DFS hoy (2026-08-16)
+
+Ejecutado antes de optimizar, con `bench --sweep` (ER a grado medio fijo
+10, L=3, escala pura sin señal, 15 corridas/punto, release, en este host
+— Ryzen 5 PRO 5650U, ver `reference_bench_host`).
+
+| n | aristas | p50 | p95 | mem approx |
+|---|---:|---:|---:|---:|
+| 1K | 9.925 | 133 µs | 215 µs | 4,7 MB |
+| 5K | 49.522 | 841 µs | 1,3 ms | 23 MB |
+| 10K | 99.870 | 1,9 ms | 12 ms | 47 MB |
+| 25K | 250.613 | 7,5 ms | 9,8 ms | 118 MB |
+| 50K | 500.185 | 18 ms | 22 ms | 235 MB |
+| 100K | 999.037 | 33 ms | 48 ms | 470 MB |
+| 250K | 2.498.604 | **121 ms** | 134 ms | 1,17 GB |
+
+**Hallazgos:**
+
+1. **La latencia crece ~O(|E|^1,2), ligeramente superlineal.** Aristas ×251
+   (10K→2,5M), p50 ×908 (133µs→121ms). No es densificación (grado medio
+   fijo en 10): es crecimiento real del trabajo de búsqueda.
+2. **El cuello es el trabajo de búsqueda (scan), no la memoria ni la
+   emisión.** `approx_memory` sobreestima ~15× (usa 470 B/arista; el CSR
+   real es ~32 B), así que la RAM real a 2,5M aristas es ~80-100 MB, no 1,17
+   GB — memoria no es la restricción. Y emitir 20 caminos plantados agrega
+   ~6µs sobre el scan de un grafo de 1K: **el scan domina, la emisión no.**
+3. **Techo interactivo:** p50 < 100 ms hasta ~200K nodos / 2M aristas. Para
+   el objetivo E3 CADETS del plan (2,855M nodos / 5,893M aristas),
+   extrapolando ~O(E^1,2): **una consulta de 3 hops ≈ 340 ms p50** — al
+   límite de interactivo; un catálogo de 20-30 hipótesis ≈ 7-10 s.
+4. **Límite del arnés:** el generador ER es O(n²) en el doble loop, así que
+   barrer más allá de ~250K queda dominado por la *generación*, no por el
+   search. Para empujar el barrido más arriba hace falta un generador
+   sparse.
+
+**Conclusión que fija el orden:** el lever es **achicar el árbol de
+búsqueda**, no la memoria. Eso valida arrancar por **#4.1 (orden de
+variables)** — es exactamente lo que reduce el trabajo que acá crece
+superlinealmente. La medición confirma la recomendación de §5.
+
 ## Apéndice: citas a verificar antes del paper
 Todas las marcadas `[V]` arriba — VF2/VF3 (TPAMI), RI (BMC Bioinformatics
 2013), TurboISO (SIGMOD 2013), CFL-Match (SIGMOD 2016), CECI (SIGMOD 2019),
