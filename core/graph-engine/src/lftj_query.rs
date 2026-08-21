@@ -641,24 +641,29 @@ pub fn enumerate_4cliques_naive(
         let a_dsts =
             &trie.dst_keys[trie.dst_offsets[ai] as usize..trie.dst_offsets[ai + 1] as usize];
         for &b in a_dsts {
+            // `b == a` was the one distinctness case even this baseline
+            // missed; only a self-loop can produce it.
+            if b == a {
+                continue;
+            }
             let b_sid = StrId::from_raw(b);
             let bi = match trie.src_keys.binary_search(&b) {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let t_ab = match ts_map.get(trie, ai, b) {
+            let t_ab = match ts_map.successor(trie, ai, b, t_lo) {
                 Some(t) => t,
                 None => continue,
             };
             // Inclusive upper bound, matching the DFS's
             // `partition_point(|e| e.timestamp <= tw_end)`.
-            if t_ab < t_lo || t_ab > t_hi {
+            if t_ab > t_hi {
                 continue;
             }
             let b_dsts = &trie.dst_keys
                 [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             for &c in a_dsts {
-                if c == b {
+                if c == a || c == b {
                     continue;
                 }
                 if b_dsts.binary_search(&c).is_err() {
@@ -668,25 +673,22 @@ pub fn enumerate_4cliques_naive(
                     Ok(i) => i,
                     Err(_) => continue,
                 };
-                let t_ac = match ts_map.get(trie, ai, c) {
+                // Chain: t_ab <= t_ac <= t_ad <= t_bc <= t_bd <= t_cd.
+                let t_ac = match ts_map.successor(trie, ai, c, t_ab) {
                     Some(t) => t,
                     None => continue,
                 };
-                if t_ac <= t_ab {
+                if t_ac > t_hi {
                     continue;
                 }
-                let t_bc = match ts_map.get(trie, bi, c) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                if t_ac >= t_bc {
+                if ts_map.successor(trie, bi, c, t_ac).is_none() {
                     continue;
                 }
                 let c_sid = StrId::from_raw(c);
                 let c_dsts = &trie.dst_keys
                     [trie.dst_offsets[ci] as usize..trie.dst_offsets[ci + 1] as usize];
                 for &d in a_dsts {
-                    if d == b || d == c {
+                    if d == a || d == b || d == c {
                         continue;
                     }
                     if b_dsts.binary_search(&d).is_err() {
@@ -695,25 +697,32 @@ pub fn enumerate_4cliques_naive(
                     if c_dsts.binary_search(&d).is_err() {
                         continue;
                     }
-                    let t_ad = match ts_map.get(trie, ai, d) {
+                    let t_ad = match ts_map.successor(trie, ai, d, t_ac) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_ad <= t_ac || t_ad >= t_bc {
+                    if t_ad > t_hi {
                         continue;
                     }
-                    let t_bd = match ts_map.get(trie, bi, d) {
+                    let t_bc = match ts_map.successor(trie, bi, c, t_ad) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_bd <= t_bc {
+                    if t_bc > t_hi {
                         continue;
                     }
-                    let t_cd = match ts_map.get(trie, ci, d) {
+                    let t_bd = match ts_map.successor(trie, bi, d, t_bc) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_cd <= t_bd {
+                    if t_bd > t_hi {
+                        continue;
+                    }
+                    let t_cd = match ts_map.successor(trie, ci, d, t_bd) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    if t_cd > t_hi {
                         continue;
                     }
                     let d_sid = StrId::from_raw(d);
@@ -758,18 +767,23 @@ pub fn enumerate_4cliques_lftj_simd(
         let a_end = trie.dst_offsets[ai + 1] as usize;
         let a_dsts = &trie.dst_keys[a_off..a_end];
         for &b in a_dsts {
+            // Distinctness — see the note in the parallel twin. Required
+            // once the comparisons below became non-strict.
+            if b == a {
+                continue;
+            }
             let b_sid = StrId::from_raw(b);
             let bi = match trie.src_keys.binary_search(&b) {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let t_ab = match ts_map.get(trie, ai, b) {
+            let t_ab = match ts_map.successor(trie, ai, b, t_lo) {
                 Some(t) => t,
                 None => continue,
             };
             // Inclusive upper bound, matching the DFS's
             // `partition_point(|e| e.timestamp <= tw_end)`.
-            if t_ab < t_lo || t_ab > t_hi {
+            if t_ab > t_hi {
                 continue;
             }
             let b_off = trie.dst_offsets[bi] as usize;
@@ -784,22 +798,23 @@ pub fn enumerate_4cliques_lftj_simd(
 
             for c_idx in 0..ab_isect.len() {
                 let c = ab_isect[c_idx];
+                if c == a || c == b {
+                    continue;
+                }
                 let ci = match trie.src_keys.binary_search(&c) {
                     Ok(i) => i,
                     Err(_) => continue,
                 };
-                let t_ac = match ts_map.get(trie, ai, c) {
+                // Chain: t_ab <= t_ac <= t_ad <= t_bc <= t_bd <= t_cd.
+                let t_ac = match ts_map.successor(trie, ai, c, t_ab) {
                     Some(t) => t,
                     None => continue,
                 };
-                if t_ac <= t_ab {
+                if t_ac > t_hi {
                     continue;
                 }
-                let t_bc = match ts_map.get(trie, bi, c) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                if t_ac >= t_bc {
+                // Necessary condition before the second intersect.
+                if ts_map.successor(trie, bi, c, t_ac).is_none() {
                     continue;
                 }
                 let c_sid = StrId::from_raw(c);
@@ -815,25 +830,35 @@ pub fn enumerate_4cliques_lftj_simd(
                 );
 
                 for &d in abc_isect.iter() {
-                    let t_ad = match ts_map.get(trie, ai, d) {
-                        Some(t) => t,
-                        None => continue,
-                    };
-                    if t_ad <= t_ac || t_ad >= t_bc {
+                    if d == a || d == b || d == c {
                         continue;
                     }
-                    let t_bd = match ts_map.get(trie, bi, d) {
+                    let t_ad = match ts_map.successor(trie, ai, d, t_ac) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_bd <= t_bc {
+                    if t_ad > t_hi {
                         continue;
                     }
-                    let t_cd = match ts_map.get(trie, ci, d) {
+                    let t_bc = match ts_map.successor(trie, bi, c, t_ad) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_cd <= t_bd {
+                    if t_bc > t_hi {
+                        continue;
+                    }
+                    let t_bd = match ts_map.successor(trie, bi, d, t_bc) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    if t_bd > t_hi {
+                        continue;
+                    }
+                    let t_cd = match ts_map.successor(trie, ci, d, t_bd) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    if t_cd > t_hi {
                         continue;
                     }
                     let d_sid = StrId::from_raw(d);
@@ -884,17 +909,34 @@ pub fn enumerate_4cliques_lftj_simd_par(
                 let a_end = trie.dst_offsets[ai + 1] as usize;
                 let a_dsts = &trie.dst_keys[a_off..a_end];
                 'a_loop: for &b in a_dsts {
+                    // Distinctness. A 4-clique needs four DISTINCT
+                    // vertices, and the intersects below can legitimately
+                    // contain `a`/`b`/`c` when self-loops exist. The naive
+                    // baseline guards this explicitly; the SIMD variants did
+                    // not, and got away with it only because the strict
+                    // comparisons rejected the degenerate tuples by
+                    // accident (d == b forces t_ad == t_ab, which tripped
+                    // `t_ad <= t_ac`). Relaxing to non-strict removes that
+                    // accidental cover, so the guards must be explicit —
+                    // and self-loops are no longer hypothetical here: the
+                    // single-endpoint ingest fallback emits `IP -> IP`
+                    // self-loops for events that name only one entity.
+                    if b == a {
+                        continue;
+                    }
                     let b_sid = StrId::from_raw(b);
                     let bi = match trie.src_keys.binary_search(&b) {
                         Ok(i) => i,
                         Err(_) => continue,
                     };
-                    let t_ab = match ts_map.get(trie, ai, b) {
+                    // Earliest `a -> b` at or after the window opens, over
+                    // all parallel edges — see `MinTimestampMap::successor`.
+                    let t_ab = match ts_map.successor(trie, ai, b, t_lo) {
                         Some(t) => t,
                         None => continue,
                     };
                     // Inclusive upper bound, matching the DFS.
-                    if t_ab < t_lo || t_ab > t_hi {
+                    if t_ab > t_hi {
                         continue;
                     }
                     let b_off = trie.dst_offsets[bi] as usize;
@@ -907,22 +949,30 @@ pub fn enumerate_4cliques_lftj_simd_par(
                     }
                     for c_idx in 0..ab_isect.len() {
                         let c = ab_isect[c_idx];
+                        if c == a || c == b {
+                            continue;
+                        }
                         let ci = match trie.src_keys.binary_search(&c) {
                             Ok(i) => i,
                             Err(_) => continue,
                         };
-                        let t_ac = match ts_map.get(trie, ai, c) {
+                        // The predicate is one chain:
+                        //   t_ab <= t_ac <= t_ad <= t_bc <= t_bd <= t_cd
+                        // so each link is the earliest edge at or after the
+                        // previous one. Greedy-earliest is optimal for a
+                        // chain: it leaves the widest range downstream.
+                        let t_ac = match ts_map.successor(trie, ai, c, t_ab) {
                             Some(t) => t,
                             None => continue,
                         };
-                        if t_ac <= t_ab {
+                        if t_ac > t_hi {
                             continue;
                         }
-                        let t_bc = match ts_map.get(trie, bi, c) {
-                            Some(t) => t,
-                            None => continue,
-                        };
-                        if t_ac >= t_bc {
+                        // Cheap necessary condition before the expensive
+                        // second intersect: `t_bc` sits after `t_ad`, which
+                        // sits after `t_ac`, so a usable `b -> c` must exist
+                        // at or after `t_ac`.
+                        if ts_map.successor(trie, bi, c, t_ac).is_none() {
                             continue;
                         }
                         let c_sid = StrId::from_raw(c);
@@ -936,25 +986,35 @@ pub fn enumerate_4cliques_lftj_simd_par(
                             abc_isect,
                         );
                         for &d in abc_isect.iter() {
-                            let t_ad = match ts_map.get(trie, ai, d) {
-                                Some(t) => t,
-                                None => continue,
-                            };
-                            if t_ad <= t_ac || t_ad >= t_bc {
+                            if d == a || d == b || d == c {
                                 continue;
                             }
-                            let t_bd = match ts_map.get(trie, bi, d) {
+                            let t_ad = match ts_map.successor(trie, ai, d, t_ac) {
                                 Some(t) => t,
                                 None => continue,
                             };
-                            if t_bd <= t_bc {
+                            if t_ad > t_hi {
                                 continue;
                             }
-                            let t_cd = match ts_map.get(trie, ci, d) {
+                            let t_bc = match ts_map.successor(trie, bi, c, t_ad) {
                                 Some(t) => t,
                                 None => continue,
                             };
-                            if t_cd <= t_bd {
+                            if t_bc > t_hi {
+                                continue;
+                            }
+                            let t_bd = match ts_map.successor(trie, bi, d, t_bc) {
+                                Some(t) => t,
+                                None => continue,
+                            };
+                            if t_bd > t_hi {
+                                continue;
+                            }
+                            let t_cd = match ts_map.successor(trie, ci, d, t_bd) {
+                                Some(t) => t,
+                                None => continue,
+                            };
+                            if t_cd > t_hi {
                                 continue;
                             }
                             let d_sid = StrId::from_raw(d);
