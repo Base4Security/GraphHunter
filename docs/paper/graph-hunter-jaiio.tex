@@ -13,6 +13,10 @@
 \usepackage{url}
 \usepackage[hidelinks]{hyperref}
 \usepackage{enumitem}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.16}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds}
 
 \newcommand{\code}[1]{\texttt{#1}}
 
@@ -35,20 +39,23 @@ telemetría de seguridad y un algoritmo de búsqueda en profundidad dirigido por
 hipótesis para Threat Hunting proactivo. A diferencia de las plataformas SIEM
 tradicionales, que almacenan la telemetría en formato tabular y requieren
 pivoteo iterativo manual para reconstruir cadenas de ataque, el enfoque
-propuesto materializa las relaciones causales entre eventos de seguridad como
-un multigrafo dirigido con diez tipos de entidades y once tipos de relaciones.
-Los analistas codifican hipótesis de ataque como cadenas tipadas secuenciales,
-y el sistema retorna todos los caminos temporalmente válidos mediante reglas de
-poda integradas (tipo de relación, tipo de entidad, monotonía causal con
-tolerancia de desfasaje de relojes, ventana temporal, huecos acotados y
-$k$-simplicidad). La evaluación empírica sobre datasets reales ---incluyendo
-telemetría Sysmon, logs de Azure Sentinel y el corpus Mordor (963K
-eventos)--- demuestra aceleraciones de $1{,}747\times$ a $11{,}600\times$
-respecto al baseline sin poda. Un barrido de escala a densidad constante mide
-un crecimiento de la latencia cercano a $O(|E|^{1{,}2})$, con una mediana de
-$121$~ms sobre $2{,}5$~millones de aristas. La comparativa operativa muestra
-una reducción de 8--20 minutos y múltiples consultas manuales por investigación
-(SIEM) a 1--2 minutos con una sola formulación de hipótesis.
+propuesto materializa las dependencias observadas entre eventos de seguridad
+como un multigrafo dirigido con diez tipos de entidades y once tipos de
+relaciones. Los analistas codifican hipótesis de ataque como patrones tipados
+---en el caso habitual, cadenas secuenciales--- y el sistema retorna todos los
+emparejamientos temporalmente válidos mediante reglas de poda integradas (tipo
+de relación, tipo de entidad, monotonía temporal con tolerancia de desfasaje de
+relojes, ventana, huecos acotados y $k$-simplicidad). Una ablación sobre
+datasets reales ---telemetría Sysmon, logs de Azure Sentinel y una
+concatenación de 963K eventos de OTRF Security-Datasets--- mide aceleraciones
+de $1.747\times$ a $11.600\times$ frente a la misma búsqueda sin poda. Un
+barrido sintético a densidad constante mide un crecimiento de la latencia con
+pendiente log-log $1{,}24$ ($R^2 = 0{,}998$) en el rango evaluado, con una
+mediana de $121$~ms sobre $2{,}5$~millones de aristas. La comparativa
+operativa, derivada del conteo de interacciones y no de un estudio con
+analistas, estima una reducción del tiempo de investigación de 8--20 minutos y
+múltiples consultas manuales (SIEM) a 1--2 minutos con una sola formulación de
+hipótesis.
 
 \paragraph{Palabras clave:} Threat Hunting, grafo de conocimiento temporal,
 telemetría de seguridad, búsqueda dirigida por hipótesis, MITRE ATT\&CK.
@@ -61,20 +68,21 @@ Proactive Threat Hunting}}
 for security telemetry and a hypothesis-driven depth-first search algorithm for
 proactive Threat Hunting. Unlike traditional SIEM platforms, which store
 telemetry in tabular form and require iterative manual pivoting to reconstruct
-attack chains, the proposed approach materializes causal relationships between
+attack chains, the proposed approach materializes observed dependencies between
 security events as a directed multigraph with ten entity types and eleven
-relation types. Analysts encode attack hypotheses as typed sequential chains,
-and the system returns all temporally valid paths through integrated pruning
-rules (relation type, entity type, causal monotonicity with clock-skew
-tolerance, time window, bounded gaps, and $k$-simplicity). Empirical evaluation
-on real-world datasets ---including Sysmon telemetry, Azure Sentinel logs, and
-the Mordor corpus (963K events)--- demonstrates speedups from $1{,}747\times$
-to $11{,}600\times$ over unpruned baselines. A constant-density scaling sweep
-measures latency growth close to $O(|E|^{1.2})$, with a $121$~ms median over
-$2.5$ million edges. The operational comparison shows a reduction from 8--20
-minutes and multiple manual queries per investigation (SIEM) to 1--2 minutes
-with a single hypothesis formulation, representing an order-of-magnitude
-decrease in Mean Time to Investigate (MTTI).
+relation types. Analysts encode attack hypotheses as typed patterns ---in the
+common case, sequential chains--- and the system returns all temporally valid
+matches through integrated pruning rules (relation type, entity type, temporal
+monotonicity with clock-skew tolerance, time window, bounded gaps, and
+$k$-simplicity). An ablation on real-world datasets ---Sysmon telemetry, Azure
+Sentinel logs, and a 963K-event concatenation of OTRF Security-Datasets---
+measures speedups from $1{,}747\times$ to $11{,}600\times$ against the same
+search with pruning disabled. A synthetic constant-density sweep measures
+latency growth with a log-log slope of $1.24$ ($R^2 = 0.998$) over the range
+evaluated, with a $121$~ms median at $2.5$ million edges. The operational
+comparison, derived from counting analyst interactions rather than from a user
+study, estimates a reduction from 8--20 minutes and multiple manual queries per
+investigation (SIEM) to 1--2 minutes with a single hypothesis formulation.
 
 \paragraph{Keywords:} Threat Hunting, temporal knowledge graph, security
 telemetry, hypothesis-driven search, MITRE ATT\&CK.
@@ -133,7 +141,7 @@ el analista de SOC:
 
 \subsection{Propuesta y objetivos}
 Este trabajo propone la transición del análisis tabular a un modelo de grafo
-temporal tipado que materializa las relaciones causales entre eventos de
+temporal tipado que materializa las dependencias observadas entre eventos de
 seguridad sobre un sistema completo ---de la ingestión de logs a la búsqueda de
 patrones--- donde el analista plantea hipótesis de caza como consultas de
 ``caminos tipados'' y obtiene resultados visuales. Los objetivos específicos
@@ -142,7 +150,7 @@ temporal para telemetría heterogénea (Sysmon, Azure Sentinel, JSON, CSV,
 HAProxy, DARPA TC CDM) alineada con MITRE ATT\&CK; (2) diseñar un algoritmo DFS
 con podas que explote el tipado y la temporalidad del dominio para lograr
 tiempo esperado lineal; (3) validar el método sobre datasets realistas
-($> 900$K eventos) midiendo la reducción de MTTI frente al flujo SIEM;
+($> 900$K eventos) y caracterizar su escalabilidad con un arnés reproducible;
 (4) implementar una herramienta que integre ingestión, búsqueda, puntuación de
 anomalías y visualización para SOCs; (5) integrar clasificación GNN sobre el
 mismo grafo, cerrando el ciclo detección-investigación con aceleración opcional
@@ -157,7 +165,7 @@ La piedra angular de los Centros de Operaciones de Seguridad (SOC) han sido los
 SIEM ---Splunk, Microsoft Sentinel, Elastic Security--- que almacenan
 telemetría en formato tabular optimizado para búsqueda full-text y agregaciones
 estadísticas. Si bien estas plataformas ofrecen capacidades de búsqueda,
-dashboards y alertas, su diseño no materializa relaciones causales entre
+dashboards y alertas, su diseño no materializa dependencias entre
 eventos.
 
 Para mitigar la fatiga de alertas, la industria incorporó análisis estadísticos
@@ -170,9 +178,10 @@ conexión de red hacia qué servidor, y qué sucedió después.
 Las capacidades de grafos en plataformas comerciales ---como los Investigation
 Graphs de Microsoft Sentinel o los Causality Views de Palo Alto Cortex XDR---
 representan un avance, pero operan como capas de visualización sobre datos
-tabulares subyacentes. No explotan formalmente la estructura del grafo para
-búsqueda de patrones, y las travesías con restricciones temporales típicamente
-superan los 100~ms para más de 3 saltos.
+tabulares subyacentes: sirven para inspeccionar el contexto de una alerta ya
+emitida, pero no exponen la estructura del grafo como objeto de consulta, de
+modo que no permiten formular un patrón de varios saltos con restricciones de
+tipo y de orden temporal y pedir todos sus emparejamientos.
 
 \subsection{Enfoques de grafos en ciberseguridad}
 BloodHound\footnote{\url{https://github.com/SpecterOps/BloodHound}} (Robbins et
@@ -276,6 +285,34 @@ $\mathsf{Connect}$ y $\mathsf{DNS}$ cubren comunicaciones C2 (TA0011), y
 $\mathsf{Read}$/$\mathsf{Write}$ cubren acceso a datos y exfiltración (TA0009,
 TA0010).
 
+\textbf{Firma de relaciones.} Los dos alfabetos por separado no impiden
+combinaciones sin sentido como $(\mathsf{File}, \mathsf{Auth},
+\mathsf{Domain})$. Se añade por ello una firma
+$\mathrm{sig} : \Sigma_E \to \mathcal{P}(\Sigma_V \times \Sigma_V)$ que fija
+los pares fuente--destino admisibles de cada relación; por ejemplo
+$\mathrm{sig}(\mathsf{Auth}) = \{(\mathsf{User}, \mathsf{Host})\}$ y
+$\mathrm{sig}(\mathsf{Connect}) = \{(\mathsf{IP}, \mathsf{Host}),
+(\mathsf{Host}, \mathsf{IP}), (\mathsf{Process}, \mathsf{IP}),
+(\mathsf{Process}, \mathsf{Domain})\}$. La firma cumple dos funciones. Valida
+estáticamente una hipótesis antes de ejecutarla: un paso fuera de la firma no
+admite emparejamiento alguno, y conviene reportarlo al escribirlo y no como un
+resultado vacío tras recorrer el grafo. Y fija una dirección canónica por
+relación, de modo que recorrer $\mathsf{Auth}$ de host a usuario es
+explícitamente un paso inverso (Sección~\ref{sec:hipotesis}) y no una segunda
+convención tácita que conviva con la primera.
+
+\paragraph{Qué establece el grafo y qué no.} Una arista registra que una fuente
+observó dos entidades participando de un mismo evento en un instante. La
+conjunción de conexión estructural, compatibilidad de tipos y orden temporal es
+evidencia de una cadena de acciones plausible, pero no la demuestra: que $A$
+preceda a $B$ y compartan una entidad no implica que $A$ haya causado $B$. Con
+fuentes que registran proveniencia explícita ---CDM, o Sysmon con el enlace
+padre-hijo de proceso--- la relación sí es causal en sentido estricto; con
+telemetría heterogénea correlacionada por identidad y tiempo, no lo es. Este
+trabajo emplea por ello ``monotonía temporal'' para nombrar la restricción de
+orden, y reserva el vocabulario causal para los casos en que la fuente lo
+sustenta.
+
 \subsection{La sesión como entidad de primera clase}
 \label{sec:sesion}
 El tipo $\mathsf{Session}$ y las relaciones $\mathsf{Uses}$ y $\mathsf{From}$
@@ -360,25 +397,50 @@ La distinción entre ``el parser falló'' y ``el evento nombra un solo extremo''
 es material: la primera exige corregir el parser, la segunda es un hecho sobre
 los datos.
 
-\subsection{Definiciones sobre hipótesis de caza como consultas de caminos}
-El concepto central del sistema es la hipótesis de caza: una secuencia tipada
-que describe un patrón de ataque esperado.
+\subsection{Hipótesis de caza como consultas de patrones tipados}
+\label{sec:hipotesis}
+El concepto central del sistema es la hipótesis de caza: un patrón tipado que
+describe la estructura de ataque esperada.
 
-\textbf{Hipótesis de caza.} Una secuencia
+\textbf{Patrón de consulta.} Un par $Q = (N, S, \prec)$ donde $N$ es un
+conjunto de variables de patrón tipadas sobre $\Sigma_V \cup \{*\}$; $S$ es un
+conjunto de pasos $(n_i, r, n_j)$ con
+$r \in \Sigma_E \cup \Sigma_E^{-1} \cup \{*\}$, donde $r^{-1}$ denota recorrer
+$r$ en contra de su dirección canónica; y $\prec$ es un orden total sobre $S$
+que fija la secuencia de recorrido. El grafo $(N, S)$ debe ser conexo, y cada
+paso debe respetar la firma $\mathrm{sig}(r)$ de la Sección 3.1.
+
+\textbf{Cadena.} El caso en que $(N, S)$ es un camino y $\prec$ su orden
+natural. Es el caso habitual en Threat Hunting y el que el DFS resuelve
+directamente; se escribe como la secuencia
 \[
-H = [(v_0, r_1, v_1), (v_1, r_2, v_2), \ldots, (v_{L-1}, r_L, v_L)]
+H = [(v_0, r_1, v_1), (v_1, r_2, v_2), \ldots, (v_{L-1}, r_L, v_L)].
 \]
-donde $v_i \in \Sigma_V \cup \{*\}$ y $r_j \in \Sigma_E \cup \{*\}$, con $*$
-denotando comodín. La hipótesis es consistente si los tipos destino-fuente de
-pasos consecutivos coinciden.
+Las formas no lineales ---ciclos, cliques--- son patrones válidos de $Q$ y se
+delegan a los operadores especializados de la Sección~\ref{sec:operadores}. La
+distinción importa: el orden $\prec$ es lo único que da sentido a las
+restricciones temporales cuando el patrón no es un camino, porque en una forma
+cíclica no hay un ``siguiente paso'' canónico.
 
-\textbf{Camino válido.} Un camino $p = [e_1, e_2, \ldots, e_L]$ sobre aristas
-del grafo es válido para $H$ si: (1) los tipos de relación y entidad coinciden
-con $H$; (2) se cumple monotonía causal relajada
-$\tau(e_{i+1}) \geq \tau(e_i) - \delta$; (3) opcionalmente, una ventana
-temporal $[t_{\min}, t_{\max}]$; (4) $k$-simplicidad: ningún vértice aparece
-más de $k$ veces; y (5) opcionalmente, hasta $g$ aristas comodín entre pasos
+\textbf{Emparejamiento válido.} Una asignación $\varphi : N \to V$ que induce
+una arista del grafo por cada paso de $S$ es válida si: (1) los tipos de
+relación y entidad coinciden con los de $Q$; (2) a lo largo de $\prec$ se
+cumple monotonía temporal relajada $\tau(e_{i+1}) \geq \tau(e_i) - \delta$;
+(3) opcionalmente, cada arista cae en una ventana $[t_{\min}, t_{\max}]$;
+(4) $k$-simplicidad: ningún vértice del grafo se usa más de $k$ veces en el
+emparejamiento; y (5) opcionalmente, hasta $g$ aristas comodín entre pasos
 consecutivos.
+
+\textbf{Predicados de agregación.} Algunas preguntas de investigación no
+interrogan un emparejamiento sino el \emph{conjunto} de emparejamientos que
+comparten una variable ---por ejemplo, sesiones alcanzadas desde tres o más
+direcciones distintas. Se expresan como un predicado posterior sobre el
+resultado agrupado, deliberadamente fuera de la semántica de emparejamiento.
+La separación no es estilística: las reglas de poda son condiciones necesarias
+respecto de un emparejamiento individual, y una condición sobre el conjunto no
+puede empujarse dentro del recorrido sin cambiar el significado de ``todos los
+emparejamientos válidos''. El motor enumera; el predicado filtra la
+enumeración.
 
 Esta formalización permite al analista expresar directamente hipótesis
 derivadas de MITRE ATT\&CK. Por ejemplo, la hipótesis de movimiento lateral
@@ -392,7 +454,7 @@ H = [(\mathsf{User}, \mathsf{Auth}, \mathsf{Host}),
 
 \subsection{Tolerancias de despliegue: desfasaje de relojes y huecos}
 \label{sec:tolerancias}
-La monotonía causal es una restricción natural del dominio: un proceso no puede
+La monotonía temporal es una restricción natural del dominio: un proceso no puede
 conectarse a un servidor C2 antes de ser ejecutado. Resulta además un factor de
 poda extremadamente efectivo. Sin embargo, aplicada de forma estricta sobre
 telemetría real produce falsos negativos por dos causas distintas, y el modelo
@@ -430,14 +492,46 @@ frontend React con TypeScript y Cytoscape.js para visualización interactiva. Un
 servidor MCP (Model Context Protocol) expone además las operaciones del motor
 como herramientas para asistentes de IA.
 
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  box/.style={draw, rounded corners=2pt, align=center, text width=21mm,
+              minimum height=13mm, inner sep=3pt},
+  every path/.style={-{Stealth[length=1.8mm]}}
+]
+\node[box] (logs)   {Logs\\heterogéneos};
+\node[box, right=6mm of logs]   (parser) {Parsers\\$P:\mathrm{Log}\to$\\tripletas};
+\node[box, right=6mm of parser] (graph)  {Grafo temporal\\tipado $G$};
+\node[box, right=6mm of graph]  (search) {Búsqueda\\DFS con podas\\/ WCOJ};
+\node[box, right=6mm of search] (out)    {Emparejamientos\\válidos};
+\node[box, above=7mm of search] (q)      {Hipótesis $Q$\\tipos, $\delta$, $g$,\\ventana, $k$};
+
+\draw (logs)   -- (parser);
+\draw (parser) -- (graph);
+\draw (graph)  -- (search);
+\draw (search) -- (out);
+\draw (q)      -- (search);
+\end{tikzpicture}
+\caption{Recorrido de la telemetría. Los parsers son el único punto que conoce
+el formato de origen; a partir de la construcción de $G$ todo el sistema opera
+sobre el mismo modelo tipado. La hipótesis entra por un costado y no por el
+principio: se formula contra el grafo ya construido, que es lo que permite
+reformularla sin volver a ingerir.}
+\label{fig:pipeline}
+\end{figure}
+
 La elección de un grafo en memoria con estructuras nativas (HashMaps, vectores)
 en lugar de una base de datos de grafos externa (Neo4j, ArangoDB) responde al
 patrón de acceso del Threat Hunting: se ingieren datos de sesión, se ejecutan
-búsquedas interactivas intensivas y se descartan al finalizar, donde el enfoque
-en memoria logra tiempos sub-milisegundo frente a los $>100$~ms de una travesía
-temporal en Neo4j. El control explícito sobre el algoritmo habilita además
+búsquedas interactivas intensivas y se descartan al finalizar. El enfoque en
+memoria evita el costo de serialización y de la capa de consulta de un motor
+externo; cuantificar esa diferencia contra Neo4j o ArangoDB sobre el mismo
+conjunto de consultas es parte del baseline externo pendiente
+(Sección~\ref{sec:limitaciones}). El control explícito sobre el algoritmo
+habilita además
 optimizaciones difíciles de expresar en lenguajes declarativos: la monotonía
-causal requiere mantener estado sobre la última marca temporal durante la
+temporal requiere mantener estado sobre la última marca temporal durante la
 travesía, lo que en Cypher exigiría procedimientos almacenados. El código
 fuente (parsers y motor en Rust) se publica bajo licencia GNU GPLv3 en
 \url{https://github.com/Base4Security/GraphHunter}.
@@ -488,7 +582,7 @@ en profundidad aplicando las siguientes reglas de poda en cada paso:
   está disponible, esta poda se convierte en un pre-filtro $O(1)$.
   \item \textbf{Poda de tipo de entidad destino:} descarta vértices destino
   cuyo tipo no coincide con $v_i$ del paso actual.
-  \item \textbf{Poda de monotonía causal:} exige
+  \item \textbf{Poda de monotonía temporal:} exige
   $\tau(e_{i+1}) \geq \tau(e_i) - \delta$. Implementada como búsqueda binaria
   sobre la adyacencia ordenada, de modo que la restricción no se evalúa por
   arista sino que define directamente el rango a recorrer.
@@ -503,33 +597,48 @@ en profundidad aplicando las siguientes reglas de poda en cada paso:
   de información.
 \end{enumerate}
 
-En el peor caso teórico (un solo tipo de entidad, un solo tipo de relación, sin
-restricción temporal), el problema se reduce a búsqueda de caminos en grafos
-dirigidos, que es NP-completo por reducción desde Camino Hamiltoniano Dirigido
-(Karp, 1972). Sin embargo, las restricciones del dominio de ciberseguridad
-hacen el problema tratable en la práctica:
+\paragraph{Dureza.} Conviene enunciar el problema de decisión con precisión,
+porque ``búsqueda de caminos'' abarca casos de dificultad muy distinta: decidir
+alcanzabilidad es lineal, y decidir la existencia de un \emph{recorrido} de
+longitud $L$ también lo es. Lo que resulta NP-completo es decidir, dado $G$ y
+un $L$ que forma parte de la entrada, si existe un \emph{camino simple} de $L$
+aristas; con un único tipo de entidad y de relación y sin restricción temporal,
+tomando $L = |V| - 1$ la reducción desde Camino Hamiltoniano Dirigido (Karp,
+1972) es inmediata. La $k$-simplicidad con $k = 1$ es justamente lo que sitúa
+al problema en ese caso duro: relajarla a $k$ no acotado lo convierte en
+existencia de recorrido, que es polinomial. Las restricciones del dominio, sin
+embargo, hacen el caso duro tratable en la práctica.
 
-\textbf{Tratabilidad práctica.} Con $|\Sigma_V| = 10$ y $|\Sigma_E| = 11$, la
-poda por tipo de relación retiene una fracción esperada $1/11 \approx 9\%$ de
-aristas, y la poda por tipo de entidad retiene otra fracción $1/10$. La
-monotonía causal retiene en promedio ${\sim}50\%$ de las aristas restantes. El
-factor de ramificación efectivo resulta
+\textbf{Modelo de ramificación.} Con $|\Sigma_V| = 10$ y $|\Sigma_E| = 11$, y
+\emph{suponiendo} tipos distribuidos de manera uniforme e independientes de la
+selectividad temporal, la poda por tipo de relación retiene una fracción
+esperada $1/11 \approx 9\%$ de las aristas, la de tipo de entidad otra
+fracción $1/10$, y la monotonía temporal ${\sim}50\%$ de las restantes. El
+factor de ramificación efectivo predicho resulta
 \[
 b_{\mathrm{eff}} = \bar{d} \cdot \tfrac{1}{11} \cdot \tfrac{1}{10} \cdot
 \tfrac{1}{2} \approx \frac{\bar{d}}{220},
 \]
 que cae por debajo de 1 cuando el grado medio $\bar{d} < 220$ ---condición
-satisfecha en todos los grafos de telemetría prácticos. Cuando
-$b_{\mathrm{eff}} < 1$, el árbol de búsqueda converge y el tiempo esperado es
-$O(|S_0| \cdot c)$ donde $S_0$ son las semillas y $c$ es una constante,
-resultando lineal en el tamaño del grafo.
+satisfecha en todos los grafos de telemetría prácticos. Este es un modelo
+predictivo de selectividad, no una demostración: sus dos supuestos son falsos
+en datos reales, y por eso el modelo se contrasta contra la medición en lugar
+de asumirse.
 
-\paragraph{Nota sobre la uniformidad.} Este análisis supone una distribución
-uniforme de tipos, supuesto que los datos reales violan: el corpus Mordor
-concentra un 85\% de sus nodos en el tipo $\mathsf{Registry}$. La
-Sección~\ref{sec:podas} contrasta las fracciones teóricas con las medidas, y la
-diferencia es informativa: la poda de tipo de entidad rinde \emph{más} de lo
-predicho, no menos.
+\paragraph{Predicción contra medición.} Los datos reales violan la uniformidad
+de forma marcada ---el corpus evaluado concentra un 85\% de sus nodos en el
+tipo $\mathsf{Registry}$--- y en efecto el modelo yerra en cada factor por
+separado (Sección~\ref{sec:podas}): predice que la poda de entidad retenga un
+10\% y retiene un 7,7\%, y que la temporal retenga un 50\% y retiene un 61,9\%.
+Los errores van en sentidos opuestos y se compensan: el producto de las tres
+retenciones medidas es $0{,}0043$ frente a $0{,}0045$ predicho, un 4,6\% por
+debajo. Sobre ese corpus $\bar{d} \approx 57$, de donde
+$b_{\mathrm{eff}} \approx 0{,}25$, holgadamente por debajo de 1. El modelo
+predice entonces bien la \emph{selectividad} agregada; lo que no captura es el
+costo del recorrido, y de hecho la medición de la
+Sección~\ref{sec:escala} arroja un crecimiento ligeramente superlineal en el
+rango evaluado. Un $b_{\mathrm{eff}} < 1$ explica por qué el tiempo es
+esencialmente insensible a $L$, no por qué sería lineal en $|E|$.
 
 \subsection{Operadores especializados y su semántica temporal}
 \label{sec:operadores}
@@ -617,11 +726,29 @@ Un modelo ONNX clasifica el vecindario de cada entidad. La retroalimentación es
 bidireccional: los puntajes endógenos (ER, TN, NC) alimentan el vector de
 características de la GNN como dimensiones de entrada, y la salida de la GNN
 alimenta el puntaje compuesto. Esto crea un ciclo cerrado donde la detección
-estadística y la clasificación aprendida se potencian mutuamente. La puntuación
-también guía la poda durante la búsqueda DFS: nodos con puntaje de anomalía
-bajo pueden ser descartados tempranamente mediante una poda admisible de tipo
-A\textsuperscript{*}, que solo descarta ramas que \emph{probadamente} no entran
-en el top-$k$.
+estadística y la clasificación aprendida se potencian mutuamente. \paragraph{Dos contratos distintos.} Conviene separar tajantemente dos modos de
+operación, que el motor expone por puntos de entrada diferentes. La
+\emph{búsqueda exhaustiva} retorna todos los emparejamientos válidos, y ningún
+mecanismo de ranking elimina resultados: la puntuación únicamente los ordena.
+La \emph{búsqueda top-$k$} cambia el contrato de forma explícita ---devuelve
+los $k$ emparejamientos de mayor puntaje--- y solo en ese modo se poda por
+anomalía. Confundirlos sería grave: si el sistema afirma devolver todos los
+caminos, ningún ranking puede estar descartando alguno en silencio.
+
+La poda del segundo modo es admisible en el sentido de A\textsuperscript{*}.
+Cada paso aporta un puntaje $s_i \in [0,1]$ y el puntaje del emparejamiento es
+la media de los $s_i$. Estando en el paso $j$ de un patrón de $L$ pasos, con
+suma parcial $A_j$ y $m = L - j$ pasos restantes, la cota
+\[
+\hat{S} = \frac{A_j + m}{L} \;\geq\; S(p)
+\quad\text{para toda extensión } p \text{ de la rama}
+\]
+supone que todo paso futuro puntúa el máximo. Descartar la rama cuando
+$\hat{S}$ cae por debajo del $k$-ésimo mejor puntaje ya hallado no puede
+entonces perder un emparejamiento que hubiera entrado al top-$k$. La
+admisibilidad descansa únicamente en que cada $s_i$ esté acotado por 1, lo cual
+vale por construcción para ER, EdgeR, NC y TN, y para el componente GNN por
+tratarse de una probabilidad.
 
 \paragraph{Guarda de precisión.} Un patrón que coincide con una fracción
 elevada de la población no discrimina, y un conjunto de resultados grande puede
@@ -663,12 +790,36 @@ fase de búsqueda para obtener mediciones reproducibles.
   \item \textbf{Sentinel Simulation} (32 eventos Azure Sentinel): escenario de
   compromiso cloud-to-on-premises con autenticaciones Azure AD, actividad en
   recursos cloud y movimiento lateral hacia infraestructura local.
-  \item \textbf{Mordor Combined} (963.000 eventos): telemetría real del
-  proyecto Mordor (Rodriguez, 2020), con sesgo extremo de tipos (85\% nodos
-  Registry) y distribución de grado power-law con $d_{\max} = 9.411$. Este
-  dataset estresa particularmente las podas de tipo y la gestión de hubs de
-  alto grado.
+  \item \textbf{Mordor Combined} (963.000 eventos): concatenación de once
+  datasets del proyecto Mordor / Security-Datasets (Rodriguez, 2020) ---
+  capturas de Empire (Mimikatz, DCSync, PsExec), lanzadores VBS, enumeración
+  LDAP y las evaluaciones APT29 de los días 1 y 2. Son canales completos de
+  eventos de Windows, no únicamente Sysmon. El grafo resultante presenta sesgo
+  extremo de tipos (85\% nodos Registry) y distribución de grado power-law con
+  $d_{\max} = 9.411$, de modo que estresa particularmente las podas de tipo y
+  la gestión de hubs de alto grado.
 \end{itemize}
+
+\paragraph{Contabilidad de ingesta.} Los 963.000 eventos de ese corpus
+producen un grafo de 772 vértices y 21.963 aristas. La reducción de dos órdenes
+de magnitud requiere explicación, porque la política de ingesta inserta aristas
+de forma incondicional y por lo tanto no puede provenir de deduplicación. La
+causa es de cobertura: el corpus son canales completos de Windows ---Defender,
+Service Control Manager, WMI-Activity, PowerShell operacional, eventos de
+kernel--- mientras que los parsers mapean a tripletas un subconjunto acotado de
+EventIDs (1, 3, 7, 11, 13 y 22 de Sysmon; 4624/4625 de Security). Un evento
+cuyo EventID cae fuera de ese conjunto no produce tripleta alguna, y la mayor
+parte del corpus cae fuera.
+
+Se declara como limitación de esta evaluación que la explicación anterior es
+estructural y \emph{no está medida}. El trabajo no reporta una contabilidad por
+etapa ---eventos recibidos, reconocidos por algún parser, resueltos a
+tripletas, aristas emitidas, eventos de un solo extremo, y descartados con su
+motivo--- y esa tabla es necesaria para que la cifra de 963.000 eventos diga
+algo sobre la escala efectivamente evaluada. Mientras no exista, la escala real
+de esta evaluación es la del grafo (21.963 aristas) y no la del corpus, y la
+evidencia sobre volúmenes grandes proviene del barrido sintético de la
+Sección~\ref{sec:escala}.
 
 \textbf{Reproducibilidad.} Las mediciones de escala se obtienen mediante un
 arnés incorporado al binario del motor, invocable como un único comando, con
@@ -695,11 +846,16 @@ del resultado anterior.
 sola hipótesis:
 \begin{align*}
 H = [\,&(\mathsf{IP}, \mathsf{Connect}, \mathsf{Host}),
-(\mathsf{Host}, \mathsf{Auth}, \mathsf{User}),\\
+(\mathsf{Host}, \mathsf{Auth}^{-1}, \mathsf{User}),\\
 &(\mathsf{User}, \mathsf{Execute}, \mathsf{Process}),
 (\mathsf{Process}, \mathsf{Write}, \mathsf{File})\,]
 \end{align*}
-El algoritmo retorna todos los caminos válidos con monotonía causal en
+El segundo paso ilustra el recorrido inverso: la firma fija
+$\mathrm{sig}(\mathsf{Auth}) = \{(\mathsf{User}, \mathsf{Host})\}$, de modo que
+ir del host al usuario que se autenticó en él es $\mathsf{Auth}^{-1}$ y se
+resuelve con la adyacencia inversa. Escribirlo como $\mathsf{Auth}$ sería una
+hipótesis mal tipada, y la firma lo detecta antes de ejecutarla.
+El algoritmo retorna todos los caminos válidos con monotonía temporal en
 milisegundos. El analista visualiza la cadena completa: IP atacante $\to$ Host
 comprometido $\to$ Usuario admin $\to$ \code{Mimikatz.exe} $\to$ archivo
 exfiltrado.
@@ -707,17 +863,31 @@ exfiltrado.
 \subsection{Caso de estudio 2: ransomware fileless}
 En un escenario de ransomware fileless, un documento de Office ejecuta una
 macro que invoca PowerShell (T1059.001). PowerShell descarga un payload en
-memoria (T1105), inyecta código en \code{svchost.exe} (T1055), realiza
-consultas DNS a un dominio C2 (T1071.004), y cifra archivos (T1486). La
-hipótesis correspondiente:
+memoria (T1105), se aloja en un proceso anfitrión, realiza consultas DNS a un
+dominio C2 (T1071.004), y cifra archivos (T1486). El patrón correspondiente,
+con sus variables explícitas ($p_1, p_2 : \mathsf{Process}$,
+$d : \mathsf{Domain}$, $f : \mathsf{File}$):
 \[
-H = [(\mathsf{Process}, \mathsf{Spawn}, \mathsf{Process}),
-(\mathsf{Process}, \mathsf{DNS}, \mathsf{Domain}),
-(\mathsf{Process}, \mathsf{Write}, \mathsf{File})]
+Q:\quad p_1 \xrightarrow{\ \mathsf{Spawn}\ } p_2, \qquad
+p_2 \xrightarrow{\ \mathsf{DNS}\ } d, \qquad
+p_2 \xrightarrow{\ \mathsf{Write}\ } f
 \]
-La ventaja del grafo se manifiesta especialmente en la detección de inyección
-de código. En logs lineales, la relación entre PowerShell y \code{svchost.exe}
-se pierde entre miles de eventos de spawn de procesos.
+Este patrón no es una cadena sino un árbol: dos pasos parten de la misma
+variable $p_2$. Es el caso más simple en que la formalización de la
+Sección~\ref{sec:hipotesis} hace falta, y a la vez uno de los más frecuentes,
+porque un proceso malicioso rara vez hace una sola cosa. En logs lineales la
+relación entre PowerShell y su proceso hijo se pierde entre miles de eventos de
+creación de procesos; en el grafo la arista $\mathsf{Spawn}$ la conecta
+directamente con su marca temporal.
+
+\paragraph{Sobre la inyección de código.} La narrativa de T1055 describe
+inyección en un proceso existente, no creación de proceso, y el alfabeto
+$\Sigma_E$ no distingue una de otra: el patrón usa $\mathsf{Spawn}$ porque es
+lo que materializa el EventID 1 de Sysmon. Representar la inyección con
+fidelidad exigiría una relación $\mathsf{Inject}$ alimentada por los EventID 8
+(CreateRemoteThread) y 10 (ProcessAccess), que hoy no se ingestan. Es una
+limitación del alfabeto y no del algoritmo, y se señala porque un patrón que
+dice $\mathsf{Spawn}$ donde el adversario inyectó encuentra otra cosa.
 
 \subsection{Caso de estudio 3: compromiso cloud-to-on-premises}
 Un escenario emergente en entornos híbridos: un atacante obtiene credenciales
@@ -726,11 +896,14 @@ hacia infraestructura on-premises. La hipótesis:
 \[
 H = [(\mathsf{User}, \mathsf{Auth}, \mathsf{Host}),
 (\mathsf{Host}, \mathsf{Connect}, \mathsf{IP}),
-(\mathsf{IP}, \mathsf{Auth}, \mathsf{Host})]
+(\mathsf{IP}, \mathsf{Connect}, \mathsf{Host})]
 \]
-El parser de Sentinel normaliza tanto los SigninLogs (Azure AD) como los
-SecurityEvent (Windows on-premises) al mismo modelo de grafo, permitiendo
-trazar la cadena completa a través de ambos entornos en una sola consulta.
+La cadena se lee: el usuario se autentica contra un recurso cloud (SigninLogs
+de Azure AD), ese recurso egresa hacia una dirección, y esa dirección abre a su
+vez una conexión contra un host on-premises. El parser de Sentinel normaliza
+tanto los SigninLogs como los SecurityEvent (Windows on-premises) al mismo
+modelo de grafo, permitiendo trazar la cadena completa a través de ambos
+entornos en una sola consulta.
 
 \subsection{Caso de estudio 4: continuidad de sesión}
 La materialización de la sesión (Sección~\ref{sec:sesion}) habilita una clase
@@ -767,9 +940,9 @@ visitando solo 13 nodos frente a 22.735 del baseline sin poda.
 APT      & 24  & 30     & 2 & 0,005 ms & $7{,}9\times$    & 0\\
 APT      & 24  & 30     & 5 & 0,010 ms & $4{,}6\times$    & 7\\
 Sentinel & 28  & 32     & 3 & 0,006 ms & $2{,}1\times$    & 3\\
-Mordor   & 772 & 21.963 & 2 & 4,3 ms   & $1{,}747\times$  & 438\\
-Mordor   & 772 & 21.963 & 3 & 4,4 ms   & $5{,}121\times$  & 42\\
-Mordor   & 772 & 21.963 & 5 & 4,4 ms   & $11{,}600\times$ & 0\\
+Mordor   & 772 & 21.963 & 2 & 4,3 ms   & $1.747\times$  & 438\\
+Mordor   & 772 & 21.963 & 3 & 4,4 ms   & $5.121\times$  & 42\\
+Mordor   & 772 & 21.963 & 5 & 4,4 ms   & $11.600\times$ & 0\\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -802,20 +975,54 @@ $|V|$ & $|E|$ & \textbf{p50} & \textbf{p95}\\
 \end{tabular}
 \end{table}
 
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}
+\begin{loglogaxis}[
+  width=0.74\textwidth, height=0.46\textwidth,
+  xlabel={$|E|$ (aristas; grado medio fijo en 10)},
+  ylabel={latencia p50 (ms)},
+  grid=both, grid style={line width=.1pt, draw=gray!25},
+  legend pos=north west, legend cell align=left,
+  font=\footnotesize,
+]
+\addplot[only marks, mark=*, mark size=1.7pt] coordinates {
+  (9925,0.133) (49522,0.841) (99870,1.9) (250613,7.5)
+  (500185,18) (999037,33) (2498604,121)
+};
+\addlegendentry{p50 medido}
+\addplot[dashed, thick] coordinates {(9925,0.1239) (2498604,116.68)};
+\addlegendentry{ajuste: pendiente $1{,}24$ ($R^2 = 0{,}998$)}
+\end{loglogaxis}
+\end{tikzpicture}
+\caption{Latencia frente a $|E|$ a densidad constante. La recta es el ajuste
+por mínimos cuadrados en escala log-log; su pendiente $1{,}24$ es la afirmación
+que sostienen estos datos. La regularidad del ajuste sobre dos órdenes y medio
+de magnitud es lo que hace utilizable la extrapolación del párrafo siguiente
+---y también lo que marca dónde termina la evidencia.}
+\label{fig:escala}
+\end{figure}
+
 Un incremento de $251\times$ en aristas (de 9.925 a 2.498.604) produce un
-incremento de $908\times$ en la mediana de latencia, lo que corresponde a un
-crecimiento aproximado de $O(|E|^{1{,}2})$: ligeramente superlineal, y no
-atribuible a densificación puesto que el grado medio permanece fijo. El cuello
+incremento de $908\times$ en la mediana de latencia. Un ajuste por mínimos
+cuadrados sobre los siete puntos en escala log-log arroja una pendiente de
+$1{,}24$ con $R^2 = 0{,}998$: el crecimiento es ligeramente superlineal y muy
+regular en el rango evaluado, y no es atribuible a densificación puesto que el
+grado medio permanece fijo. Se enuncia como pendiente medida y no como una cota
+$O(\cdot)$ de forma deliberada: la notación asintótica afirma algo sobre el
+límite que siete puntos entre $10^4$ y $2{,}5 \times 10^6$ aristas no alcanzan
+a sostener. El cuello
 de botella es el trabajo de búsqueda y no la memoria ---la representación CSR
 consume del orden de 32 bytes por arista, de modo que $2{,}5$ millones de
 aristas ocupan menos de 100~MB--- ni la emisión de resultados, cuyo costo
 resultó despreciable frente al recorrido.
 
-Extrapolando esta tendencia al objetivo de un engagement DARPA TC E3
-($\sim$5,9 millones de aristas), una consulta de tres saltos se ubicaría en el
-orden de los 340~ms: en el límite de lo interactivo para una consulta
-individual, y del orden de segundos para un catálogo completo de 20--30
-hipótesis.
+Prolongando la misma pendiente hasta un engagement DARPA TC E3 ($\sim$5,9
+millones de aristas), una consulta de tres saltos se ubicaría en el orden de
+los 350~ms: al límite de lo interactivo para una consulta individual, y del
+orden de segundos para un catálogo completo de 20--30 hipótesis. Es una
+extrapolación a algo más del doble del mayor punto medido y se ofrece como
+orden de magnitud esperado, no como resultado.
 
 \subsection{Efectividad de las reglas de poda}
 \label{sec:podas}
@@ -828,7 +1035,7 @@ hipótesis.
 \midrule
 Tipo de relación (pre-filtro por índice) & 90,9\% & ${\sim}0\%$\textsuperscript{*}\\
 Tipo de entidad destino                  & 90,0\% & 92,3\%\\
-Monotonía causal                         & 50,0\% & 38,1\%\\
+Monotonía temporal                         & 50,0\% & 38,1\%\\
 $k$-simplicidad                          & $<1\%$ & 0\%\\
 \bottomrule
 \end{tabular}
@@ -842,7 +1049,7 @@ La poda de tipo de relación muestra 0\% en el bucle porque el índice secundari
 la resuelve antes de la iteración ---las aristas con tipo incorrecto nunca
 entran al bucle de podas. La poda de tipo de entidad es el filtro dominante en
 ejecución, eliminando $>90\%$ de candidatos en datos reales. La monotonía
-causal aporta un 38\% adicional en Mordor, menor que el 50\% teórico, lo que
+temporal aporta un 38\% adicional en Mordor, menor que el 50\% teórico, lo que
 refleja la distribución temporal no uniforme de eventos reales de seguridad.
 
 \subsection{Análisis comparativo: SIEM vs. grafo}
@@ -867,10 +1074,21 @@ Tiempo de ejecución       & 8--20 min total            & $<5$ ms\\
 Extracción manual de IDs  & Sí, en cada paso           & No\\
 Descubrimiento exhaustivo & No (3--5 caminos)          & Sí (todos)\\
 Escalamiento con $L$      & Lineal (${\sim}L\times$2--5 min) & Constante\\
-Visualización causal      & No nativa                  & Grafo interactivo\\
+Visualización de cadenas   & No nativa                  & Grafo interactivo\\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\paragraph{Cómo se obtuvo esta tabla.} Las filas de ejecución provienen de
+medición; las de tiempo de formulación y de investigación, no. Se derivan de
+contar las interacciones que cada flujo exige ---cuántas consultas, cuántas
+extracciones manuales de identificadores--- y de asignarles la duración típica
+que reporta la práctica del SOC (2--5 minutos por consulta con extracción
+manual). No hubo estudio con analistas: no hay $N$, ni asignación a
+condiciones, ni distribución de tiempos, ni grupo de control. La tabla debe
+leerse como una comparación estructural del trabajo que cada flujo impone al
+analista, y una evaluación de usabilidad con instrumentos como NASA-TLX queda
+pendiente.
 
 % ======================================================================
 \section{Discusión}
@@ -880,10 +1098,11 @@ El sistema resuelve las tres barreras de la Sección 1.2. \textbf{(i) Pivoteo
 iterativo.} Las $L$ consultas manuales secuenciales de un SIEM se reemplazan
 por una única hipótesis tipada que el DFS recorre automáticamente respetando
 tipo y temporalidad, conectando IPs, PIDs y usuarios de forma estructural; el
-MTTI cae de 8--20 minutos a 1--2 minutos para cadenas de 4 pasos.
+tiempo estimado de investigación cae de 8--20 minutos a 1--2 minutos para
+cadenas de 4 pasos.
 \textbf{(ii) Sobrecarga cognitiva.} El modelo mental que el analista debía
-sostener en memoria de trabajo se externaliza: el grafo almacena las relaciones
-causales como aristas tipadas, la visualización las hace navegables, y los
+sostener en memoria de trabajo se externaliza: el grafo almacena las dependencias
+observadas como aristas tipadas, la visualización las hace navegables, y los
 puntajes de anomalía priorizan los nodos de interés, mitigando el cuello de
 botella de los $7 \pm 2$ ítems de Miller (1956). \textbf{(iii) Fragmentación
 del contexto.} Los parsers multi-formato ingestan telemetría heterogénea bajo
@@ -902,6 +1121,17 @@ anómalo, el analista formula una hipótesis para investigar el contexto causal
 sin exportar datos ni reconstruir el grafo en otra herramienta.
 
 \subsection{Limitaciones}
+\label{sec:limitaciones}
+\textbf{Ausencia de baseline externo.} La evaluación de rendimiento es una
+ablación: contrasta la búsqueda con y sin sus propias podas. Eso mide el aporte
+de las podas ---que es lo que afirma--- pero no sitúa al sistema frente a las
+alternativas entre las que un equipo elegiría realmente: una base de datos de
+grafos con travesía temporal, un motor de joins relacional sobre las mismas
+tablas, o el propio SIEM ejecutando las consultas equivalentes. Comparar contra
+esos sistemas sobre el mismo conjunto de consultas es el trabajo experimental
+más importante que queda pendiente; hasta entonces, las cifras de aceleración
+no deben leerse como una ventaja sobre el estado del arte.
+
 \textbf{Escalabilidad en memoria.} El tamaño del dataset queda limitado por la
 RAM disponible; para volúmenes mayores se recurre a compactación temporal
 (${\sim}40\%$ de reducción en aristas) o ventanas deslizantes. La medición de
@@ -949,21 +1179,29 @@ Este trabajo demuestra que la modelización de telemetría de seguridad como
 grafo temporal tipado, combinada con búsqueda de hipótesis por DFS con reglas
 de poda, reduce significativamente el tiempo y la complejidad cognitiva de las
 investigaciones de Threat Hunting. Las restricciones inherentes al dominio de
-ciberseguridad ---tipado de entidades y relaciones, causalidad temporal---
+ciberseguridad ---tipado de entidades y relaciones, orden temporal---
 convierten un problema teóricamente intratable en uno con tiempo esperado
 lineal en la práctica.
 
-Los resultados principales son: (1) aceleraciones de $1{,}747\times$ a
-$11{,}600\times$ sobre baseline sin poda en datasets reales; (2) un
-crecimiento de latencia cercano a $O(|E|^{1{,}2})$ medido a densidad constante
-hasta $2{,}5$ millones de aristas, con mediana de 121~ms; (3) reducción de un
-orden de magnitud en el MTTI (de 8--20 minutos a 1--2 minutos para
-investigaciones de 4 pasos); (4) descubrimiento exhaustivo de caminos de ataque
-versus la exploración parcial del pivoteo manual; (5) integración de
-clasificación GNN sobre subgrafos $k$-hop como componente de la puntuación de
-anomalía; y (6) la incorporación de tolerancias de despliegue ---desfasaje de
-relojes y huecos acotados--- que convierten supuestos implícitos sobre la
-calidad de la telemetría en parámetros declarados de la consulta.
+Los resultados principales son: (1) una ablación que mide aceleraciones de
+$1.747\times$ a $11.600\times$ frente a la misma búsqueda con las podas
+desactivadas; (2) un crecimiento de latencia con pendiente log-log $1{,}24$
+($R^2 = 0{,}998$) medido a densidad constante hasta $2{,}5$ millones de
+aristas, con mediana de 121~ms; (3) una reducción estimada de un orden de
+magnitud en el tiempo de investigación, derivada del conteo de interacciones;
+(4) descubrimiento exhaustivo de emparejamientos frente a la exploración
+parcial del pivoteo manual; y (5) la incorporación de tolerancias de despliegue
+---desfasaje de relojes y huecos acotados--- que convierten supuestos
+implícitos sobre la calidad de la telemetría en parámetros declarados de la
+consulta.
+
+Conviene ser explícito sobre lo que \emph{no} se demuestra aquí. La ablación
+del punto (1) mide el aporte de las podas propias, no una comparación contra
+una base de datos de grafos, un motor de joins relacional ni un SIEM; el punto
+(3) es una estimación de interacciones y no un estudio con analistas; y la
+integración GNN, aunque descrita como parte del sistema, no se evalúa en este
+trabajo y permanece desactivada por defecto. Son extensiones y afirmaciones de
+diseño, no resultados experimentales.
 
 Una observación metodológica transversal merece registrarse: varias de las
 limitaciones corregidas durante este trabajo ---eventos de un solo extremo
@@ -973,16 +1211,28 @@ herramienta contra incidentes reales. Esto sugiere que el catálogo de supuestos
 de un sistema de este tipo se construye más confiablemente en despliegue que en
 el pizarrón.
 
-\textbf{Líneas futuras.} Se identifican: búsqueda en streaming sobre ventanas
-deslizantes con eventos fuera de orden (Lai et al., 2022); generación
+\textbf{Prioridades experimentales.} Tres huecos de esta evaluación ordenan el
+trabajo inmediato, y los tres son de medición antes que de diseño. El primero
+es un baseline externo: ejecutar el mismo conjunto de consultas sobre una base
+de datos de grafos con travesía temporal, sobre un motor relacional y sobre el
+propio SIEM. Es lo único que puede convertir una ablación en una comparación
+con el estado del arte, y por eso encabeza la lista. El segundo es la
+contabilidad de ingesta por etapa, sin la cual el tamaño de un corpus no dice
+nada sobre la escala efectivamente evaluada. El tercero es una evaluación de
+usabilidad con analistas de SOC ---con $N$, asignación a condiciones y
+distribución de tiempos, e instrumentos como NASA-TLX--- que reemplace la
+estimación por conteo de interacciones con una medición real de MTTI.
+
+\textbf{Extensiones.} Se identifican además: búsqueda en streaming sobre
+ventanas deslizantes con eventos fuera de orden (Lai et al., 2022); generación
 automática de hipótesis a partir de los puntajes GNN y embeddings del grafo,
-complementando el catálogo ATT\&CK; integración con feeds de inteligencia de
-amenazas (IoCs vía STIX/TAXII); evaluación de usabilidad con analistas de SOC
-mediante métricas como NASA-TLX; ordenamiento de variables sensible a
-cardinalidad para las formas no lineales de hipótesis; completar la alineación
-semántica de los operadores worst-case-optimal restantes; y una arquitectura
-distribuida que separe el fast-path en endpoint (inferencia NPU) del servidor
-de investigación (grafo temporal + DFS) para entornos enterprise.
+complementando el catálogo ATT\&CK; una relación $\mathsf{Inject}$ que
+distinga inyección de creación de proceso; integración con feeds de
+inteligencia de amenazas (IoCs vía STIX/TAXII); ordenamiento de variables
+sensible a cardinalidad para las formas no lineales de patrón; completar la
+alineación semántica de los operadores worst-case-optimal restantes; y una
+arquitectura distribuida que separe el fast-path en endpoint (inferencia NPU)
+del servidor de investigación (grafo temporal + DFS) para entornos enterprise.
 
 % ======================================================================
 \section*{Referencias}
