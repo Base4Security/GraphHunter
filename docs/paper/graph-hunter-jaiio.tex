@@ -238,10 +238,13 @@ maliciosos. MAGIC (Jia et al., 2024) utiliza aprendizaje de representaciones
 enmascarado sobre grafos para detección de APT a nivel de sistema. Sin embargo,
 estos sistemas operan como detectores de caja negra sin capacidad de
 investigación interactiva: generan alertas pero no permiten al analista
-formular hipótesis ad-hoc ni explorar el contexto causal de la alerta. Nuestra
-propuesta cierra esta brecha integrando la clasificación GNN como un componente
-de la puntuación de anomalía, de modo que la detección automática alimenta la
-priorización de caminos en la búsqueda dirigida por hipótesis, y viceversa.
+formular hipótesis ad-hoc ni explorar el contexto de la alerta. La propuesta de
+este trabajo aborda esa brecha por diseño: la clasificación GNN entra como un
+componente más de la puntuación de anomalía, de modo que detección e
+investigación operan sobre el mismo grafo y el analista pasa de una alerta a
+una hipótesis sin cambiar de herramienta. Si esa integración mejora la
+detección respecto de los sistemas citados es una pregunta empírica que este
+trabajo no responde.
 
 % ======================================================================
 \section{Modelo de grafo para telemetría de seguridad}
@@ -1114,11 +1117,14 @@ subgrafos que coinciden con el patrón.
 manual no encontraría: en Mordor la hipótesis con $L = 2$ retorna 438 caminos
 válidos, frente a los 3--5 que un analista explora típicamente.
 
-\textbf{Ciclo cerrado detección-investigación.} La clasificación GNN como
-componente de la puntuación de anomalía unifica la detección automática y la
-investigación dirigida por hipótesis sobre el mismo grafo: ante un subgrafo
-anómalo, el analista formula una hipótesis para investigar el contexto causal
-sin exportar datos ni reconstruir el grafo en otra herramienta.
+\textbf{Detección e investigación sobre un mismo grafo.} El diseño admite la
+clasificación GNN como un componente más de la puntuación de anomalía, de modo
+que ante un subgrafo anómalo el analista formula una hipótesis para investigar
+su contexto sin exportar datos ni reconstruir el grafo en otra herramienta. A
+diferencia de las tres barreras anteriores, esto es una propiedad de la
+arquitectura y no un resultado medido: el componente está desactivado por
+defecto y su aporte no se evalúa en este trabajo
+(Sección~\ref{sec:limitaciones}).
 
 \subsection{Limitaciones}
 \label{sec:limitaciones}
