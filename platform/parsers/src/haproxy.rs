@@ -93,12 +93,68 @@ fn parse_haproxy_line(line: &str) -> Option<HaproxyRecord<'_>> {
     })
 }
 
+/// Escape hatch: set `GRAPHHUNTER_URL_KEEP_IDS` to keep raw path
+/// identifiers instead of collapsing them. Read once — this sits on a path
+/// that runs once per log line.
+fn keep_raw_path_ids() -> bool {
+    static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *KEEP.get_or_init(|| std::env::var_os("GRAPHHUNTER_URL_KEEP_IDS").is_some())
+}
+
+fn is_numeric_id(seg: &str) -> bool {
+    !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `8-4-4-4-12` hex, the canonical UUID rendering.
+fn is_uuid(seg: &str) -> bool {
+    seg.len() == 36
+        && seg.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
+/// Collapses identifier-shaped path segments (`/credencial/5982994` →
+/// `/credencial/{id}`) so URL-node cardinality tracks the API's endpoint
+/// surface instead of its traffic volume.
+///
+/// This is the same bound `split_url` already enforces by dropping the
+/// query string, applied where the identifiers actually are: REST APIs put
+/// them in the path. Measured on a real portal log, raw paths grew roughly
+/// linearly — 39.254 distinct in 193k lines, one new path every five
+/// requests — which at full volume means millions of URL entities in a map
+/// that does not spill to disk. Collapsing them converges instead: 1.683
+/// distinct over the same lines, and still flattening.
+///
+/// It also sharpens the signal. One client hitting `/credencial/{id}` five
+/// thousand times is a pattern a hunter can see; five thousand singleton
+/// nodes are noise. And on the logs that motivated this, the collapsed
+/// segments were patient identifiers, which have no business becoming
+/// entity IDs.
+fn normalize_path_ids(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for (i, seg) in path.split('/').enumerate() {
+        if i > 0 {
+            out.push('/');
+        }
+        if is_numeric_id(seg) {
+            out.push_str("{id}");
+        } else if is_uuid(seg) {
+            out.push_str("{uuid}");
+        } else {
+            out.push_str(seg);
+        }
+    }
+    out
+}
+
 /// Splits a request-line URL into `(domain, path)`. Absolute URLs
 /// (`https://host/path?q`) yield the host and the query-stripped path;
 /// relative URLs (`/path?q`) yield an empty domain and the stripped path.
-/// The query string is dropped to keep URL-node cardinality bounded — at
-/// HAProxy volumes the per-request query (cache-busters, tokens) would
-/// otherwise mint a unique node per line.
+/// The query string is dropped, and identifier-shaped path segments are
+/// collapsed (see [`normalize_path_ids`]), to keep URL-node cardinality
+/// bounded — at HAProxy volumes either one would otherwise mint a unique
+/// node per request.
 fn split_url(raw: &str) -> (&str, String) {
     let without_scheme = raw
         .strip_prefix("https://")
@@ -114,7 +170,12 @@ fn split_url(raw: &str) -> (&str, String) {
     };
 
     let path_no_query = path.split('?').next().unwrap_or(path);
-    (domain, path_no_query.to_string())
+    let bounded = if keep_raw_path_ids() {
+        path_no_query.to_string()
+    } else {
+        normalize_path_ids(path_no_query)
+    };
+    (domain, bounded)
 }
 
 /// Builds the 1–3 triples for one parsed record. Shared by `parse` and
@@ -483,7 +544,8 @@ mod tests {
         let triples = HaproxyParser.parse(SAMPLE_LOG);
         // triples[1] is line 1's URL edge (OPTIONS => Read).
         let (_, rel1, dst1) = &triples[1];
-        assert_eq!(dst1.id, "/wssPortal/api/log/guardarNuevoLog/2507896/INICIO");
+        // `2507896` collapses: URL nodes name endpoints, not records.
+        assert_eq!(dst1.id, "/wssPortal/api/log/guardarNuevoLog/{id}/INICIO");
         assert_eq!(dst1.entity_type, EntityType::URL);
         assert_eq!(rel1.rel_type, RelationType::Read);
 
@@ -502,6 +564,41 @@ mod tests {
         assert_eq!(dst.id, "wss_pps_i10");
         assert_eq!(dst.entity_type, EntityType::Host);
         assert_eq!(rel.rel_type, RelationType::Connect);
+    }
+
+    #[test]
+    fn path_ids_collapse_so_url_nodes_track_endpoints_not_traffic() {
+        // The real shape from the log that motivated this: the identifier
+        // is in the path, not the query string, so stripping the query
+        // bounded nothing.
+        assert_eq!(
+            normalize_path_ids("/wssPortal/api/biografia/credencial/5982994"),
+            "/wssPortal/api/biografia/credencial/{id}"
+        );
+        // Two requests for different records collapse to one node.
+        assert_eq!(
+            normalize_path_ids("/api/medicos/6208652"),
+            normalize_path_ids("/api/medicos/9999999")
+        );
+        assert_eq!(
+            normalize_path_ids("/s/550e8400-e29b-41d4-a716-446655440000/x"),
+            "/s/{uuid}/x"
+        );
+    }
+
+    #[test]
+    fn path_normalization_leaves_real_endpoint_names_alone() {
+        // Version-ish and alphanumeric segments must survive, or the
+        // collapse would merge genuinely different endpoints.
+        assert_eq!(normalize_path_ids("/rest/wrm/2.0/resources"), "/rest/wrm/2.0/resources");
+        assert_eq!(normalize_path_ids("/api/v2/users"), "/api/v2/users");
+        assert_eq!(normalize_path_ids("/health"), "/health");
+        assert_eq!(normalize_path_ids("/"), "/");
+        // A 36-char non-hex segment is not a UUID.
+        assert_eq!(
+            normalize_path_ids("/zzze8400-e29b-41d4-a716-44665544zzzz"),
+            "/zzze8400-e29b-41d4-a716-44665544zzzz"
+        );
     }
 
     #[test]
