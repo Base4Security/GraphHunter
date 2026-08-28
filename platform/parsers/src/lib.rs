@@ -33,7 +33,7 @@ pub mod iis_w3c;
 
 pub use cdm::{CdmParser, looks_like_cdm};
 pub use cognito::{CognitoParser, looks_like_cognito};
-pub use haproxy::{HaproxyParser, looks_like_haproxy};
+pub use haproxy::{HaproxyParser, haproxy_iso_date, looks_like_haproxy};
 pub use forti_analyzer::{
     ChartHandler, CompromisedHostHandler, FortiAnalyzerXmlParser, GenericFortiHandler,
     HandlerRegistry, ReportContext, Row, TopApplicationBySeverityHandler,

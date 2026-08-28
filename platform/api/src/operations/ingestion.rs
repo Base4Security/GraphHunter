@@ -17,7 +17,7 @@ use graph_hunter_core::{
     GraphHunter, LogParser,
 };
 use graph_hunter_canonical::ProvenanceCtx;
-use graph_hunter_parsers::extract_fields_header;
+use graph_hunter_parsers::{extract_fields_header, haproxy_iso_date};
 use uuid::Uuid;
 
 use crate::dto::ingestion::{
@@ -1520,6 +1520,14 @@ impl GraphHunterApi {
                     )
                     || (resolved == "cognito" && !trimmed_peek.starts_with('['));
 
+                // The date-range filter below probes byte 0 for an ISO date.
+                // HAProxy lines start with the client `ip:port` and carry the
+                // date in a bracketed `DD/Mon/YYYY` second token, so the probe
+                // never matched and the range was silently ignored. Resolved
+                // once here rather than per line — this loop runs tens of
+                // millions of times on the logs that motivated the fix.
+                let is_haproxy = resolved == "haproxy";
+
                 let iis_fields_header = if matches!(resolved.as_str(), "iis" | "iis_w3c" | "w3c") {
                     extract_fields_header(&peek_buf)
                 } else {
@@ -1666,16 +1674,34 @@ impl GraphHunterApi {
                                     } else {
                                         batch_start
                                     };
-                                    let first_byte = raw.get(line_start).copied().unwrap_or(b'#');
-                                    if first_byte.is_ascii_digit() && pos >= line_start + 10 {
-                                        let line_date = &raw[line_start..line_start + 10];
+                                    // Two date shapes: ISO at byte 0 (IIS, CSV)
+                                    // and HAProxy's bracketed `DD/Mon/YYYY`,
+                                    // normalized to ISO so the same byte
+                                    // comparison works. A line we cannot date
+                                    // is left IN, never dropped: guessing here
+                                    // would silently shrink the ingest, which
+                                    // is the failure mode this filter already
+                                    // had for HAProxy.
+                                    let line_date: Option<[u8; 10]> = if is_haproxy {
+                                        haproxy_iso_date(&raw[line_start..pos])
+                                    } else {
+                                        let first_byte =
+                                            raw.get(line_start).copied().unwrap_or(b'#');
+                                        if first_byte.is_ascii_digit() && pos >= line_start + 10 {
+                                            raw[line_start..line_start + 10].try_into().ok()
+                                        } else {
+                                            None
+                                        }
+                                    };
+
+                                    if let Some(ref d) = line_date {
                                         if let Some(ref from) = date_from_bytes {
-                                            if line_date < from.as_slice() {
+                                            if d.as_slice() < from.as_slice() {
                                                 continue;
                                             }
                                         }
                                         if let Some(ref to) = date_to_bytes {
-                                            if line_date > to.as_slice() {
+                                            if d.as_slice() > to.as_slice() {
                                                 continue;
                                             }
                                         }

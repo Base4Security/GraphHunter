@@ -119,9 +119,11 @@ fn split_url(raw: &str) -> (&str, String) {
 
 /// Builds the 1–3 triples for one parsed record. Shared by `parse` and
 /// `try_parse` so both paths agree on the emitted graph shape.
-fn record_to_triples(rec: &HaproxyRecord<'_>) -> Vec<ParsedTriple> {
-    let mut triples = Vec::new();
-
+/// Per-request metadata (`method`, `status`, `backend`) shared by both the
+/// triple and raw-event paths. Extracted so the two cannot drift: they
+/// disagreeing about which edge carries `status` is the difference between
+/// a hunt being able to filter on 401s and not.
+fn build_meta(rec: &HaproxyRecord<'_>) -> HashMap<String, String> {
     let mut meta = HashMap::new();
     if !rec.method.is_empty() {
         meta.insert("method".to_string(), rec.method.to_string());
@@ -132,6 +134,29 @@ fn record_to_triples(rec: &HaproxyRecord<'_>) -> Vec<ParsedTriple> {
     if !rec.backend.is_empty() && rec.backend != "-" {
         meta.insert("backend".to_string(), rec.backend.to_string());
     }
+    meta
+}
+
+/// Anchor for the backend edge. HAProxy always knows which server it
+/// routed to, but the *requested host* only exists when the client sent an
+/// absolute request target. With a relative target (`GET /api/x`) the
+/// domain is unknown, so the backend edge hangs off the client IP instead
+/// of being dropped — the routing fact is observed either way.
+///
+/// The asymmetry is deliberate and matters when writing hypotheses:
+/// absolute-target traffic yields `IP -> Domain -> Host`, relative-target
+/// traffic yields `IP -> Host` directly.
+fn backend_anchor<'a>(rec: &'a HaproxyRecord<'a>) -> (&'a str, EntityType) {
+    if rec.domain.is_empty() {
+        (rec.client_ip, EntityType::IP)
+    } else {
+        (rec.domain, EntityType::Domain)
+    }
+}
+
+fn record_to_triples(rec: &HaproxyRecord<'_>) -> Vec<ParsedTriple> {
+    let mut triples = Vec::new();
+    let meta = build_meta(rec);
 
     // Triple 1: client IP -[Connect]-> requested domain.
     if !rec.domain.is_empty() {
@@ -151,15 +176,22 @@ fn record_to_triples(rec: &HaproxyRecord<'_>) -> Vec<ParsedTriple> {
         };
         let src = Entity::new(rec.client_ip, EntityType::IP);
         let dst = Entity::new(&rec.url, EntityType::URL);
-        let rel = Relation::new(rec.client_ip, &rec.url, rel_type, rec.timestamp);
+        let mut rel = Relation::new(rec.client_ip, &rec.url, rel_type, rec.timestamp);
+        // With no domain edge to carry it, the URL edge is the only place
+        // `method`/`status` can live — without this, relative-target traffic
+        // is unfilterable by response code.
+        if rec.domain.is_empty() {
+            rel.metadata = meta.clone();
+        }
         triples.push((src, rel, dst));
     }
 
-    // Triple 3: requested domain -[Connect]-> backend server (proxy routing).
-    if !rec.domain.is_empty() && !rec.server.is_empty() && rec.server != "-" {
-        let src = Entity::new(rec.domain, EntityType::Domain);
+    // Triple 3: backend routing, anchored per `backend_anchor`.
+    if !rec.server.is_empty() && rec.server != "-" {
+        let (src_id, src_type) = backend_anchor(rec);
+        let src = Entity::new(src_id, src_type);
         let dst = Entity::new(rec.server, EntityType::Host);
-        let rel = Relation::new(rec.domain, rec.server, RelationType::Connect, rec.timestamp);
+        let rel = Relation::new(src_id, rec.server, RelationType::Connect, rec.timestamp);
         triples.push((src, rel, dst));
     }
 
@@ -175,16 +207,10 @@ fn record_to_triples(rec: &HaproxyRecord<'_>) -> Vec<ParsedTriple> {
 fn record_to_raw_events(rec: &HaproxyRecord<'_>) -> Vec<RawIngestEvent> {
     let mut events = Vec::new();
 
-    let mut meta = HashMap::new();
-    if !rec.method.is_empty() {
-        meta.insert("method".to_string(), rec.method.to_string());
-    }
-    if rec.status != "-" && !rec.status.is_empty() {
-        meta.insert("status".to_string(), rec.status.to_string());
-    }
-    if !rec.backend.is_empty() && rec.backend != "-" {
-        meta.insert("backend".to_string(), rec.backend.to_string());
-    }
+    // Exactly one edge owns the metadata: the domain edge when there is one,
+    // the URL edge otherwise. `take` makes that single ownership explicit and
+    // keeps this hot path (one call per log line) free of a per-line clone.
+    let mut meta = Some(build_meta(rec));
 
     // Triple 1: client IP -[Connect]-> requested domain.
     if !rec.domain.is_empty() {
@@ -196,7 +222,7 @@ fn record_to_raw_events(rec: &HaproxyRecord<'_>) -> Vec<RawIngestEvent> {
             dst_type: EntityType::Domain,
             dst_metadata: HashMap::new(),
             rel_type: RelationType::Connect,
-            rel_metadata: meta,
+            rel_metadata: meta.take().unwrap_or_default(),
             timestamp: rec.timestamp,
             raw_line: None,
         });
@@ -217,17 +243,24 @@ fn record_to_raw_events(rec: &HaproxyRecord<'_>) -> Vec<RawIngestEvent> {
             dst_type: EntityType::URL,
             dst_metadata: HashMap::new(),
             rel_type,
-            rel_metadata: HashMap::new(),
+            // Only claims the metadata when triple 1 did not: with a relative
+            // request target this is the sole edge that can carry status.
+            rel_metadata: if rec.domain.is_empty() {
+                meta.take().unwrap_or_default()
+            } else {
+                HashMap::new()
+            },
             timestamp: rec.timestamp,
             raw_line: None,
         });
     }
 
-    // Triple 3: requested domain -[Connect]-> backend server.
-    if !rec.domain.is_empty() && !rec.server.is_empty() && rec.server != "-" {
+    // Triple 3: backend routing, anchored per `backend_anchor`.
+    if !rec.server.is_empty() && rec.server != "-" {
+        let (src_id, src_type) = backend_anchor(rec);
         events.push(RawIngestEvent {
-            src_id: rec.domain.to_string(),
-            src_type: EntityType::Domain,
+            src_id: src_id.to_string(),
+            src_type,
             src_metadata: HashMap::new(),
             dst_id: rec.server.to_string(),
             dst_type: EntityType::Host,
@@ -305,6 +338,49 @@ impl LogParser for HaproxyParser {
     fn parse_raw_with_stats(&self, data: &str) -> (Vec<RawIngestEvent>, ParseStats) {
         (self.parse_raw(data), ParseStats::default())
     }
+}
+
+/// Extracts the accept-date from a raw HAProxy line as ISO `YYYY-MM-DD`
+/// bytes, for the ingest range filter.
+///
+/// That filter works by probing the first 10 bytes of a line for an ISO
+/// date, which suits IIS and CSV. HAProxy puts its date in the *second*
+/// token and in `DD/Mon/YYYY` form (`[06/Aug/2026:00:00:09.930]`), so the
+/// probe never fired and a HAProxy ingest silently ignored the range —
+/// the operator asked for one day and got twenty. Normalizing here lets
+/// the same lexicographic comparison work, since ISO dates sort as bytes.
+///
+/// Returns `None` for anything that is not a recognizable HAProxy date;
+/// callers must leave such lines unfiltered rather than drop them.
+pub fn haproxy_iso_date(line: &[u8]) -> Option<[u8; 10]> {
+    let open = line.iter().position(|&b| b == b'[')?;
+    let d = line.get(open + 1..open + 12)?; // `DD/Mon/YYYY`
+    if d[2] != b'/' || d[6] != b'/' {
+        return None;
+    }
+    let month: &[u8; 2] = match &d[3..6] {
+        b"Jan" => b"01",
+        b"Feb" => b"02",
+        b"Mar" => b"03",
+        b"Apr" => b"04",
+        b"May" => b"05",
+        b"Jun" => b"06",
+        b"Jul" => b"07",
+        b"Aug" => b"08",
+        b"Sep" => b"09",
+        b"Oct" => b"10",
+        b"Nov" => b"11",
+        b"Dec" => b"12",
+        _ => return None,
+    };
+    if !d[0].is_ascii_digit() || !d[1].is_ascii_digit() || !d[7].is_ascii_digit() {
+        return None;
+    }
+    let mut out = [b'-'; 10];
+    out[0..4].copy_from_slice(&d[7..11]); // YYYY
+    out[5..7].copy_from_slice(month);
+    out[8..10].copy_from_slice(&d[0..2]); // DD
+    Some(out)
 }
 
 /// Parses a HAProxy accept-date (`10/Jun/2026:00:00:27.428`, no timezone,
@@ -429,6 +505,32 @@ mod tests {
     }
 
     #[test]
+    fn iso_date_normalizes_the_bracketed_accept_date() {
+        // The real shape, leading space and all.
+        let line = b" 190.245.161.140:44164 [06/Aug/2026:00:00:09.930] https~ be/srv 0/0/1/1/1 200 1 - - --NI 0/0/0/0/0 0/0 \"GET /x HTTP/1.1\"";
+        assert_eq!(haproxy_iso_date(line).as_ref(), Some(b"2026-08-06"));
+    }
+
+    #[test]
+    fn iso_date_sorts_lexicographically_across_months() {
+        // The whole point of normalizing: `Aug` < `Jun` as text but August
+        // is the later month. ISO bytes put them back in real order.
+        let aug = haproxy_iso_date(b" ip [06/Aug/2026:00:00:00.000] x").unwrap();
+        let jun = haproxy_iso_date(b" ip [06/Jun/2026:00:00:00.000] x").unwrap();
+        assert!(jun < aug, "June must sort before August");
+    }
+
+    #[test]
+    fn iso_date_rejects_non_haproxy_shapes() {
+        // Must return None, not a guess: the caller leaves undatable lines
+        // unfiltered, and a wrong guess would silently drop real rows.
+        assert_eq!(haproxy_iso_date(b"no brackets here"), None);
+        assert_eq!(haproxy_iso_date(b" ip [not-a-date] x"), None);
+        assert_eq!(haproxy_iso_date(b" ip [06/Xxx/2026:00:00:00.000] x"), None);
+        assert_eq!(haproxy_iso_date(b" ip ["), None);
+    }
+
+    #[test]
     fn timestamp_parses_haproxy_date() {
         // 10/Jun/2026:00:00:27.428 UTC == 1781049627 (seconds; ms truncated)
         assert_eq!(parse_haproxy_datetime("10/Jun/2026:00:00:27.428"), 1781049627);
@@ -444,14 +546,78 @@ mod tests {
         assert!(results.iter().any(|r| r.is_ok()));
     }
 
+    /// A relative request target (`GET /health`, no absolute URL) is the
+    /// norm for API backends: in a real 15 GB portal log, 74% of lines had
+    /// one. HAProxy still records which server it routed to, so dropping
+    /// the backend edge threw away an observed fact — the graph came back
+    /// with no backends at all for that traffic.
+    const RELATIVE: &str = " 10.0.0.5:5000 [10/Jun/2026:00:00:27.428] fe be/srv 0/0/0/1/1 401 100 - - ---- 0/0/0/0/0 0/0 \"GET /health HTTP/1.1\"";
+
     #[test]
-    fn relative_url_yields_no_domain_triple() {
-        // Some HAProxy setups log a relative request target.
-        let data = " 10.0.0.5:5000 [10/Jun/2026:00:00:27.428] fe be/srv 0/0/0/1/1 200 100 - - ---- 0/0/0/0/0 0/0 \"GET /health HTTP/1.1\"";
-        let triples = HaproxyParser.parse(data);
-        // No domain => only the URL edge survives.
-        assert_eq!(triples.len(), 1);
-        assert_eq!(triples[0].2.id, "/health");
-        assert_eq!(triples[0].2.entity_type, EntityType::URL);
+    fn relative_url_still_anchors_the_backend_on_the_client_ip() {
+        let triples = HaproxyParser.parse(RELATIVE);
+        // URL edge + backend edge. No domain edge: there is no domain.
+        assert_eq!(triples.len(), 2);
+        assert!(
+            !triples
+                .iter()
+                .any(|(_, _, d)| d.entity_type == EntityType::Domain),
+            "a relative target has no host to build a Domain node from"
+        );
+
+        let (src, rel, dst) = &triples[1];
+        assert_eq!(src.id, "10.0.0.5");
+        assert_eq!(src.entity_type, EntityType::IP);
+        assert_eq!(dst.id, "srv");
+        assert_eq!(dst.entity_type, EntityType::Host);
+        assert_eq!(rel.rel_type, RelationType::Connect);
+    }
+
+    #[test]
+    fn relative_url_edge_carries_status_so_it_stays_filterable() {
+        // The domain edge normally owns method/status. With no domain edge
+        // the metadata used to be dropped on the floor, which made the whole
+        // relative-target corpus unfilterable by response code.
+        let triples = HaproxyParser.parse(RELATIVE);
+        let (_, url_rel, dst) = &triples[0];
+        assert_eq!(dst.entity_type, EntityType::URL);
+        assert_eq!(url_rel.metadata.get("status").map(String::as_str), Some("401"));
+        assert_eq!(url_rel.metadata.get("method").map(String::as_str), Some("GET"));
+    }
+
+    #[test]
+    fn absolute_url_keeps_metadata_on_the_domain_edge() {
+        // Regression guard: the fix must not move metadata for logs that do
+        // carry an absolute target, or existing hunts change meaning.
+        let triples = HaproxyParser.parse(SAMPLE_LOG);
+        let (_, domain_rel, dst) = &triples[0];
+        assert_eq!(dst.entity_type, EntityType::Domain);
+        assert_eq!(domain_rel.metadata.get("status").map(String::as_str), Some("200"));
+        // ...and the URL edge stays bare, as before.
+        assert!(triples[1].1.metadata.is_empty());
+    }
+
+    /// The streaming ingest path calls `parse_raw`, not `parse`. The two
+    /// drifting is exactly how a fix lands in tests and never reaches the
+    /// multi-GB ingest that needed it.
+    #[test]
+    fn raw_event_path_matches_the_triple_path_for_relative_targets() {
+        let triples = HaproxyParser.parse(RELATIVE);
+        let events = HaproxyParser.parse_raw(RELATIVE);
+        assert_eq!(events.len(), triples.len());
+
+        let backend = events
+            .iter()
+            .find(|e| e.dst_type == EntityType::Host)
+            .expect("raw path must emit the backend edge too");
+        assert_eq!(backend.src_id, "10.0.0.5");
+        assert_eq!(backend.src_type, EntityType::IP);
+        assert_eq!(backend.dst_id, "srv");
+
+        let url = events
+            .iter()
+            .find(|e| e.dst_type == EntityType::URL)
+            .expect("raw path must emit the URL edge");
+        assert_eq!(url.rel_metadata.get("status").map(String::as_str), Some("401"));
     }
 }
