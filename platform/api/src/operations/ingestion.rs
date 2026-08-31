@@ -144,6 +144,91 @@ const MAX_PREALLOC_RELATIONS: usize = 4_000_000;
 #[cfg(target_os = "windows")]
 const CRITICAL_MEMORY_MB: u64 = 256;
 
+/// Growth in this process's own working set, since the ingest began, above
+/// which the ingest is treated as the *cause* of the machine's memory
+/// pressure.
+///
+/// The guard needs both readings. A machine low on RAM says nothing about
+/// who is responsible, and aborting on that alone discards the operator's
+/// data to make room for someone else's browser tab. Measured on a 15 GB
+/// HTTP access log, an ingest's resident set *falls* while it runs — edges
+/// spill to disk and parsed batches are freed, so at 1.1M relations RSS had
+/// dropped from 585 MB to 391 MB and free RAM had risen — while the machine
+/// idled only 150-300 MB above the critical line. Availability alone was
+/// therefore firing on ambient pressure, never on this ingest.
+const SELF_GROWTH_CRITICAL_MB: u64 = 2048;
+
+/// `(free physical RAM, this process's working set)` in MB.
+///
+/// `None` when the platform offers no cheap reading; callers must then let
+/// the ingest proceed rather than abort on a measurement they do not have.
+#[cfg(target_os = "windows")]
+fn memory_snapshot_mb() -> Option<(u64, u64)> {
+    use std::mem::MaybeUninit;
+
+    #[repr(C)]
+    struct MemoryStatusEx {
+        dw_length: u32,
+        dw_memory_load: u32,
+        ull_total_phys: u64,
+        ull_avail_phys: u64,
+        ull_total_page_file: u64,
+        ull_avail_page_file: u64,
+        ull_total_virtual: u64,
+        ull_avail_virtual: u64,
+        ull_avail_extended_virtual: u64,
+    }
+
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+        fn K32GetProcessMemoryInfo(
+            process: isize,
+            counters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+        fn GetCurrentProcess() -> isize;
+    }
+
+    unsafe {
+        let mut status = MaybeUninit::<MemoryStatusEx>::zeroed();
+        let sp = status.as_mut_ptr();
+        (*sp).dw_length = std::mem::size_of::<MemoryStatusEx>() as u32;
+        if GlobalMemoryStatusEx(sp) == 0 {
+            return None;
+        }
+        let avail_mb = (*sp).ull_avail_phys / (1024 * 1024);
+
+        let mut counters = MaybeUninit::<ProcessMemoryCounters>::zeroed();
+        let cp = counters.as_mut_ptr();
+        (*cp).cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+        if K32GetProcessMemoryInfo(GetCurrentProcess(), cp, (*cp).cb) == 0 {
+            return None;
+        }
+        let rss_mb = ((*cp).working_set_size / (1024 * 1024)) as u64;
+
+        Some((avail_mb, rss_mb))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn memory_snapshot_mb() -> Option<(u64, u64)> {
+    None
+}
+
 const LARGE_FILE_THRESHOLD: u64 = 10 * 1024 * 1024;
 const PREVIEW_READ_SIZE: usize = 64 * 1024;
 const EVTX_PREVIEW_SAMPLE_SIZE: usize = 1000;
@@ -1612,8 +1697,8 @@ impl GraphHunterApi {
                     is_line_based,
                     bytes_total
                 );
-                let ingest_result: Result<(usize, usize, Option<DriftSnapshot>, bool), String> =
-                    (|| -> Result<(usize, usize, Option<DriftSnapshot>, bool), String> {
+                let ingest_result: Result<(usize, usize, Option<DriftSnapshot>, Option<(u64, u64, u64)>), String> =
+                    (|| -> Result<(usize, usize, Option<DriftSnapshot>, Option<(u64, u64, u64)>), String> {
                         if is_line_based {
                             // ── Line-based streaming path (NDJSON / IIS / CSV): mmap + line-batch parsing ──
                             bg_emitter.emit(
@@ -1644,6 +1729,14 @@ impl GraphHunterApi {
                             let mut lines_in_batch = 0usize;
                             let mut batch_start = 0usize;
                             let mut stopped_early = false;
+                            // Baseline for the self-growth half of the OOM
+                            // guard: only growth *since this ingest started*
+                            // can be attributed to it.
+                            let rss_baseline_mb =
+                                memory_snapshot_mb().map(|(_, rss)| rss).unwrap_or(0);
+                            // Set when the guard fires, so the truncation can
+                            // be reported instead of inferred from a bool.
+                            let mut truncated_at: Option<(usize, u64, u64)> = None;
                             let mut drift_accum: Option<DriftSnapshot> = None;
 
                             let mut last_fields_header: Option<String> = iis_fields_header.clone();
@@ -1896,47 +1989,28 @@ impl GraphHunterApi {
                                         }),
                                     );
 
-                                    // Last-resort OOM guard: edges spill to disk but entities/interner
-                                    // stay in RAM. Stop only if physical RAM is critically low.
+                                    // Last-resort OOM guard: edges spill to disk but
+                                    // entities/interner stay in RAM. Stops only when the
+                                    // machine is critically low AND this ingest is what
+                                    // filled it — see `SELF_GROWTH_CRITICAL_MB` for why
+                                    // availability alone is the wrong test.
                                     if total_new_relations % (BATCH_LINES * 20) < BATCH_LINES {
-                                        #[cfg(target_os = "windows")]
-                                        {
-                                            use std::mem::MaybeUninit;
-                                            #[repr(C)]
-                                            struct MEMORYSTATUSEX {
-                                                dw_length: u32,
-                                                dw_memory_load: u32,
-                                                ull_total_phys: u64,
-                                                ull_avail_phys: u64,
-                                                ull_total_page_file: u64,
-                                                ull_avail_page_file: u64,
-                                                ull_total_virtual: u64,
-                                                ull_avail_virtual: u64,
-                                                ull_avail_extended_virtual: u64,
-                                            }
-                                            unsafe extern "system" {
-                                                fn GlobalMemoryStatusEx(
-                                                    lp_buffer: *mut MEMORYSTATUSEX,
-                                                ) -> i32;
-                                            }
-                                            let mut mem_info =
-                                                MaybeUninit::<MEMORYSTATUSEX>::zeroed();
-                                            unsafe {
-                                                let p = mem_info.as_mut_ptr();
-                                                (*p).dw_length =
-                                                    std::mem::size_of::<MEMORYSTATUSEX>() as u32;
-                                                if GlobalMemoryStatusEx(p) != 0 {
-                                                    let avail_mb =
-                                                        (*p).ull_avail_phys / (1024 * 1024);
-                                                    if avail_mb < CRITICAL_MEMORY_MB {
-                                                        tracing::warn!(
-                                                            "INGEST: Critically low memory ({} MB free), stopping to prevent crash",
-                                                            avail_mb
-                                                        );
-                                                        stopped_early = true;
-                                                        break;
-                                                    }
-                                                }
+                                        if let Some((avail_mb, rss_mb)) = memory_snapshot_mb() {
+                                            let self_growth_mb =
+                                                rss_mb.saturating_sub(rss_baseline_mb);
+                                            if avail_mb < CRITICAL_MEMORY_MB
+                                                && self_growth_mb > SELF_GROWTH_CRITICAL_MB
+                                            {
+                                                tracing::warn!(
+                                                    "INGEST: stopping at byte {} of {} — {} MB free and this ingest grew {} MB",
+                                                    pos + 1,
+                                                    bytes_total,
+                                                    avail_mb,
+                                                    self_growth_mb
+                                                );
+                                                truncated_at = Some((pos + 1, avail_mb, self_growth_mb));
+                                                stopped_early = true;
+                                                break;
                                             }
                                         }
                                     }
@@ -2036,7 +2110,13 @@ impl GraphHunterApi {
                                 }
                             }
 
-                            Ok((total_new_entities, total_new_relations, drift_accum, stopped_early))
+                            let _ = stopped_early;
+                            Ok((
+                                total_new_entities,
+                                total_new_relations,
+                                drift_accum,
+                                truncated_at.map(|(b, a, g)| (b as u64, a, g)),
+                            ))
                         } else {
                             // ── JSON array / small file: memory-mapped parse + insert ──
                             //
@@ -2180,12 +2260,15 @@ impl GraphHunterApi {
                             // input in one pass — there is no early-stop guard
                             // here (only the line-based streaming branch above
                             // can bail on the Windows critical-memory check).
-                            Ok((ne, nr, stats.drift, false))
+                            // The whole-file branch reads everything or fails; it
+                            // never truncates, so there is nothing to report.
+                            Ok((ne, nr, stats.drift, None))
                         }
                     })();
 
                 match ingest_result {
-                    Ok((new_entities, new_relations, drift, stopped_early)) => {
+                    Ok((new_entities, new_relations, drift, truncation)) => {
+                        let stopped_early = truncation.is_some();
                         if let Some(ref d) = drift {
                             bg_api.record_drift(&bg_dataset_id, d);
                         }
@@ -2248,7 +2331,7 @@ impl GraphHunterApi {
                             }
                         }
 
-                        let (total_entities, total_relations, warnings) = bg_session
+                        let (total_entities, total_relations, mut warnings) = bg_session
                             .graph
                             .read()
                             .map(|g| {
@@ -2256,6 +2339,27 @@ impl GraphHunterApi {
                                 (g.entity_count(), g.relation_count(), warnings)
                             })
                             .unwrap_or((0, 0, Vec::new()));
+
+                        // A truncated ingest is a partial graph, and a partial
+                        // graph answers hunts wrongly without ever looking
+                        // wrong. `stopped_early` alone is a flag someone has to
+                        // think to check; say plainly what was dropped and
+                        // where, at the top of the warnings the UI already
+                        // shows.
+                        if let Some((byte, avail_mb, growth_mb)) = truncation {
+                            let pct = if bytes_total > 0 {
+                                (byte as f64 / bytes_total as f64) * 100.0
+                            } else {
+                                0.0
+                            };
+                            warnings.insert(
+                                0,
+                                format!(
+                                    "INGESTA PARCIAL: se detuvo en el byte {} de {} ({:.1}% del archivo)                                      por memoria baja ({} MB libres, esta ingesta creció {} MB).                                      El resto del archivo NO se ingirió y el grafo está incompleto.                                      Liberá memoria y reingerí, o acotá con un rango de fechas.",
+                                    byte, bytes_total, pct, avail_mb, growth_mb
+                                ),
+                            );
+                        }
 
                         bg_session.set_phase(crate::state::SessionPhase::Ready);
 
