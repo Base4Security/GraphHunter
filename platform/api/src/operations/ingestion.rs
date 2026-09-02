@@ -156,14 +156,22 @@ const CRITICAL_MEMORY_MB: u64 = 256;
 /// dropped from 585 MB to 391 MB and free RAM had risen — while the machine
 /// idled only 150-300 MB above the critical line. Availability alone was
 /// therefore firing on ambient pressure, never on this ingest.
-const SELF_GROWTH_CRITICAL_MB: u64 = 2048;
+/// Share of total physical RAM this ingest's own commit must have grown by
+/// before it is considered the cause of the machine's pressure. A fraction
+/// rather than a constant so the same build behaves sanely on a 16 GB
+/// laptop and a 256 GB server. Measured: a 2 GB HTTP log ingests with about
+/// 1.6 GB of commit growth — 10% of a 16 GB machine — and the curve
+/// flattens from there, so half of RAM is far above anything a healthy
+/// ingest reaches and still well under the point of no return.
+const SELF_GROWTH_CRITICAL_FRACTION: u64 = 2; // total_phys / 2
 
-/// `(free physical RAM, this process's working set)` in MB.
+/// `(free physical RAM, this process's private commit, total physical RAM)`
+/// in MB.
 ///
 /// `None` when the platform offers no cheap reading; callers must then let
 /// the ingest proceed rather than abort on a measurement they do not have.
 #[cfg(target_os = "windows")]
-fn memory_snapshot_mb() -> Option<(u64, u64)> {
+fn memory_snapshot_mb() -> Option<(u64, u64, u64)> {
     use std::mem::MaybeUninit;
 
     #[repr(C)]
@@ -211,6 +219,7 @@ fn memory_snapshot_mb() -> Option<(u64, u64)> {
             return None;
         }
         let avail_mb = (*sp).ull_avail_phys / (1024 * 1024);
+        let total_phys_mb = (*sp).ull_total_phys / (1024 * 1024);
 
         let mut counters = MaybeUninit::<ProcessMemoryCounters>::zeroed();
         let cp = counters.as_mut_ptr();
@@ -218,14 +227,19 @@ fn memory_snapshot_mb() -> Option<(u64, u64)> {
         if K32GetProcessMemoryInfo(GetCurrentProcess(), cp, (*cp).cb) == 0 {
             return None;
         }
-        let rss_mb = ((*cp).working_set_size / (1024 * 1024)) as u64;
+        // `pagefile_usage` is private commit: memory this process actually
+        // demands. `working_set_size` would also count the resident pages of
+        // the mmap'd input, which are file-backed and reclaimable — on a
+        // 2 GB log that inflated the reading by ~1.4 GB and made the ingest
+        // look like the culprit for its own input file.
+        let commit_mb = ((*cp).pagefile_usage / (1024 * 1024)) as u64;
 
-        Some((avail_mb, rss_mb))
+        Some((avail_mb, commit_mb, total_phys_mb))
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn memory_snapshot_mb() -> Option<(u64, u64)> {
+fn memory_snapshot_mb() -> Option<(u64, u64, u64)> {
     None
 }
 
@@ -1732,8 +1746,8 @@ impl GraphHunterApi {
                             // Baseline for the self-growth half of the OOM
                             // guard: only growth *since this ingest started*
                             // can be attributed to it.
-                            let rss_baseline_mb =
-                                memory_snapshot_mb().map(|(_, rss)| rss).unwrap_or(0);
+                            let commit_baseline_mb =
+                                memory_snapshot_mb().map(|(_, commit, _)| commit).unwrap_or(0);
                             // Set when the guard fires, so the truncation can
                             // be reported instead of inferred from a bool.
                             let mut truncated_at: Option<(usize, u64, u64)> = None;
@@ -1995,11 +2009,14 @@ impl GraphHunterApi {
                                     // filled it — see `SELF_GROWTH_CRITICAL_MB` for why
                                     // availability alone is the wrong test.
                                     if total_new_relations % (BATCH_LINES * 20) < BATCH_LINES {
-                                        if let Some((avail_mb, rss_mb)) = memory_snapshot_mb() {
+                                        if let Some((avail_mb, commit_mb, total_mb)) =
+                                            memory_snapshot_mb()
+                                        {
                                             let self_growth_mb =
-                                                rss_mb.saturating_sub(rss_baseline_mb);
+                                                commit_mb.saturating_sub(commit_baseline_mb);
                                             if avail_mb < CRITICAL_MEMORY_MB
-                                                && self_growth_mb > SELF_GROWTH_CRITICAL_MB
+                                                && self_growth_mb
+                                                    > total_mb / SELF_GROWTH_CRITICAL_FRACTION
                                             {
                                                 tracing::warn!(
                                                     "INGEST: stopping at byte {} of {} — {} MB free and this ingest grew {} MB",
