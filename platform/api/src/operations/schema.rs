@@ -270,6 +270,19 @@ fn known_endpoints() -> Vec<EndpointMeta> {
             "Emit session tags as a STIX / MISP / KQL / Sigma feed.",
             true,
         ),
+        // --- Attack-chain reconstruction (TPCSA) ---------------------
+        ep(
+            "/reconstruct_chain",
+            Post,
+            "Reconstruct attack chains from seeds: ranked, verified time-respecting trees with entry point, connectors, ties and an optional MILP certificate.",
+            true,
+        ),
+        ep(
+            "/tpcsa/export",
+            Post,
+            "Export the loaded graph (or a window) as a TPCSA solver instance.",
+            true,
+        ),
         // --- Data quality -------------------------------------------
         ep(
             "/check_invariants",

@@ -40,6 +40,7 @@ mod notes;
 mod session;
 mod siem;
 mod tags;
+mod tpcsa;
 
 /// Combined axum state. Handlers extract `Arc<AppState>` or
 /// `Arc<GraphHunterApi>` (or both) via `FromRef` — no handler signature
@@ -392,6 +393,8 @@ pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> R
         .route("/path_nodes", get(graph::handler_path_nodes))
         .route("/export_subgraph", post(export::handler_export_subgraph))
         .route("/export_ocsf", post(export::handler_export_ocsf))
+        .route("/tpcsa/export", post(tpcsa::handler_export_instance))
+        .route("/reconstruct_chain", post(tpcsa::handler_reconstruct_chain))
         .route("/check_invariants", post(invariants::handler_check_invariants))
         .route("/ingest_negotiate", post(ingest::handler_ingest_negotiate))
         // File ingest over HTTP. All three are gated by

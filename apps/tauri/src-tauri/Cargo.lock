@@ -2037,6 +2037,7 @@ dependencies = [
  "graph_hunter_matcher_ffi",
  "graph_hunter_parsers",
  "graph_hunter_siem",
+ "graph_hunter_tpcsa",
  "graph_hunter_vrl",
  "md5",
  "memchr",
@@ -2196,6 +2197,15 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "graph_hunter_tpcsa"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
