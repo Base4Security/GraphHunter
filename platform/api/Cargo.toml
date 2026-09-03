@@ -21,6 +21,7 @@ graph_hunter_matcher_ffi = { path = "../../core/matcher-ffi" }
 # this crate forwards to `graph_hunter_gnn/ml-scoring` where the ONNX
 # Runtime deps actually live.
 graph_hunter_gnn = { path = "../../core/gnn" }
+graph_hunter_tpcsa = { path = "../../core/tpcsa-core" }
 graph_hunter_canonical = { path = "../canonical" }
 # Concrete LogParser impls (Cognito, FortiAnalyzer, IIS W3C) lifted out
 # of core per F2.10. The rest still live in core (see parsers/src/lib.rs

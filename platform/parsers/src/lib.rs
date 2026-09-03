@@ -26,6 +26,7 @@
 
 pub mod cdm;
 pub mod cognito;
+pub mod etw_nodlink;
 pub mod forti_analyzer;
 pub mod fortigate;
 pub mod haproxy;
@@ -33,6 +34,7 @@ pub mod iis_w3c;
 
 pub use cdm::{CdmParser, looks_like_cdm};
 pub use cognito::{CognitoParser, looks_like_cognito};
+pub use etw_nodlink::{EtwNodlinkParser, looks_like_etw_nodlink};
 pub use haproxy::{HaproxyParser, haproxy_iso_date, looks_like_haproxy};
 pub use forti_analyzer::{
     ChartHandler, CompromisedHostHandler, FortiAnalyzerXmlParser, GenericFortiHandler,

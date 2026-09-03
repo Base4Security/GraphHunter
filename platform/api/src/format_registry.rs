@@ -12,7 +12,8 @@ use graph_hunter_core::{
     preview_sysmon,
 };
 use graph_hunter_parsers::{
-    CdmParser, CognitoParser, FortiAnalyzerXmlParser, FortiGateParser, HaproxyParser, IisW3cParser,
+    CdmParser, CognitoParser, EtwNodlinkParser, FortiAnalyzerXmlParser, FortiGateParser, HaproxyParser,
+    IisW3cParser, looks_like_etw_nodlink,
     looks_like_cdm, looks_like_cognito, looks_like_fortigate, looks_like_haproxy,
     looks_like_iis_w3c,
 };
@@ -81,6 +82,14 @@ fn detect_cdm(contents: &str) -> bool {
 /// avoids the generic-CSV heuristic bugs (port→IP, dotted-signature→
 /// Domain, dropped/close→Delete, no-edge-metadata) so FortiGate data
 /// must be routed away from `generic`/`csv` before they swallow it.
+/// Detects NODLINK ETW JSONL (`hw20` / `win10`): every leading line is a
+/// JSON object carrying `EventName` and `MSec`. Like CDM it must be probed
+/// before `generic`, which would otherwise treat each event as a bag of
+/// fields and lose the causal direction and process generations.
+fn detect_etw_nodlink(contents: &str) -> bool {
+    looks_like_etw_nodlink(contents)
+}
+
 fn detect_fortigate(contents: &str) -> bool {
     looks_like_fortigate(contents)
 }
@@ -163,6 +172,18 @@ fn preview_cdm(_contents: &str) -> Vec<(String, String)> {
     ]
 }
 
+fn preview_etw_nodlink(_contents: &str) -> Vec<(String, String)> {
+    vec![
+        ("PID|PName|generation".into(), "Process (identity survives PID reuse)".into()),
+        ("FileName".into(), "File (read/load → process; process → write)".into()),
+        ("daddr".into(), "IP (send: process → ip; recv: ip → process)".into()),
+        ("EventName".into(), "relation (Start→Spawn, Read, Write, Load, Send/Recv→Connect)".into()),
+        ("event_type".into(), "metadata (start/read/write/load/send/recv)".into()),
+        ("ts_us".into(), "metadata (microseconds from trace start)".into()),
+        ("is_warn".into(), "process metadata (red-team label)".into()),
+    ]
+}
+
 fn preview_fortianalyzer(_contents: &str) -> Vec<(String, String)> {
     vec![
         ("User_Name".into(), "IP (Top User by Traffic)".into()),
@@ -227,6 +248,13 @@ static FORMAT_REGISTRY: &[FormatDescriptor] = &[
     // CDM is JSON, so it must be probed before `generic`/`csv` swallow it
     // — its detector keys on the cdm18 schema prefix, which generic JSON
     // never carries.
+    FormatDescriptor {
+        name: "etw",
+        aliases: &["nodlink", "etw_nodlink", "hw20", "win10"],
+        detect: detect_etw_nodlink,
+        make_parser: || Box::new(EtwNodlinkParser),
+        preview: preview_etw_nodlink,
+    },
     FormatDescriptor {
         name: "cdm",
         aliases: &["darpa", "tc", "cdm18"],
@@ -324,7 +352,7 @@ pub fn make_parser_for_format(
         .map(|desc| (desc.make_parser)())
         .ok_or_else(|| {
             format!(
-                "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', 'haproxy', 'cdm', 'fortianalyzer', or 'fortigate'.",
+                "Unsupported format: '{}'. Use 'auto', 'evtx', 'sysmon', 'sentinel', 'cognito', 'generic', 'csv', 'iis', 'haproxy', 'cdm', 'etw', 'fortianalyzer', or 'fortigate'.",
                 format_name
             )
         })
@@ -409,6 +437,15 @@ mod tests {
     /// nodes with no edges, because CDM events reference their endpoints
     /// by UUID defined in other records — the whole reason for the native
     /// two-pass parser.
+    #[test]
+    fn etw_nodlink_auto_detects_to_etw_not_generic() {
+        let etw = "{\"MSec\": \"81.7\", \"PID\": \"88\", \"PName\": \"\", \"EventName\": \"TcpIp/Recv\", \"daddr\": \"1.2.3.4\"}
+{\"MSec\": \"82.0\", \"PID\": \"4\", \"PName\": \"svchost\", \"EventName\": \"FileIO/Read\", \"FileName\": \"C:\\x\"}
+";
+        assert_eq!(resolve_format(etw, "auto"), "etw");
+        assert_eq!(resolve_format(etw, "nodlink"), "etw");
+    }
+
     #[test]
     fn cdm_auto_detects_to_cdm() {
         let cdm = "{\"datum\":{\"com.bbn.tc.schema.avro.cdm18.Event\":{\"uuid\":\"e\",\"type\":\"EVENT_EXECUTE\",\"timestampNanos\":1}}}\n";
