@@ -257,6 +257,7 @@ fn greedy_is_verified_and_never_beats_the_exact_optimum() {
         }
     }
     // The heuristic should be exact most of the time on these tiny instances.
+    eprintln!("greedy matched the exact optimum in {optimal_hits}/{total} (instance, k) cases");
     assert!(
         optimal_hits * 10 >= total * 7,
         "only {optimal_hits}/{total} optimal"
