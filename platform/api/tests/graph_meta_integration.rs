@@ -32,7 +32,9 @@ fn graph_summary_returns_schema_v1_shape() {
     use graph_hunter_api::operations::graph_meta::{
         _flush_summary_cache_for_test, _GRAPH_META_TEST_MUTEX,
     };
-    let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+    let _g = _GRAPH_META_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     _flush_summary_cache_for_test();
 
     let api = GraphHunterApi::new_noop();
@@ -93,10 +95,21 @@ fn graph_summary_returns_schema_v1_shape() {
 #[test]
 fn graph_summary_fresh_api_has_no_datasets_or_hunts() {
     use graph_hunter_api::operations::graph_meta::{
-        _flush_summary_cache_for_test, _GRAPH_META_TEST_MUTEX,
+        _flush_recent_pivots_for_test, _flush_summary_cache_for_test, _GRAPH_META_TEST_MUTEX,
     };
-    let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+    let _g = _GRAPH_META_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     _flush_summary_cache_for_test();
+    // `recent_pivots` is a PROCESS-GLOBAL ring buffer, so "fresh API" is
+    // not the same as "fresh buffer": the two Task 6 tests below push
+    // into it, and whichever ran first left its entry behind. Flushing
+    // only the summary cache — which is what this test used to do —
+    // left the assertion at the bottom failing about 40 % of runs
+    // depending on thread scheduling, and its panic then poisoned the
+    // mutex so the other three tests in this file died with
+    // `PoisonError` instead of their own result.
+    _flush_recent_pivots_for_test();
 
     let api = GraphHunterApi::new_noop();
     let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
@@ -162,7 +175,9 @@ fn graph_summary_lists_active_datasets() {
     use graph_hunter_api::operations::graph_meta::{
         _flush_summary_cache_for_test, _GRAPH_META_TEST_MUTEX,
     };
-    let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+    let _g = _GRAPH_META_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     _flush_summary_cache_for_test();
 
     let api = api_with_session_dataset("s1", "ator-evtx-snapshot");
@@ -179,7 +194,9 @@ fn graph_summary_hunt_cache_non_empty_exposes_active_hunt() {
     use graph_hunter_api::operations::graph_meta::{
         _flush_summary_cache_for_test, _GRAPH_META_TEST_MUTEX,
     };
-    let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+    let _g = _GRAPH_META_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     _flush_summary_cache_for_test();
 
     let api = GraphHunterApi::new_noop();
@@ -213,10 +230,26 @@ fn graph_summary_hunt_cache_non_empty_exposes_active_hunt() {
 /// branch still returns Ok, and the user expressed pivot intent). Uses a
 /// uniquely-shaped IP value to avoid cross-test collision with the global
 /// buffer.
+// The guard is held across the `.await`. That is safe here and not the
+// usual hazard: `#[tokio::test]` runs a current-thread runtime, so there
+// is no second task in this runtime to block on the lock. Releasing it
+// before the await instead would reopen the race the guard exists to
+// close — another test could flush the buffer between the seed and the
+// snapshot below, and this test would fail looking for its own entry.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn seed_from_ioc_appends_to_recent_pivots() {
     use graph_hunter_api::dto::v1::sentinel::SeedFromIocRequest;
-    use graph_hunter_api::operations::graph_meta::RECENT_PIVOTS;
+    use graph_hunter_api::operations::graph_meta::{
+        _flush_recent_pivots_for_test, RECENT_PIVOTS, _GRAPH_META_TEST_MUTEX,
+    };
+
+    // Writers of the process-global pivot buffer must serialise against
+    // its readers, or the reader asserting "empty" races this push.
+    let _g = _GRAPH_META_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    _flush_recent_pivots_for_test();
 
     let api = GraphHunterApi::new_noop();
     let unique = "10.255.255.42";
@@ -248,7 +281,16 @@ async fn seed_from_ioc_appends_to_recent_pivots() {
 fn expand_node_marks_pivot_expanded_when_buffered() {
     use graph_hunter_api::dto::v1::graph_meta::RecentPivot;
     use graph_hunter_api::dto::v1::graph_ops::ExpandNodeRequest;
-    use graph_hunter_api::operations::graph_meta::RECENT_PIVOTS;
+    use graph_hunter_api::operations::graph_meta::{
+        _flush_recent_pivots_for_test, RECENT_PIVOTS, _GRAPH_META_TEST_MUTEX,
+    };
+
+    // Same reason as the test above: this one pushes into the global
+    // buffer, so it has to take its turn.
+    let _g = _GRAPH_META_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    _flush_recent_pivots_for_test();
 
     let api = GraphHunterApi::new_noop();
     let unique = "host-task6-marker";
