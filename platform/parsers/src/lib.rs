@@ -24,18 +24,24 @@
 //!   `graph_hunter_core/tests/*.rs` integration tests, which bypass the
 //!   two-copy problem).
 
+pub mod auth0;
+pub mod bind_psp;
 pub mod cdm;
+pub mod certero;
 pub mod cognito;
 pub mod etw_nodlink;
 pub mod forti_analyzer;
 pub mod fortigate;
+pub mod fortiweb;
 pub mod haproxy;
 pub mod iis_w3c;
 
+pub use auth0::{Auth0CsvParser, looks_like_auth0};
+pub use bind_psp::{BindPspParser, looks_like_bind_psp};
 pub use cdm::{CdmParser, looks_like_cdm};
+pub use certero::{CerteroParser, looks_like_certero};
 pub use cognito::{CognitoParser, looks_like_cognito};
 pub use etw_nodlink::{EtwNodlinkParser, looks_like_etw_nodlink};
-pub use haproxy::{HaproxyParser, haproxy_iso_date, looks_like_haproxy};
 pub use forti_analyzer::{
     ChartHandler, CompromisedHostHandler, FortiAnalyzerXmlParser, GenericFortiHandler,
     HandlerRegistry, ReportContext, Row, TopApplicationBySeverityHandler,
@@ -43,4 +49,6 @@ pub use forti_analyzer::{
     TopWebsiteByTrafficHandler,
 };
 pub use fortigate::{FortiGateParser, looks_like_fortigate};
+pub use fortiweb::{FortiWebParser, looks_like_fortiweb};
+pub use haproxy::{HaproxyParser, haproxy_iso_date, looks_like_haproxy};
 pub use iis_w3c::{IisW3cParser, extract_fields_header, looks_like_iis_w3c};

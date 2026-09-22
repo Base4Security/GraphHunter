@@ -179,8 +179,13 @@ export default function FileUploadSection({
           <option value="sysmon">Sysmon (Event Log)</option>
           <option value="sentinel">Azure Sentinel</option>
           <option value="fortianalyzer">FortiAnalyzer XML Report</option>
+          <option value="fortigate">FortiGate (firewall / SSL-VPN KV)</option>
+          <option value="fortiweb">FortiWeb WAF (attack / event log)</option>
+          <option value="auth0">Auth0 logs (Elastic CSV export)</option>
           <option value="haproxy">HAProxy (HTTP log)</option>
           <option value="cdm">DARPA TC CDM (E3 provenance)</option>
+          <option value="bind_psp">BIND PSP connector (NDJSON)</option>
+          <option value="certero">CERTERO dossier (TSV)</option>
           <option value="generic">Generic JSON</option>
           <option value="csv">CSV</option>
         </select>

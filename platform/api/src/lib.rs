@@ -28,6 +28,7 @@ pub mod pcap_l7;
 pub mod pcap_l7_auth;
 pub mod paths;
 pub mod pcap_preview;
+pub mod record_scan;
 pub mod reqwest_client;
 // `local_llm` was lifted into its own crate at platform/local-llm.
 // Re-exported here so call-sites that imported `api::local_llm::X`

@@ -1606,18 +1606,23 @@ impl GraphHunterApi {
                 let resolved = resolve_format(&peek_buf, &bg_format);
 
                 let trimmed_peek = peek_buf.trim_start();
-                // HAProxy and FortiGate are line-delimited and parse each
-                // line independently (no header/array state), so they belong
-                // on the mmap line-batch streaming path. Without this they
-                // fell through to the whole-file branch, which buffers the
-                // entire log + every event at once — a multi-GB HAProxy log
-                // then aborted with `memory allocation of N bytes failed`.
-                let is_line_based = trimmed_peek.starts_with('{')
-                    || matches!(
-                        resolved.as_str(),
-                        "iis" | "iis_w3c" | "w3c" | "haproxy" | "fortigate"
-                    )
-                    || (resolved == "cognito" && !trimmed_peek.starts_with('['));
+                // How this format may be cut into batches is declared by the
+                // registry next to its parser (`FormatDescriptor::stream`),
+                // not decided here.
+                //
+                // This used to be a hard-coded allowlist of format names. It
+                // fell behind the registry: `csv` was never in it, so every
+                // CSV larger than WHOLE_FILE_PARSE_LIMIT was rejected with
+                // "this format isn't line-delimited so it can't be streamed"
+                // — by an error message that, in the same breath, suggested
+                // converting the file to CSV. A list that has to be updated
+                // by hand every time a format is added will drift again, so
+                // the fact now lives with the format.
+                let stream_mode = crate::format_registry::stream_mode_for(&resolved, trimmed_peek);
+                // Headed formats (CSV/TSV) repeat their column header into
+                // every batch — see `table_header` below.
+                let is_headed = crate::format_registry::format_is_headed(&resolved);
+                let is_line_based = stream_mode.is_streamable();
 
                 // The date-range filter below probes byte 0 for an ISO date.
                 // HAProxy lines start with the client `ip:port` and carry the
@@ -1755,10 +1760,41 @@ impl GraphHunterApi {
 
                             let mut last_fields_header: Option<String> = iis_fields_header.clone();
 
+                            // Column header of a headed format (CSV/TSV),
+                            // taken from the first record and repeated into
+                            // every later batch. Batch 1 already contains it
+                            // verbatim, so only batches starting past byte 0
+                            // need the copy.
+                            //
+                            // Without this, batch 2..N hands the parser a
+                            // headerless block: it takes the first *data* row
+                            // as the column names and every subsequent row
+                            // maps onto the wrong fields. Nothing errors —
+                            // the ingest just lands as near-zero triples,
+                            // which is the failure mode that is hardest to
+                            // notice on a multi-GB file.
+                            let table_header: Option<String> = if is_headed {
+                                let mut hs = crate::record_scan::RecordScanner::new(stream_mode);
+                                hs.next_record_end(raw, 0).map(|end| {
+                                    String::from_utf8_lossy(&raw[..end])
+                                        .trim_end_matches('\r')
+                                        .to_string()
+                                })
+                            } else {
+                                None
+                            };
+
+                            // Record boundaries honour the format's stream
+                            // mode: for `Quoted` a newline inside a quoted
+                            // value does not end a record, so a multi-line
+                            // FortiWeb attack payload stays one record
+                            // instead of being shredded into fragments.
+                            let mut scanner =
+                                crate::record_scan::RecordScanner::new(stream_mode);
+
                             let mut total_lines = 0usize;
                             let mut search_offset = 0usize;
-                            while let Some(rel_pos) = memchr::memchr(b'\n', &raw[search_offset..]) {
-                                let pos = search_offset + rel_pos;
+                            while let Some(pos) = scanner.next_record_end(raw, search_offset) {
                                 search_offset = pos + 1;
 
                                 total_lines += 1;
@@ -1841,35 +1877,53 @@ impl GraphHunterApi {
                                     let batch_bytes = &raw[batch_start..pos + 1];
                                     let batch_str = String::from_utf8_lossy(batch_bytes);
 
-                                    let parse_input: String = if let Some(ref hdr) =
-                                        last_fields_header
-                                    {
-                                        if memchr::memmem::find(batch_bytes, b"#Fields:").is_none()
-                                        {
-                                            format!("{}\n{}", hdr, batch_str)
+                                    // The header this batch must carry, if
+                                    // any. Two sources, never both: IIS reads
+                                    // a `#Fields:` directive that can recur
+                                    // mid-file, a headed tabular format
+                                    // repeats its first row.
+                                    let header_for_batch: Option<&str> =
+                                        if let Some(ref hdr) = last_fields_header {
+                                            if memchr::memmem::find(batch_bytes, b"#Fields:")
+                                                .is_none()
+                                            {
+                                                Some(hdr.as_str())
+                                            } else {
+                                                None
+                                            }
+                                        } else if batch_start > 0 {
+                                            table_header.as_deref()
                                         } else {
-                                            batch_str.into_owned()
-                                        }
-                                    } else {
-                                        batch_str.into_owned()
-                                    };
+                                            None
+                                        };
 
-                                    let sub_chunks: Vec<&str> = {
-                                        let num_chunks = rayon::current_num_threads().max(1);
-                                        let lines: Vec<&str> = parse_input.lines().collect();
-                                        let chunk_size = (lines.len() / num_chunks).max(1);
-                                        lines
-                                            .chunks(chunk_size)
-                                            .map(|chunk| {
-                                                let first = chunk[0].as_ptr() as usize
-                                                    - parse_input.as_ptr() as usize;
-                                                let last = chunk.last().unwrap();
-                                                let end = last.as_ptr() as usize + last.len()
-                                                    - parse_input.as_ptr() as usize;
-                                                &parse_input[first..end]
-                                            })
-                                            .collect()
-                                    };
+                                    // Sub-chunks are cut at record
+                                    // boundaries, not at every newline: the
+                                    // `lines()` split this replaced could
+                                    // hand one worker the first half of a
+                                    // multi-line quoted value and the next
+                                    // worker the rest.
+                                    //
+                                    // The header goes on EVERY chunk, not
+                                    // just the first. Each chunk is parsed by
+                                    // an independent `parse_raw_with_stats`
+                                    // call, so a header that reached only
+                                    // chunk 0 left the other workers mapping
+                                    // columns by position against the wrong
+                                    // names.
+                                    let num_chunks = rayon::current_num_threads().max(1);
+                                    let sub_chunks: Vec<std::borrow::Cow<'_, str>> =
+                                        crate::record_scan::split_records(
+                                            &batch_str, stream_mode, num_chunks,
+                                        )
+                                        .into_iter()
+                                        .map(|c| match header_for_batch {
+                                            Some(h) => {
+                                                std::borrow::Cow::Owned(format!("{}\n{}", h, c))
+                                            }
+                                            None => std::borrow::Cow::Borrowed(c),
+                                        })
+                                        .collect();
 
                                     // parse_raw_with_stats: native typed-fast-path on
                                     // SysmonJsonParser/SentinelJsonParser captures the
@@ -1891,7 +1945,9 @@ impl GraphHunterApi {
                                             use rayon::prelude::*;
                                             let per_chunk: Vec<(Vec<_>, _)> = sub_chunks
                                                 .par_iter()
-                                                .map(|chunk| parser.parse_raw_with_stats(chunk))
+                                                .map(|chunk| {
+                                                    parser.parse_raw_with_stats(chunk.as_ref())
+                                                })
                                                 .collect();
                                             let mut flattened: Vec<_> = Vec::new();
                                             for (e, s) in per_chunk {
@@ -1913,7 +1969,8 @@ impl GraphHunterApi {
                                             }
                                             flattened
                                         } else {
-                                            let (e, s) = parser.parse_raw_with_stats(&parse_input);
+                                            let (e, s) =
+                                                parser.parse_raw_with_stats(sub_chunks[0].as_ref());
                                             if let Some(d) = s.drift {
                                                 drift_accum
                                                     .get_or_insert_with(DriftSnapshot::default)
@@ -2044,17 +2101,30 @@ impl GraphHunterApi {
                                 let batch_bytes = &raw[batch_start..];
                                 let batch_str = String::from_utf8_lossy(batch_bytes);
                                 if !batch_str.trim().is_empty() {
-                                    let (events, final_stats) =
+                                    // Same header rule as the batch loop
+                                    // above — the remainder is a batch like
+                                    // any other, and a headed format's last
+                                    // partial batch is exactly where a
+                                    // missing header goes unnoticed.
+                                    let header_for_batch: Option<&str> =
                                         if let Some(ref hdr) = last_fields_header {
                                             if !batch_str.contains("#Fields:") {
-                                                let with_header = format!("{}\n{}", hdr, batch_str);
-                                                parser.parse_raw_with_stats(&with_header)
+                                                Some(hdr.as_str())
                                             } else {
-                                                parser.parse_raw_with_stats(&batch_str)
+                                                None
                                             }
+                                        } else if batch_start > 0 {
+                                            table_header.as_deref()
                                         } else {
-                                            parser.parse_raw_with_stats(&batch_str)
+                                            None
                                         };
+                                    let (events, final_stats) = match header_for_batch {
+                                        Some(h) => {
+                                            let with_header = format!("{}\n{}", h, batch_str);
+                                            parser.parse_raw_with_stats(&with_header)
+                                        }
+                                        None => parser.parse_raw_with_stats(&batch_str),
+                                    };
                                     if let Some(d) = final_stats.drift {
                                         drift_accum
                                             .get_or_insert_with(DriftSnapshot::default)
@@ -2127,6 +2197,21 @@ impl GraphHunterApi {
                                 }
                             }
 
+                            // A desync means the input's quoting is not
+                            // trustworthy (a producer emitting unescaped
+                            // quotes inside a quoted value). The scan
+                            // recovered, but records were merged on the
+                            // way — say so, rather than leaving a silent
+                            // shortfall for someone to find later.
+                            if scanner.resyncs() > 0 {
+                                tracing::warn!(
+                                    "INGEST: {} quote-state resync(s) in '{}' ({}) — the file                                      contains unescaped quotes inside quoted values, so some                                      records were merged before the scan recovered",
+                                    scanner.resyncs(),
+                                    bg_path,
+                                    resolved
+                                );
+                            }
+
                             let _ = stopped_early;
                             Ok((
                                 total_new_entities,
@@ -2152,9 +2237,10 @@ impl GraphHunterApi {
                             if bytes_total > WHOLE_FILE_PARSE_LIMIT {
                                 return Err(format!(
                                     "File '{}' ({} MB, format '{}') is too large for the whole-file ingest path \
-                                     (limit {} MB). This format isn't line-delimited so it can't be streamed. \
-                                     Split the file, or convert it to a streamable format (CSV / NDJSON / a native \
-                                     line format like HAProxy or FortiGate).",
+                                     (limit {} MB). '{2}' is parsed as a single document (a JSON array or an XML \
+                                     report), so it has no record boundary to stream on. Split the file, or export \
+                                     it as one record per line (NDJSON instead of a JSON array). Line-delimited and \
+                                     quoted-CSV formats stream regardless of size and never reach this check.",
                                     bg_path,
                                     bytes_total / (1024 * 1024),
                                     resolved,
