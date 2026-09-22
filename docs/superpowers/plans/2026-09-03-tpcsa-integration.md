@@ -197,7 +197,7 @@ terminales sintéticos como el paper (§6.1: ataque con prob. 0.8, premio
 | 1 | 1,084,177 → 91,836 | 103.50 | 0.95 | 0.84 | 0.87 | 5.4 s |
 | 2 | 1,084,177 → 18,339 | 99.08 | 0.94 | 0.72 | 0.74 | 1.4 s |
 
-Paper (Tabla 1, hw20/20): P 0.95–0.97, R 0.72–0.84, arcR 0.76–0.87. Sidecar sobre seed 0: `Optimal`, 96.718, gap 0.0, 17.5 s. El C2 `agent` aparece como conector (11 hijos terminales) sin haber sido sembrado.
+Paper (Tabla 1, hw20/20): P 0.95–0.97, R 0.72–0.84, arcR 0.76–0.87. Sidecar: seed 0 `Optimal` 96.718 gap 0.0 en 17.5 s; seed 2 `Optimal` 99.080 gap 0.0 en 20.3 s; seed 1 (91,836 arcos) `Optimal` dentro de la tolerancia 0.5 % al límite de 600 s, gap 0.04 % (103.497 contra cota 103.406), pico 2.0 GB. En los tres el óptimo certificado es el árbol del greedy (3/3, como el paper). El C2 `agent` aparece como conector (11 hijos terminales) sin haber sido sembrado.
 
 **Corrida 2026-09-03, win10 `anomaly.json` (1,876,517 arcos, 136 procesos etiquetados, 33 arcos `start` etiquetados), n_false=20, k=2, etiquetas originales, árbol 1:**
 
