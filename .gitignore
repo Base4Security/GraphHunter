@@ -116,3 +116,7 @@ training/data/**/features/
 
 # Scratch probes written by audit subagents into test dirs — never committed.
 **/tests/zz_*.rs
+
+# Python bytecode from the sidecar — build output, never committed.
+__pycache__/
+*.pyc
