@@ -175,6 +175,21 @@ pub fn looks_like_fortigate(contents: &str) -> bool {
     if has_kv_marker {
         return true;
     }
+    // FortiOS *event* logs (SSL-VPN, system) carry no session IPs at all,
+    // so the `srcip`/`dstip` probe above misses them entirely and the file
+    // slid down to the generic `csv` fallback.
+    //
+    // `logid=` has no underscore; FortiWeb writes `log_id=`. Pairing it
+    // with a FortiOS-only companion field keeps this off both FortiWeb
+    // logs and unrelated syslog that merely mentions a log id.
+    let has_fortios_event = probe.contains("logid=")
+        && (probe.contains("remip=")
+            || probe.contains("devname=")
+            || probe.contains("tunneltype=")
+            || probe.contains("logdesc="));
+    if has_fortios_event {
+        return true;
+    }
     // CSV-header shape: first line has both `srcip` and `dstip` as
     // comma-separated headers. Pinning to BOTH keeps generic CSVs that
     // happen to mention `srcip` from sliding into this branch.
@@ -199,6 +214,15 @@ pub fn looks_like_fortigate(contents: &str) -> bool {
 /// * `srcip -[Triggered]-> attack` if an `attack` field is present (IPS event).
 fn parse_kv_line(line: &str) -> Vec<ParsedTriple> {
     let kv = extract_kv_pairs(line);
+    // SSL-VPN events carry no `srcip`/`dstip` at all — the remote peer is
+    // `remip` and the subject is `user`. Before this branch they fell out
+    // of the `srcip`/`dstip` guard below and produced ZERO triples with no
+    // error: a 670 MB VPN log ingested as an empty graph. Handle them
+    // first, since the firewall-session fields they lack are exactly what
+    // that guard tests for.
+    if let Some(vpn) = parse_vpn_line(&kv) {
+        return vpn;
+    }
     let srcip = match kv.get("srcip") {
         Some(v) if !v.is_empty() => v.clone(),
         _ => return Vec::new(),
@@ -283,6 +307,86 @@ fn parse_kv_line(line: &str) -> Vec<ParsedTriple> {
         triples.push((src, rel2, sig));
     }
     triples
+}
+
+/// FortiOS `action` verbs that mean the SSL-VPN authentication failed.
+const VPN_FAILURE_ACTIONS: &[&str] = &[
+    "ssl-login-fail",
+    "ssl-exit-error",
+    "tunnel-down",
+    "error",
+    "ssl-alert",
+];
+
+/// Parse an SSL-VPN event (`subtype="vpn"`), or `None` when the line is
+/// not one.
+///
+/// Emits, anchored on the remote peer:
+///
+/// * `remip -[Auth]-> User(user)` — who was tried from where;
+/// * `remip -[Connect]-> Host(dst_host)` — the internal host reached, on
+///   the events that name one.
+///
+/// Outcome travels as an `outcome` edge-metadata key (`success` /
+/// `failure`) derived from the FortiOS `action` verb, rather than as a
+/// separate relation type. That keeps every existing `Auth` query working
+/// while still letting a hunt separate 92 k `ssl-login-fail` attempts from
+/// the handful of real `tunnel-up` logins without knowing FortiOS verbs.
+///
+/// Records whose `user` is the `N/A` placeholder still emit nothing for
+/// the user edge: minting a `User("N/A")` node would give every anonymous
+/// alert a shared hub and wreck centrality on the whole graph.
+fn parse_vpn_line(kv: &HashMap<String, String>) -> Option<Vec<ParsedTriple>> {
+    let is_vpn = kv.get("subtype").map(|s| s == "vpn").unwrap_or(false);
+    let remip = kv.get("remip").filter(|v| !v.is_empty())?;
+    if !is_vpn {
+        return None;
+    }
+    // A VPN record that also carries firewall-session fields is better
+    // served by the main path, which knows about NAT and policies.
+    if kv.contains_key("srcip") && kv.contains_key("dstip") {
+        return None;
+    }
+
+    let timestamp = derive_timestamp(kv);
+    let mut edge_meta = collect_edge_metadata(kv);
+    for extra in ["tunneltype", "reason", "level", "logdesc", "group", "msg"] {
+        if let Some(v) = kv.get(extra).filter(|v| !v.is_empty() && *v != "N/A") {
+            edge_meta.insert(extra.to_string(), v.clone());
+        }
+    }
+    let action = kv.get("action").map(String::as_str).unwrap_or("");
+    let outcome = if VPN_FAILURE_ACTIONS.contains(&action) {
+        "failure"
+    } else {
+        "success"
+    };
+    edge_meta.insert("outcome".into(), outcome.into());
+
+    let mut triples = Vec::new();
+    let peer = Entity::new(remip, EntityType::IP);
+
+    if let Some(user) = kv.get("user").filter(|v| !v.is_empty() && *v != "N/A") {
+        let mut rel = Relation::new(remip, user, RelationType::Auth, timestamp);
+        rel.metadata = edge_meta.clone();
+        let mut user_node = Entity::new(user, EntityType::User);
+        if let Some(g) = kv.get("group").filter(|v| !v.is_empty() && *v != "N/A") {
+            user_node.metadata.insert("group".into(), g.clone());
+        }
+        triples.push((peer.clone(), rel, user_node));
+    }
+
+    if let Some(host) = kv.get("dst_host").filter(|v| !v.is_empty() && *v != "N/A") {
+        let mut rel = Relation::new(remip, host, RelationType::Connect, timestamp);
+        rel.metadata = edge_meta;
+        triples.push((peer, rel, Entity::new(host, EntityType::Host)));
+    }
+
+    // A VPN line we recognised but that named neither a user nor a host
+    // still belongs to this branch: returning `Some(vec![])` stops the
+    // caller falling through to the srcip/dstip path, which would only
+    // return empty anyway.
+    Some(triples)
 }
 
 /// Pull the configured edge-metadata fields off a parsed KV map.
@@ -546,6 +650,93 @@ mod tests {
         r#"srcip="10.0.0.5" dstip="10.0.0.10" dstport="80" "#,
         r#"action="close" severity="low" service="HTTP""#,
     );
+
+    // ── SSL-VPN events (no srcip/dstip) ─────────────────────────
+
+    const VPN_FAIL: &str = "date=2026-08-24 time=23:59:57 eventtime=1787626798373509651 tz=\"-0300\" logid=\"0101039426\" type=\"event\" subtype=\"vpn\" level=\"alert\" vd=\"root\" logdesc=\"SSL VPN login fail\" action=\"ssl-login-fail\" tunneltype=\"ssl-web\" tunnelid=0 remip=203.0.113.193 user=\"accounts\" group=\"N/A\" dst_host=\"N/A\" reason=\"sslvpn_login_permission_denied\" msg=\"SSL user failed to logged in\"";
+
+    const VPN_UP: &str = "date=2026-08-24 time=12:00:00 eventtime=1787626798373509651 logid=\"0101039947\" type=\"event\" subtype=\"vpn\" level=\"information\" vd=\"root\" logdesc=\"SSL VPN tunnel up\" action=\"tunnel-up\" tunneltype=\"ssl-tunnel\" remip=200.1.2.3 user=\"jdoe\" group=\"vpn-users\" dst_host=\"srv-files\" reason=\"N/A\" msg=\"SSL tunnel established\"";
+
+    /// The regression this branch exists for: before it, a VPN log line
+    /// produced ZERO triples and raised no error, so a 670 MB SSL-VPN
+    /// export ingested as an empty graph.
+    #[test]
+    fn vpn_line_emits_auth_edge_instead_of_nothing() {
+        let triples = FortiGateParser::new().parse(VPN_FAIL);
+        assert!(!triples.is_empty(), "VPN line produced no triples");
+        let (src, rel, dst) = &triples[0];
+        assert_eq!(src.id, "203.0.113.193");
+        assert_eq!(src.entity_type, EntityType::IP);
+        assert_eq!(rel.rel_type, RelationType::Auth);
+        assert_eq!(dst.id, "accounts");
+        assert_eq!(dst.entity_type, EntityType::User);
+    }
+
+    /// 92 k failures and 13 successes live in the same file; a hunt has to
+    /// separate them without knowing FortiOS action verbs.
+    #[test]
+    fn vpn_outcome_distinguishes_failure_from_success() {
+        let fail = FortiGateParser::new().parse(VPN_FAIL);
+        assert_eq!(
+            fail[0].1.metadata.get("outcome").map(String::as_str),
+            Some("failure")
+        );
+        let up = FortiGateParser::new().parse(VPN_UP);
+        assert_eq!(
+            up[0].1.metadata.get("outcome").map(String::as_str),
+            Some("success")
+        );
+    }
+
+    /// `user="N/A"` is an absence marker. A `User("N/A")` node would be a
+    /// hub every anonymous alert points at, distorting centrality.
+    #[test]
+    fn vpn_placeholder_user_and_host_are_not_entities() {
+        let anon = "date=2026-08-24 time=23:59:59 logid=\"0101039944\" type=\"event\" subtype=\"vpn\" action=\"ssl-alert\" tunneltype=\"ssl\" remip=203.0.113.193 user=\"N/A\" group=\"N/A\" dst_host=\"N/A\" reason=\"warning\"";
+        let triples = FortiGateParser::new().parse(anon);
+        assert!(
+            triples.is_empty(),
+            "placeholder values became entities: {:?}",
+            triples.iter().map(|(_, _, d)| &d.id).collect::<Vec<_>>()
+        );
+    }
+
+    /// A tunnel-up names an internal host as well as the user.
+    #[test]
+    fn vpn_tunnel_up_emits_user_and_host() {
+        let triples = FortiGateParser::new().parse(VPN_UP);
+        assert_eq!(triples.len(), 2);
+        assert_eq!(triples[1].2.id, "srv-files");
+        assert_eq!(triples[1].2.entity_type, EntityType::Host);
+        assert_eq!(triples[0].2.metadata.get("group").map(String::as_str), Some("vpn-users"));
+    }
+
+    /// Auto-detection must claim the VPN log; falling through to `csv`
+    /// is what routed a 670 MB file into the whole-file size guard.
+    #[test]
+    fn looks_like_fortigate_recognizes_vpn_event() {
+        assert!(looks_like_fortigate(VPN_FAIL));
+        assert!(looks_like_fortigate(VPN_UP));
+    }
+
+    /// FortiWeb's comma-KV uses `log_id=` (underscored) and must not be
+    /// claimed here — it has its own parser.
+    #[test]
+    fn looks_like_fortigate_rejects_fortiweb() {
+        let fweb = "v015xxxxdate=2026-08-01,time=22:34:07,log_id=20000008,device_id=FWBVMSTM00000001,type=attack,src=198.51.100.5,dst=10.0.9.10,http_host=\"x.com\"";
+        assert!(!looks_like_fortigate(fweb));
+    }
+
+    /// A firewall session that happens to be subtype=vpn still belongs to
+    /// the main path, which understands NAT and policies.
+    #[test]
+    fn vpn_subtype_with_session_ips_uses_the_firewall_path() {
+        let session = "date=2026-08-24 time=10:00:00 logid=\"0000000013\" type=\"traffic\" subtype=\"vpn\" remip=1.2.3.4 srcip=10.0.0.5 dstip=10.0.0.9 dstport=443 action=\"accept\"";
+        let triples = FortiGateParser::new().parse(session);
+        assert!(triples.iter().any(|(s, r, d)| s.id == "10.0.0.5"
+            && d.id == "10.0.0.9"
+            && r.rel_type == RelationType::Connect));
+    }
 
     #[test]
     fn looks_like_fortigate_recognizes_kv_line() {
