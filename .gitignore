@@ -120,3 +120,7 @@ training/data/**/features/
 # Python bytecode from the sidecar — build output, never committed.
 __pycache__/
 *.pyc
+
+# LaTeX build dir del libro: .minted y demás intermedios que las reglas
+# por extensión de arriba no alcanzan.
+docs/**/build/
