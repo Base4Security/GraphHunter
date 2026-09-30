@@ -146,6 +146,9 @@ fn phases(path: &str) {
                 );
             }
         }
+        if i == 0 {
+            journal_bytes(&events, chunk.len());
+        }
         let t = Instant::now();
         graph.insert_raw_events(events, Some("ds")).unwrap();
         let t_insert = t.elapsed();
@@ -202,6 +205,37 @@ fn phases(path: &str) {
     step("interner");
     drop(graph);
     step("rest");
+}
+
+/// Journal bytes for one batch, written to a temp dir (never the real
+/// journal). "unshared" gives every event a distinct source row — the
+/// on-disk shape before rows were shared — at a cost of a few bytes a line.
+fn journal_bytes(events: &[graph_hunter_core::RawIngestEvent], rows: usize) {
+    use graph_hunter_api::journal::{journal_batch_keyed, JournalStore};
+    let mut unshared = events.to_vec();
+    for (i, ev) in unshared.iter_mut().enumerate() {
+        if let Some(r) = ev.raw_line.as_mut() {
+            r.push_str(&format!(" {i}"));
+        }
+    }
+    for (name, evs) in [("shared", events), ("unshared", &unshared[..])] {
+        let dir = std::env::temp_dir().join(format!("gh-jbench-{}-{name}", std::process::id()));
+        let store = JournalStore::open(&dir).unwrap();
+        let (_, err) = journal_batch_keyed(Some(&store), "s", "file_stream", "ds", "csv", evs, &[], 0);
+        assert!(err.is_none());
+        let bytes = ["journal.jsonl", "journal.jsonl.1"]
+            .iter()
+            .filter_map(|f| std::fs::metadata(dir.join(f)).ok())
+            .map(|m| m.len())
+            .sum::<u64>();
+        println!(
+            "  journal {name:<9} {:>6} MB  {:>5} B/event  {:>5} B/row",
+            bytes >> 20,
+            bytes / evs.len() as u64,
+            bytes / rows as u64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(target_os = "windows")]
