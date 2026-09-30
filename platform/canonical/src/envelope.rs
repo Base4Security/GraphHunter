@@ -65,6 +65,13 @@ pub struct CanonicalEnvelope {
     /// `compute_hash` — identity stays keyed on `raw_payload` alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_source_row: Option<String>,
+    /// On-disk form only: "my `raw_source_row` is the one this many
+    /// envelopes back". The journal writes a source row once per row group
+    /// instead of once per event — an Auth0 row fans out to several events,
+    /// and the row was a third of each JSONL line. Readers never see it:
+    /// `JournalStore::read_all` resolves it back into `raw_source_row`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_source_back: Option<u32>,
     pub change_kind: ChangeKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_reason: Option<String>,
@@ -96,6 +103,7 @@ impl CanonicalEnvelope {
             canonical_hash,
             raw_payload,
             raw_source_row: None,
+            raw_source_back: None,
             change_kind: ChangeKind::Insert,
             skip_reason: None,
             provenance,

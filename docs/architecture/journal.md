@@ -108,6 +108,19 @@ resuelto). Este es el primitivo de reconstrucción: la comparación
 incremental-vs-rebuild que usará Fase C parte de aquí (`proposed`, no
 implementada todavía).
 
+**Forma en disco de la fila fuente (2026-09-30).** Una fila fuente suele
+producir varios eventos (en Auth0, ~2,6), y cada uno llevaba la fila
+entera en `raw_source_row`. Ahora el journal escribe la fila una vez por
+grupo: el primer sobre la trae y los siguientes eventos de la misma fila
+llevan `raw_source_back: 1` ("la fila está en el sobre anterior").
+`read_all` resuelve esas referencias, así que los lectores siguen viendo
+cada evento con su fila completa y `build_batch_envelopes` no cambia. Las
+líneas de un grupo se escriben como una unidad en `append_lines`, que
+solo rota entre unidades: una referencia nunca queda en un segmento
+distinto del de su fila, y la retención no puede dejarla huérfana. En un
+export de Auth0 esto baja el journal de ~4,5 KB a ~3,6 KB por fila; el
+resto es `raw_payload`, que define `canonical_hash` y no se toca.
+
 ## 3. El orden de 12 pasos y dónde encaja el journal
 
 El spec de la fase (§9) describe el pipeline de ingesta como una

@@ -246,6 +246,7 @@ impl JournalStore {
                 }
             }
         }
+        resolve_source_rows(&mut out);
         Ok(out)
     }
 
@@ -450,7 +451,8 @@ pub fn journal_batch(
     skipped_samples: &[(String, String)],
     now_ms: i64,
 ) -> std::io::Result<()> {
-    let lines: Vec<Vec<u8>> = build_batch_envelopes(
+    let cont = source_row_continuations(events);
+    let mut envs = build_batch_envelopes(
         source_id,
         source_kind,
         dataset_id,
@@ -458,11 +460,66 @@ pub fn journal_batch(
         events,
         skipped_samples,
         now_ms,
-    )
-    .iter()
-    .map(envelope_line)
-    .collect();
-    store.append_lines(&lines)
+    );
+    for (env, &c) in envs.iter_mut().zip(&cont) {
+        if c {
+            strip_source_row(env);
+        }
+    }
+    let lines: Vec<Vec<u8>> = envs.iter().map(envelope_line).collect();
+    store.append_lines(&group_lines(lines, &cont))
+}
+
+/// `cont[i]`: event `i` came from the same source row as event `i - 1`, so
+/// its journal line refers back instead of repeating the row. Parsers emit
+/// a row's events consecutively, which is all this relies on — a repeat that
+/// is not adjacent is simply written in full.
+fn source_row_continuations(events: &[RawIngestEvent]) -> Vec<bool> {
+    (0..events.len())
+        .map(|i| {
+            i > 0
+                && events[i].raw_line.is_some()
+                && events[i].raw_line == events[i - 1].raw_line
+        })
+        .collect()
+}
+
+/// Replace an envelope's source row with a pointer to the previous line.
+fn strip_source_row(env: &mut CanonicalEnvelope) {
+    env.raw_source_row = None;
+    env.raw_source_back = Some(1);
+}
+
+/// Concatenates each row group's lines into one element: `append_lines`
+/// only rotates between elements, so a back-reference never lands in a
+/// different segment than the line it resolves against — rotation then
+/// retention could otherwise orphan it. Lines past `cont` (skipped-sample
+/// envelopes) each stand alone.
+fn group_lines(lines: Vec<Vec<u8>>, cont: &[bool]) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(lines.len());
+    for (i, line) in lines.into_iter().enumerate() {
+        match out.last_mut() {
+            Some(prev) if cont.get(i).copied().unwrap_or(false) => prev.extend_from_slice(&line),
+            _ => out.push(line),
+        }
+    }
+    out
+}
+
+/// Inverse of the on-disk row sharing: fill every `raw_source_back`
+/// envelope's `raw_source_row` from the envelope it points at, so readers
+/// see each event with its full source row, as `build_batch_envelopes`
+/// produced it. A pointer that reaches before the segment start (only a
+/// hand-edited or truncated file) is left unresolved rather than guessed.
+fn resolve_source_rows(envs: &mut [CanonicalEnvelope]) {
+    for i in 0..envs.len() {
+        let Some(back) = envs[i].raw_source_back.take() else {
+            continue;
+        };
+        if let Some(j) = i.checked_sub(back as usize) {
+            envs[i].raw_source_row = envs[j].raw_source_row.clone();
+        }
+    }
 }
 
 /// Events per journaling sub-chunk: bounds the envelopes + serialized lines
@@ -499,17 +556,25 @@ pub fn journal_batch_keyed(
     use rayon::prelude::*;
     let mut keys = Vec::with_capacity(events.len());
     let mut write_err: Option<std::io::Error> = None;
-    for chunk in events.chunks(JOURNAL_CHUNK_EVENTS) {
+    let cont = source_row_continuations(events);
+    let mut start = 0;
+    while start < events.len() {
+        // Cut at a row boundary so a row group never spans two
+        // `append_lines` calls (see `group_lines`).
+        let mut end = (start + JOURNAL_CHUNK_EVENTS).min(events.len());
+        while end < events.len() && cont[end] {
+            end += 1;
+        }
         let writing = store.is_some() && write_err.is_none();
-        let built: Vec<(u64, Vec<u8>)> = chunk
-            .par_iter()
-            .map(|ev| {
-                let env = build_batch_envelopes(
+        let built: Vec<(u64, Vec<u8>)> = (start..end)
+            .into_par_iter()
+            .map(|i| {
+                let mut env = build_batch_envelopes(
                     source_id,
                     source_kind,
                     dataset_id,
                     parser_name,
-                    std::slice::from_ref(ev),
+                    std::slice::from_ref(&events[i]),
                     &[],
                     now_ms,
                 )
@@ -517,6 +582,9 @@ pub fn journal_batch_keyed(
                 .expect("one event yields one envelope");
                 let id = env.native_id.as_deref().unwrap_or(&env.canonical_hash);
                 let key = graph_hunter_core::graph::GraphHunter::event_key(id);
+                if cont[i] {
+                    strip_source_row(&mut env);
+                }
                 let line = if writing { envelope_line(&env) } else { Vec::new() };
                 (key, line)
             })
@@ -529,10 +597,11 @@ pub fn journal_batch_keyed(
             }
         }
         if let (true, Some(s)) = (writing, store) {
-            if let Err(e) = s.append_lines(&lines) {
+            if let Err(e) = s.append_lines(&group_lines(lines, &cont[start..end])) {
                 write_err = Some(e);
             }
         }
+        start = end;
     }
     if let (Some(s), None) = (store, &write_err) {
         let lines: Vec<Vec<u8>> = build_batch_envelopes(
@@ -2592,6 +2661,102 @@ mod tests {
                 assert!(detail.contains("failed to parse"), "detail: {detail}");
             }
             other => panic!("expected Diff surfacing the parse failure, got {:?}", other),
+        }
+    }
+
+    // ── source-row sharing on disk ───────────────────────────────────
+
+    /// Events 0..n share `rows[k]` for the k-th group; `dst_id` makes each
+    /// event distinct so identity/multiplicity is untouched.
+    fn fanout(rows: &[&str], per_row: usize) -> Vec<RawIngestEvent> {
+        let mut out = Vec::new();
+        for (k, row) in rows.iter().enumerate() {
+            for j in 0..per_row {
+                let mut ev = sample_event(100);
+                ev.dst_id = format!("host-{k}-{j}");
+                ev.raw_line = Some((*row).to_string());
+                out.push(ev);
+            }
+        }
+        out
+    }
+
+    /// A row that fans out to several events is written once, and every
+    /// event reads back with its full source row — same as before sharing.
+    #[test]
+    fn source_row_is_written_once_per_row_and_read_back_on_every_event() {
+        let _guard = lock_env();
+        unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL_MAX_BYTES") };
+        let rows = ["{\"row\":\"alpha-unmapped\"}", "{\"row\":\"beta-unmapped\"}"];
+        let events = fanout(&rows, 3);
+        let dir = tempfile::tempdir().unwrap();
+        let store = JournalStore::open(dir.path()).unwrap();
+        journal_batch(&store, "s", "la", "ds", "p", &events, &[], 1000).unwrap();
+
+        let on_disk = std::fs::read_to_string(dir.path().join(JOURNAL_FILE)).unwrap();
+        assert_eq!(on_disk.matches("alpha-unmapped").count(), 1);
+        assert_eq!(on_disk.matches("beta-unmapped").count(), 1);
+
+        let all = store.read_all().unwrap();
+        assert_eq!(all.len(), 6);
+        for (i, env) in all.iter().enumerate() {
+            let want = if i < 3 { rows[0] } else { rows[1] };
+            assert_eq!(env.raw_source_row.as_deref(), Some(want), "event {i}");
+            assert_eq!(env.raw_source_back, None, "resolved on read");
+        }
+        // Identity is untouched: six distinct events, six distinct hashes.
+        let hashes: HashSet<_> = all.iter().map(|e| e.canonical_hash.clone()).collect();
+        assert_eq!(hashes.len(), 6);
+    }
+
+    /// The hot path and the plain path must journal byte-identical files.
+    #[test]
+    fn keyed_path_writes_the_same_bytes_as_journal_batch() {
+        let _guard = lock_env();
+        unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL_MAX_BYTES") };
+        let rows: Vec<String> = (0..3000).map(|i| format!("{{\"row\":{i}}}")).collect();
+        let row_refs: Vec<&str> = rows.iter().map(String::as_str).collect();
+        // 3 events per row spans several JOURNAL_CHUNK_EVENTS sub-chunks.
+        let events = fanout(&row_refs, 3);
+        let skipped = vec![("bad row".to_string(), "unparseable".to_string())];
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let sa = JournalStore::open(a.path()).unwrap();
+        let sb = JournalStore::open(b.path()).unwrap();
+        journal_batch(&sa, "s", "la", "ds", "p", &events, &skipped, 1000).unwrap();
+        let (keys, err) =
+            journal_batch_keyed(Some(&sb), "s", "la", "ds", "p", &events, &skipped, 1000);
+        assert!(err.is_none());
+        assert_eq!(keys.len(), events.len());
+        assert_eq!(
+            std::fs::read(a.path().join(JOURNAL_FILE)).unwrap(),
+            std::fs::read(b.path().join(JOURNAL_FILE)).unwrap()
+        );
+    }
+
+    /// Rotation never separates a back-reference from its row: each segment
+    /// resolves on its own, so retention pruning `.1` can't orphan a line.
+    #[test]
+    fn rotation_keeps_each_row_group_in_one_segment() {
+        let _guard = lock_env();
+        unsafe { std::env::set_var("GRAPHHUNTER_JOURNAL_MAX_BYTES", "1048576") };
+        let big: Vec<String> = (0..12)
+            .map(|i| format!("{{\"row\":{i},\"pad\":\"{}\"}}", "x".repeat(200_000)))
+            .collect();
+        let refs: Vec<&str> = big.iter().map(String::as_str).collect();
+        let events = fanout(&refs, 4);
+        let dir = tempfile::tempdir().unwrap();
+        let store = JournalStore::open(dir.path()).unwrap();
+        journal_batch(&store, "s", "la", "ds", "p", &events, &[], 1000).unwrap();
+        unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL_MAX_BYTES") };
+
+        assert!(dir.path().join(JOURNAL_ROTATED_FILE).exists(), "must have rotated");
+        for seg in [JOURNAL_ROTATED_FILE, JOURNAL_FILE] {
+            let envs = JournalStore::read_segment(&dir.path().join(seg)).unwrap();
+            assert!(!envs.is_empty());
+            assert_eq!(envs.len() % 4, 0, "{seg}: a row group was split");
+            for env in &envs {
+                assert!(env.raw_source_row.is_some(), "{seg}: unresolved back-ref");
+            }
         }
     }
 }
