@@ -270,6 +270,14 @@ pub fn suggest_entity_type_with_source(
     field_name: &str,
     sample_values: &[String],
 ) -> Option<Suggestion> {
+    // A user-agent string describes a client, not an identity. The name
+    // tier matched it as a User ("user_agent" contains "user"), so an Auth0
+    // export minted one bogus User per UA string plus an edge per row to
+    // it — a fifth of the graph. No suggestion leaves it as edge metadata,
+    // where it stays filterable.
+    if is_user_agent_field(field_name) {
+        return None;
+    }
     if let Some(et) = suggest_by_name(field_name) {
         return Some(Suggestion {
             entity_type: et,
@@ -319,6 +327,17 @@ fn looks_like_categorical_label(samples: &[String]) -> bool {
     // Soft ratio: distinct/total ≤ 0.25 also qualifies (e.g. 5 labels across
     // 30 rows).
     (distinct as f32) / (non_empty.len() as f32) <= 0.25
+}
+
+/// `user_agent`, `userAgent`, `User-Agent`, `http_user_agent`,
+/// `cs(User-Agent)`: the name with separators removed contains `useragent`.
+fn is_user_agent_field(field_name: &str) -> bool {
+    let squashed: String = field_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    squashed.contains("useragent")
 }
 
 fn suggest_by_name(field_name: &str) -> Option<EntityType> {
@@ -848,6 +867,11 @@ impl ConfigurableParser {
         // Canonical triples come from the STRIPPED event — this is where
         // Ignore/Node overrides actually take effect.
         let mut triples = GenericParser::parse_event(stripped);
+        // GenericParser's last-resort fallback: an event with a single
+        // recognizable entity becomes that entity's self-loop, so it leaves
+        // a trace. Only meaningful if nothing else below links the entity.
+        let canonical_is_fallback_loop =
+            triples.len() == 1 && triples[0].0.id == triples[0].2.id;
 
         // But for the user-override loop below, iterate the ORIGINAL event's
         // keys. Otherwise fields we just stripped would be invisible to their
@@ -985,6 +1009,15 @@ impl ConfigurableParser {
                     }
                 }
             }
+        }
+
+        // The fallback self-loop is redundant once promoted fields linked
+        // the anchor to something: the entity is in the graph through those
+        // edges, and the event's metadata is stamped onto them below. On an
+        // Auth0 export it was one `IP -[Connect]-> IP` per row, a fifth of
+        // all edges. Events with nothing else keep it (AD-CAP rejections).
+        if canonical_is_fallback_loop && triples.len() > 1 {
+            triples.remove(0);
         }
 
         // Stamp Metadata-role fields onto the relations. Each edge
@@ -1247,5 +1280,78 @@ mod raw_line_tests {
                 "canonical timestamp fields must not duplicate onto edge metadata"
             );
         }
+    }
+
+    #[test]
+    fn user_agent_columns_are_not_users() {
+        let ua = vec!["Linux; U; Android 15; SM-A256E".to_string(); 6];
+        for name in ["user_agent", "userAgent", "User-Agent", "cs(User-Agent)", "http_user_agent"] {
+            assert_eq!(suggest_entity_type(name, &ua), None, "{name}");
+        }
+        assert_eq!(
+            suggest_entity_type("user_name", &["ana".to_string()]),
+            Some(EntityType::User)
+        );
+    }
+
+    fn node(name: &str, et: &str) -> FieldMapping {
+        FieldMapping {
+            raw_name: name.to_string(),
+            role: FieldRole::Node,
+            entity_type: Some(et.to_string()),
+            timestamp_format: None,
+            locale: None,
+        }
+    }
+
+    fn meta_field(name: &str) -> FieldMapping {
+        FieldMapping {
+            raw_name: name.to_string(),
+            role: FieldRole::Metadata,
+            entity_type: None,
+            timestamp_format: None,
+            locale: None,
+        }
+    }
+
+    /// Auth0 shape: the IP is the only canonical entity, so GenericParser
+    /// falls back to an `IP -> IP` self-loop; the promoted user columns then
+    /// link the IP for real. The self-loop must go, and the event's metadata
+    /// must still reach the surviving edges.
+    #[test]
+    fn fallback_self_loop_dropped_when_promoted_fields_link_the_anchor() {
+        let data = r#"[{
+            "ip": "198.51.100.186",
+            "user_id": "auth0|000000000000000000000001",
+            "user_name": "usuario.cuatro@example.com",
+            "type": "sepft"
+        }]"#;
+        let parser = ConfigurableParser::new(FieldConfig {
+            mappings: vec![
+                node("ip", "IP"),
+                node("user_id", "User"),
+                node("user_name", "User"),
+                meta_field("type"),
+            ],
+        });
+        let triples = parser.parse(data);
+        assert_eq!(triples.len(), 2, "{:?}", triples.iter().map(|t| (&t.0.id, &t.2.id)).collect::<Vec<_>>());
+        for (src, rel, dst) in &triples {
+            assert_ne!(src.id, dst.id, "no self-loop alongside real edges");
+            assert_eq!(rel.metadata.get("type").map(String::as_str), Some("sepft"));
+        }
+    }
+
+    /// An event whose only entity is the IP keeps its self-loop — without it
+    /// the event leaves no trace (the AD-CAP `realm_disabled` rejections).
+    #[test]
+    fn fallback_self_loop_kept_when_it_is_the_only_edge() {
+        let data = r#"[{"ip": "198.51.100.186", "type": "f"}]"#;
+        let parser = ConfigurableParser::new(FieldConfig {
+            mappings: vec![node("ip", "IP"), meta_field("type")],
+        });
+        let triples = parser.parse(data);
+        assert_eq!(triples.len(), 1);
+        assert_eq!(triples[0].0.id, triples[0].2.id);
     }
 }
