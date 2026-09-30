@@ -35,8 +35,25 @@ impl CsvParser {
     /// Strips the UTF-8 byte-order mark (`\u{FEFF}`) from the start of `s`
     /// if present. A leading BOM corrupts the first header name, which then
     /// fails canonical matching and tanks the whole file silently.
+    ///
+    /// Also strips a literal two-character `\n` / `\r` escape (backslash + letter)
+    /// ahead of the BOM or header. An Auth0 export re-sorted by a script arrived as
+    /// `\n` + BOM + `timestamp,...`: the first column became `\n\u{feff}timestamp`,
+    /// and 2.2 GB of rows lost their event time without a single error. A real
+    /// header cell never starts with a backslash escape, so this is safe.
     fn strip_bom(s: &str) -> &str {
-        s.strip_prefix('\u{feff}').unwrap_or(s)
+        let mut s = s;
+        loop {
+            let next = s
+                .strip_prefix('\u{feff}')
+                .or_else(|| s.strip_prefix("\\r\\n"))
+                .or_else(|| s.strip_prefix("\\n"))
+                .or_else(|| s.strip_prefix("\\r"));
+            match next {
+                Some(rest) => s = rest,
+                None => return s,
+            }
+        }
     }
 
     /// Splits a single logical CSV line (already joined across quoted
@@ -507,6 +524,16 @@ mod tests {
         assert_eq!(events[0]["city"], "rosario");
         let (_, stats) = CsvParser.parse_with_stats(data);
         assert!(stats.skip_reasons.get("double_encoded_row").is_none());
+    }
+
+    /// A re-sorted Auth0 export arrived as literal `\n` + BOM + header. The
+    /// first column must still be `timestamp`, or every row loses its time.
+    #[test]
+    fn literal_newline_escape_and_bom_before_header_are_stripped() {
+        let data = "\\n\u{feff}timestamp,user\n2026-08-01T00:00:00Z,ana\n";
+        let events = CsvParser::sample_events(data, 10);
+        assert_eq!(events[0]["timestamp"], "2026-08-01T00:00:00Z");
+        assert_eq!(events[0]["user"], "ana");
     }
 
     /// JSON-object cells expand on ordinary (single-encoded) CSVs too —

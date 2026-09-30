@@ -1746,7 +1746,8 @@ impl GraphHunterApi {
                             let mut total_new_entities = 0usize;
                             let mut total_new_relations = 0usize;
                             let mut lines_in_batch = 0usize;
-                            let mut batch_start = 0usize;
+                            // Set past the header record below, once known.
+                            let mut batch_start: usize;
                             let mut stopped_early = false;
                             // Baseline for the self-growth half of the OOM
                             // guard: only growth *since this ingest started*
@@ -1762,27 +1763,37 @@ impl GraphHunterApi {
 
                             // Column header of a headed format (CSV/TSV),
                             // taken from the first record and repeated into
-                            // every later batch. Batch 1 already contains it
-                            // verbatim, so only batches starting past byte 0
-                            // need the copy.
+                            // every batch — batch 1 included, which is why
+                            // the scan below starts AFTER the header record.
                             //
-                            // Without this, batch 2..N hands the parser a
+                            // Without this, a batch hands the parser a
                             // headerless block: it takes the first *data* row
                             // as the column names and every subsequent row
                             // maps onto the wrong fields. Nothing errors —
                             // the ingest just lands as near-zero triples,
                             // which is the failure mode that is hardest to
-                            // notice on a multi-GB file.
-                            let table_header: Option<String> = if is_headed {
+                            // notice on a multi-GB file. Batch 1 used to rely
+                            // on carrying the header verbatim, but it is then
+                            // split across rayon workers and only the first
+                            // sub-chunk saw it: on a 1M-row Auth0 CSV the
+                            // first batch yielded 19k events instead of 230k.
+                            let (table_header, header_end): (Option<String>, usize) = if is_headed {
                                 let mut hs = crate::record_scan::RecordScanner::new(stream_mode);
-                                hs.next_record_end(raw, 0).map(|end| {
-                                    String::from_utf8_lossy(&raw[..end])
-                                        .trim_end_matches('\r')
-                                        .to_string()
-                                })
+                                match hs.next_record_end(raw, 0) {
+                                    Some(end) => (
+                                        Some(
+                                            String::from_utf8_lossy(&raw[..end])
+                                                .trim_end_matches('\r')
+                                                .to_string(),
+                                        ),
+                                        end + 1,
+                                    ),
+                                    None => (None, 0),
+                                }
                             } else {
-                                None
+                                (None, 0)
                             };
+                            batch_start = header_end;
 
                             // Record boundaries honour the format's stream
                             // mode: for `Quoted` a newline inside a quoted
@@ -1793,7 +1804,7 @@ impl GraphHunterApi {
                                 crate::record_scan::RecordScanner::new(stream_mode);
 
                             let mut total_lines = 0usize;
-                            let mut search_offset = 0usize;
+                            let mut search_offset = header_end;
                             while let Some(pos) = scanner.next_record_end(raw, search_offset) {
                                 search_offset = pos + 1;
 
