@@ -103,6 +103,9 @@ rayon = "1"
 tokio = { version = "1", features = ["test-util"] }
 jsonschema = "0.18"
 criterion = "0.5"
+# `ingest_bench` runs under the same allocator as the desktop binary, so
+# its memory numbers match what the app actually commits.
+mimalloc = { version = "0.1", default-features = false }
 
 [[bench]]
 name = "batch_csh_cold_vs_warm"

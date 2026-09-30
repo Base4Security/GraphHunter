@@ -1370,6 +1370,7 @@ dependencies = [
  "md5",
  "memchr",
  "memmap2",
+ "mimalloc",
  "parking_lot",
  "pcap-parser",
  "rand 0.8.6",
