@@ -95,7 +95,7 @@ const TAG_DEAD: u8 = 253;
 pub struct GraphHunter {
     /// String interner: stores each unique entity ID once.
     pub interner: StringInterner,
-    pub entities: HashMap<StrId, Entity>,
+    pub entities: HashMap<StrId, Box<Entity>>,
     /// SoA hot-path index: `entity_type_tags[sid.index()]` holds the u8
     /// tag of the entity's type, or `TAG_DEAD` when the slot is empty
     /// (never populated, or removed). Kept in lockstep with `entities`.
@@ -462,7 +462,7 @@ impl GraphHunter {
             .or_default()
             .insert(sid);
         self.set_entity_type_tag(sid, &entity.entity_type);
-        self.entities.insert(sid, entity);
+        self.entities.insert(sid, Box::new(entity));
         self.reverse_adj.entry(sid).or_default();
         self.bump_mutation_version();
         Ok(())
@@ -752,13 +752,13 @@ impl GraphHunter {
     /// Retrieves an entity by its ID.
     pub fn get_entity(&self, id: &str) -> Option<&Entity> {
         let sid = self.interner.get(id)?;
-        self.entities.get(&sid)
+        self.entities.get(&sid).map(|e| &**e)
     }
 
     /// Retrieves a mutable reference to an entity by its ID.
     pub fn get_entity_mut(&mut self, id: &str) -> Option<&mut Entity> {
         let sid = self.interner.get(id)?;
-        self.entities.get_mut(&sid)
+        self.entities.get_mut(&sid).map(|e| &mut **e)
     }
 
     /// Retrieves all outgoing relations from a given entity (materialized).
@@ -2863,7 +2863,7 @@ impl GraphHunter {
             } else {
                 let et = src.entity_type.clone();
                 self.set_entity_type_tag(src_sid, &et);
-                self.entities.insert(src_sid, src);
+                self.entities.insert(src_sid, Box::new(src));
                 self.type_index.entry(et).or_default().insert(src_sid);
                 self.reverse_adj.entry(src_sid).or_default();
                 new_entities += 1;
@@ -2879,7 +2879,7 @@ impl GraphHunter {
             } else {
                 let et = dst.entity_type.clone();
                 self.set_entity_type_tag(dst_sid, &et);
-                self.entities.insert(dst_sid, dst);
+                self.entities.insert(dst_sid, Box::new(dst));
                 self.type_index.entry(et).or_default().insert(dst_sid);
                 self.reverse_adj.entry(dst_sid).or_default();
                 new_entities += 1;
@@ -3034,7 +3034,7 @@ impl GraphHunter {
 
     /// Exports the graph as a snapshot for serialization.
     pub fn to_snapshot(&self) -> (Vec<Entity>, Vec<Relation>) {
-        let entities: Vec<Entity> = self.entities.values().cloned().collect();
+        let entities: Vec<Entity> = self.entities.values().map(|e| (**e).clone()).collect();
         let mut relations: Vec<Relation> = Vec::new();
         self.streaming.for_each_edge(|_src, edge| {
             // SAFETY: layout-identical with CompactRelation.
@@ -3487,7 +3487,7 @@ impl GraphHunter {
             } else {
                 let et = src.entity_type.clone();
                 self.set_entity_type_tag(src_sid, &et);
-                self.entities.insert(src_sid, src);
+                self.entities.insert(src_sid, Box::new(src));
                 self.type_index.entry(et).or_default().insert(src_sid);
                 self.reverse_adj.entry(src_sid).or_default();
                 new_entities += 1;
@@ -3499,7 +3499,7 @@ impl GraphHunter {
             } else {
                 let et = dst.entity_type.clone();
                 self.set_entity_type_tag(dst_sid, &et);
-                self.entities.insert(dst_sid, dst);
+                self.entities.insert(dst_sid, Box::new(dst));
                 self.type_index.entry(et).or_default().insert(dst_sid);
                 self.reverse_adj.entry(dst_sid).or_default();
                 new_entities += 1;
@@ -3618,7 +3618,7 @@ impl GraphHunter {
             } else {
                 let et = src.entity_type.clone();
                 self.set_entity_type_tag(src_sid, &et);
-                self.entities.insert(src_sid, src);
+                self.entities.insert(src_sid, Box::new(src));
                 self.type_index.entry(et).or_default().insert(src_sid);
                 self.reverse_adj.entry(src_sid).or_default();
                 new_entities += 1;
@@ -3630,7 +3630,7 @@ impl GraphHunter {
             } else {
                 let et = dst.entity_type.clone();
                 self.set_entity_type_tag(dst_sid, &et);
-                self.entities.insert(dst_sid, dst);
+                self.entities.insert(dst_sid, Box::new(dst));
                 self.type_index.entry(et).or_default().insert(dst_sid);
                 self.reverse_adj.entry(dst_sid).or_default();
                 new_entities += 1;
@@ -3706,7 +3706,7 @@ impl GraphHunter {
                     entity.dataset_id = Some(Arc::clone(id));
                 }
                 self.set_entity_type_tag(src_sid, &src_type);
-                self.entities.insert(src_sid, entity);
+                self.entities.insert(src_sid, Box::new(entity));
                 self.type_index.entry(src_type).or_default().insert(src_sid);
                 self.reverse_adj.entry(src_sid).or_default();
                 new_entities += 1;
@@ -3722,7 +3722,7 @@ impl GraphHunter {
                     entity.dataset_id = Some(Arc::clone(id));
                 }
                 self.set_entity_type_tag(dst_sid, &dst_type);
-                self.entities.insert(dst_sid, entity);
+                self.entities.insert(dst_sid, Box::new(entity));
                 self.type_index.entry(dst_type).or_default().insert(dst_sid);
                 self.reverse_adj.entry(dst_sid).or_default();
                 new_entities += 1;

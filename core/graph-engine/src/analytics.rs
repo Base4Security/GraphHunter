@@ -2397,6 +2397,7 @@ impl GraphHunter {
         let candidates: Vec<&crate::entity::Entity> = self
             .entities
             .values()
+            .map(|e| &**e)
             .filter(|e| node_class.is_none_or(|c| format!("{}", e.entity_type) == c))
             .collect();
         if candidates.len() < 2 {

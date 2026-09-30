@@ -341,7 +341,7 @@ impl GraphHunterApi {
                         json_progress("entities", i + 1, entity_count),
                     );
                 }
-                entity
+                &**entity
             }),
         )
         .map_err(|e| ApiError::Io(e.to_string()))?;
