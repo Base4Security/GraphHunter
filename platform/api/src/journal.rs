@@ -170,6 +170,40 @@ impl JournalStore {
         Ok(())
     }
 
+    /// Append pre-serialized JSONL lines (each ending in `\n`) under ONE
+    /// lock and ONE open, with the same rotate-before-write rule `append`
+    /// applies per line: whenever the active file has reached the cap, it
+    /// rotates before the next line is written.
+    ///
+    /// `append` opens, stats and closes the file per envelope. A multi-GB
+    /// CSV journals tens of millions of envelopes, and that per-line
+    /// open/close was most of the ingest's wall time.
+    pub fn append_lines(&self, lines: &[Vec<u8>]) -> std::io::Result<()> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+        let cap = journal_max_bytes();
+        let _guard = ROTATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        let open = |p: &Path| -> std::io::Result<std::io::BufWriter<File>> {
+            let f = OpenOptions::new().create(true).append(true).open(p)?;
+            Ok(std::io::BufWriter::with_capacity(1 << 20, f))
+        };
+        let mut w = open(&self.path)?;
+        for line in lines {
+            if size >= cap {
+                w.flush()?;
+                drop(w);
+                self.rotate()?;
+                w = open(&self.path)?;
+                size = 0;
+            }
+            w.write_all(line)?;
+            size += line.len() as u64;
+        }
+        w.flush()
+    }
+
     /// Read every JSONL record from one segment file in append order.
     /// Missing file → empty. Shared by `read_all` across the rotated +
     /// active segments.
@@ -416,7 +450,7 @@ pub fn journal_batch(
     skipped_samples: &[(String, String)],
     now_ms: i64,
 ) -> std::io::Result<()> {
-    for env in build_batch_envelopes(
+    let lines: Vec<Vec<u8>> = build_batch_envelopes(
         source_id,
         source_kind,
         dataset_id,
@@ -424,10 +458,107 @@ pub fn journal_batch(
         events,
         skipped_samples,
         now_ms,
-    ) {
-        store.append(&env)?;
+    )
+    .iter()
+    .map(envelope_line)
+    .collect();
+    store.append_lines(&lines)
+}
+
+/// Events per journaling sub-chunk: bounds the envelopes + serialized lines
+/// alive at once (~1.5 KB each) while leaving each rayon task enough work.
+const JOURNAL_CHUNK_EVENTS: usize = 8192;
+
+/// [`journal_batch`] for the hot ingest path, returning each event's
+/// idempotency key.
+///
+/// Writes the same envelopes, in the same order (inserts, then skipped
+/// samples), as `journal_batch`. The difference is the cost: envelopes are
+/// built and serialized in parallel a sub-chunk at a time, and each
+/// sub-chunk is written with one open instead of one per envelope.
+/// `keys[i]` is `GraphHunter::event_key` of event `i`'s event_id — exactly
+/// what `apply_batch_idempotent` would dedup that event on — so the caller
+/// can hand `events` + `keys` to `insert_raw_events_idempotent` and skip
+/// the JSON round-trip back out of the envelope.
+///
+/// `store: None` computes the keys without writing (journal dir
+/// unavailable). A write failure stops further writes but not the keys,
+/// and is returned alongside them: the journal is best-effort, the graph
+/// insert is not.
+#[allow(clippy::too_many_arguments)]
+pub fn journal_batch_keyed(
+    store: Option<&JournalStore>,
+    source_id: &str,
+    source_kind: &str,
+    dataset_id: &str,
+    parser_name: &str,
+    events: &[RawIngestEvent],
+    skipped_samples: &[(String, String)],
+    now_ms: i64,
+) -> (Vec<u64>, Option<std::io::Error>) {
+    use rayon::prelude::*;
+    let mut keys = Vec::with_capacity(events.len());
+    let mut write_err: Option<std::io::Error> = None;
+    for chunk in events.chunks(JOURNAL_CHUNK_EVENTS) {
+        let writing = store.is_some() && write_err.is_none();
+        let built: Vec<(u64, Vec<u8>)> = chunk
+            .par_iter()
+            .map(|ev| {
+                let env = build_batch_envelopes(
+                    source_id,
+                    source_kind,
+                    dataset_id,
+                    parser_name,
+                    std::slice::from_ref(ev),
+                    &[],
+                    now_ms,
+                )
+                .pop()
+                .expect("one event yields one envelope");
+                let id = env.native_id.as_deref().unwrap_or(&env.canonical_hash);
+                let key = graph_hunter_core::graph::GraphHunter::event_key(id);
+                let line = if writing { envelope_line(&env) } else { Vec::new() };
+                (key, line)
+            })
+            .collect();
+        let mut lines = Vec::with_capacity(if writing { built.len() } else { 0 });
+        for (key, line) in built {
+            keys.push(key);
+            if writing {
+                lines.push(line);
+            }
+        }
+        if let (true, Some(s)) = (writing, store) {
+            if let Err(e) = s.append_lines(&lines) {
+                write_err = Some(e);
+            }
+        }
     }
-    Ok(())
+    if let (Some(s), None) = (store, &write_err) {
+        let lines: Vec<Vec<u8>> = build_batch_envelopes(
+            source_id,
+            source_kind,
+            dataset_id,
+            parser_name,
+            &[],
+            skipped_samples,
+            now_ms,
+        )
+        .iter()
+        .map(envelope_line)
+        .collect();
+        if let Err(e) = s.append_lines(&lines) {
+            write_err = Some(e);
+        }
+    }
+    (keys, write_err)
+}
+
+/// One envelope as a JSONL line, byte-identical to what `append` writes.
+fn envelope_line(env: &CanonicalEnvelope) -> Vec<u8> {
+    let mut line = serde_json::to_vec(env).unwrap_or_default();
+    line.push(b'\n');
+    line
 }
 
 /// `GRAPHHUNTER_GRAPHDELTA`: apply journal envelopes to the graph idempotently

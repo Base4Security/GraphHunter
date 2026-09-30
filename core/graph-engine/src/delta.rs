@@ -111,4 +111,34 @@ mod tests {
             .unwrap();
         assert_eq!(g.relation_count(), 2); // multiplicity preserved
     }
+
+    /// The batch path must dedup exactly like per-event `apply_delta`:
+    /// across calls (crash replay), within one batch, and against ids that
+    /// `apply_delta` already recorded — both paths share one key space.
+    #[test]
+    fn batch_idempotent_insert_matches_apply_delta() {
+        let key = GraphHunter::event_key;
+        let mut g = GraphHunter::new();
+        let batch = vec![ev("u", "h", 1), ev("u", "h", 2), ev("u", "h", 1)];
+        let keys = [key("a"), key("b"), key("a")]; // "a" repeats in-batch
+        let (_, r) = g
+            .insert_raw_events_idempotent(batch.clone(), &keys, Some("ds"))
+            .unwrap();
+        assert_eq!(r, 2, "in-batch duplicate collapses");
+        let (_, r) = g
+            .insert_raw_events_idempotent(batch, &keys, Some("ds"))
+            .unwrap();
+        assert_eq!(r, 0, "replaying the batch adds nothing");
+        let out = g
+            .apply_delta(&GraphDelta::new(ev("u", "h", 2), "b".into(), None))
+            .unwrap();
+        assert!(!out.applied, "apply_delta sees ids the batch path recorded");
+        g.apply_delta(&GraphDelta::new(ev("u", "h", 3), "c".into(), None))
+            .unwrap();
+        let (_, r) = g
+            .insert_raw_events_idempotent(vec![ev("u", "h", 3)], &[key("c")], None)
+            .unwrap();
+        assert_eq!(r, 0, "the batch path sees ids apply_delta recorded");
+        assert_eq!(g.relation_count(), 3);
+    }
 }

@@ -3783,6 +3783,43 @@ impl GraphHunter {
         })
     }
 
+    /// Batch form of [`Self::apply_delta`]: `keys[i]` is the
+    /// [`Self::event_key`] of `events[i]`'s event_id. Events whose key was
+    /// already applied — earlier, or earlier in this same batch — are
+    /// dropped; the survivors go through ONE `insert_raw_events` call.
+    ///
+    /// Same outcome as calling `apply_delta` per event, without its
+    /// per-event cost (a clone, a one-element `Vec`, a dataset-tag lookup
+    /// and a clock read each), which dominated multi-million-row ingests.
+    /// Keys are recorded only after the insert succeeds, so a spill failure
+    /// leaves the batch replayable instead of marked applied.
+    pub fn insert_raw_events_idempotent(
+        &mut self,
+        events: Vec<crate::parser::RawIngestEvent>,
+        keys: &[u64],
+        dataset_id: Option<&str>,
+    ) -> Result<(usize, usize), GraphError> {
+        debug_assert_eq!(events.len(), keys.len());
+        let mut batch_keys: HashSet<u64> = HashSet::with_capacity(keys.len());
+        let mut fresh = Vec::with_capacity(events.len());
+        for (ev, &key) in events.into_iter().zip(keys) {
+            if !self.applied_event_ids.contains(&key) && batch_keys.insert(key) {
+                fresh.push(ev);
+            }
+        }
+        let counts = self.insert_raw_events(fresh, dataset_id)?;
+        self.applied_event_ids.extend(batch_keys);
+        Ok(counts)
+    }
+
+    /// The `applied_event_ids` key for an event_id — what
+    /// [`Self::apply_delta`] dedups on. Public so batch callers can hash
+    /// ids off the graph lock and pass them to
+    /// [`Self::insert_raw_events_idempotent`].
+    pub fn event_key(id: &str) -> u64 {
+        Self::hash_event_id(id)
+    }
+
     /// Hashes an `event_id` string to a compact 64-bit key for the
     /// `applied_event_ids` set used by [`Self::apply_delta`].
     fn hash_event_id(id: &str) -> u64 {
