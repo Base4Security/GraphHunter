@@ -329,6 +329,7 @@ fn parse_conn(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -357,6 +358,7 @@ fn parse_dns(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent>
         rel_type: RelationType::DNS,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -387,6 +389,7 @@ fn parse_http(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -420,6 +423,7 @@ fn parse_ssl(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent>
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -466,6 +470,7 @@ fn parse_kerberos(v: &serde_json::Value, source_file: &str) -> Option<RawIngestE
         rel_type: RelationType::Auth,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 

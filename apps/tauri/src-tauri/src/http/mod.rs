@@ -4,17 +4,20 @@
 //! this root owns `HttpState`, the auth middleware, and router assembly.
 
 use axum::{
+    body::{to_bytes, Body, Bytes, HttpBody},
     extract::{FromRef, Request, State},
-    http::StatusCode,
+    http::{header::CONTENT_LENGTH, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use std::sync::Arc;
+use std::time::Instant;
 use subtle::ConstantTimeEq;
 use tower_http::cors::{CorsLayer, Any};
 
+use crate::journal::event::GraphCounts;
 use crate::AppState;
 use graph_hunter_api::GraphHunterApi;
 
@@ -22,17 +25,22 @@ mod agentic;
 mod anomaly;
 mod catalog;
 mod dlq;
+pub(crate) mod escape_hatch;
 mod export;
 mod graph;
 mod graph_meta;
 mod helpers;
 mod hunt;
 mod ingest;
+mod ingest_data;
 mod invariants;
+mod journal;
 mod misc;
 mod notes;
+mod session;
 mod siem;
 mod tags;
+mod tpcsa;
 
 /// Combined axum state. Handlers extract `Arc<AppState>` or
 /// `Arc<GraphHunterApi>` (or both) via `FromRef` — no handler signature
@@ -100,9 +108,247 @@ async fn auth_middleware(
     }
 }
 
+/// Paths the mandatory journal capture skips: free-standing/liveness
+/// endpoints and the journal's own read API (capturing reads of the
+/// journal would just spam the journal with itself).
+fn journal_capture_skips(path: &str) -> bool {
+    path == "/"
+        || path == "/health"
+        || path == "/metrics"
+        || path.starts_with("/journal")
+        // Ingest-progress polling: a client checking once a second during
+        // a 20-minute ingest would otherwise write ~1200 journal events
+        // that say nothing about the hunt.
+        || path == "/ingest/status"
+        || path == "/ingest/jobs"
+}
+
+/// Cap on how many bytes `capture` will buffer from a *request* body via
+/// `to_bytes`. Matches the `DefaultBodyLimit` cap applied lower in the
+/// stack (see `build_app`) — `to_bytes` requires its own explicit limit
+/// regardless of that layer. When a request exceeds this, `capture`
+/// rejects it with `413 Payload Too Large` up front instead of forwarding
+/// a truncated body to the handler (see `capture`).
+const CAPTURE_BODY_LIMIT: usize = 10 * 1024 * 1024;
+
+/// Cap on how many bytes `capture` will buffer from a *response* body when
+/// it does decide to buffer one (see `capture`). Comfortably above any
+/// real graph/OCSF export produced by this app. Responses whose declared
+/// size (`Content-Length`, or the body's own size hint) already exceeds
+/// this limit are never buffered at all — they are forwarded to the
+/// client completely untouched, since truncating an already-produced
+/// response to empty would be silent data loss.
+const RESP_CAPTURE_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Above this size, skip JSON-parsing the response body for the
+/// interpreter (`extract_touched`/`row_count`/etc). The raw bytes are
+/// still forwarded to the client untouched; only the journal's view of
+/// a huge response degrades to `Value::Null`, per the task brief.
+const CAPTURE_PARSE_LIMIT: usize = 2 * 1024 * 1024;
+
+/// Cheap current-session graph fingerprint (entity/relation counts).
+/// Returns zeros if no session is loaded or the graph lock is poisoned —
+/// the journal's mandatory core (path, kind, redacted params, status,
+/// est_tokens) does not depend on this being accurate.
+fn graph_counts(api: &GraphHunterApi) -> GraphCounts {
+    api.sessions()
+        .current_session()
+        .and_then(|s| {
+            s.graph.read().ok().map(|g| GraphCounts {
+                entities: g.entity_count() as u64,
+                relations: g.relation_count() as u64,
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Mandatory hunt-journal capture middleware (Task A4). Buffers the
+/// request body (rebuilding the request so the real handler still sees
+/// it), reads graph counts before/after, runs the handler, buffers the
+/// response body when it's safe to do so (rebuilding the response so the
+/// client still sees it), and appends a redacted `HuntEvent` to the
+/// current hunt.
+///
+/// Buffered bodies must reach their downstream consumer (handler or
+/// client) *unchanged*. `to_bytes` returns `Err` when a body exceeds the
+/// limit passed to it — silently substituting an empty `Bytes` in that
+/// case (via `unwrap_or_default`) would forward a corrupted, zero-byte
+/// body to whichever side is downstream. `capture` never does that:
+/// an over-limit *request* is rejected with `413` before the handler
+/// runs, and an over-limit *response* is forwarded completely untouched
+/// (buffering is skipped up front, before the body is ever consumed).
+///
+/// Registered *inside* `auth_middleware` (see `build_app`) so it only
+/// runs for authenticated, resolved requests — unauthorized probes never
+/// get journaled.
+async fn capture(
+    State(app): State<Arc<AppState>>,
+    State(api): State<Arc<GraphHunterApi>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path().to_string();
+    if journal_capture_skips(&path) {
+        return next.run(request).await;
+    }
+    let method = request.method().to_string();
+
+    // Buffer the request body; best-effort JSON (non-JSON/undecodable ->
+    // Null). Rebuild the request from the buffered bytes so the real
+    // handler downstream still gets a fully-formed body.
+    //
+    // If the body exceeds CAPTURE_BODY_LIMIT, `to_bytes` returns `Err`.
+    // Reject with 413 here instead of substituting an empty body: an
+    // empty body would reach the handler as a confusing, silently-wrong
+    // request instead of the clean 413 a >limit request used to get from
+    // `DefaultBodyLimit` before `capture` sat in front of it.
+    let (parts, body) = request.into_parts();
+    let req_bytes = match to_bytes(body, CAPTURE_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "Request body exceeds the {}-byte limit.",
+                        CAPTURE_BODY_LIMIT
+                    )
+                })),
+            )
+                .into_response();
+        }
+    };
+    let req_json: serde_json::Value =
+        serde_json::from_slice(&req_bytes).unwrap_or(serde_json::Value::Null);
+    let request = Request::from_parts(parts, Body::from(req_bytes));
+
+    let before = graph_counts(&api);
+    let started = Instant::now();
+    let response = next.run(request).await;
+    let dur_ms = started.elapsed().as_millis() as u64;
+    let after = graph_counts(&api);
+    let status = response.status().as_u16();
+
+    // Decide whether the response is safe to buffer *before* touching its
+    // body. The handler already produced a valid response; `capture` must
+    // never corrupt it. Prefer the declared `Content-Length`, falling
+    // back to the body's own size hint (exact for the `Bytes`-backed
+    // bodies this app's `Json(...)` handlers produce).
+    let declared_len = response
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    let hinted_len = HttpBody::size_hint(response.body()).upper();
+    let known_len = declared_len.or(hinted_len);
+
+    if known_len.is_some_and(|n| n as usize > RESP_CAPTURE_LIMIT) {
+        // Oversized: skip buffering entirely and forward the original
+        // response untouched — this is the fix for the data-loss bug.
+        // The journal still gets an event; row_count/touched are skipped
+        // (Null resp_json) since the body was never inspected.
+        let resp_json = serde_json::Value::Null;
+        // detail_ref is resolved here, post-handler (after `next.run` above),
+        // so the window between naming a hunt and `append()` landing the
+        // event in it is only two fast lock ops with no await in between —
+        // a concurrent /journal/close can no longer race a slow handler and
+        // make this event land in the wrong hunt. current_hunt_id() is
+        // idempotent/lazy: it just returns the already-open hunt or lazily
+        // opens one, same as append() below would. Used as the summary's
+        // detail_ref so an LLM reading a compact summary knows which hunt
+        // to pull the full detail from via the journal API.
+        let detail_ref = app.journal.current_hunt_id();
+        let mut event = crate::journal::capture::build_event(
+            &path, &method, status, dur_ms, &req_json, &resp_json, before, after, &detail_ref,
+        );
+        event.result.body_bytes = known_len.unwrap_or(0);
+        // IMPORTANT fix: build_event derived est_tokens from resp_json
+        // (Null here, since the body was never inspected) which collapses
+        // to ~1 token regardless of true size — silently under-counting the
+        // largest responses in cumulative_est_tokens. Recompute it from the
+        // real wire size now that body_bytes has been corrected above.
+        event.result.est_tokens = event.result.body_bytes / 4;
+        let event_body_bytes = event.result.body_bytes;
+        app.journal.append(event);
+
+        tracing::debug!(
+            "journal: captured {} {} -> {} ({} ms, oversized response {} bytes, buffering skipped)",
+            method, path, status, dur_ms, event_body_bytes
+        );
+        return response;
+    }
+
+    // Normal-sized (or unknown-length, under the buffering cap) response:
+    // buffer and rebuild as before. Cap JSON parsing separately from the
+    // buffering limit: a large-but-under-cap response still gets
+    // forwarded to the client byte-for-byte, it just isn't interpreted
+    // for row_count/touched in the journal.
+    let (resp_parts, resp_body) = response.into_parts();
+    let resp_bytes = match to_bytes(resp_body, RESP_CAPTURE_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            // The size pre-check above should route anything over
+            // RESP_CAPTURE_LIMIT away from this branch for every handler
+            // in this app (all `Json(...)`, which always sets
+            // Content-Length). Getting here means a body streamed past
+            // the cap without a usable size hint — not a real case
+            // today, and unrecoverable once `to_bytes` has already
+            // consumed the stream: there's no original response left to
+            // forward. Log loudly and fall back to an empty body as the
+            // last resort.
+            tracing::warn!(
+                "journal: response body for {} {} exceeded {} bytes with no usable \
+                 Content-Length/size hint; forwarding EMPTY body to client — \
+                 this is unrecoverable data loss for this one response: {}",
+                method, path, RESP_CAPTURE_LIMIT, e
+            );
+            Bytes::new()
+        }
+    };
+    let resp_json: serde_json::Value = if resp_bytes.len() <= CAPTURE_PARSE_LIMIT {
+        serde_json::from_slice(&resp_bytes).unwrap_or(serde_json::Value::Null)
+    } else {
+        serde_json::Value::Null
+    };
+
+    // detail_ref is resolved here, post-handler (after `next.run` above), so
+    // the window between naming a hunt and `append()` landing the event in
+    // it is only two fast lock ops with no await in between — a concurrent
+    // /journal/close can no longer race a slow handler and make this event
+    // land in the wrong hunt. See the oversized branch above for the full
+    // rationale.
+    let detail_ref = app.journal.current_hunt_id();
+    let mut event = crate::journal::capture::build_event(
+        &path, &method, status, dur_ms, &req_json, &resp_json, before, after, &detail_ref,
+    );
+    // build_event derives body_bytes/est_tokens from resp_json, which is
+    // Null for oversized bodies; correct body_bytes to the real wire size
+    // regardless (est_tokens stays a best-effort estimate in that case).
+    event.result.body_bytes = resp_bytes.len() as u64;
+    // I-1 fix: when the body exceeded CAPTURE_PARSE_LIMIT above, resp_json
+    // was left Null and build_event computed est_tokens from
+    // `len("null")/4 ≈ 1` — silently under-reporting exactly the large raw
+    // responses (e.g. a multi-MB raw /kql dump) in
+    // journal_stats.cumulative_est_tokens, which can invert the "tool <
+    // raw" token guarantee the journal exists to prove. Recompute from the
+    // corrected body_bytes, symmetric to the oversized-response branch
+    // above. Small responses (resp_json parsed normally) are untouched:
+    // their est_tokens already came from `summarize`/body_bytes via
+    // build_event.
+    if resp_bytes.len() > CAPTURE_PARSE_LIMIT {
+        event.result.est_tokens = event.result.body_bytes / 4;
+    }
+    app.journal.append(event);
+
+    tracing::debug!("journal: captured {} {} -> {} ({} ms)", method, path, status, dur_ms);
+    Response::from_parts(resp_parts, Body::from(resp_bytes))
+}
+
 /// Build the API router (shared by run and run_async).
 /// POST routes are also registered with trailing slash so /notes/ and /notes both work.
-fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
+/// `pub(crate)` so the `/run_hunt` cross-transport equivalence test in
+/// `http::hunt::tests` can drive the real router via `tower::ServiceExt::oneshot`.
+pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
     let state = HttpState { app: app_state, api };
     Router::new()
         .route("/", get(misc::handler_api_root))
@@ -131,6 +377,7 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
         .route("/entity_type_counts", get(graph::handler_entity_type_counts))
         .route("/temporal_heatmap", get(anomaly::handler_temporal_heatmap))
         .route("/subnet_analysis", get(anomaly::handler_subnet_analysis))
+        .route("/sessions/shared", get(anomaly::handler_shared_sessions))
         .route("/enrich_ip", post(anomaly::handler_enrich_ip))
         .route("/catalog", get(catalog::handler_catalog))
         .route("/catalog/status", get(catalog::handler_catalog_with_status))
@@ -146,8 +393,38 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
         .route("/path_nodes", get(graph::handler_path_nodes))
         .route("/export_subgraph", post(export::handler_export_subgraph))
         .route("/export_ocsf", post(export::handler_export_ocsf))
+        .route("/tpcsa/export", post(tpcsa::handler_export_instance))
+        .route("/reconstruct_chain", post(tpcsa::handler_reconstruct_chain))
         .route("/check_invariants", post(invariants::handler_check_invariants))
         .route("/ingest_negotiate", post(ingest::handler_ingest_negotiate))
+        // File ingest over HTTP. All three are gated by
+        // GRAPHHUNTER_INGEST_ROOT (403 until an operator sets it) — see
+        // `graph_hunter_api::paths`. Trailing-slash duplicates match the
+        // existing convention for POSTs that MCP tools hit.
+        .route("/ingest/preview", post(ingest_data::handler_preview_ingest))
+        .route("/ingest/preview/", post(ingest_data::handler_preview_ingest))
+        .route("/ingest/load", post(ingest_data::handler_load_data))
+        .route("/ingest/load/", post(ingest_data::handler_load_data))
+        .route(
+            "/ingest/load_with_config",
+            post(ingest_data::handler_load_data_with_config),
+        )
+        .route(
+            "/ingest/load_with_config/",
+            post(ingest_data::handler_load_data_with_config),
+        )
+        .route("/ingest/stream", post(ingest_data::handler_load_data_streaming))
+        .route("/ingest/stream/", post(ingest_data::handler_load_data_streaming))
+        .route("/ingest/status", get(ingest_data::handler_ingest_status))
+        .route("/ingest/jobs", get(ingest_data::handler_ingest_jobs))
+        .route("/session/create", post(session::handler_create_session))
+        .route("/session/create/", post(session::handler_create_session))
+        .route("/session/list", get(session::handler_list_sessions))
+        .route("/session/current", get(session::handler_current_session))
+        .route("/session/load", post(session::handler_load_session))
+        .route("/session/load/", post(session::handler_load_session))
+        .route("/session/save", post(session::handler_save_session))
+        .route("/session/save/", post(session::handler_save_session))
         .route("/pcap_preview", post(ingest::handler_pcap_preview))
         .route("/canonical_map", post(ingest::handler_canonical_map))
         .route("/parser_generate", post(ingest::handler_parser_generate))
@@ -184,6 +461,13 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
         .route("/sentinel/pause", post(siem::handler_sentinel_pause))
         .route("/sentinel_status", get(siem::handler_sentinel_status))
         .route("/metrics", get(misc::handler_metrics))
+        .route("/journal/start", post(journal::handler_start))
+        .route("/journal/close", post(journal::handler_close))
+        .route("/journal/list", get(journal::handler_list))
+        .route("/journal/export", post(journal::handler_export))
+        .route("/journal/:id", get(journal::handler_get))
+        .route("/journal/:id/stats", get(journal::handler_stats))
+        .route("/journal/:id/expand", post(journal::handler_expand))
         .fallback(misc::fallback_404)
         // 10 MB cap on request bodies. Hunt payloads are small (a DSL string
         // plus maybe a note); anything larger is almost certainly malformed
@@ -194,6 +478,12 @@ fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
             .allow_origin(Any)
             .allow_methods(Any)
             .allow_headers(Any))
+        // `capture` is added *before* `auth_middleware` here, which makes
+        // it the layer auth's `next.run()` calls into — i.e. capture only
+        // sees requests that already passed authentication. Needs the
+        // full `HttpState` (not just `Arc<AppState>`) so it can also pull
+        // `Arc<GraphHunterApi>` for the graph-count fingerprint.
+        .layer(axum::middleware::from_fn_with_state(state.clone(), capture))
         .layer(axum::middleware::from_fn_with_state(state.app.clone(), auth_middleware))
         .layer(axum::middleware::from_fn(log_requests))
         .with_state(state)

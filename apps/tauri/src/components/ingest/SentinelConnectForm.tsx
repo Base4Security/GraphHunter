@@ -47,6 +47,14 @@ interface SentinelConnectFormProps {
     onRunHuntingTemplate: (template: HuntingTemplateId) => void;
     /** Phase N: latest KQL result summary for the at-a-glance badge. */
     lastKqlSummary: { rows: number; tookMs: number; truncated: boolean } | null;
+    /** Fase G: server-side gate for the hunting-templates surface
+     * (GRAPHHUNTER_HUNTING_TEMPLATES). `undefined`/`true` are both
+     * treated as visible (default ON) — only an explicit `false`
+     * hides it. */
+    huntingTemplatesEnabled?: boolean;
+    /** Fase G: server-side gate for the ad-hoc raw-KQL escape hatch
+     * (GRAPHHUNTER_KQL_ESCAPE_HATCH). Same default-visible handling. */
+    kqlEscapeHatchEnabled?: boolean;
   };
 }
 
@@ -215,7 +223,7 @@ export default function SentinelConnectForm({
         />
       )}
 
-      {extended && (
+      {extended && extended.huntingTemplatesEnabled !== false && (
         <HuntingTemplatesSection
           loading={extended.adhocLoading}
           preset={extended.lookbackPreset}
@@ -223,6 +231,7 @@ export default function SentinelConnectForm({
           customToIso={extended.customToIso}
           onRun={extended.onRunHuntingTemplate}
           onCustomize={(kql) => extended.setAdhocKql(kql)}
+          kqlEscapeHatchEnabled={extended.kqlEscapeHatchEnabled}
         />
       )}
 
@@ -252,7 +261,7 @@ export default function SentinelConnectForm({
         </div>
       )}
 
-      {extended && (
+      {extended && extended.kqlEscapeHatchEnabled !== false && (
         <AdhocKqlSection
           kql={extended.adhocKql}
           setKql={extended.setAdhocKql}
@@ -423,6 +432,7 @@ function HuntingTemplatesSection({
   customToIso,
   onRun,
   onCustomize,
+  kqlEscapeHatchEnabled,
 }: {
   loading: boolean;
   preset: LookbackPreset | "custom";
@@ -430,6 +440,12 @@ function HuntingTemplatesSection({
   customToIso: string;
   onRun: (template: HuntingTemplateId) => void;
   onCustomize: (kql: string) => void;
+  /** Fase G: server-side gate for the ad-hoc raw-KQL escape hatch
+   * (GRAPHHUNTER_KQL_ESCAPE_HATCH). `undefined`/`true` are both
+   * treated as enabled (default ON) — only an explicit `false` hides
+   * "Customize", since it targets the ad-hoc textarea that is itself
+   * hidden when the escape hatch is off. */
+  kqlEscapeHatchEnabled?: boolean;
 }) {
   const [openId, setOpenId] = useState<HuntingTemplateId | null>(null);
   const [previewKqlMap, setPreviewKqlMap] = useState<Record<string, string>>({});
@@ -571,7 +587,7 @@ function HuntingTemplatesSection({
                 >
                   {previewKqlMap[t.id] ?? "Loading…"}
                 </pre>
-                {previewKqlMap[t.id] && (
+                {previewKqlMap[t.id] && kqlEscapeHatchEnabled !== false && (
                   <button
                     type="button"
                     onClick={() => onCustomize(previewKqlMap[t.id])}

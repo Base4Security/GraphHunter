@@ -50,4 +50,8 @@ pub struct AppState {
     /// here because the axum auth middleware extracts it via the
     /// `State<Arc<AppState>>` FromRef.
     pub api_token: String,
+    /// Hunt journal store (Task A2). Constructed once in `setup()` and
+    /// shared with the mandatory HTTP capture middleware (Task A4) via
+    /// `State<Arc<AppState>>` / `HttpState`'s `FromRef`.
+    pub journal: Arc<crate::journal::store::JournalStore>,
 }

@@ -247,25 +247,35 @@ pub fn plan_with_hints(hypothesis: &Hypothesis, hints: &CostHints) -> DispatchPl
     // α-acyclic queries (delegated to its own gate).
     let mut best = (DispatchPlan::DfsMatch, cost_estimate(DispatchPlan::DfsMatch, hypothesis, hints));
 
-    if is_homogeneous_triangle_shape(hypothesis) || hypothesis.looks_like_triangle() {
+    // Candidacy requires BOTH the shape and the author's explicit marker.
+    // These were `||`, which made shape ALONE enough to make a clique
+    // operator a candidate — the same "shape is not intent" defect fixed in
+    // `structural_dispatch`, and worse here because the cost model could
+    // then pick it purely on estimated speed. A 6-hop chain must never be
+    // costed as a 4-clique. (`is_homogeneous_c6_shape` already embeds its
+    // own marker check, so its conjunction is redundant but harmless.)
+    if hypothesis.looks_like_triangle() && is_homogeneous_triangle_shape(hypothesis) {
         let c = cost_estimate(DispatchPlan::TriangleLftj, hypothesis, hints);
         if c < best.1 {
             best = (DispatchPlan::TriangleLftj, c);
         }
     }
-    if is_homogeneous_k4_shape(hypothesis) || hypothesis.looks_like_k4_clique() {
+    if hypothesis.looks_like_k4_clique() && is_homogeneous_k4_shape(hypothesis) {
         let c = cost_estimate(DispatchPlan::K4Lftj, hypothesis, hints);
         if c < best.1 {
             best = (DispatchPlan::K4Lftj, c);
         }
     }
-    if is_homogeneous_k5_shape(hypothesis) || hypothesis.looks_like_k5_clique() {
+    if hypothesis.looks_like_k5_clique() && is_homogeneous_k5_shape(hypothesis) {
         let c = cost_estimate(DispatchPlan::K5Lftj, hypothesis, hints);
         if c < best.1 {
             best = (DispatchPlan::K5Lftj, c);
         }
     }
-    if is_homogeneous_c6_shape(hypothesis) || hypothesis.looks_like_6cycle() {
+    // `is_homogeneous_c6_shape` already requires the marker AND the shape;
+    // the old `|| looks_like_6cycle()` let a merely-NAMED hypothesis of any
+    // shape become a candidate, so it is dropped.
+    if is_homogeneous_c6_shape(hypothesis) {
         let c = cost_estimate(DispatchPlan::C6Lftj, hypothesis, hints);
         if c < best.1 {
             best = (DispatchPlan::C6Lftj, c);
@@ -298,7 +308,8 @@ fn triangle_structural_dispatch(hypothesis: &Hypothesis) -> bool {
     if !env_flag("GRAPHHUNTER_LFTJ_PLANNER") {
         return false;
     }
-    is_homogeneous_triangle_shape(hypothesis)
+    // Shape alone is NOT intent — see `structural_dispatch`.
+    hypothesis.looks_like_triangle() && is_homogeneous_triangle_shape(hypothesis)
 }
 
 /// True iff the chain consists of exactly 3 identical homogeneous
@@ -353,11 +364,32 @@ fn name_marker_dispatch(hypothesis: &Hypothesis) -> bool {
     hypothesis.looks_like_k4_clique()
 }
 
+/// K4 structural route.
+///
+/// **Shape is not intent.** A homogeneous 6-step chain `T -[r]-> T` is a
+/// perfectly ordinary thing to author meaning "a 6-hop path", and it is
+/// *also* the edge count of a 4-clique. Dispatching on shape alone sent
+/// such a hypothesis to the clique enumerator, which answers a different
+/// question: on a 6-vertex clique graph the DFS returns 6-hop temporally-
+/// monotone walks while the enumerator returns all 15 four-cliques. Since
+/// both shipped apps set `GRAPHHUNTER_LFTJ_PLANNER=1` at startup, that
+/// divergence was reachable in production by anyone writing a plain 6-hop
+/// chain. Demonstrated in `tests/lftj_dfs_parity.rs`.
+///
+/// The fix is to require the explicit `k4-clique` name marker in addition
+/// to the shape, so the operator runs only when the author asked for
+/// cliques. This mirrors what `is_homogeneous_c6_shape` already did (it
+/// checks `looks_like_6cycle()` before the shape) — the correct pattern
+/// existed in this file; the triangle/K4/K5 routes had skipped it.
+///
+/// The real fix — making the enumerators consult per-step entity-type
+/// filters and predicates so shape-based routing becomes sound — is
+/// tracked as the WCOJ work item; until then, narrow beats wrong.
 fn structural_dispatch(hypothesis: &Hypothesis) -> bool {
     if !env_flag("GRAPHHUNTER_LFTJ_PLANNER") {
         return false;
     }
-    is_homogeneous_k4_shape(hypothesis)
+    hypothesis.looks_like_k4_clique() && is_homogeneous_k4_shape(hypothesis)
 }
 
 /// True iff the chain consists of exactly 6 identical homogeneous
@@ -405,7 +437,8 @@ fn k5_structural_dispatch(hypothesis: &Hypothesis) -> bool {
     if !env_flag("GRAPHHUNTER_LFTJ_PLANNER") {
         return false;
     }
-    is_homogeneous_k5_shape(hypothesis)
+    // Shape alone is NOT intent — see `structural_dispatch`.
+    hypothesis.looks_like_k5_clique() && is_homogeneous_k5_shape(hypothesis)
 }
 
 /// True iff the chain consists of exactly 10 identical homogeneous
@@ -489,8 +522,13 @@ mod tests {
     use super::*;
     use crate::hypothesis::HypothesisStep;
 
+    /// A 6-step homogeneous chain that DOES ask for cliques (carries the
+    /// `k4-clique` marker). Shape alone no longer dispatches — see
+    /// `structural_dispatch` — so the structural-route tests use this,
+    /// and `plain_six_step_chain_is_not_a_clique_query` covers the
+    /// unmarked case.
     fn k4_homogeneous() -> Hypothesis {
-        let mut h = Hypothesis::new("plain hunt");
+        let mut h = Hypothesis::new("k4-clique hunt");
         for _ in 0..6 {
             h = h.add_step(HypothesisStep::new(
                 EntityType::Host,
@@ -513,8 +551,10 @@ mod tests {
         h
     }
 
+    /// 10-step homogeneous chain WITH the `k5-clique` marker (shape alone
+    /// no longer dispatches).
     fn k5_homogeneous() -> Hypothesis {
-        let mut h = Hypothesis::new("plain hunt");
+        let mut h = Hypothesis::new("k5-clique hunt");
         for _ in 0..10 {
             h = h.add_step(HypothesisStep::new(
                 EntityType::Host,
@@ -612,6 +652,54 @@ mod tests {
         });
     }
 
+    /// THE RULE THIS PLANNER GOT WRONG, now pinned.
+    ///
+    /// A homogeneous 6-step chain named anything ordinary is a *path*
+    /// query. It happens to have the edge count of a 4-clique, and the
+    /// planner used to dispatch on that coincidence alone — so with
+    /// `GRAPHHUNTER_LFTJ_PLANNER=1` (set by both shipped apps at startup)
+    /// an analyst asking for a 6-hop path got 4-cliques back. Shape is not
+    /// intent: routing to a clique enumerator now requires the author's
+    /// explicit marker. Same rule for triangle (3 steps) and K5 (10).
+    #[test]
+    fn plain_six_step_chain_is_not_a_clique_query() {
+        let mut h = Hypothesis::new("plain hunt");
+        for _ in 0..6 {
+            h = h.add_step(HypothesisStep::new(
+                EntityType::Host,
+                RelationType::Connect,
+                EntityType::Host,
+            ));
+        }
+        with_var("GRAPHHUNTER_LFTJ_PLANNER", "1", || {
+            assert_eq!(
+                plan(&h),
+                DispatchPlan::DfsMatch,
+                "an unmarked 6-step chain is a path query, not a clique query"
+            );
+        });
+    }
+
+    /// Same rule at the other two arities.
+    #[test]
+    fn plain_three_and_ten_step_chains_are_not_clique_queries() {
+        let mk = |n: usize| {
+            let mut h = Hypothesis::new("plain hunt");
+            for _ in 0..n {
+                h = h.add_step(HypothesisStep::new(
+                    EntityType::Host,
+                    RelationType::Connect,
+                    EntityType::Host,
+                ));
+            }
+            h
+        };
+        with_var("GRAPHHUNTER_LFTJ_PLANNER", "1", || {
+            assert_eq!(plan(&mk(3)), DispatchPlan::DfsMatch, "unmarked 3-step");
+            assert_eq!(plan(&mk(10)), DispatchPlan::DfsMatch, "unmarked 10-step");
+        });
+    }
+
     #[test]
     fn structural_route_skips_five_step_chain() {
         let h = five_step_chain();
@@ -655,8 +743,10 @@ mod tests {
         });
     }
 
+    /// 3-step homogeneous chain WITH the `triangle` marker (shape alone
+    /// no longer dispatches).
     fn triangle_homogeneous() -> Hypothesis {
-        let mut h = Hypothesis::new("plain hunt");
+        let mut h = Hypothesis::new("triangle hunt");
         for _ in 0..3 {
             h = h.add_step(HypothesisStep::new(
                 EntityType::Host,

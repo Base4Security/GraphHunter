@@ -29,8 +29,16 @@ pub(super) async fn handler_pcap_preview(
     State(api): State<Arc<GraphHunterApi>>,
     Json(body): Json<graph_hunter_api::dto::ingestion::PcapPreviewRequest>,
 ) -> Response {
+    // This route shipped before path containment existed and accepted any
+    // path the process could read — an arbitrary-file-read primitive for
+    // anyone holding the bearer token. It is now confined to the operator-
+    // configured ingest roots, and returns 403 until one is configured.
+    let policy = match graph_hunter_api::paths::PathPolicy::from_env() {
+        Ok(p) => p,
+        Err(e) => return api_err_response(e),
+    };
     let api_clone = api.clone();
-    let joined = tokio::task::spawn_blocking(move || api_clone.pcap_preview(body)).await;
+    let joined = tokio::task::spawn_blocking(move || api_clone.pcap_preview(body, &policy)).await;
     match joined {
         Ok(Ok(resp)) => ok_json(resp),
         Ok(Err(e)) => api_err_response(e),

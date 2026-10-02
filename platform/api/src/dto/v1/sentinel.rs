@@ -512,6 +512,16 @@ pub struct BuildRecord {
 
 // ── Env probe ──────────────────────────────────────────────────────────
 
+/// Deterministic `serde(default)` fallback for the Fase G flag fields below.
+/// Deliberately does NOT read `crate::kql_flags::*` (which consults process
+/// env at call time) — a flag-less legacy payload must deserialize the same
+/// way regardless of the current process's environment. The live producer
+/// (`sentinel_check_env`) always sets both fields explicitly; this default
+/// only governs backward-compat deserialization of older/partial payloads.
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SentinelEnvStatus {
     pub azure_client_id: Option<String>,
@@ -522,6 +532,16 @@ pub struct SentinelEnvStatus {
     pub azure_resource_group: Option<String>,
     pub azure_workspace_id: Option<String>,
     pub azure_workspace_name: Option<String>,
+    /// Fase G: whether one-click hunting templates (`run_hunting_template`)
+    /// are enabled (`GRAPHHUNTER_HUNTING_TEMPLATES`). Default `true`; the
+    /// frontend hides the "Hunting Templates" surface when `false`.
+    #[serde(default = "default_true")]
+    pub hunting_templates_enabled: bool,
+    /// Fase G: whether the raw-KQL escape hatch (`POST /kql`) is enabled
+    /// (`GRAPHHUNTER_KQL_ESCAPE_HATCH`). Default `true`; the frontend hides
+    /// the raw-KQL entry point when `false`.
+    #[serde(default = "default_true")]
+    pub kql_escape_hatch_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

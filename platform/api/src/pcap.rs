@@ -752,6 +752,7 @@ impl FlowAggregator {
             rel_type: RelationType::Connect,
             rel_metadata,
             timestamp,
+            raw_line: None,
         });
 
         // Secondary `IP -[Connect]-> Domain` edges from L7 signal.
@@ -782,6 +783,7 @@ impl FlowAggregator {
                 rel_type: RelationType::Connect,
                 rel_metadata: md,
                 timestamp,
+                raw_line: None,
             });
         }
 
@@ -813,6 +815,7 @@ impl FlowAggregator {
                 rel_type: RelationType::Auth,
                 rel_metadata: md,
                 timestamp,
+                raw_line: None,
             });
         }
 
@@ -843,6 +846,7 @@ impl FlowAggregator {
                 rel_type: RelationType::Auth,
                 rel_metadata: md,
                 timestamp,
+                raw_line: None,
             });
         }
         // LDAP: full DN → LDAP server IP. The DN is the canonical
@@ -869,6 +873,7 @@ impl FlowAggregator {
                 rel_type: RelationType::Auth,
                 rel_metadata: md,
                 timestamp,
+                raw_line: None,
             });
         }
         // NTLM: `DOMAIN\\user` (or bare `user` when domain is empty).
@@ -903,6 +908,7 @@ impl FlowAggregator {
                 rel_type: RelationType::Auth,
                 rel_metadata: md,
                 timestamp,
+                raw_line: None,
             });
         }
     }
@@ -930,6 +936,7 @@ fn dns_edge(querier_ip: String, qname: String, timestamp: i64, pcap_file: &str) 
         rel_type: RelationType::DNS,
         rel_metadata: md,
         timestamp,
+        raw_line: None,
     }
 }
 

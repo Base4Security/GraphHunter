@@ -21,6 +21,7 @@ graph_hunter_matcher_ffi = { path = "../../core/matcher-ffi" }
 # this crate forwards to `graph_hunter_gnn/ml-scoring` where the ONNX
 # Runtime deps actually live.
 graph_hunter_gnn = { path = "../../core/gnn" }
+graph_hunter_tpcsa = { path = "../../core/tpcsa-core" }
 graph_hunter_canonical = { path = "../canonical" }
 # Concrete LogParser impls (Cognito, FortiAnalyzer, IIS W3C) lifted out
 # of core per F2.10. The rest still live in core (see parsers/src/lib.rs
@@ -102,6 +103,9 @@ rayon = "1"
 tokio = { version = "1", features = ["test-util"] }
 jsonschema = "0.18"
 criterion = "0.5"
+# `ingest_bench` runs under the same allocator as the desktop binary, so
+# its memory numbers match what the app actually commits.
+mimalloc = { version = "0.1", default-features = false }
 
 [[bench]]
 name = "batch_csh_cold_vs_warm"

@@ -418,6 +418,8 @@ mod tests {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
+                parser: None,
+                mapping_hash: None,
             });
         api.sessions().insert(session);
         api.sessions().set_current(Some(session_id.to_string()));
@@ -584,6 +586,8 @@ mod tests {
             relation_count: 0,
             field_config: None,
             ingest_stats: None,
+            parser: None,
+            mapping_hash: None,
         });
         api.sessions().insert(session);
         api.sessions().set_current(Some("s1".into()));

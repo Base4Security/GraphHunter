@@ -91,6 +91,54 @@ fn live_tail_coverage_for_session(
     graph.live_tail_coverage("live_tail")
 }
 
+/// Build the [`crate::coverage::AnswerCoverage`] for a session: reads
+/// the session's `IngestCoverage`, the graph's edge-timestamp span
+/// (Fase F Task 1 `GraphHunter::edge_timestamp_range`), and the
+/// per-source watermark/breaker snapshot (Fase F Task 3
+/// `SourceCoverage::snapshot`), then folds all three into
+/// `answer_coverage`. Factored out so both `run_hunt`'s single-query
+/// call site and every `run_hunt_batch` entry-construction path
+/// (fast/cache paths included) populate `coverage` from the same real
+/// session state rather than duplicating the 3 reads per site.
+///
+/// With `GRAPHHUNTER_COVERAGE` off this is a true no-op: it returns the
+/// all-clear default *before* touching any lock or scanning the graph.
+/// `edge_timestamp_range()` is an O(E) full edge scan (not a cheap
+/// lock read like the other two), so a batch of N hypotheses must not
+/// pay for N scans just to have `answer_coverage` throw the result away
+/// afterward — a prior phase explicitly rejected exactly that per-query
+/// tax. Flag-on keeps paying the O(E) cost (accepted tradeoff, disclosed
+/// in `coverage_enabled`'s doc).
+fn session_answer_coverage(
+    session: &crate::state::Session,
+) -> ApiResult<crate::coverage::AnswerCoverage> {
+    if !crate::coverage::coverage_enabled() {
+        return Ok(crate::coverage::AnswerCoverage::default());
+    }
+    let ic = session
+        .ingest_coverage
+        .read()
+        .map_err(|e| ApiError::Internal(format!("ingest_coverage lock poisoned: {e}")))?;
+    let (source_watermarks, missing_sources) = session
+        .source_coverage
+        .read()
+        .map_err(|e| ApiError::Internal(format!("source_coverage lock poisoned: {e}")))?
+        .snapshot();
+    let (edge_ts_min, edge_ts_max) = session
+        .graph
+        .read()
+        .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?
+        .edge_timestamp_range()
+        .map_or((None, None), |(min, max)| (Some(min), Some(max)));
+    Ok(crate::coverage::answer_coverage(
+        &ic,
+        edge_ts_min,
+        edge_ts_max,
+        source_watermarks,
+        missing_sources,
+    ))
+}
+
 impl GraphHunterApi {
     /// Execute a temporal pattern search. Populates the hunt cache and
     /// returns either the paths inline (when ≤ 100) or just the count
@@ -197,13 +245,38 @@ impl GraphHunterApi {
         // Zero-match diagnostic: read-only schema probe so the analyst
         // knows whether the hypothesis direction / type was plausible at
         // all. Skipped on non-zero to avoid the cost in the happy path.
-        let diagnostic = if path_count == 0 {
+        // The two opposite failure modes, each probed only in the branch
+        // where it can occur: zero paths may mean the pattern is
+        // structurally impossible against this graph, while a large
+        // result set may mean it matches most of the population and
+        // discriminates nothing.
+        let (diagnostic, non_discriminating) = if path_count == 0 {
             let graph = session.graph.read().ok();
-            graph.map(|g| g.hunt_diagnostic(&req.hypothesis))
+            (graph.map(|g| g.hunt_diagnostic(&req.hypothesis)), None)
         } else {
-            None
+            let flag = session
+                .graph
+                .read()
+                .ok()
+                .and_then(|g| {
+                    crate::operations::precision::assess(
+                        &req.hypothesis,
+                        &paths,
+                        truncated,
+                        &g,
+                    )
+                });
+            (None, flag)
         };
         let live_tail_coverage = live_tail_coverage_for_session(&session);
+
+        // Completeness metadata (design spec §17): `IngestCoverage` +
+        // the graph's edge-timestamp span (Fase F Task 1) + the
+        // session's `SourceCoverage` snapshot (Fase F Task 3), folded
+        // together by `session_answer_coverage` (also used by every
+        // `run_hunt_batch` entry so both response shapes see the same
+        // real values).
+        let coverage = session_answer_coverage(&session)?;
 
         // Publish to the shared cache so get_hunt_page can serve it.
         let mut cache = self
@@ -221,6 +294,8 @@ impl GraphHunterApi {
                 truncated,
                 diagnostic,
                 live_tail_coverage,
+                coverage,
+                non_discriminating,
             })
         } else {
             *cache = paths;
@@ -230,6 +305,8 @@ impl GraphHunterApi {
                 truncated,
                 diagnostic,
                 live_tail_coverage,
+                coverage,
+                non_discriminating,
             })
         }
     }
@@ -460,14 +537,27 @@ impl GraphHunterApi {
             // in the batch. Yannakakis still wins for α-acyclic chains
             // and is checked below; if neither LFTJ nor Yannakakis
             // applies, the per-call `run_hunt` branch handles it.
+            // Temporal tolerances must survive the batch path too.
+            // `GraphHunter::search_temporal_pattern` refuses to route a
+            // hypothesis with skew δ>0 or gap g>0 to an LFTJ/Yannakakis
+            // operator, because those enumerators enforce strict
+            // monotonicity in their join structure and would silently
+            // ignore the tolerance — returning a STRICTER set than the
+            // analyst asked for. This batch entry point called the
+            // planner directly and skipped that guard, so a δ- or
+            // gap-bearing hypothesis lost its tolerance here while the
+            // single-hunt path honored it. Same guard, same reason.
+            let temporal_tolerance_active =
+                hypothesis.resolve_skew_delta() > 0 || hypothesis.resolve_max_gap() > 0;
             let lftj_plan = graph_hunter_core::planner::plan(&hypothesis);
-            let lftj_routed = matches!(
-                lftj_plan,
-                graph_hunter_core::planner::DispatchPlan::TriangleLftj
-                    | graph_hunter_core::planner::DispatchPlan::K4Lftj
-                    | graph_hunter_core::planner::DispatchPlan::K5Lftj
-                    | graph_hunter_core::planner::DispatchPlan::C6Lftj
-            );
+            let lftj_routed = !temporal_tolerance_active
+                && matches!(
+                    lftj_plan,
+                    graph_hunter_core::planner::DispatchPlan::TriangleLftj
+                        | graph_hunter_core::planner::DispatchPlan::K4Lftj
+                        | graph_hunter_core::planner::DispatchPlan::K5Lftj
+                        | graph_hunter_core::planner::DispatchPlan::C6Lftj
+                );
             if lftj_routed {
                 let session_for_lftj = self.resolve_session(session.as_ref())?;
                 let graph = session_for_lftj
@@ -532,6 +622,7 @@ impl GraphHunterApi {
                         truncated,
                         diagnostic: None,
                         live_tail_coverage: batch_live_tail_coverage.clone(),
+                        coverage: session_answer_coverage(&session_handle)?,
                         error: None,
                     };
                     result_cache.insert(result_cache_key, entry.clone());
@@ -667,6 +758,7 @@ impl GraphHunterApi {
                     truncated,
                     diagnostic: None,
                     live_tail_coverage: batch_live_tail_coverage.clone(),
+                    coverage: session_answer_coverage(&session_handle)?,
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -680,8 +772,16 @@ impl GraphHunterApi {
             // the dispatch needs the env flag check anyway, and the
             // planner is graph-internal; mirror its yannakakis_dispatch
             // logic here for the routing decision.
-            let yannakakis_ok =
-                std::env::var("GRAPHHUNTER_YANNAKAKIS")
+            //
+            // Note the hazard this mirroring creates: because the check
+            // is a COPY of `planner::yannakakis_dispatch` rather than a
+            // call to it, the two drift independently. It had already
+            // drifted — the core matcher refuses to route a hypothesis
+            // carrying skew δ>0 or gap g>0 to Yannakakis (that operator
+            // enforces strict monotonicity and would silently drop the
+            // tolerance), and this copy did not. Same guard, restored.
+            let yannakakis_ok = !temporal_tolerance_active
+                && std::env::var("GRAPHHUNTER_YANNAKAKIS")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false)
                     && !hypothesis.steps.is_empty()
@@ -919,6 +1019,7 @@ impl GraphHunterApi {
                     truncated,
                     diagnostic: None,
                     live_tail_coverage: batch_live_tail_coverage.clone(),
+                    coverage: session_answer_coverage(&session_handle)?,
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -944,6 +1045,7 @@ impl GraphHunterApi {
                         truncated: resp.truncated,
                         diagnostic: resp.diagnostic,
                         live_tail_coverage: resp.live_tail_coverage,
+                        coverage: resp.coverage,
                         error: None,
                     },
                     Err(e) => RunHuntBatchEntry {
@@ -952,6 +1054,7 @@ impl GraphHunterApi {
                         truncated: false,
                         diagnostic: None,
                         live_tail_coverage: batch_live_tail_coverage.clone(),
+                        coverage: crate::coverage::AnswerCoverage::default(),
                         error: Some(e.to_string()),
                     },
                 };
@@ -1173,6 +1276,194 @@ mod tests {
                 dedup_mode: None,
             })
             .expect("Structural override after Anomaly must not error");
+    }
+
+    /// `RunHuntResponse.coverage` reflects the session's `IngestCoverage`
+    /// when `GRAPHHUNTER_COVERAGE` is on: a session marked incomplete
+    /// by a prior ingest (`stopped_early = true`) produces
+    /// `coverage.possibly_incomplete == true` on the next `run_hunt`.
+    /// Wiring check for Task 5 (completeness_flag) — end-to-end through
+    /// `answer_coverage`, not just the DTO default.
+    #[test]
+    fn run_hunt_coverage_flag_on_reflects_incomplete_session() {
+        let _env_guard = lock_env();
+        let prior = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "1") };
+
+        let api = api();
+        if let Some(session) = api.sessions().current_session() {
+            session
+                .ingest_coverage
+                .write()
+                .unwrap()
+                .observe(true, false);
+        } else {
+            panic!("test harness session must exist");
+        }
+
+        let resp = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: None,
+                dedup_mode: None,
+            })
+            .expect("run_hunt should not error");
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
+        }
+
+        assert!(
+            resp.coverage.possibly_incomplete,
+            "session with stopped_early=true must mark the answer possibly_incomplete"
+        );
+        assert!(resp
+            .coverage
+            .incomplete_reasons
+            .iter()
+            .any(|r| r.contains("stopped_early")));
+    }
+
+    /// With `GRAPHHUNTER_COVERAGE` off (default), `run_hunt` never marks
+    /// the answer — even on a session whose ingest stopped early. Pins
+    /// the "flag off = no behavior change" contract from the brief.
+    #[test]
+    fn run_hunt_coverage_flag_off_stays_clear_even_if_session_incomplete() {
+        let _env_guard = lock_env();
+        let prior = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        // Coverage now defaults ON; exercise the explicit-off path.
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "0") };
+
+        let api = api();
+        if let Some(session) = api.sessions().current_session() {
+            session
+                .ingest_coverage
+                .write()
+                .unwrap()
+                .observe(true, false);
+        }
+
+        let resp = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: None,
+                dedup_mode: None,
+            })
+            .expect("run_hunt should not error");
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
+        }
+
+        assert!(!resp.coverage.possibly_incomplete);
+        assert!(resp.coverage.coverage_start.is_none());
+    }
+
+    /// `session_answer_coverage` itself (not just the `run_hunt` wrapper)
+    /// is a true no-op when `GRAPHHUNTER_COVERAGE` is off: it must return
+    /// the all-clear default without needing the graph's edge-timestamp
+    /// scan or the ingest/source-coverage lock reads to produce anything
+    /// meaningful — even on a session whose ingest is marked incomplete
+    /// and whose source_coverage has a missing source, the flag-off
+    /// result is indistinguishable from a pristine session. Pins the
+    /// perf fix: flag-off must skip the O(E) `edge_timestamp_range()`
+    /// scan entirely rather than compute-then-discard it.
+    #[test]
+    fn session_answer_coverage_flag_off_is_default_no_op() {
+        let _env_guard = lock_env();
+        let prior = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        // Coverage now defaults ON; exercise the explicit-off path.
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "0") };
+
+        let api = api();
+        let session = api
+            .sessions()
+            .current_session()
+            .expect("test harness session must exist");
+        session
+            .ingest_coverage
+            .write()
+            .unwrap()
+            .observe(true, false);
+        session
+            .source_coverage
+            .write()
+            .unwrap()
+            .record_missing("xdr:tenant");
+
+        let coverage = session_answer_coverage(&session).expect("must not error");
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
+        }
+
+        assert_eq!(coverage, crate::coverage::AnswerCoverage::default());
+    }
+
+    /// `RunHuntResponse.coverage` also carries the session's
+    /// `SourceCoverage` snapshot (Fase F Task 3/5): a source with an
+    /// open breaker + `record_missing` shows up in `missing_sources`,
+    /// and a source with a recorded watermark shows up in
+    /// `source_watermarks`. Wiring check that `run_hunt` reads
+    /// `session.source_coverage` — not just `session.ingest_coverage`
+    /// — when building the answer's coverage.
+    #[test]
+    fn run_hunt_answer_carries_missing_sources_when_breaker_open() {
+        let _env_guard = lock_env();
+        let prior_coverage = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        let prior_source_coverage = std::env::var("GRAPHHUNTER_SOURCE_COVERAGE").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "1") };
+        unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", "1") };
+
+        let api = api();
+        let session = api
+            .sessions()
+            .current_session()
+            .expect("test harness session must exist");
+        {
+            let mut sc = session.source_coverage.write().unwrap();
+            sc.record_covered("la:ws", 500);
+            for _ in 0..5 {
+                sc.record_failure("xdr:tenant", 5);
+            }
+            sc.record_missing("xdr:tenant");
+        }
+
+        let resp = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: None,
+                dedup_mode: None,
+            })
+            .expect("run_hunt should not error");
+
+        match prior_coverage {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
+        }
+        match prior_source_coverage {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") },
+        }
+
+        assert!(resp
+            .coverage
+            .missing_sources
+            .contains(&"xdr:tenant".to_string()));
+        assert_eq!(resp.coverage.source_watermarks.get("la:ws"), Some(&500));
+        assert!(resp.coverage.possibly_incomplete);
     }
 
     #[test]

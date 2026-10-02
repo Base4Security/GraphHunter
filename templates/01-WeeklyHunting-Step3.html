@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Threat Hunting · Fase 3 — Validación y Blast Radius · [FECHA_EMISION] · BASE4 Security</title>
+<link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,300;0,400;0,700;0,900;1,400&display=swap" rel="stylesheet">
+<style>
+:root{--or:#F1912D;--or2:#DC780F;--or3:#7C4409;--bk:#282828;--w:#fff;--g1:#404040;--g2:#5A5A5A;--g3:#747474;--g4:#A8A8A8;--g5:#DCDCDC;--cr:#8B0000;--hi:#C0392B;--me:#D68910;--lo:#1E8449;--nav-w:240px;--page:1100px}
+*{box-sizing:border-box;margin:0;padding:0}html{background:#1a1a1a}
+body{font-family:'Lato',sans-serif;background:#1a1a1a;color:var(--bk);line-height:1.6;font-size:14px}
+.doc-wrap{max-width:var(--page);margin:32px auto;background:var(--w);box-shadow:0 4px 40px rgba(0,0,0,.5)}
+.page-header{background:var(--bk);padding:18px 48px;display:flex;align-items:center;justify-content:space-between;border-bottom:3px solid var(--or)}
+.ph-logo{display:flex;align-items:center}
+.ph-logo img{display:block;height:72px;width:auto;max-width:220px}
+.ph-right{font-size:11px;color:var(--g4);text-align:right;line-height:1.5}
+.cover{background:var(--bk);padding:56px 48px 48px;position:relative;overflow:hidden}
+.cover-stripe{position:absolute;top:0;right:0;width:6px;height:100%;background:linear-gradient(to bottom,var(--or),var(--or3))}
+.cover>*{position:relative;z-index:1}
+.cover-date{font-size:12px;color:var(--g4);letter-spacing:1px;margin-bottom:28px}
+.cover-title{font-family:'Lato',sans-serif;font-weight:900;font-size:32px;color:var(--w);line-height:1.15;margin-bottom:8px}
+.cover-sub{font-size:14px;color:var(--g4);font-weight:300;margin-bottom:4px}
+.cover-phase{font-size:13px;color:var(--or);font-weight:700;margin-bottom:36px}
+.cover-divider{width:56px;height:3px;background:linear-gradient(90deg,var(--or),var(--or3));margin-bottom:28px}
+.cover-meta{display:grid;grid-template-columns:1fr 1fr;border:1px solid rgba(255,255,255,.1)}
+.cm-k{padding:9px 16px;font-size:11px;color:var(--g4);font-weight:700;letter-spacing:.5px;text-transform:uppercase;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)}
+.cm-v{padding:9px 16px;font-size:12px;color:var(--w);border-bottom:1px solid rgba(255,255,255,.08);border-left:1px solid rgba(255,255,255,.08)}
+.doc-layout{display:grid;grid-template-columns:var(--nav-w) 1fr;align-items:start}
+.side-nav{position:sticky;top:0;align-self:start;min-height:100vh;background:var(--bk);padding:28px 0 32px;border-right:3px solid var(--or);overflow-y:auto;max-height:100vh}
+.side-nav-inner{padding:0 18px}
+.side-nav-title{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--g4);margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,.12)}
+.side-nav ul{list-style:none}
+.side-nav li{margin:0}
+.side-nav a{display:block;padding:7px 10px;font-size:12px;line-height:1.35;color:var(--g4);text-decoration:none;border-left:2px solid transparent;transition:color .15s,border-color .15s}
+.side-nav a:hover,.side-nav a:focus{color:var(--w);border-left-color:var(--or);outline:none}
+.side-nav .nav-section>a{font-weight:700;color:var(--w);margin-top:10px}
+.side-nav .nav-section:first-child>a{margin-top:0}
+.side-nav .nav-sub a{padding-left:22px;font-size:11px}
+.doc-main{padding:48px 40px 64px;min-width:0}
+.sec{margin-bottom:44px;scroll-margin-top:16px}
+.blast{scroll-margin-top:16px;margin-bottom:36px}
+.sec-title{font-family:'Lato',sans-serif;font-weight:900;font-size:18px;color:var(--bk);padding:0 0 10px;border-bottom:3px solid var(--or);margin-bottom:18px}
+.sec-sub{font-weight:700;font-size:13px;color:var(--bk);margin:18px 0 8px}
+.para{font-size:13px;color:var(--g1);line-height:1.7;margin-bottom:10px}
+.para strong{color:var(--bk)}
+.placeholder{color:var(--g3);font-style:italic}
+.blast-title{font-size:16px;font-weight:900;color:var(--bk);margin-bottom:4px}
+.blast-title span{color:var(--or)}
+.blast-meta{font-size:12px;margin-bottom:8px;padding:6px 12px;background:#f9f9f9;border-left:3px solid var(--or)}
+.blast-meta strong{color:var(--bk)}
+.bm-tp{border-left-color:var(--cr)!important}
+.bm-env{border-left-color:var(--me)!important}
+.bm-fp{border-left-color:var(--lo)!important}
+.blast-divider{border:none;border-top:1px solid var(--g5);margin:8px 0 12px}
+.sub-label{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--g3);margin:14px 0 6px}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px}
+thead tr{background:var(--bk);color:var(--w)}
+thead th{padding:8px 12px;text-align:left;font-weight:700;font-size:11px;letter-spacing:.3px;border:1px solid var(--bk)}
+tbody tr:nth-child(even){background:#f7f7f7}
+tbody td{padding:7px 12px;border:1px solid #e0e0e0;color:var(--g1);vertical-align:top}
+tbody td:first-child{font-weight:700;color:var(--g2)}
+.pill{display:inline-block;padding:2px 8px;border-radius:2px;font-size:10px;font-weight:700;letter-spacing:.5px;color:var(--w)}
+.p-crit{background:var(--cr)}.p-high{background:var(--hi)}.p-med{background:var(--me)}.p-low{background:var(--lo)}
+.p-pass{background:var(--lo)}.p-fail{background:var(--hi)}.p-na{background:var(--g3);color:var(--bk)}
+.p-tp{background:var(--cr)}.p-env{background:var(--me)}.p-fp{background:var(--lo)}
+.blist{padding-left:0;list-style:none;margin-bottom:10px}
+.blist li{padding:5px 0 5px 20px;position:relative;font-size:13px;color:var(--g1);line-height:1.55;border-bottom:1px dotted var(--g5)}
+.blist li::before{content:"›";position:absolute;left:0;color:var(--or);font-weight:700;font-size:16px;line-height:1.3}
+.blist li strong{color:var(--bk)}
+.mitre-tag{display:inline-block;padding:2px 6px;margin:1px 3px 1px 0;font-size:10px;font-weight:700;background:var(--g1);color:var(--w);border-radius:2px;letter-spacing:.3px}
+.timeline{list-style:none;padding-left:0;margin:8px 0 12px;position:relative;border-left:3px solid var(--or);padding-left:18px}
+.timeline li{position:relative;padding:8px 0 8px 0;font-size:12.5px;color:var(--g1);line-height:1.55}
+.timeline li::before{content:"";position:absolute;left:-25px;top:14px;width:10px;height:10px;background:var(--or);border:2px solid var(--bk);border-radius:50%}
+.timeline .tl-t{display:inline-block;min-width:118px;font-family:'SFMono-Regular',Consolas,monospace;font-size:11.5px;color:var(--bk);font-weight:700;letter-spacing:.3px}
+.timeline .tl-tag{display:inline-block;padding:1px 6px;font-size:10px;font-weight:700;border-radius:2px;margin-right:6px;letter-spacing:.3px}
+.tl-pre{background:var(--g5);color:var(--bk)}
+.tl-hit{background:var(--cr);color:var(--w)}
+.tl-post{background:#fde3c6;color:var(--bk)}
+.handoff-block{background:#fafafa;border:1px solid var(--g5);border-left:4px solid var(--or);padding:14px 18px;margin-top:10px}
+.handoff-block .sec-sub{margin-top:0}
+.page-footer{background:var(--bk);padding:14px 48px;display:flex;justify-content:space-between;align-items:center;border-top:2px solid var(--or3)}
+.pf-left{font-size:11px;color:var(--g4)}.pf-right{font-size:11px;color:var(--g4);text-align:right}
+.pf-right span{color:var(--or)}
+@media (max-width:900px){.doc-layout{grid-template-columns:1fr}.side-nav{position:relative;min-height:auto;max-height:none;border-right:none;border-bottom:3px solid var(--or)}.side-nav ul{display:flex;flex-wrap:wrap;gap:4px}.side-nav .nav-section,.side-nav .nav-sub{display:inline}.side-nav a,.side-nav .nav-section>a,.side-nav .nav-sub a{padding:6px 10px;margin:0;border-left:none;border-radius:2px;background:rgba(255,255,255,.06)}}
+@media print{.doc-wrap{max-width:100%;margin:0;box-shadow:none}body{background:white}.side-nav{display:none}.doc-layout{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<!--
+  Plantilla — Informe de Threat Hunting (Fase 3: Validación y Blast Radius)
+  Mapea al prompt: 01-WeeklyHunting-Step3.md
+  Uso: duplicar este archivo por ciclo (ej. hunt-phase3-W23-2026.html).
+  Sustituir todos los marcadores [ENTRE_CORCHETES].
+  Duplicar bloques .blast por cada finding sobreviviente; aplicar .bm-tp / .bm-env / .bm-fp en .blast-meta.
+-->
+<div class="doc-wrap">
+<header class="page-header">
+  <div class="ph-logo">
+    <img src="https://base4sec.com/wp-content/uploads/2025/05/Logo_Slogan.png" alt="BASE4 Security — Your cyber ally" width="220" height="72" />
+  </div>
+  <div class="ph-right">Threat Hunting · Fase 3 · [FECHA_EMISION]<br>Clasificación: [CLASIFICACION]</div>
+</header>
+
+<div class="cover">
+  <div class="cover-stripe"></div>
+  <div class="cover-date">[FECHA_EMISION]</div>
+  <h1 class="cover-title">Validación y Blast Radius</h1>
+  <div class="cover-sub">Revisión QA de hallazgos de Fase 2 · [SUBTITULO_ALCANCE]</div>
+  <div class="cover-phase">Fase 3 · Cross-examination, enriquecimiento y veredicto</div>
+  <div class="cover-divider"></div>
+  <div class="cover-meta">
+    <div class="cm-k">Cliente / Entorno</div><div class="cm-v">[CLIENTE_ENTORNO]</div>
+    <div class="cm-k">Fecha de emisión</div><div class="cm-v">[FECHA_EMISION]</div>
+    <div class="cm-k">Clasificación</div><div class="cm-v">[CLASIFICACION]</div>
+    <div class="cm-k">Hallazgos Fase 2 evaluados</div><div class="cm-v">[N_HALLAZGOS_INPUT]</div>
+    <div class="cm-k">True Positives confirmados</div><div class="cm-v" style="color:var(--or);font-weight:700">[N_TP]</div>
+    <div class="cm-k">Falsos Positivos descartados</div><div class="cm-v">[N_FP]</div>
+    <div class="cm-k">Informe ID</div><div class="cm-v">[INFORME_ID]</div>
+  </div>
+</div>
+
+<div class="doc-layout">
+<nav class="side-nav" aria-label="Índice del informe">
+  <div class="side-nav-inner">
+    <div class="side-nav-title">Índice · Fase 3</div>
+    <ul>
+      <li class="nav-section"><a href="#sec-resumen">1. Resumen de validación</a></li>
+      <li class="nav-section"><a href="#sec-matriz">2. Matriz de validación</a></li>
+      <li class="nav-section"><a href="#sec-blast">3. Blast radius</a></li>
+      <!-- Duplicar li.nav-sub por finding con blast radius construido -->
+      <li class="nav-sub"><a href="#blast-h02">H-02 · [H-02_TITULO_CORTO]</a></li>
+      <li class="nav-sub"><a href="#blast-h03">H-03 · [H-03_TITULO_CORTO]</a></li>
+      <li class="nav-section"><a href="#sec-enrich">4. Enriquecimiento</a></li>
+      <li class="nav-section"><a href="#sec-handoff">5. Handoff a Fase 4</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="doc-main">
+
+<!-- ═══ 1. RESUMEN DE VALIDACIÓN ═══ -->
+<div class="sec" id="sec-resumen">
+<h2 class="sec-title">1. Resumen de validación</h2>
+<p class="para placeholder">[RESUMEN_PARRAFO_1 — Objetivo de la fase: cross-examination contra contexto operativo (parches, scanners, scripts agendados, cuentas de servicio).]</p>
+<p class="para placeholder">[RESUMEN_PARRAFO_2 — Resultado global: cuántos hallazgos Phase 2 sobreviven al peer-review skeptic; cómo se redistribuyen entre True Positive, Environmental Anomaly y False Positive.]</p>
+<p class="para placeholder">[RESUMEN_PARRAFO_3 — Postura final hacia la sintesis ejecutiva de Fase 4.]</p>
+</div>
+
+<!-- ═══ 2. MATRIZ DE VALIDACIÓN ═══ -->
+<div class="sec" id="sec-matriz">
+<h2 class="sec-title">2. Matriz de validación</h2>
+<p class="para placeholder">[MATRIZ_INTRO — Cada finding de Fase 2 evaluado en frío, con riesgo previo, riesgo post-validación, veredicto definitivo y justificación basada en telemetría.]</p>
+<table>
+  <thead>
+    <tr>
+      <th style="width:80px">Finding F2</th>
+      <th style="width:110px">Riesgo inicial</th>
+      <th style="width:130px">Riesgo post-validación</th>
+      <th style="width:160px">Veredicto final</th>
+      <th>Justificación</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>H-01</td>
+      <td><span class="pill p-low">Clean</span></td>
+      <td><span class="pill p-low">Clean</span></td>
+      <td><span class="pill p-fp">False Positive</span></td>
+      <td class="placeholder">[JUSTIF_H01 — corroboración con baseline / cuentas de servicio conocidas].</td>
+    </tr>
+    <tr>
+      <td>H-02</td>
+      <td><span class="pill p-med">Suspicious</span></td>
+      <td><span class="pill p-med">Environmental</span></td>
+      <td><span class="pill p-env">Environmental Anomaly</span></td>
+      <td class="placeholder">[JUSTIF_H02 — vinculado a misconfig / patching, sin malicia].</td>
+    </tr>
+    <tr>
+      <td>H-03</td>
+      <td><span class="pill p-high">Needs Escalation</span></td>
+      <td><span class="pill p-crit">Crítico</span></td>
+      <td><span class="pill p-tp">True Positive</span></td>
+      <td class="placeholder">[JUSTIF_H03 — IOC corroborado, MITRE técnica confirmada].</td>
+    </tr>
+    <!-- Añadir filas H-04, H-05… según hallazgos -->
+  </tbody>
+</table>
+<p class="para placeholder">Mapping MITRE consolidado: <span class="mitre-tag">[TACTICA_1]</span><span class="mitre-tag">[T1XXX]</span><span class="mitre-tag">[T1YYY]</span> · técnicas subsiguientes plausibles (lateral movement / persistence): <span class="mitre-tag">[T1ZZZ]</span></p>
+</div>
+
+<!-- ═══ 3. BLAST RADIUS (duplicar bloque .blast) ═══ -->
+<div class="sec" id="sec-blast">
+<h2 class="sec-title">3. Blast radius assessment</h2>
+<p class="para placeholder">[BLAST_INTRO — Para cada True Positive o Environmental Anomaly severo, reconstrucción cronológica de ±60 min de telemetría alrededor de la entidad involucrada (User / Host).]</p>
+
+<div class="blast" id="blast-h02">
+  <div class="blast-title"><span>H-02 —</span> [H-02_TITULO]</div>
+  <div class="blast-meta bm-env"><strong>Veredicto:</strong> Environmental Anomaly.&nbsp;&nbsp;<strong>Entidad pivot:</strong> [USUARIO_O_HOST].&nbsp;&nbsp;<strong>Ventana:</strong> [TIMESTAMP_ANCLA] ±60 min</div>
+  <hr class="blast-divider">
+
+  <div class="sub-label">Cadena de eventos reconstruida</div>
+  <ul class="timeline">
+    <li><span class="tl-t">[T-60 min]</span><span class="tl-tag tl-pre">Pre</span><span class="placeholder">[EVENTO_PRE_1 — actividad legítima u observable previa]</span></li>
+    <li><span class="tl-t">[T-20 min]</span><span class="tl-tag tl-pre">Pre</span><span class="placeholder">[EVENTO_PRE_2]</span></li>
+    <li><span class="tl-t">[T = 0]</span><span class="tl-tag tl-hit">Hit</span><span class="placeholder"><strong>[EVENTO_DETECTADO_EN_F2 — la anomalía original]</strong></span></li>
+    <li><span class="tl-t">[T+15 min]</span><span class="tl-tag tl-post">Post</span><span class="placeholder">[EVENTO_POST_1 — efecto / acción consecuente]</span></li>
+    <li><span class="tl-t">[T+45 min]</span><span class="tl-tag tl-post">Post</span><span class="placeholder">[EVENTO_POST_2]</span></li>
+  </ul>
+
+  <div class="sub-label">Intento de attack chain</div>
+  <p class="para placeholder">[ATTACK_CHAIN — Stitch del evento aislado en una cadena MITRE; relación con tácticas previas (Initial Access / Execution) y posibles próximas (Lateral Movement / Persistence).]</p>
+</div>
+
+<div class="blast" id="blast-h03">
+  <div class="blast-title"><span>H-03 —</span> [H-03_TITULO]</div>
+  <div class="blast-meta bm-tp"><strong>Veredicto:</strong> True Positive.&nbsp;&nbsp;<strong>Entidad pivot:</strong> [USUARIO_O_HOST].&nbsp;&nbsp;<strong>Ventana:</strong> [TIMESTAMP_ANCLA] ±60 min</div>
+  <hr class="blast-divider">
+  <div class="sub-label">Cadena de eventos reconstruida</div>
+  <ul class="timeline">
+    <li><span class="tl-t">[T-60 min]</span><span class="tl-tag tl-pre">Pre</span><span class="placeholder">[EVENTO_PRE_1]</span></li>
+    <li><span class="tl-t">[T = 0]</span><span class="tl-tag tl-hit">Hit</span><span class="placeholder"><strong>[EVENTO_DETECTADO_EN_F2]</strong></span></li>
+    <li><span class="tl-t">[T+10 min]</span><span class="tl-tag tl-post">Post</span><span class="placeholder">[EVENTO_POST_1]</span></li>
+  </ul>
+  <div class="sub-label">Intento de attack chain</div>
+  <p class="para placeholder">[ATTACK_CHAIN]</p>
+</div>
+<!-- Duplicar bloque .blast y entrada en .side-nav para findings adicionales. -->
+</div>
+
+<!-- ═══ 4. ENRIQUECIMIENTO ═══ -->
+<div class="sec" id="sec-enrich">
+<h2 class="sec-title">4. Datos de enriquecimiento</h2>
+<p class="para placeholder">[ENRICH_INTRO — IOCs nuevos surgidos durante el pivoteo de validación y patrones de comportamiento anómalos correlacionados.]</p>
+<div class="sec-sub">IOCs descubiertos</div>
+<table>
+  <thead><tr><th style="width:120px">Tipo</th><th>Valor</th><th>Origen / Hipótesis</th><th>Comentario</th></tr></thead>
+  <tbody>
+    <tr><td>IP</td><td class="placeholder">[IP_1]</td><td>[ORIGEN_1]</td><td class="placeholder">[COMENTARIO_1]</td></tr>
+    <tr><td>Dominio</td><td class="placeholder">[DOMINIO_1]</td><td>[ORIGEN_2]</td><td class="placeholder">[COMENTARIO_2]</td></tr>
+    <tr><td>Hash</td><td class="placeholder">[HASH_1]</td><td>[ORIGEN_3]</td><td class="placeholder">[COMENTARIO_3]</td></tr>
+    <tr><td>User-Agent</td><td class="placeholder">[UA_1]</td><td>[ORIGEN_4]</td><td class="placeholder">[COMENTARIO_4]</td></tr>
+  </tbody>
+</table>
+<div class="sec-sub">Anomalías de comportamiento</div>
+<ul class="blist">
+  <li class="placeholder"><strong>[ANOMALIA_1_TITULO]:</strong> [DESCRIPCION — Aislado vs sistémico; evidencia de propagación].</li>
+  <li class="placeholder"><strong>[ANOMALIA_2_TITULO]:</strong> [DESCRIPCION].</li>
+</ul>
+</div>
+
+<!-- ═══ 5. HANDOFF A FASE 4 ═══ -->
+<div class="sec" id="sec-handoff">
+<h2 class="sec-title">5. Handoff a Fase 4 — Reporting</h2>
+<div class="handoff-block">
+  <div class="sec-sub">Amenazas validadas</div>
+  <ul class="blist">
+    <li class="placeholder"><strong>[TP_1]</strong> — MITRE <span class="mitre-tag">[T1XXX]</span> · entidades: [ENTIDADES] · severidad propuesta: <span class="pill p-crit">Crítica</span></li>
+    <li class="placeholder"><strong>[TP_2]</strong> — MITRE <span class="mitre-tag">[T1YYY]</span> · entidades: [ENTIDADES] · severidad propuesta: <span class="pill p-high">Alta</span></li>
+  </ul>
+  <div class="sec-sub">Brechas de seguridad detectadas</div>
+  <ul class="blist">
+    <li class="placeholder"><strong>[GAP_1]</strong> — [DESCRIPCION — visibilidad faltante, política débil de logging, ventana ciega].</li>
+    <li class="placeholder"><strong>[GAP_2]</strong> — [DESCRIPCION].</li>
+  </ul>
+  <div class="sec-sub">Controles verificados (Negative Findings)</div>
+  <ul class="blist">
+    <li class="placeholder"><strong>[CONTROL_1]</strong> — [TECNICA_O_AMBITO] · evidencia: [EVIDENCIA].</li>
+    <li class="placeholder"><strong>[CONTROL_2]</strong> — [TECNICA_O_AMBITO] · evidencia: [EVIDENCIA].</li>
+  </ul>
+</div>
+</div>
+
+</main>
+</div>
+
+<footer class="page-footer">
+  <div class="pf-left">© [AÑO] BASE4 Security S.A. · Todos los derechos reservados<br>Documento confidencial — [USO_DOCUMENTO]</div>
+  <div class="pf-right">info@base4sec.com<br>LATAM · USA · España &nbsp;|&nbsp; <span>Tu ciber aliado.</span></div>
+</footer>
+</div>
+</body>
+</html>

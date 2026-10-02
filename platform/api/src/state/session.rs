@@ -139,6 +139,20 @@ pub struct Session {
     /// Most recent `graph_build` (§4.3), surfaced in §5 status as `last_build`.
     /// Ephemeral — cleared on process restart.
     pub last_build: RwLock<Option<crate::dto::sentinel::BuildRecord>>,
+    /// Completeness tracking (design spec §17, `completeness_flag`):
+    /// folds `stopped_early` / `whole_file_rejected` signals across every
+    /// ingest into this session. `run_hunt` reads it (via
+    /// `crate::coverage::answer_coverage`) to populate
+    /// `RunHuntResponse.coverage`. Monotonic — see `IngestCoverage::observe`.
+    pub ingest_coverage: RwLock<crate::coverage::IngestCoverage>,
+    /// Per-source watermark + circuit breaker (Fase F, Task 3/4): tracks how
+    /// far each SIEM source (`ingest_siem`) or streaming source has been
+    /// successfully pulled, and a consecutive-failure breaker used only as a
+    /// *reporting* signal (missing_sources on answers) — never to skip a
+    /// pull, since `ingest_siem` is one-shot and has no later tick to
+    /// recover a skipped source. Ephemeral — NOT persisted in
+    /// `SessionFile`/GHS1, same policy as `ingest_coverage`.
+    pub source_coverage: RwLock<crate::coverage::SourceCoverage>,
 }
 
 /// D3 stage 3+4 — Session-level LFTJ index cache. Built lazily on
@@ -365,6 +379,8 @@ impl Session {
             live_tail_stats: RwLock::new(LiveTailStats::default()),
             proposals: RwLock::new(std::collections::HashMap::new()),
             last_build: RwLock::new(None),
+            ingest_coverage: RwLock::new(crate::coverage::IngestCoverage::default()),
+            source_coverage: RwLock::new(crate::coverage::SourceCoverage::default()),
         }
     }
 
@@ -658,6 +674,7 @@ mod tests {
                 rel_type: RelationType::Auth,
                 rel_metadata: Default::default(),
                 timestamp: ts,
+                raw_line: None,
             }
         }
 

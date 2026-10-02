@@ -230,6 +230,48 @@ pub struct Hypothesis {
     /// last edge timestamp. `None` = no window constraint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_seconds: Option<i64>,
+    /// Clock-skew tolerance δ in seconds. Causal monotonicity is relaxed
+    /// from `τ(eᵢ₊₁) ≥ τ(eᵢ)` to `τ(eᵢ₊₁) ≥ τ(eᵢ) − δ`, so a later step
+    /// may carry a timestamp up to δ *before* the step it follows.
+    ///
+    /// The reason this exists is that a single investigation stitches
+    /// events from clocks that do not agree: an endpoint's Sysmon, a
+    /// cloud tenant's sign-in log and a sensor's CDM stream can disagree
+    /// by seconds, and a strict `≥` silently drops the true causal chain
+    /// when the downstream clock happens to run behind. δ is the width of
+    /// that disagreement, not a fuzz factor — set it to the sources' known
+    /// skew bound.
+    ///
+    /// The tolerance is **per step, not cumulative**: each edge is
+    /// compared against the *real* timestamp of the one before it, so a
+    /// chain of L steps can never drift more than δ at any single hop.
+    ///
+    /// `None` falls back to the `GRAPHHUNTER_SKEW_TOLERANCE_SECONDS`
+    /// environment variable, then to `0` (strict). Deployment-level skew
+    /// belongs in the env var; a per-hypothesis override belongs here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skew_tolerance_seconds: Option<i64>,
+    /// Maximum gap `g`: how many *wildcard* edges may bridge the hole
+    /// between two consecutive observed steps, to tolerate lost logs.
+    ///
+    /// With `g = 0` (default) step `i+1` must leave the exact vertex step
+    /// `i` arrived at. With `g > 0` it may instead leave any vertex
+    /// reachable from there in 1..=g wildcard hops (any relation type),
+    /// so long as those hops are temporally monotone (honouring δ). The
+    /// step's own relation type and destination type are still required —
+    /// the gap fills the hole *between* steps, it does not relax the
+    /// steps themselves.
+    ///
+    /// The bridging vertices are deliberately **not** added to the result
+    /// path: a match stays a chain of `steps + 1` anchor entities, so
+    /// dedup, scoring, aggregation and verification are unchanged and the
+    /// path remains readable as the observed kill-chain. The gap is a
+    /// relaxation of *matching*, not an expansion of *output*.
+    ///
+    /// `None` falls back to `GRAPHHUNTER_MAX_GAP`, then `0`. This is a
+    /// robustness knob for lossy telemetry, off by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_gap: Option<usize>,
     /// Structural connectivity model. See [`HypothesisShape`].
     /// Defaults to `Chain` for backward compatibility.
     #[serde(default)]
@@ -245,8 +287,51 @@ impl Hypothesis {
             k_simplicity: 1,
             aggregations: Vec::new(),
             window_seconds: None,
+            skew_tolerance_seconds: None,
+            max_gap: None,
             shape: HypothesisShape::default(),
         }
+    }
+
+    /// Sets the maximum wildcard-gap `g` (see [`Self::max_gap`]).
+    pub fn with_max_gap(mut self, g: usize) -> Self {
+        self.max_gap = Some(g);
+        self
+    }
+
+    /// Resolves the effective `g`: the explicit field, else
+    /// `GRAPHHUNTER_MAX_GAP`, else `0`. Read once per search.
+    pub fn resolve_max_gap(&self) -> usize {
+        self.max_gap
+            .or_else(|| {
+                std::env::var("GRAPHHUNTER_MAX_GAP")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0)
+    }
+
+    /// Sets the clock-skew tolerance δ in seconds (see
+    /// [`Self::skew_tolerance_seconds`]). Negative values are clamped to
+    /// zero — a "negative tolerance" has no meaning and would silently
+    /// tighten monotonicity below strict.
+    pub fn with_skew_tolerance(mut self, seconds: i64) -> Self {
+        self.skew_tolerance_seconds = Some(seconds.max(0));
+        self
+    }
+
+    /// Resolves the effective δ for this hypothesis: the explicit field,
+    /// else `GRAPHHUNTER_SKEW_TOLERANCE_SECONDS`, else `0`. Never
+    /// negative. Read this once per search, never inside the match loop.
+    pub fn resolve_skew_delta(&self) -> i64 {
+        self.skew_tolerance_seconds
+            .or_else(|| {
+                std::env::var("GRAPHHUNTER_SKEW_TOLERANCE_SECONDS")
+                    .ok()
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+            })
+            .unwrap_or(0)
+            .max(0)
     }
 
     /// Sets the structural connectivity shape (Chain or Graph).
@@ -348,5 +433,49 @@ impl Hypothesis {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // The two env-var fallbacks are the only tests here that touch a
+    // process-global, so they take one lock to serialise against each
+    // other. This crate has no concurrent search that reads the default,
+    // so the mutation cannot leak the way it would in graph-engine —
+    // which is exactly why these tests live here and not there.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn max_gap_prefers_the_field_over_the_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: restored before the guard drops.
+        unsafe { std::env::set_var("GRAPHHUNTER_MAX_GAP", "3") };
+        let explicit = Hypothesis::new("h").with_max_gap(1);
+        assert_eq!(explicit.resolve_max_gap(), 1, "field wins over env");
+        let defaulted = Hypothesis::new("h");
+        assert_eq!(defaulted.resolve_max_gap(), 3, "env supplies the default");
+        unsafe { std::env::remove_var("GRAPHHUNTER_MAX_GAP") };
+        assert_eq!(Hypothesis::new("h").resolve_max_gap(), 0, "no field, no env → 0");
+    }
+
+    #[test]
+    fn skew_delta_prefers_the_field_over_the_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: restored before the guard drops.
+        unsafe { std::env::set_var("GRAPHHUNTER_SKEW_TOLERANCE_SECONDS", "9") };
+        let explicit = Hypothesis::new("h").with_skew_tolerance(2);
+        assert_eq!(explicit.resolve_skew_delta(), 2, "field wins over env");
+        let defaulted = Hypothesis::new("h");
+        assert_eq!(defaulted.resolve_skew_delta(), 9, "env supplies the default");
+        unsafe { std::env::remove_var("GRAPHHUNTER_SKEW_TOLERANCE_SECONDS") };
+        assert_eq!(Hypothesis::new("h").resolve_skew_delta(), 0, "no field, no env → 0");
+    }
+
+    #[test]
+    fn negative_skew_is_clamped_to_zero() {
+        assert_eq!(Hypothesis::new("h").with_skew_tolerance(-5).skew_tolerance_seconds, Some(0));
     }
 }

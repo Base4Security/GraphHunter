@@ -627,6 +627,7 @@ fn mk_smoke_triple(src_id: &str, dst_id: &str, ts: i64) -> RawIngestEvent {
         rel_type: RelationType::Auth,
         rel_metadata: HashMap::new(),
         timestamp: ts,
+        raw_line: None,
     }
 }
 

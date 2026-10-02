@@ -104,6 +104,18 @@ graph_hunter_dsl = { path = "../../platform/dsl" }
 mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
+# Dev-only: activates preserve_order for the *test build's* unified feature
+# set (Cargo unifies features across the whole dep graph, dev-deps included).
+# In core's real deploy target (inside platform/api), preserve_order is
+# already ON transitively via evtx — Value::Object becomes an IndexMap that
+# preserves insertion order, not sorted order. Without this dev-dep, core's
+# standalone test build never activates preserve_order, so Value::Object is
+# a plain BTreeMap (already sorted) and a naive/no-op canonicalization would
+# pass canonical_value_string's regression test by accident. This makes the
+# test build match the real deploy target so the test genuinely exercises
+# the non-determinism the function fixes. Dev-only: does not affect the
+# published lib's dependency graph or downstream consumers.
+serde_json = { version = "1", features = ["preserve_order"] }
 # Enables `tokio::time::advance` + `#[tokio::test(start_paused = true)]`
 # for deterministic rate-limiter tests. Only pulled during test builds.
 tokio = { version = "1", features = ["test-util"] }

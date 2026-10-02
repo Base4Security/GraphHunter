@@ -26,12 +26,17 @@ impl From<ApiError> for CommandError {
             }
             ApiError::NotFound(m) | ApiError::InvalidState(m) => CommandError::InvalidInput(m),
             ApiError::Conflict(m) => CommandError::GraphLocked(m),
-            ApiError::InvalidInput(m) => CommandError::InvalidInput(m),
+            ApiError::InvalidInput(m) | ApiError::PayloadTooLarge(m) => {
+                CommandError::InvalidInput(m)
+            }
             ApiError::Upstream { service, message } => {
                 CommandError::Internal(format!("{service}: {message}"))
             }
             ApiError::Io(m) => CommandError::IoError(m),
             ApiError::Internal(m) => CommandError::Internal(m),
+            ApiError::FeatureDisabled { feature, hint } => {
+                CommandError::InvalidInput(format!("{feature}: {hint}"))
+            }
         }
     }
 }

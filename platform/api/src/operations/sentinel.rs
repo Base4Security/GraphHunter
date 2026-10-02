@@ -152,6 +152,15 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
+                // `polling_loop` below resolves `make_parser_for_format(
+                // "sentinel")` for every batch — freeze that real
+                // identity now instead of leaving this a `builtin:unknown`
+                // live-tail dataset.
+                parser: Some("sentinel".to_string()),
+                // No FieldConfig on the live-connector path — builtin
+                // identity via `parser` above is the frozen mapping
+                // identity for this dataset.
+                mapping_hash: None,
             });
         }
 
@@ -310,6 +319,8 @@ impl GraphHunterApi {
             azure_resource_group: std::env::var("AZURE_RESOURCE_GROUP").ok(),
             azure_workspace_id: std::env::var("AZURE_WORKSPACE_ID").ok(),
             azure_workspace_name: std::env::var("AZURE_WORKSPACE_NAME").ok(),
+            hunting_templates_enabled: crate::kql_flags::hunting_templates_enabled(),
+            kql_escape_hatch_enabled: crate::kql_flags::kql_escape_hatch_enabled(),
         }
     }
 
@@ -467,6 +478,11 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
+                // `make_parser_for_format("sentinel")` below is the real
+                // (hardcoded) parser for this ad-hoc KQL path — freeze it
+                // now instead of leaving `builtin:unknown`.
+                parser: Some("sentinel".to_string()),
+                mapping_hash: None,
             });
         }
 
@@ -775,6 +791,10 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
+                // Materialized from a Sentinel KQL proposal — freeze the
+                // real source identity instead of leaving `builtin:unknown`.
+                parser: Some("sentinel".to_string()),
+                mapping_hash: None,
             });
         }
 
@@ -814,6 +834,19 @@ impl GraphHunterApi {
                 d.relation_count = relations_created;
             }
         }
+
+        // Re-pin the built session as current. `graph_build` resolved
+        // `session` once at the top and correctly wrote the whole graph into
+        // that Arc, but the materialization KQL above `await`s for seconds —
+        // long enough for the frontend's async session-restore (which fires
+        // `set_current` after the webview mounts) to move `current` to a
+        // different session mid-build. When that happens the freshly built
+        // graph is orphaned: every read endpoint resolves `current` and sees
+        // the OTHER session, so the analyst's build appears to have vanished.
+        // Pinning here enforces the user-visible invariant "after I build a
+        // graph, that graph is what I'm looking at" and makes the
+        // `enrich_ip(session: None)` calls below resolve to the built session.
+        self.sessions().set_current(Some(session.id.clone()));
 
         // Enrichment ONCE, at build (design principle §2): resolve geoip+asn for
         // the IP nodes and store on entity metadata. threat_intel is a stub.
@@ -885,6 +918,18 @@ impl GraphHunterApi {
         &self,
         req: RunHuntingTemplateRequest,
     ) -> ApiResult<KqlResult> {
+        // Fase G gate: fires before any rendering / Azure network / credential
+        // use, so a disabled flag never touches the network. Gates ALL
+        // callers of the template path uniformly (currently Tauri's
+        // `cmd_run_hunting_template`).
+        if !crate::kql_flags::hunting_templates_enabled() {
+            return Err(ApiError::FeatureDisabled {
+                feature: "hunting_templates".into(),
+                hint: "Hunting templates are disabled (GRAPHHUNTER_HUNTING_TEMPLATES). \
+                       Hunt in the local graph via hunt_run / the hypothesis catalog."
+                    .into(),
+            });
+        }
         let template = req
             .template
             .ok_or_else(|| ApiError::InvalidInput("template is required".into()))?;
@@ -1659,6 +1704,10 @@ fn name_to_class(leaf_lower: &str) -> Option<&'static str> {
         ("userprincipalname", "User"), ("useridentityarn", "User"), ("useridentity", "User"),
         ("username", "User"), ("samaccountname", "User"), ("accountname", "User"),
         ("subjectusername", "User"), ("targetusername", "User"), ("principalid", "User"),
+        // UPN is the strongest identity key — it unifies device/endpoint
+        // activity (InitiatingProcessAccountUpn, AccountUpn) with Azure AD
+        // SigninLogs (UserPrincipalName) on one User node.
+        ("accountupn", "User"), ("userupn", "User"),
         // Host
         ("hostname", "Host"), ("devicename", "Host"), ("machinename", "Host"),
         ("workstation", "Host"), ("computer", "Host"),
@@ -2144,6 +2193,123 @@ mod cap_kql_rows_tests {
     }
 }
 
+/// Fase G: `run_hunting_template` gate + `sentinel_check_env` reporting.
+/// Both touch the process-global `GRAPHHUNTER_HUNTING_TEMPLATES` /
+/// `GRAPHHUNTER_KQL_ESCAPE_HATCH` env vars, so tests here serialize via
+/// `crate::kql_flags::ENV_LOCK` (shared with `kql_flags`'s own flag-reader
+/// tests) to avoid cross-test races under the default multi-threaded runner.
+#[cfg(test)]
+mod hunting_template_gate_tests {
+    use super::*;
+    use crate::kql_flags::ENV_LOCK;
+
+    #[tokio::test]
+    async fn run_hunting_template_disabled_returns_structured_steer() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("GRAPHHUNTER_HUNTING_TEMPLATES", "0");
+        }
+        let api = GraphHunterApi::new_noop();
+        let err = api
+            .run_hunting_template(RunHuntingTemplateRequest {
+                template: Some(HuntingTemplateId::FailedLogonBurst),
+                workspace_id: "ws-dummy".into(),
+                azure_tenant_id: "tenant-dummy".into(),
+                azure_client_id: "client-dummy".into(),
+                azure_client_secret: "secret-dummy".into(),
+                time_window: None,
+            })
+            .await
+            .unwrap_err();
+        unsafe {
+            std::env::remove_var("GRAPHHUNTER_HUNTING_TEMPLATES");
+        }
+        // The gate must fire before any network/credential use: this must be
+        // the structured disabled steer, not an Upstream/network error, even
+        // though the dummy creds above would fail a real Azure call.
+        match &err {
+            ApiError::FeatureDisabled { feature, .. } => {
+                assert_eq!(feature, "hunting_templates");
+            }
+            other => panic!("expected FeatureDisabled, got {other:?}"),
+        }
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("disabled") && msg.contains("GRAPHHUNTER_HUNTING_TEMPLATES"),
+            "expected feature-disabled steer wording, got: {msg}"
+        );
+        assert!(
+            msg.contains("hunt_run"),
+            "expected steer to local hunting tools, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_hunting_template_enabled_by_default_proceeds_past_gate() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("GRAPHHUNTER_HUNTING_TEMPLATES");
+        }
+        let api = GraphHunterApi::new_noop();
+        let err = api
+            .run_hunting_template(RunHuntingTemplateRequest {
+                template: Some(HuntingTemplateId::FailedLogonBurst),
+                workspace_id: "ws-dummy".into(),
+                azure_tenant_id: "tenant-dummy".into(),
+                azure_client_id: "client-dummy".into(),
+                azure_client_secret: "secret-dummy".into(),
+                time_window: None,
+            })
+            .await
+            .unwrap_err();
+        // Default-on: the gate does not fire, so the request proceeds to
+        // `run_kql` and fails downstream (dummy creds, no real transport) —
+        // anything other than FeatureDisabled proves the gate didn't trip.
+        match err {
+            ApiError::FeatureDisabled { .. } => {
+                panic!("gate must not fire when flag is default-enabled")
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod sentinel_check_env_flag_tests {
+    use super::*;
+    use crate::kql_flags::ENV_LOCK;
+
+    #[test]
+    fn sentinel_check_env_defaults_both_fase_g_flags_enabled() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("GRAPHHUNTER_HUNTING_TEMPLATES");
+            std::env::remove_var("GRAPHHUNTER_KQL_ESCAPE_HATCH");
+        }
+        let api = GraphHunterApi::new_noop();
+        let status = api.sentinel_check_env();
+        assert!(status.hunting_templates_enabled, "default must be enabled");
+        assert!(status.kql_escape_hatch_enabled, "default must be enabled");
+    }
+
+    #[test]
+    fn sentinel_check_env_reflects_explicit_falsy() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("GRAPHHUNTER_HUNTING_TEMPLATES", "0");
+            std::env::set_var("GRAPHHUNTER_KQL_ESCAPE_HATCH", "off");
+        }
+        let api = GraphHunterApi::new_noop();
+        let status = api.sentinel_check_env();
+        assert!(!status.hunting_templates_enabled);
+        assert!(!status.kql_escape_hatch_enabled);
+        unsafe {
+            std::env::remove_var("GRAPHHUNTER_HUNTING_TEMPLATES");
+            std::env::remove_var("GRAPHHUNTER_KQL_ESCAPE_HATCH");
+        }
+    }
+}
+
 #[cfg(test)]
 mod resume_pause_tests {
     use super::*;
@@ -2268,8 +2434,12 @@ mod fallback_gate_tests {
         // With acknowledge_fallback the gate does not fire; the call then
         // proceeds to credential resolution (which fails here with no AZURE_*),
         // proving it was NOT short-circuited as gated.
+        //
+        // `sentinel_check_env_flag_tests` exercises `sentinel_check_env` (an
+        // AZURE_*-reading production path) from a test, so serialize against
+        // it via the shared `kql_flags::ENV_LOCK`.
+        let _guard = crate::kql_flags::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for k in ["AZURE_WORKSPACE_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"] {
-            // SAFETY: see other AZURE_* tests in this file — no concurrent reader.
             unsafe { std::env::remove_var(k) };
         }
         let api = GraphHunterApi::new_noop();
@@ -2351,6 +2521,63 @@ mod graph_propose_tests {
 
     fn sf(table: &str, field: &str) -> SelectedField {
         SelectedField { table: table.into(), field: field.into() }
+    }
+
+    #[test]
+    fn account_upn_field_classifies_as_user_node_for_identity_correlation() {
+        // Device tables carry the SAM account name (InitiatingProcessAccountName,
+        // a short name) as the User node AND the UPN (InitiatingProcessAccountUpn,
+        // e.g. "jsalas@niubiz.com.pe") as an attribute. But the UPN is the key
+        // that unifies endpoint activity with Azure AD SigninLogs (also UPN),
+        // so a hunt can pivot identity -> endpoint on one User node. Selecting
+        // the UPN field must therefore produce a User node, not an attribute.
+        let selected = vec![
+            sf("DeviceNetworkEvents", "InitiatingProcessAccountUpn"),
+            sf("DeviceNetworkEvents", "RemoteIP"),
+        ];
+        let props = build_proposals(&selected, None, "where TimeGenerated > ago(1h)");
+        assert_eq!(props.len(), 1);
+        let p = &props[0];
+        assert!(
+            p.nodes.iter().any(|n| n.class == "User"),
+            "InitiatingProcessAccountUpn must be a User node; got {:?}",
+            p.nodes
+        );
+    }
+
+    #[test]
+    fn proposes_ip_to_ip_flow_graph_from_aws_firewall() {
+        // AWS Network Firewall flow logs name their columns SrcIp/DestIp.
+        // "destip" was missing from the canonical alias table, so DestIp
+        // classified as attribute and the proposal came out edge-less:
+        // graph_build materialized 4K isolated IP nodes with 0 relations.
+        let selected = vec![
+            sf("AWSNetworkFirewallFlow", "SrcIp"),
+            sf("AWSNetworkFirewallFlow", "DestIp"),
+            sf("AWSNetworkFirewallFlow", "DestPort"),
+            sf("AWSNetworkFirewallFlow", "AppProto"),
+        ];
+        let props =
+            build_proposals(&selected, Some("egress"), "where TimeGenerated > ago(1h)");
+        assert_eq!(props.len(), 1);
+        let p = &props[0];
+        assert_eq!(
+            p.nodes.len(),
+            2,
+            "SrcIp and DestIp must both be IP nodes; got {:?}",
+            p.nodes
+        );
+        assert_eq!(
+            p.edges.len(),
+            1,
+            "flow table must propose an IP->IP edge; got {:?}",
+            p.edges
+        );
+        assert_eq!(p.edges[0].from, "IP");
+        assert_eq!(p.edges[0].to, "IP");
+        // Ports/protocol ride the edge as attributes.
+        assert!(p.edges[0].attributes.iter().any(|a| a == "DestPort"));
+        assert!(p.edges[0].attributes.iter().any(|a| a == "AppProto"));
     }
 
     #[test]
@@ -2825,20 +3052,19 @@ mod seed_tests {
 
     #[tokio::test]
     async fn seed_without_session_auto_creates_one() {
+        // Fase G added `sentinel_check_env_flag_tests`, which DOES exercise
+        // `sentinel_check_env` (an AZURE_*-reading production path) from a
+        // test. So this test now also acquires `kql_flags::ENV_LOCK` before
+        // stripping AZURE_* vars, serializing against that module (and any
+        // other env-touching test) instead of relying on "no test reads
+        // AZURE_*".
+        let _guard = crate::kql_flags::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for k in [
             "AZURE_WORKSPACE_ID",
             "AZURE_TENANT_ID",
             "AZURE_CLIENT_ID",
             "AZURE_CLIENT_SECRET",
         ] {
-            // SAFETY: no TEST in this binary reads AZURE_* from the process
-            // environment — the production readers (run_kql, sentinel_connect,
-            // sentinel_check_env) are never exercised by a test, and
-            // hydrate_tests/seed_tests pass credentials as literals. So
-            // stripping these vars races with no concurrent observer. If a
-            // future test calls an env-reading production path, serialize it
-            // (e.g. add the serial_test dep + #[serial]) or pass creds via
-            // request fields.
             unsafe { std::env::remove_var(k); }
         }
         let api = GraphHunterApi::new_noop();

@@ -40,6 +40,307 @@ timestamp,source_ip,target_ip,user
 }
 
 #[test]
+fn csv_parser_maps_mde_timeline_export_headers() {
+    // Trimmed-down M365 Defender machine-timeline export: Title Case
+    // headers with spaces. Before separator normalization every column
+    // fell through canonical matching and the file produced zero triples.
+    let csv = "\
+Event Time,Computer Name,Action Type,File Name,Account Name,Remote IP,Remote Port,Process Command Line
+2026-06-18T15:56:13.736,arlmldcc44714js.lomanegra.root,ProcessCreated,updater.exe,system,52.229.170.60,443,\"\"\"updater.exe\"\" --system\"
+2026-06-18T15:57:01.100,arlmldcc44714js.lomanegra.root,ConnectionSuccess,chrome.exe,jperez,142.250.79.14,443,
+";
+    let triples = CsvParser.parse(csv);
+    assert!(
+        !triples.is_empty(),
+        "MDE timeline CSV must map to graph triples, got none"
+    );
+    let mut entity_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (src, _, dst) in &triples {
+        entity_ids.insert(src.id.clone());
+        entity_ids.insert(dst.id.clone());
+    }
+    // The remote IPs and the host must surface as graph entities.
+    assert!(entity_ids.iter().any(|id| id.contains("52.229.170.60")));
+    assert!(entity_ids.iter().any(|id| id.contains("142.250.79.14")));
+    assert!(entity_ids.iter().any(|id| id.contains("arlmldcc44714js")));
+}
+
+#[test]
+fn action_relation_process_created_is_execute_not_write() {
+    use graph_hunter_core::RelationType;
+    use graph_hunter_core::field_preview::infer_relation_from_action;
+    // Process-creation actions must not fall into the generic
+    // create→Write branch.
+    assert_eq!(
+        infer_relation_from_action("ProcessCreated"),
+        Some(RelationType::Execute)
+    );
+    assert_eq!(
+        infer_relation_from_action("CreateProcess"),
+        Some(RelationType::Execute)
+    );
+    assert_eq!(
+        infer_relation_from_action("process_started"),
+        Some(RelationType::Execute)
+    );
+    // File actions keep their existing labels.
+    assert_eq!(
+        infer_relation_from_action("FileCreated"),
+        Some(RelationType::Write)
+    );
+    assert_eq!(
+        infer_relation_from_action("FileDeleted"),
+        Some(RelationType::Delete)
+    );
+}
+
+#[test]
+fn mde_file_events_route_file_name_to_file_not_process() {
+    use graph_hunter_core::RelationType;
+    // For MDE file events the bare "File Name" column is the file being
+    // acted on and the actor is "Initiating Process File Name". Without the
+    // action-aware reroute the file surfaced as a Process entity and the
+    // initiating process was dropped.
+    let csv = "\
+Event Time,Computer Name,Action Type,File Name,Folder Path,Initiating Process File Name,Account Name
+2026-06-18T16:02:00.000,arlmldcc44714js.lomanegra.root,FileCreated,payload.dll,C:\\Temp,powershell.exe,jperez
+";
+    let triples = CsvParser.parse(csv);
+    assert!(
+        triples.iter().any(|(src, rel, dst)| {
+            src.entity_type == EntityType::Process
+                && src.id.contains("powershell.exe")
+                && rel.rel_type == RelationType::Write
+                && dst.entity_type == EntityType::File
+                && dst.id.contains("payload.dll")
+        }),
+        "expected powershell.exe -[Write]-> payload.dll, got: {:?}",
+        triples
+            .iter()
+            .map(|(s, r, d)| format!("{} -[{:?}]-> {}", s.id, r.rel_type, d.id))
+            .collect::<Vec<_>>()
+    );
+    // The created file must never surface as a Process entity.
+    assert!(
+        !triples.iter().any(|(src, _, dst)| {
+            (src.entity_type == EntityType::Process && src.id.contains("payload.dll"))
+                || (dst.entity_type == EntityType::Process && dst.id.contains("payload.dll"))
+        }),
+        "payload.dll must not be a Process entity"
+    );
+}
+
+#[test]
+fn configurable_parser_does_not_promote_pathological_values_to_nodes() {
+    // Defense-in-depth against node-ID explosions: even when a config
+    // (user-supplied or auto-generated) promotes a field to Node, values
+    // that cannot be meaningful entity IDs — very long strings (command
+    // lines) and timestamps — must stay off the graph as nodes.
+    let long_cmdline = format!("\"updater.exe\" {}", "--flag=value ".repeat(40));
+    let csv = format!(
+        "user,cmdline,created\nalice,{},2026-06-18T15:56:13.736\n",
+        long_cmdline.replace(',', ";")
+    );
+    let config = FieldConfig {
+        mappings: vec![
+            FieldMapping {
+                raw_name: "cmdline".to_string(),
+                role: FieldRole::Node,
+                entity_type: Some("Process".to_string()),
+                timestamp_format: None,
+                locale: None,
+            },
+            FieldMapping {
+                raw_name: "created".to_string(),
+                role: FieldRole::Node,
+                entity_type: Some("Process".to_string()),
+                timestamp_format: None,
+                locale: None,
+            },
+        ],
+    };
+    let triples = ConfigurableParser::new(config).parse(&csv);
+    for (src, _, dst) in &triples {
+        assert!(
+            src.id.len() <= 300 && dst.id.len() <= 300,
+            "pathological long value must not become a node id: {}…",
+            &dst.id[..dst.id.len().min(80)]
+        );
+        assert!(
+            !dst.id.contains("2026-06-18T15:56:13"),
+            "timestamp value must not become a node id: {}",
+            dst.id
+        );
+    }
+}
+
+#[test]
+fn configurable_parser_numeric_id_columns_never_become_nodes() {
+    // PID / logon-id style columns match the name heuristic ("Process Id"
+    // → Process) but their values are opaque numbers — promoting them
+    // mints one junk node per row.
+    let csv = "user,process id\nalice,27008\n";
+    let config = FieldConfig {
+        mappings: vec![FieldMapping {
+            raw_name: "process id".to_string(),
+            role: FieldRole::Node,
+            entity_type: Some("Process".to_string()),
+            timestamp_format: None,
+            locale: None,
+        }],
+    };
+    let triples = ConfigurableParser::new(config).parse(csv);
+    assert!(
+        !triples
+            .iter()
+            .flat_map(|(s, _, d)| [s.id.as_str(), d.id.as_str()])
+            .any(|id| id.contains("27008")),
+        "pure-numeric value must not become a node id; got {triples:?}"
+    );
+}
+
+#[test]
+fn configurable_parser_promoted_canonical_types_use_bare_ids() {
+    // An IP is the same IP whichever column it came from. Promoted
+    // canonical-type entities must use the bare value as ID so they merge
+    // with entities the canonical path creates — the column-prefixed form
+    // ("File Origin IP:8.8.8.8") made the same address exist 2-3 times in
+    // the MDE graph (13,283 IP entities vs 706 via the canonical path).
+    let csv = "user,file origin ip\nalice,8.8.8.8\n";
+    let config = FieldConfig {
+        mappings: vec![FieldMapping {
+            raw_name: "file origin ip".to_string(),
+            role: FieldRole::Node,
+            entity_type: Some("IP".to_string()),
+            timestamp_format: None,
+            locale: None,
+        }],
+    };
+    let triples = ConfigurableParser::new(config).parse(csv);
+    let ids: Vec<&str> = triples
+        .iter()
+        .flat_map(|(s, _, d)| [s.id.as_str(), d.id.as_str()])
+        .collect();
+    assert!(
+        ids.contains(&"8.8.8.8"),
+        "promoted IP must use the bare value as id; got {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id.contains("file origin ip:")),
+        "no column-prefixed IP duplicate; got {ids:?}"
+    );
+}
+
+#[test]
+fn host_and_domain_ids_are_case_normalized() {
+    use graph_hunter_core::RelationType;
+    // Hostnames and domains are case-insensitive (DNS/NetBIOS). The MDE
+    // export carries the same machine as "arlmldcc…" (Computer Name) and
+    // "ARLMLDCC…" (Remote Computer Name); without normalization the graph
+    // grew one Host entity per casing.
+    let csv = "\
+timestamp,computer,image,queryname,user
+2026-06-18T10:00:00Z,DC01.CORP.LOCAL,chrome.exe,EXAMPLE.COM,alice
+";
+    let triples = CsvParser.parse(csv);
+    let ids: Vec<&str> = triples
+        .iter()
+        .flat_map(|(s, _, d)| [s.id.as_str(), d.id.as_str()])
+        .collect();
+    assert!(
+        ids.contains(&"dc01.corp.local"),
+        "canonical Host id must be lowercased; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"example.com"),
+        "canonical Domain id must be lowercased; got {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id.contains("DC01") || id.contains("EXAMPLE")),
+        "no uppercase host/domain ids may remain; got {ids:?}"
+    );
+    let _ = RelationType::Connect;
+
+    // Promotion path: a config-promoted Host merges with the canonical
+    // one regardless of source casing.
+    let csv2 = "\
+timestamp,computer,remote box,user
+2026-06-18T10:00:00Z,dc01.corp.local,DC01.CORP.LOCAL,alice
+";
+    let config = FieldConfig {
+        mappings: vec![FieldMapping {
+            raw_name: "remote box".to_string(),
+            role: FieldRole::Node,
+            entity_type: Some("Host".to_string()),
+            timestamp_format: None,
+            locale: None,
+        }],
+    };
+    let triples2 = ConfigurableParser::new(config).parse(csv2);
+    let host_ids: std::collections::HashSet<&str> = triples2
+        .iter()
+        .flat_map(|(s, _, d)| [s, d])
+        .filter(|e| e.entity_type == EntityType::Host)
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        host_ids,
+        std::collections::HashSet::from(["dc01.corp.local"]),
+        "promoted Host must merge with canonical Host under one lowercase id"
+    );
+}
+
+#[test]
+fn user_ids_are_case_normalized() {
+    // Windows account/domain names are case-insensitive; the MDE export
+    // carried "LOMANEGRA" and "lomanegra" as two distinct User entities.
+    let csv = "\
+timestamp,user,computer
+2026-06-18T10:00:00Z,LOMANEGRA\\JPerez,dc01
+2026-06-18T11:00:00Z,lomanegra\\jperez,dc01
+";
+    let triples = CsvParser.parse(csv);
+    let user_ids: std::collections::HashSet<&str> = triples
+        .iter()
+        .flat_map(|(s, _, d)| [s, d])
+        .filter(|e| e.entity_type == EntityType::User)
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        user_ids,
+        std::collections::HashSet::from(["lomanegra\\jperez"]),
+        "same account in different casing must be ONE User entity"
+    );
+
+    // Promotion path merges with canonical the same way.
+    let config = FieldConfig {
+        mappings: vec![FieldMapping {
+            raw_name: "approver".to_string(),
+            role: FieldRole::Node,
+            entity_type: Some("User".to_string()),
+            timestamp_format: None,
+            locale: None,
+        }],
+    };
+    let csv2 = "\
+timestamp,user,approver
+2026-06-18T10:00:00Z,jperez,JPEREZ
+";
+    let triples2 = ConfigurableParser::new(config).parse(csv2);
+    let user_ids2: std::collections::HashSet<&str> = triples2
+        .iter()
+        .flat_map(|(s, _, d)| [s, d])
+        .filter(|e| e.entity_type == EntityType::User)
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        user_ids2,
+        std::collections::HashSet::from(["jperez"]),
+        "promoted User must merge with canonical User under one lowercase id"
+    );
+}
+
+#[test]
 fn csv_parser_empty_input_yields_empty() {
     assert!(CsvParser.parse("").is_empty());
     assert!(CsvParser.parse("   \n\t\n").is_empty());
@@ -133,7 +434,8 @@ EVENT_BY,TIME,IP_ADDRESS,DEVICE,OS,BROWSER
     assert_eq!(stats.rows_with_triples, 1, "1 row processed");
     // The canonical user (no column-prefix) must be present — proves we did
     // NOT strip when the user accepted the canonical default.
-    let has_clean_user = triples.iter().any(|(s, _, _)| s.id == "Joel Canepa");
+    // User ids are case-normalized to lowercase at creation.
+    let has_clean_user = triples.iter().any(|(s, _, _)| s.id == "joel canepa");
     assert!(
         has_clean_user,
         "canonical User entity must be preserved when user accepts default; got {triples:?}"
@@ -276,9 +578,10 @@ EVENT_BY,IP_ADDRESS
         "User override must prevent canonical User entity; got {triples:?}"
     );
     // And there should be a Host-typed entity promoted from EVENT_BY.
+    // Host ids are case-normalized to lowercase at creation.
     let has_host = triples.iter().any(|(s, _, d)| {
-        (s.entity_type == EntityType::Host && s.id.contains("Joel Canepa"))
-            || (d.entity_type == EntityType::Host && d.id.contains("Joel Canepa"))
+        (s.entity_type == EntityType::Host && s.id.contains("joel canepa"))
+            || (d.entity_type == EntityType::Host && d.id.contains("joel canepa"))
     });
     assert!(
         has_host,
@@ -382,8 +685,8 @@ fn configurable_parser_applies_timestamp_hint_to_zoho_csv() {
         .timestamp();
     let joel = triples
         .iter()
-        .find(|(s, _, _)| s.id == "Joel Canepa")
-        .expect("Joel Canepa User entity should be in triples");
+        .find(|(s, _, _)| s.id == "joel canepa")
+        .expect("joel canepa User entity should be in triples");
     assert_eq!(
         joel.1.timestamp, expected,
         "timestamp_format + locale hint must translate Spanish month and parse the date"
@@ -663,6 +966,85 @@ fn canonical_field_recognizes_audit_log_semantics() {
     assert_eq!(GenericParser::canonical_field("country"), Some("location"));
     assert_eq!(GenericParser::canonical_field("severity"), Some("severity"));
     assert_eq!(GenericParser::canonical_field("message"), Some("message"));
+}
+
+#[test]
+fn canonical_field_recognizes_mde_timeline_spaced_headers() {
+    // The M365 Defender portal timeline export ("Logs_<from>_<to>.csv")
+    // emits the same DeviceEvents columns as the advanced-hunting API but
+    // in Title Case with spaces ("Remote IP" vs "RemoteIP"). Exact
+    // lowercase matching missed all of them, so every column defaulted to
+    // Metadata and the graph came out empty.
+    assert_eq!(
+        GenericParser::canonical_field("Event Time"),
+        Some("timestamp")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Account Name"),
+        Some("source_user")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Remote IP"),
+        Some("target_ip")
+    );
+    // AWS Network Firewall flow-log column (SrcIp/DestIp pair).
+    assert_eq!(GenericParser::canonical_field("DestIp"), Some("target_ip"));
+    assert_eq!(
+        GenericParser::canonical_field("Local IP"),
+        Some("source_ip")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Computer Name"),
+        Some("source_host")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Remote Computer Name"),
+        Some("target_ip")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Process Command Line"),
+        Some("command_line")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Initiating Process Command Line"),
+        Some("command_line")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Folder Path"),
+        Some("target_file")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Initiating Process File Name"),
+        Some("source_process")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Initiating Process Parent File Name"),
+        Some("parent_process")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Registry Key"),
+        Some("target_registry")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Remote Url"),
+        Some("target_url")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Remote Port"),
+        Some("target_port")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Local Port"),
+        Some("source_port")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Sha256"),
+        Some("target_hash")
+    );
+    assert_eq!(
+        GenericParser::canonical_field("Action Type"),
+        Some("action")
+    );
 }
 
 #[test]

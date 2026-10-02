@@ -197,6 +197,54 @@ pub fn generate_barabasi_albert(
     g
 }
 
+/// Plants one attack path that matches `hypothesis` exactly into `g`,
+/// with strictly increasing edge timestamps so temporal monotonicity
+/// holds and the chain is emitted rather than pruned.
+///
+/// The planted shape is derived from the hypothesis itself, not hard-
+/// coded: vertex at position `i` takes `step[i].origin_type` (and the
+/// last takes the final `dest_type`), each edge takes its step's relation
+/// type. So whatever the hypothesis looks for, the plant provides exactly
+/// that — the two can never drift apart the way a hard-coded chain would.
+///
+/// Vertex ids are prefixed `plant{idx}_` so a planted chain collides
+/// neither with the generator's `v{i}` vertices nor with another planted
+/// chain. `base_ts` is the first edge's timestamp; each subsequent hop is
+/// `+1`, keeping the whole chain inside any realistic window.
+///
+/// An `Any` origin/dest type is materialised as a concrete `IP` — a
+/// wildcard cannot be a real node's type. The harness's hypotheses are
+/// fully concrete, so this only guards misuse.
+pub fn plant_chain(g: &mut GraphHunter, hypothesis: &Hypothesis, idx: usize, base_ts: i64) {
+    let steps = &hypothesis.steps;
+    if steps.is_empty() {
+        return;
+    }
+    let concrete = |t: &EntityType| -> EntityType {
+        match t {
+            EntityType::Any => EntityType::IP,
+            other => other.clone(),
+        }
+    };
+    let vid = |pos: usize| format!("plant{idx}_{pos}");
+
+    for (i, step) in steps.iter().enumerate() {
+        let _ = g.add_entity(Entity::new(vid(i), concrete(&step.origin_type)));
+    }
+    let last = steps.len() - 1;
+    let _ = g.add_entity(Entity::new(vid(steps.len()), concrete(&steps[last].dest_type)));
+
+    for (i, step) in steps.iter().enumerate() {
+        let ts = base_ts + i as i64;
+        let _ = g.add_relation(Relation::new(
+            vid(i),
+            vid(i + 1),
+            step.relation_type.clone(),
+            ts,
+        ));
+    }
+}
+
 // ── Instrumented DFS with per-rule pruning counters ──
 
 /// Detailed pruning statistics from an instrumented DFS run.
@@ -575,6 +623,384 @@ pub fn build_lateral_movement_hypothesis(length: usize) -> Hypothesis {
         h.steps.push(steps_template[i].clone());
     }
     h
+}
+
+// ── Reproducible performance harness (WS1.5) ──
+//
+// `run_benchmark` above measures one run and pairs it with the naive
+// baseline for the pruning-ablation table. This harness answers a
+// different question — latency *distribution* vs graph size — and is
+// built to be run, not read: a fixed config set, a fixed seed, N repeats
+// per config, and structured rows a script turns into a table or figure.
+//
+// SCOPE, stated honestly: this measures *performance* (latency, scale,
+// approximate memory) on synthetic ER/BA graphs. It does NOT measure
+// *efficacy* (step recall, path precision) — those need ground-truth
+// labels from the DARPA datasets and belong to WS2. Emitting them here
+// with no ground truth would be a fabricated number, so the harness
+// leaves them out rather than invent them.
+//
+// Run under `--release`: debug DFS is several times slower and not
+// representative of the numbers a paper reports.
+
+/// Which synthetic generator produces a config's graph.
+#[derive(Debug, Clone, Copy)]
+pub enum BenchGenerator {
+    /// Erdős–Rényi G(n, p).
+    ErdosRenyi { n: usize, p: f64 },
+    /// Barabási–Albert with m edges per new node.
+    BarabasiAlbert { n: usize, m: usize },
+}
+
+impl BenchGenerator {
+    fn name(&self) -> &'static str {
+        match self {
+            BenchGenerator::ErdosRenyi { .. } => "erdos_renyi",
+            BenchGenerator::BarabasiAlbert { .. } => "barabasi_albert",
+        }
+    }
+
+    fn build(&self, seed: u64) -> GraphHunter {
+        match *self {
+            BenchGenerator::ErdosRenyi { n, p } => {
+                generate_erdos_renyi(n, p, 1_000_000, 2_000_000, seed)
+            }
+            BenchGenerator::BarabasiAlbert { n, m } => {
+                generate_barabasi_albert(n, m, 1_000_000, 2_000_000, seed)
+            }
+        }
+    }
+}
+
+/// One configuration in the performance suite.
+#[derive(Debug, Clone, Copy)]
+pub struct PerfConfig {
+    pub label: &'static str,
+    pub generator: BenchGenerator,
+    /// Hypothesis chain length (lateral-movement shape).
+    pub hypothesis_len: usize,
+    /// Attack paths planted into the graph before search. Zero measures
+    /// pure scan-and-prune work (the common no-match case); a positive
+    /// value guarantees the emitter runs, so the latency reflects finding
+    /// and materialising real paths, not just rejecting candidates.
+    pub planted_chains: usize,
+}
+
+/// One row of the performance table: a config's latency distribution over
+/// `runs` repeats. Serializable so the CLI can emit CSV or JSON verbatim.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PerfRow {
+    pub config: String,
+    pub generator: String,
+    pub seed: u64,
+    pub n_entities: usize,
+    pub n_relations: usize,
+    pub d_avg: f64,
+    pub hypothesis_len: usize,
+    pub planted_chains: usize,
+    pub runs: usize,
+    pub paths_found: usize,
+    pub latency_p50_us: u64,
+    pub latency_p95_us: u64,
+    pub latency_mean_us: u64,
+    pub latency_min_us: u64,
+    pub latency_max_us: u64,
+    /// Structural estimate (`approx_memory`), not measured RSS. Labelled
+    /// so no reader mistakes it for a heap measurement.
+    pub memory_bytes_approx: usize,
+}
+
+/// The fixed config set. Deliberately hard-coded, not parameterised: the
+/// point of a reproducible harness is that everyone runs the *same*
+/// configs, so the table is comparable across machines and commits.
+pub fn default_perf_configs() -> Vec<PerfConfig> {
+    use BenchGenerator::{BarabasiAlbert, ErdosRenyi};
+    vec![
+        PerfConfig { label: "ER-100", generator: ErdosRenyi { n: 100, p: 0.10 }, hypothesis_len: 3, planted_chains: 0 },
+        PerfConfig { label: "ER-500", generator: ErdosRenyi { n: 500, p: 0.02 }, hypothesis_len: 3, planted_chains: 0 },
+        PerfConfig { label: "ER-1K", generator: ErdosRenyi { n: 1000, p: 0.01 }, hypothesis_len: 3, planted_chains: 0 },
+        PerfConfig { label: "ER-5K", generator: ErdosRenyi { n: 5000, p: 0.002 }, hypothesis_len: 3, planted_chains: 0 },
+        PerfConfig { label: "BA-100", generator: BarabasiAlbert { n: 100, m: 3 }, hypothesis_len: 3, planted_chains: 0 },
+        PerfConfig { label: "BA-500", generator: BarabasiAlbert { n: 500, m: 3 }, hypothesis_len: 3, planted_chains: 0 },
+        PerfConfig { label: "BA-1K", generator: BarabasiAlbert { n: 1000, m: 3 }, hypothesis_len: 3, planted_chains: 0 },
+        PerfConfig { label: "BA-5K", generator: BarabasiAlbert { n: 5000, m: 3 }, hypothesis_len: 3, planted_chains: 0 },
+    ]
+}
+
+/// The `q`-th percentile (0.0–1.0) of a sorted slice via nearest-rank.
+fn percentile_us(sorted: &[u64], q: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (q * (sorted.len() as f64 - 1.0)).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
+}
+
+/// Runs one config `runs` times and summarises the latency distribution.
+///
+/// The graph is generated once and edges sorted once (so the binary-
+/// search successor path is active), then the *search* is timed `runs`
+/// times. Generation and sort are setup, not the thing being measured.
+pub fn run_perf_config(config: &PerfConfig, seed: u64, runs: usize) -> PerfRow {
+    measure_one(
+        config.label.to_string(),
+        config.generator,
+        config.hypothesis_len,
+        config.planted_chains,
+        seed,
+        runs,
+    )
+}
+
+/// The measurement primitive: generate → plant → sort → time the search
+/// `runs` times → summarise. An owned `label` lets callers (the fixed
+/// suite and the scaling sweep) name rows however they need.
+pub fn measure_one(
+    label: String,
+    generator: BenchGenerator,
+    hypothesis_len: usize,
+    planted_chains: usize,
+    seed: u64,
+    runs: usize,
+) -> PerfRow {
+    let mut g = generator.build(seed);
+    let hypothesis = build_lateral_movement_hypothesis(hypothesis_len);
+    // Plant BEFORE the sort so the planted edges land in the sorted CSR
+    // the binary-search successor path reads. Timestamps are spaced far
+    // apart per chain so chains never interleave into a spurious match.
+    for idx in 0..planted_chains {
+        plant_chain(&mut g, &hypothesis, idx, 1_500_000 + (idx as i64) * 1000);
+    }
+    let _ = g.sort_edges_by_timestamp();
+    let (n, m, _d_max, d_avg, _et, _rt) = graph_params(&g);
+
+    let runs = runs.max(1);
+    let mut latencies: Vec<u64> = Vec::with_capacity(runs);
+    let mut paths_found = 0usize;
+    for _ in 0..runs {
+        let start = std::time::Instant::now();
+        let (paths, _truncated) = g
+            .search_temporal_pattern(&hypothesis, None, None)
+            .expect("search must not fail on a generated graph");
+        latencies.push(start.elapsed().as_micros() as u64);
+        paths_found = paths.len();
+    }
+    latencies.sort_unstable();
+    let sum: u128 = latencies.iter().map(|&x| x as u128).sum();
+
+    PerfRow {
+        config: label,
+        generator: generator.name().to_string(),
+        seed,
+        n_entities: n,
+        n_relations: m,
+        d_avg,
+        hypothesis_len,
+        planted_chains,
+        runs,
+        paths_found,
+        latency_p50_us: percentile_us(&latencies, 0.50),
+        latency_p95_us: percentile_us(&latencies, 0.95),
+        latency_mean_us: (sum / runs as u128) as u64,
+        latency_min_us: *latencies.first().unwrap(),
+        latency_max_us: *latencies.last().unwrap(),
+        memory_bytes_approx: approx_memory(&g),
+    }
+}
+
+/// Scaling sweep for the "where does the DFS break?" study (D3.1).
+///
+/// Erdős–Rényi at a **fixed average degree** — `p = avg_degree / (n−1)`
+/// holds density constant as `n` grows, so the row-to-row change isolates
+/// the effect of |E| rather than confounding it with densification. Sizes
+/// are swept in one place so a latency-vs-|E| curve falls out of the CSV
+/// directly. `plant` guarantees the emitter runs; set 0 for the pure-scan
+/// curve.
+pub fn run_perf_scaling(
+    seed: u64,
+    runs: usize,
+    sizes: &[usize],
+    avg_degree: f64,
+    hypothesis_len: usize,
+    plant: usize,
+) -> Vec<PerfRow> {
+    sizes
+        .iter()
+        .map(|&n| {
+            let denom = n.saturating_sub(1).max(1) as f64;
+            let p = (avg_degree / denom).clamp(0.0, 1.0);
+            measure_one(
+                format!("ER-{n}"),
+                BenchGenerator::ErdosRenyi { n, p },
+                hypothesis_len,
+                plant,
+                seed,
+                runs,
+            )
+        })
+        .collect()
+}
+
+/// Runs the full fixed suite. Single-threaded and deterministic: same
+/// seed, same machine → same graphs and comparable latencies.
+///
+/// `paths_found` is typically 0 on these synthetic graphs, and that is
+/// expected, not a bug: types are assigned uniformly at random, so a
+/// specific 3-step *typed* chain almost never closes. What the harness
+/// measures is search *work* — start selection, NLF/k-hop/semijoin
+/// pruning, temporal expansion — which the DFS does in full whether or
+/// not it emits. That is also the common case in real hunting: most
+/// hypotheses run and find nothing, and their latency is what an analyst
+/// waits on. Planting attack subgraphs to exercise the emitter is WS2
+/// work (it needs a ground-truth model), tracked separately.
+pub fn run_perf_suite(seed: u64, runs: usize) -> Vec<PerfRow> {
+    run_perf_suite_planted(seed, runs, 0)
+}
+
+/// Like [`run_perf_suite`] but plants `planted_chains` attack paths into
+/// every config first. `planted_chains = 0` is the pure-scan suite; a
+/// positive value makes every config's search emit that many paths, so
+/// the table measures the find-and-materialise cost rather than only the
+/// reject-everything cost. Both are reproducible for a given seed.
+pub fn run_perf_suite_planted(seed: u64, runs: usize, planted_chains: usize) -> Vec<PerfRow> {
+    default_perf_configs()
+        .iter()
+        .map(|c| {
+            let cfg = PerfConfig { planted_chains, ..*c };
+            run_perf_config(&cfg, seed, runs)
+        })
+        .collect()
+}
+
+/// CSV serialization of a perf table — header plus one row each. Kept
+/// dependency-free (no csv crate) since every field is a plain scalar.
+pub fn perf_rows_to_csv(rows: &[PerfRow]) -> String {
+    let mut out = String::from(
+        "config,generator,seed,n_entities,n_relations,d_avg,hypothesis_len,planted_chains,runs,\
+         paths_found,latency_p50_us,latency_p95_us,latency_mean_us,latency_min_us,latency_max_us,\
+         memory_bytes_approx\n",
+    );
+    for r in rows {
+        out.push_str(&format!(
+            "{},{},{},{},{},{:.4},{},{},{},{},{},{},{},{},{},{}\n",
+            r.config,
+            r.generator,
+            r.seed,
+            r.n_entities,
+            r.n_relations,
+            r.d_avg,
+            r.hypothesis_len,
+            r.planted_chains,
+            r.runs,
+            r.paths_found,
+            r.latency_p50_us,
+            r.latency_p95_us,
+            r.latency_mean_us,
+            r.latency_min_us,
+            r.latency_max_us,
+            r.memory_bytes_approx,
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+mod perf_harness_tests {
+    use super::*;
+
+    /// The same seed produces the same graph and therefore the same
+    /// structural numbers — the property the whole harness rests on. (The
+    /// *latencies* are wall-clock and will vary; the graph shape must not.)
+    #[test]
+    fn the_suite_is_deterministic_in_graph_shape() {
+        let a = run_perf_config(&default_perf_configs()[0], 42, 2);
+        let b = run_perf_config(&default_perf_configs()[0], 42, 2);
+        assert_eq!(a.n_entities, b.n_entities);
+        assert_eq!(a.n_relations, b.n_relations);
+        assert_eq!(a.paths_found, b.paths_found);
+        assert_eq!(a.seed, 42);
+    }
+
+    /// Percentiles must be ordered and inside the observed range — a
+    /// guard against an off-by-one in the nearest-rank index.
+    #[test]
+    fn percentiles_are_ordered_and_bounded() {
+        let row = run_perf_config(&default_perf_configs()[0], 7, 20);
+        assert!(row.latency_min_us <= row.latency_p50_us);
+        assert!(row.latency_p50_us <= row.latency_p95_us);
+        assert!(row.latency_p95_us <= row.latency_max_us);
+        assert_eq!(row.runs, 20);
+    }
+
+    #[test]
+    fn percentile_nearest_rank_endpoints() {
+        let xs = [10u64, 20, 30, 40, 50];
+        assert_eq!(percentile_us(&xs, 0.0), 10);
+        assert_eq!(percentile_us(&xs, 1.0), 50);
+        assert_eq!(percentile_us(&xs, 0.5), 30);
+        assert_eq!(percentile_us(&[], 0.5), 0);
+    }
+
+    /// The CSV header column count must match every data row's field
+    /// count, or a downstream parser silently misaligns.
+    #[test]
+    fn csv_header_and_rows_have_equal_arity() {
+        let rows = run_perf_suite_planted(1, 2, 3);
+        let csv = perf_rows_to_csv(&rows);
+        let mut lines = csv.lines();
+        let header_cols = lines.next().unwrap().split(',').count();
+        for line in lines {
+            assert_eq!(line.split(',').count(), header_cols, "row: {line}");
+        }
+    }
+
+    /// Planting a matching chain must make the search emit it. Without a
+    /// plant the same config finds nothing, so this also pins that the
+    /// plant — not incidental structure — is what produced the match.
+    #[test]
+    fn planting_a_chain_makes_the_search_find_it() {
+        let base = PerfConfig { planted_chains: 0, ..default_perf_configs()[0] };
+        let planted = PerfConfig { planted_chains: 5, ..default_perf_configs()[0] };
+        let none = run_perf_config(&base, 3, 1);
+        let some = run_perf_config(&planted, 3, 1);
+        assert_eq!(none.paths_found, 0, "no plant, no match on this seed");
+        assert!(
+            some.paths_found >= 5,
+            "5 planted chains must each be found; got {}",
+            some.paths_found
+        );
+        assert_eq!(some.planted_chains, 5);
+        // Planting adds vertices and edges — the graph really grew.
+        assert!(some.n_entities > none.n_entities);
+    }
+
+    /// The scaling sweep holds average degree roughly constant as n grows,
+    /// so latency rows compare on |E| and not on a moving density.
+    #[test]
+    fn scaling_sweep_holds_density_across_sizes() {
+        let rows = run_perf_scaling(9, 2, &[1_000, 4_000], 10.0, 3, 0);
+        assert_eq!(rows.len(), 2);
+        // Avg degree stays near the requested 10 at both sizes.
+        for r in &rows {
+            assert!((r.d_avg - 10.0).abs() < 2.0, "d_avg drifted: {}", r.d_avg);
+        }
+        // Larger n → more edges.
+        assert!(rows[1].n_relations > rows[0].n_relations);
+    }
+
+    /// A planted chain honours temporal monotonicity, so it survives the
+    /// strict matcher — a guard that the plant's increasing timestamps
+    /// are actually increasing.
+    #[test]
+    fn a_planted_chain_is_temporally_valid() {
+        use crate::graph::GraphHunter;
+        let mut g = GraphHunter::new();
+        let h = build_lateral_movement_hypothesis(3);
+        plant_chain(&mut g, &h, 0, 1000);
+        let _ = g.sort_edges_by_timestamp();
+        let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
+        assert_eq!(paths.len(), 1, "one planted chain → one match, got {paths:?}");
+    }
 }
 
 /// Format benchmark results as a LaTeX table row.

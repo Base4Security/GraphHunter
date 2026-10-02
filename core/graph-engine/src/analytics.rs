@@ -578,10 +578,12 @@ impl GraphHunter {
                 continue;
             }
 
-            // Outgoing edges
-            if let Some(arc) = self.streaming.neighbors_arc(current_sid) {
-                let g = arc.read();
-                for edge in g.as_slice() {
+            // Outgoing edges (base + post-finalize tail; base-only would
+            // drop every edge appended after the last finalize — the
+            // /expand-shows-0-edges bug on freshly built graphs).
+            {
+                let out_edges = self.neighbors_incl_tail(current_sid);
+                for edge in &out_edges {
                     if edges.len() >= max_edges {
                         truncated = true;
                         break;
@@ -660,9 +662,9 @@ impl GraphHunter {
                         truncated = true;
                         break;
                     }
-                    if let Some(arc) = self.streaming.neighbors_arc(source_sid) {
-                        let g = arc.read();
-                        for edge in g.as_slice() {
+                    {
+                        let src_out = self.neighbors_incl_tail(source_sid);
+                        for edge in &src_out {
                             if edges.len() >= max_edges {
                                 truncated = true;
                                 break;
@@ -2395,6 +2397,7 @@ impl GraphHunter {
         let candidates: Vec<&crate::entity::Entity> = self
             .entities
             .values()
+            .map(|e| &**e)
             .filter(|e| node_class.is_none_or(|c| format!("{}", e.entity_type) == c))
             .collect();
         if candidates.len() < 2 {

@@ -1,0 +1,19 @@
+{
+  "version": "v1",
+  "trained_on": "production",
+  "validation_accuracy": 0.9992,
+  "class_labels": [
+    "Benign",
+    "Exfiltration"
+  ],
+  "input_shape": {
+    "k_max": 32,
+    "d_node": 16
+  },
+  "sha256": "e66463edfb33d925e87f096eeaed2d1ff7a5c132d12883f8275017f8ad3320e2",
+  "_notes": [
+    "BINARY detector wearing a 5-logit head. The CADETS ground truth marks the FILES an attack touched, not the processes that ran it: 99.7% of the 12,858 malicious entities are File nodes, so the Process/User-keyed threat taxonomy collapses and only Benign and Exfiltration have support. The other three logits never activate. Consume the threat SCORE (1 - P(benign)), which is binary by construction, not the class label.",
+    "Accuracy measures separability of attack-touched files from RANDOMLY SAMPLED benign nodes. That is an easier problem than detection in the wild, where the negatives are ambiguous rather than random. Do not quote it as a detection rate.",
+    "Trained on the full DARPA TC E3 CADETS corpus: 35.7 GiB, 2,855,158 nodes, 5,893,542 edges after collapsing parallel edges, 77,136 samples at a 5:1 benign:malicious ratio."
+  ]
+}

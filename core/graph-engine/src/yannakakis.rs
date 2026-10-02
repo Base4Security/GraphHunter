@@ -371,15 +371,109 @@ impl JoinTree {
         // Reverse iterate: skip the root (already pushed).
         for &edge_idx in elimination.iter().rev().skip(1) {
             let (a, b) = g.edges[edge_idx].endpoints();
-            // Find the existing tree node sharing a variable.
+            // Parent = an already-placed node sharing a variable. A
+            // DISCONNECTED hypergraph (α-acyclic but with independent
+            // components — e.g. a Graph-shape hypothesis with no shared
+            // bindings) has ears that share a var with NOTHING placed yet;
+            // such an ear is its own component root. Previously this was an
+            // `.expect(...)` that PANICKED on that case — a latent crash for
+            // any disconnected Graph hypothesis reaching this function.
+            // Falling back to self-as-root (position `nodes.len()`, the slot
+            // this node is about to occupy) makes `build` total.
             let parent_pos = nodes
                 .iter()
                 .position(|&n_idx| g.edges[n_idx].contains(a) || g.edges[n_idx].contains(b))
-                .expect("GYO invariant: every non-root ear shares a var with the surviving core");
+                .unwrap_or(nodes.len());
             nodes.push(edge_idx);
             parent.push(parent_pos);
         }
         Some(Self { nodes, parent })
+    }
+}
+
+/// Selectivity-greedy connected visitation order for the tree-walk
+/// enumerator — variable ordering (RI/DAF-style) applied to the one shape
+/// that actually has the freedom for it.
+///
+/// A temporal *chain* carries a cross-edge ordering constraint
+/// (monotone timestamps), so its steps cannot be permuted. A Graph/tree
+/// hypothesis does not: [`enumerate_tree`] is atemporal (see its doc), so
+/// its branches may be visited in any order. This function orders them
+/// smallest-bag-first, keeping each next branch connected to the already-
+/// placed prefix, so every non-seed node has a bound endpoint and becomes
+/// an indexed lookup instead of the full-bag `(None, None)` scan.
+///
+/// **Correctness is not at stake here, only speed.** `enumerate_tree`
+/// computes the same natural join in any node order — a mis-ordered
+/// (disconnected) pick merely hits the full-bag branch and still filters
+/// to the identical join. So this is a pure heuristic; a bug in it can
+/// slow a query but can never change the returned set. The replaced
+/// [`JoinTree::build`] order was the GYO elimination order, which is
+/// structural and cardinality-blind.
+///
+/// Returns a [`JoinTree`] whose `nodes` is a permutation of the edge
+/// indices `0..n` and whose `parent` is a consistent connected parent
+/// pointer over that order (component roots point at themselves).
+/// `parent` is kept consistent for struct hygiene even though
+/// `enumerate_tree` never reads it.
+fn selectivity_join_tree(g: &Hypergraph, bags: &[Bag]) -> JoinTree {
+    let n = g.edges.len();
+    if n == 0 {
+        return JoinTree {
+            nodes: Vec::new(),
+            parent: Vec::new(),
+        };
+    }
+
+    let mut placed: Vec<usize> = Vec::with_capacity(n);
+    let mut used = vec![false; n];
+    let mut covered: std::collections::HashSet<VarId> = std::collections::HashSet::new();
+
+    // Seed the smallest bag overall; ties break to the lowest index
+    // (min_by_key returns the first minimum) so the order is deterministic.
+    let seed = (0..n).min_by_key(|&i| bags[i].len()).unwrap();
+    placed.push(seed);
+    used[seed] = true;
+    covered.insert(g.edges[seed].origin);
+    covered.insert(g.edges[seed].dest);
+
+    while placed.len() < n {
+        // Prefer the smallest unplaced bag that shares a variable with
+        // the placed prefix (the running-intersection guard that keeps
+        // it an indexed lookup). If none do — a disconnected component —
+        // restart from the smallest remaining bag (Cartesian product;
+        // still correct, just no shared key to prune on).
+        let next = (0..n)
+            .filter(|&i| !used[i])
+            .filter(|&i| {
+                covered.contains(&g.edges[i].origin) || covered.contains(&g.edges[i].dest)
+            })
+            .min_by_key(|&i| bags[i].len())
+            .or_else(|| (0..n).filter(|&i| !used[i]).min_by_key(|&i| bags[i].len()));
+        let pick = next.expect("placed.len() < n guarantees an unused edge");
+        placed.push(pick);
+        used[pick] = true;
+        covered.insert(g.edges[pick].origin);
+        covered.insert(g.edges[pick].dest);
+    }
+
+    // Parent = position of the first earlier-placed edge sharing a var;
+    // a component root (none earlier shares) points at itself. O(n²), and
+    // n is the step count (≤ a handful).
+    let mut parent = vec![0usize; n];
+    for p in 0..n {
+        let e = &g.edges[placed[p]];
+        parent[p] = (0..p)
+            .find(|&q| {
+                let pe = &g.edges[placed[q]];
+                pe.contains(e.origin) || pe.contains(e.dest)
+            })
+            .unwrap_or(p);
+    }
+
+    JoinTree {
+        nodes: placed,
+        parent,
     }
 }
 
@@ -1118,10 +1212,15 @@ pub fn search_temporal_pattern_yannakakis_with_bags(
             // enumerator filters on demand via the shared-var
             // bindings, which is equivalent to a per-walk
             // semi-join.
-            let tree = match JoinTree::build(&g) {
-                Some(t) => t,
-                None => return (Vec::new(), false),
-            };
+            // α-acyclicity is already gated above by `is_alpha_acyclic`, so
+            // we build the visitation order directly with a selectivity-
+            // greedy connected order (variable ordering, increment 1) instead
+            // of the GYO order `JoinTree::build` produces. `selectivity_join_
+            // tree` is total (handles disconnected components without panic,
+            // unlike the old build path), and the join is order-invariant
+            // (see its doc), so this only changes speed, never the result set
+            // — the end-to-end star test and the parity test pin that.
+            let tree = selectivity_join_tree(&g, &bags);
             enumerate_tree(
                 graph,
                 &g,
@@ -1513,6 +1612,169 @@ mod tests {
             assert!(unique.contains("c"));
             assert!(!unique.contains("extra"), "decoy must not appear");
         }
+    }
+
+    // ── Variable ordering (increment 1): selectivity-greedy join-tree ──
+
+    /// A skewed 3-branch star whose branches have DIFFERENT type
+    /// signatures, so their bags have different cardinalities and the
+    /// selectivity order genuinely differs from the GYO/step order.
+    /// Center `c` (an IP) fans out to a Host, a User and a Process.
+    fn skewed_star() -> (GraphHunter, Hypothesis) {
+        use crate::entity::Entity;
+        use crate::relation::Relation;
+        let mut g = GraphHunter::new();
+        g.add_entity(Entity::new("ip1", EntityType::IP)).unwrap();
+        g.add_entity(Entity::new("ip2", EntityType::IP)).unwrap();
+        g.add_entity(Entity::new("h1", EntityType::Host)).unwrap();
+        for u in ["u1", "u2", "u3"] {
+            g.add_entity(Entity::new(u, EntityType::User)).unwrap();
+        }
+        for p in ["p1", "p2"] {
+            g.add_entity(Entity::new(p, EntityType::Process)).unwrap();
+        }
+        // Connect branch: 2 rows (one is a decoy from ip2).
+        g.add_relation(Relation::new("ip1", "h1", RelationType::Connect, 100)).unwrap();
+        g.add_relation(Relation::new("ip2", "h1", RelationType::Connect, 101)).unwrap();
+        // Auth branch: 3 rows from ip1.
+        for (u, t) in [("u1", 110i64), ("u2", 111), ("u3", 112)] {
+            g.add_relation(Relation::new("ip1", u, RelationType::Auth, t)).unwrap();
+        }
+        // Execute branch: 2 rows from ip1.
+        for (p, t) in [("p1", 120i64), ("p2", 121)] {
+            g.add_relation(Relation::new("ip1", p, RelationType::Execute, t)).unwrap();
+        }
+        g.sort_edges_by_timestamp().unwrap();
+
+        let mut s0 = HypothesisStep::new(EntityType::IP, RelationType::Connect, EntityType::Host);
+        s0.origin_binding = Some("c".into());
+        s0.dest_binding = Some("l0".into());
+        let mut s1 = HypothesisStep::new(EntityType::IP, RelationType::Auth, EntityType::User);
+        s1.origin_binding = Some("c".into());
+        s1.dest_binding = Some("l1".into());
+        let mut s2 = HypothesisStep::new(EntityType::IP, RelationType::Execute, EntityType::Process);
+        s2.origin_binding = Some("c".into());
+        s2.dest_binding = Some("l2".into());
+        let h = Hypothesis {
+            steps: vec![s0, s1, s2],
+            shape: graph_hunter_dsl::hypothesis::HypothesisShape::Graph,
+            ..Hypothesis::new("skewed-star")
+        };
+        (g, h)
+    }
+
+    fn bags_for(g: &GraphHunter, h: &Hypothesis) -> Vec<Bag> {
+        h.steps
+            .iter()
+            .map(|s| materialize_bag(g, s, i64::MIN, i64::MAX))
+            .collect()
+    }
+
+    fn norm(paths: &[HuntResult]) -> Vec<Vec<String>> {
+        let mut v: Vec<Vec<String>> = paths
+            .iter()
+            .map(|p| p.iter().map(|s| s.to_string()).collect())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// THE GATE: `enumerate_tree` must return the identical result SET
+    /// under the GYO order, the selectivity order, and a hand-reversed
+    /// order. If reordering could ever change the set, this fails.
+    #[test]
+    fn reordering_the_join_tree_preserves_the_result_set() {
+        let (g, h) = skewed_star();
+        let hg = Hypergraph::of(&h);
+        let bags = bags_for(&g, &h);
+        let k = h.k_simplicity.max(1);
+
+        let gyo = JoinTree::build(&hg).unwrap();
+        let sel = selectivity_join_tree(&hg, &bags);
+        // A hand-made reversed order (still a valid permutation).
+        let mut rev_nodes = gyo.nodes.clone();
+        rev_nodes.reverse();
+        let rev = JoinTree { parent: vec![0; rev_nodes.len()], nodes: rev_nodes };
+
+        let r_gyo = norm(&enumerate_tree(&g, &hg, &gyo, &bags, 1000, k));
+        let r_sel = norm(&enumerate_tree(&g, &hg, &sel, &bags, 1000, k));
+        let r_rev = norm(&enumerate_tree(&g, &hg, &rev, &bags, 1000, k));
+
+        assert_eq!(r_gyo, r_sel, "selectivity order changed the result set");
+        assert_eq!(r_gyo, r_rev, "reversed order changed the result set");
+        // Sanity: the star really does match (3 users × 2 processes).
+        assert_eq!(r_sel.len(), 6, "expected 6 star matches, got {}", r_sel.len());
+    }
+
+    /// The order is a valid permutation, seeds the smallest bag, and is
+    /// connected (every non-seed shares a var with the placed prefix) —
+    /// the mechanism that turns each non-seed node into an indexed lookup.
+    #[test]
+    fn selectivity_order_is_a_connected_permutation() {
+        let (g, h) = skewed_star();
+        let hg = Hypergraph::of(&h);
+        let bags = bags_for(&g, &h);
+        let tree = selectivity_join_tree(&hg, &bags);
+
+        // Permutation of 0..n.
+        let mut sorted = tree.nodes.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..hg.edges.len()).collect::<Vec<_>>());
+
+        // Seed = a min-cardinality bag (Connect or Execute, both 2 rows;
+        // tie breaks to the lower step index → Connect = step 0).
+        let min_card = (0..bags.len()).map(|i| bags[i].len()).min().unwrap();
+        assert_eq!(bags[tree.nodes[0]].len(), min_card);
+
+        // Connected: every non-seed node shares a var with the prefix.
+        let mut covered = std::collections::HashSet::new();
+        covered.insert(hg.edges[tree.nodes[0]].origin);
+        covered.insert(hg.edges[tree.nodes[0]].dest);
+        for &node in &tree.nodes[1..] {
+            let e = &hg.edges[node];
+            assert!(
+                covered.contains(&e.origin) || covered.contains(&e.dest),
+                "node {node} is disconnected from the placed prefix",
+            );
+            covered.insert(e.origin);
+            covered.insert(e.dest);
+        }
+    }
+
+    /// A disconnected Graph hypothesis (no shared vars) must still order
+    /// without panic and enumerate the identical (Cartesian) set as GYO.
+    #[test]
+    fn selectivity_order_handles_a_disconnected_graph() {
+        use crate::entity::Entity;
+        use crate::relation::Relation;
+        let mut g = GraphHunter::new();
+        for n in ["a", "b", "c", "d"] {
+            g.add_entity(Entity::new(n, EntityType::User)).unwrap();
+        }
+        g.add_relation(Relation::new("a", "b", RelationType::Auth, 100)).unwrap();
+        g.add_relation(Relation::new("c", "d", RelationType::Auth, 110)).unwrap();
+        g.sort_edges_by_timestamp().unwrap();
+
+        // Two independent steps, no bindings → disconnected hypergraph.
+        let h = Hypothesis {
+            steps: (0..2)
+                .map(|_| HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User))
+                .collect(),
+            shape: graph_hunter_dsl::hypothesis::HypothesisShape::Graph,
+            ..Hypothesis::new("disconnected")
+        };
+        let hg = Hypergraph::of(&h);
+        let bags = bags_for(&g, &h);
+        let k = h.k_simplicity.max(1);
+
+        let sel = selectivity_join_tree(&hg, &bags);
+        assert_eq!(sel.nodes.len(), 2);
+        let gyo = JoinTree::build(&hg).unwrap();
+        assert_eq!(
+            norm(&enumerate_tree(&g, &hg, &gyo, &bags, 1000, k)),
+            norm(&enumerate_tree(&g, &hg, &sel, &bags, 1000, k)),
+            "disconnected reorder changed the Cartesian result set",
+        );
     }
 
     #[test]

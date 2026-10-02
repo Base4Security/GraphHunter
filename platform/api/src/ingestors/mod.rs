@@ -373,6 +373,7 @@ mod tests {
             rel_type: RelationType::DNS,
             rel_metadata: pcap_md,
             timestamp: 2,
+            raw_line: None,
         };
         let (p_e, p_r) = graph
             .insert_raw_events(vec![pcap_edge], Some("pcap-ds"))

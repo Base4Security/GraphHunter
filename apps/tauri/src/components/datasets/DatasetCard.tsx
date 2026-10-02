@@ -25,6 +25,22 @@ type InvariantReport = {
   } | null;
 };
 
+/** Plain-language gloss for each skip-reason tag from the parser.
+ *  Without it the popover shows bare machine tags and every one of them
+ *  reads as a defect. `single_endpoint` in particular means the opposite:
+ *  the row is fine, it just names one entity, and a relation needs two. */
+const SKIP_REASON_HELP: Record<string, string> = {
+  empty_row: "The row had no values at all.",
+  no_canonical_fields:
+    "No column was recognised as a known field. Map the columns manually to ingest these.",
+  no_anchor:
+    "Recognised fields, but none that can start a relation (no user, IP, host or process).",
+  single_endpoint:
+    "Not an error: the event names only one entity, and a relation needs two ends. Common for realm- or service-level events that carry an IP but no user.",
+  no_triple_emitted:
+    "Two or more entities were present but no relation came out — this one is worth reporting.",
+};
+
 interface DatasetCardProps {
   dataset: DatasetInfo;
   onStatsUpdate: (stats: GraphStats) => void;
@@ -260,17 +276,32 @@ export default function DatasetCard({
           {Object.entries(skipReasons)
             .sort(([, a], [, b]) => b - a)
             .map(([reason, n]) => (
-              <div
-                key={reason}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  fontFamily:
-                    "ui-monospace, SFMono-Regular, Menlo, monospace",
-                }}
-              >
-                <span>{reason}</span>
-                <span>{n}</span>
+              <div key={reason} style={{ marginBottom: 3 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    fontFamily:
+                      "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  }}
+                >
+                  <span title={SKIP_REASON_HELP[reason] ?? reason}>
+                    {reason}
+                  </span>
+                  <span>{n}</span>
+                </div>
+                {SKIP_REASON_HELP[reason] && (
+                  <div
+                    style={{
+                      color: "var(--text-muted)",
+                      fontSize: 9,
+                      lineHeight: 1.3,
+                      paddingRight: 24,
+                    }}
+                  >
+                    {SKIP_REASON_HELP[reason]}
+                  </div>
+                )}
               </div>
             ))}
           {skippedSamples.length > 0 && (

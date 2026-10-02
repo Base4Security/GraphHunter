@@ -21,7 +21,17 @@ import os
 from collections import defaultdict
 from pathlib import Path
 
-import networkx as nx
+from compact_graph import CompactGraph
+
+try:
+    import orjson
+
+    def _loads(raw: bytes):
+        return orjson.loads(raw)
+except ImportError:  # pragma: no cover
+    def _loads(raw: bytes):
+        return json.loads(raw.decode("utf-8", "replace"))
+
 import numpy as np
 from tqdm import tqdm
 
@@ -76,28 +86,52 @@ def load_ground_truth(dataset_dir: Path, dataset_name: str):
     return malicious_uuids
 
 
-def build_graph(nodes_file: Path, edges_file: Path):
-    """Build a NetworkX DiGraph from parsed node/edge catalogs."""
-    with open(nodes_file) as f:
-        nodes = json.load(f)
-    with open(edges_file) as f:
-        edges = json.load(f)
+def build_graph(nodes_file: Path, parsed_dir: Path):
+    """Build the adjacency index from the parsed node/edge catalogs.
 
-    G = nx.DiGraph()
+    Reads step 1's per-file `edges.*.jsonl` shards line by line rather
+    than `json.load`-ing one array: the real CADETS corpus is 34.7M edges
+    (~5 GiB of JSON), which does not fit in memory as Python objects, let
+    alone inside a NetworkX DiGraph. `CompactGraph` answers the same
+    questions from CSR arrays -- see compact_graph.py.
+    """
+    with open(nodes_file, "rb") as f:
+        nodes = _loads(f.read())
 
+    G = CompactGraph()
     node_types = {}
     for node in nodes:
         uid = node["id"]
         G.add_node(uid)
         node_types[uid] = node.get("type", "File")
+    del nodes
 
-    for edge in edges:
-        src, dst = edge["src"], edge["dst"]
-        if src in node_types and dst in node_types:
-            G.add_edge(src, dst, rel_type=edge.get("type", "Connect"),
-                       timestamp=edge.get("timestamp", 0))
+    shards = sorted(parsed_dir.glob("edges.*.jsonl"))
+    if not shards:
+        raise SystemExit(
+            f"No edge shards in {parsed_dir}. Run 01_parse_darpa_cdm.py first."
+        )
 
-    print(f"  Graph: {G.number_of_nodes():,} nodes, {G.number_of_edges():,} edges")
+    kept = skipped = 0
+    for shard in shards:
+        with open(shard, "rb") as f:
+            for raw in f:
+                if not raw.strip():
+                    continue
+                edge = _loads(raw)
+                src, dst = edge["src"], edge["dst"]
+                # Same filter as before: an edge is only meaningful if both
+                # endpoints are catalogued entities.
+                if src in node_types and dst in node_types:
+                    G.add_edge(src, dst, edge.get("type", "Connect"))
+                    kept += 1
+                else:
+                    skipped += 1
+        print(f"    read {shard.name}: {kept:,} kept / {skipped:,} dangling")
+
+    G.finalize()
+    print(f"  Graph: {G.number_of_nodes():,} nodes, {G.number_of_edges():,} edges "
+          f"({skipped:,} edges skipped for uncatalogued endpoints)")
     return G, node_types
 
 
@@ -252,15 +286,14 @@ def main():
     features_dir.mkdir(exist_ok=True)
 
     nodes_file = parsed_dir / "nodes.json"
-    edges_file = parsed_dir / "edges.json"
 
-    if not nodes_file.exists() or not edges_file.exists():
-        print(f"ERROR: Run 01_parse_darpa_cdm.py first.")
+    if not nodes_file.exists() or not any(parsed_dir.glob("edges.*.jsonl")):
+        print("ERROR: Run 01_parse_darpa_cdm.py first.")
         return
 
     # Load graph
     print("Loading graph...")
-    G, node_types = build_graph(nodes_file, edges_file)
+    G, node_types = build_graph(nodes_file, parsed_dir)
 
     # Load ground truth
     malicious = load_ground_truth(dataset_dir, args.dataset)

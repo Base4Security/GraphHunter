@@ -463,10 +463,14 @@ pub struct InMemoryStreamingBackend {
 /// the per-vertex `RwLock` already taken on the same call so the
 /// extra atomic is noise.
 struct SpillState {
-    /// Threshold in number of edges. When `edges_since_last_spill`
-    /// hits this value, `append_edge` triggers `auto_spill`.
+    /// Floor for the spill threshold, in edges. The effective
+    /// threshold grows with the graph — see [`SpillState::threshold`].
     budget_edges: usize,
     edges_since_last_spill: usize,
+    /// Every edge ever appended, spilled or not. Needed because each
+    /// spill round rewrites the whole edge set, so the cost of a round
+    /// is a function of the total, not of the new arrivals.
+    total_edges: usize,
     /// Test hook: `auto_spill` returns an I/O error without touching disk.
     force_fail: bool,
     /// Directory hosting the auto-spill files. Either an externally-
@@ -479,6 +483,36 @@ struct SpillState {
     /// a full re-write; old file becomes orphaned).
     current_path: Option<std::path::PathBuf>,
     spill_round: usize,
+}
+
+/// Ceiling on edges held unspilled, so the geometric threshold below
+/// cannot trade unbounded RAM for I/O. 32M edges is ~1 GB of
+/// `StreamEdge`, which is affordable on any machine ingesting logs
+/// large enough to spill at all.
+const MAX_UNSPILLED_EDGES: usize = 32 * 1024 * 1024;
+
+impl SpillState {
+    /// Edges that must accumulate before the next spill round.
+    ///
+    /// A spill round rewrites the *entire* edge set, so a fixed period
+    /// is quadratic: with a 1M-edge budget, N edges cost
+    /// `1M + 2M + … + N` bytes written. That stayed invisible while the
+    /// design target was a 28 GB EVTX session (~30M edges, ~30 rounds,
+    /// tens of GB written — slow but survivable). A 15 GB HTTP access
+    /// log produces ~167M edges: 167 rounds writing ~14e9 records, some
+    /// 450 GB of disk traffic to ingest 5 GB of edges. That is the
+    /// difference between a slow ingest and one that never finishes.
+    ///
+    /// Growing the threshold with the spilled total makes the rounds
+    /// geometric — 1M, 2M, 4M, … — so the count is logarithmic and the
+    /// bytes written sum to a small multiple of the final size. The
+    /// cap keeps the unspilled tail, and therefore RAM, bounded.
+    fn threshold(&self) -> usize {
+        let spilled = self.total_edges - self.edges_since_last_spill;
+        spilled
+            .max(self.budget_edges)
+            .min(MAX_UNSPILLED_EDGES.max(self.budget_edges))
+    }
 }
 
 impl Default for InMemoryStreamingBackend {
@@ -508,6 +542,9 @@ impl InMemoryStreamingBackend {
     ///
     /// `0` disables auto-spill (default). Call once during
     /// `GraphHunter` setup; not safe to flip mid-ingest.
+    ///
+    /// Note this is a *floor*, not a fixed period: see
+    /// [`SpillState::threshold`] for why a fixed period is quadratic.
     pub fn with_memory_budget_edges(self, budget_edges: usize) -> Self {
         if budget_edges == 0 {
             return self;
@@ -517,6 +554,7 @@ impl InMemoryStreamingBackend {
         *self.spill_state.lock() = Some(SpillState {
             budget_edges,
             edges_since_last_spill: 0,
+            total_edges: 0,
             spill_dir: dir,
             _temp_dir: Some(temp),
             current_path: None,
@@ -541,6 +579,7 @@ impl InMemoryStreamingBackend {
         *self.spill_state.lock() = Some(SpillState {
             budget_edges,
             edges_since_last_spill: 0,
+            total_edges: 0,
             spill_dir: dir,
             _temp_dir: None,
             current_path: None,
@@ -562,6 +601,7 @@ impl InMemoryStreamingBackend {
         *self.spill_state.lock() = Some(SpillState {
             budget_edges: 1,
             edges_since_last_spill: 0,
+            total_edges: 0,
             spill_dir: dir,
             _temp_dir: Some(temp),
             current_path: None,
@@ -1323,7 +1363,8 @@ impl InMemoryStreamingBackend {
             match state.as_mut() {
                 Some(s) => {
                     s.edges_since_last_spill += 1;
-                    s.edges_since_last_spill >= s.budget_edges
+                    s.total_edges += 1;
+                    s.edges_since_last_spill >= s.threshold()
                 }
                 None => false,
             }
@@ -1750,9 +1791,10 @@ mod tests {
         let backend = InMemoryStreamingBackend::new()
             .with_memory_budget_edges(10);
         let a = StrId::from_raw(1);
-        // 35 edges total: round-1 at 10, round-2 at 20, round-3 at 30,
-        // and 5 more in-memory after the third spill.
-        for i in 0..35i64 {
+        // 45 edges total. The threshold grows with the spilled total,
+        // so rounds land at 10, 20 and 40 — not every 10 — leaving 5
+        // in memory after the third spill.
+        for i in 0..45i64 {
             // Reverse timestamps to verify sort-on-spill works
             // across rounds (each round receives a mix of mmap'd
             // already-sorted runs and freshly-pushed unsorted ones).
@@ -1761,13 +1803,13 @@ mod tests {
 
         let arc = backend.neighbors_arc(a).expect("a");
         let g = arc.read();
-        assert_eq!(g.len(), 35);
+        assert_eq!(g.len(), 45);
         // Final state should be sorted ascending by timestamp; the
         // last 5 are in-memory (post-third-round) so the variant
         // is whatever the post-spill promote-on-write logic landed
         // on — accept either Mmap (if 5 < budget) or Vec.
         let timestamps: Vec<i64> = g.iter().map(|e| e.timestamp).collect();
-        let mut expected: Vec<i64> = (0..35i64).map(|i| 1000 - i).collect();
+        let mut expected: Vec<i64> = (0..45i64).map(|i| 1000 - i).collect();
         expected.sort();
         // The 5 post-third-round in-memory edges aren't sorted yet
         // (sort happens at spill time, not at every push), so the
@@ -1776,6 +1818,34 @@ mod tests {
         let mut got_set = timestamps.clone();
         got_set.sort();
         assert_eq!(got_set, expected, "edge set preserved across rounds");
+    }
+
+    /// The cost that motivated the geometric threshold. Each round is a
+    /// full rewrite of the edge set, so a fixed period makes total disk
+    /// traffic quadratic in the edge count. This pins the round count to
+    /// something logarithmic instead — the property, not the constant.
+    #[test]
+    fn spill_rounds_grow_logarithmically_not_linearly() {
+        let backend = InMemoryStreamingBackend::new().with_memory_budget_edges(10);
+        let a = StrId::from_raw(1);
+        for i in 0..1000i64 {
+            backend.append_edge(a, edge(i as u32, i, 0));
+        }
+        let rounds = backend
+            .spill_state
+            .lock()
+            .as_ref()
+            .expect("spill armed")
+            .spill_round;
+        // A fixed 10-edge period would be 100 rounds, each rewriting
+        // everything written so far. Geometric: 10, 20, 40, 80, 160,
+        // 320, 640 — seven.
+        assert!(
+            rounds <= 10,
+            "expected a logarithmic number of rounds, got {rounds}"
+        );
+        // And no edge was lost to the larger batches.
+        assert_eq!(backend.neighbors_arc(a).expect("a").read().len(), 1000);
     }
 
     #[test]

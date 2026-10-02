@@ -218,6 +218,7 @@ pub(crate) fn record_to_event(r: &NetflowRecord, source_file: &str) -> Option<Ra
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: r.start_secs,
+        raw_line: None,
     })
 }
 

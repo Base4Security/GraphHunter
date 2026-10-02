@@ -36,7 +36,13 @@ impl GraphHunterApi {
         let geoip_any = geoip_mmdb || geoip_http;
         Capabilities {
             geoip: geoip_any,
-            asn: geoip_mmdb,
+            // The ip-api.com response carries `as` / `asname`, and
+            // `HttpGeoIpProvider::lookup` parses both into `asn`/`as_org`.
+            // Reporting `asn: geoip_mmdb` therefore under-reported the
+            // capability whenever only the HTTP backend was installed —
+            // an analyst would read `asn:false` and rule out ASN-based
+            // analysis that would in fact have worked.
+            asn: geoip_mmdb || geoip_http,
             threat_intel: false,
         }
     }

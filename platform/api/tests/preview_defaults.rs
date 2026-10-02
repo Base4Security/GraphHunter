@@ -32,7 +32,7 @@ fn preview_defaults_canonical_fields_to_canonical_entity_type() {
         .preview_ingest(PreviewIngestRequest {
             path,
             format: "csv".to_string(),
-        })
+        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
         .expect("preview must succeed");
 
     let by_name: std::collections::HashMap<&str, &str> = result

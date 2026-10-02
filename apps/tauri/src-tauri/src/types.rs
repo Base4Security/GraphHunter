@@ -25,6 +25,17 @@ pub struct HuntResults {
     pub diagnostic: Option<graph_hunter_core::HuntDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_tail_coverage: Option<graph_hunter_core::LiveTailCoverage>,
+    // Fase D/E: carry the core's answer-coverage across the transport so
+    // the GUI's primary single-hunt path sees Fase F's
+    // missing_sources/source_watermarks (symmetric to the HTTP handler's
+    // `RunHuntResponse::coverage`). Default coverage is omitted -> byte-
+    // identical wire when the flag is off.
+    #[serde(skip_serializing_if = "is_default_hunt_coverage")]
+    pub coverage: graph_hunter_api::coverage::AnswerCoverage,
+}
+
+fn is_default_hunt_coverage(c: &graph_hunter_api::coverage::AnswerCoverage) -> bool {
+    *c == graph_hunter_api::coverage::AnswerCoverage::default()
 }
 
 #[derive(Serialize)]

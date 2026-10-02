@@ -61,6 +61,13 @@ pub enum ApiError {
     /// the caller.
     #[error("internal: {0}")]
     Internal(String),
+
+    /// The requested surface is gated off by a Fase G feature flag
+    /// (default ON; an operator explicitly disabled it via env var).
+    /// `feature` names the gated flag/surface; `hint` steers the caller to
+    /// the equivalent local-graph path. Maps to HTTP 403.
+    #[error("feature disabled ({feature}): {hint}")]
+    FeatureDisabled { feature: String, hint: String },
 }
 
 impl ApiError {
@@ -73,6 +80,7 @@ impl ApiError {
                 400
             }
             ApiError::Conflict(_) => 409,
+            ApiError::FeatureDisabled { .. } => 403,
             ApiError::PayloadTooLarge(_) => 413,
             ApiError::Upstream { .. } => 502,
             ApiError::Io(_) | ApiError::Internal(_) => 500,
@@ -113,6 +121,14 @@ mod tests {
         assert_eq!(ApiError::Internal("x".into()).status_code(), 500);
         assert_eq!(ApiError::Conflict("x".into()).status_code(), 409);
         assert_eq!(ApiError::PayloadTooLarge("x".into()).status_code(), 413);
+        assert_eq!(
+            ApiError::FeatureDisabled {
+                feature: "hunting_templates".into(),
+                hint: "h".into()
+            }
+            .status_code(),
+            403
+        );
     }
 
     #[test]

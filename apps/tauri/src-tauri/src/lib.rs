@@ -4,6 +4,7 @@ pub mod error;
 pub mod evtx;
 pub mod format_registry;
 pub mod helpers;
+pub mod journal;
 mod http;
 pub mod scoring;
 pub mod sentinel_connector;
@@ -106,23 +107,19 @@ pub fn run() {
     // / current / hunt_cache handles from the API so legacy helpers and
     // the canonical operations see the exact same state.
     let api = Arc::new(graph_hunter_api::GraphHunterApi::new(emitter));
-    // Populate the API's GeoIP slot at startup (MaxMind from disk).
-    // AppState no longer holds this handle directly — all GeoIP
-    // ops go through the canonical API.
+    // Populate the API's GeoIP slots at startup. The bootstrap lives on
+    // the API (not here) so the headless HTTP transport gets the same
+    // wiring; this call additionally passes the installer's bundled
+    // resource directory, which only the desktop app can resolve.
+    // Failures are logged loudly inside `bootstrap_geoip` — the previous
+    // version of this block logged only on success, so a missing
+    // database was indistinguishable from a working one and shipped as
+    // a silent `geoip=false`.
     {
-        let handle = api.geoip_provider_handle();
-        let provider = dirs::data_dir()
-            .map(|d| d.join("GraphHunter").join("geoip"))
-            .and_then(|dir| {
-                graph_hunter_core::geoip::maxmind::MaxMindProvider::from_directory(&dir).ok()
-            })
-            .filter(|p| p.is_available());
-        if provider.is_some() {
-            tracing::info!("MaxMind GeoIP databases loaded");
-        }
-        if let Ok(mut g) = handle.lock() {
-            *g = provider;
-        }
+        let bundled = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|p| p.join("resources").join("geoip")));
+        api.bootstrap_geoip(bundled);
     }
     // Initialize the drift store on disk. Placed beside other GraphHunter
     // runtime state. If the directory is unavailable (no HOME?) or SQLite
@@ -201,12 +198,24 @@ pub fn run() {
         }
     }
 
+    // Hunt journal (Task A2/A4): append-only per-hunt event log under
+    // `<data>/GraphHunter/journals/<hunt_id>/`. Falls back to the OS temp
+    // dir on platforms where `dirs::data_dir()` returns `None` — the
+    // journal must always have somewhere to write since capture is
+    // mandatory (unlike the optional drift/DLQ/mapping stores above).
+    let journal_base = dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("GraphHunter")
+        .join("journals");
+    let journal = Arc::new(journal::store::JournalStore::new(journal_base));
+
     let app_state = Arc::new(state::AppState {
         sessions: api.sessions().map_handle(),
         current_session_id: api.sessions().current_handle(),
         app_handle: app_handle_slot.clone(),
         last_mcp_subgraph: RwLock::new(None),
         api_token,
+        journal,
     });
     let http_port = std::env::var("GRAPHHUNTER_API_PORT")
         .ok()
@@ -353,6 +362,7 @@ pub fn run() {
             // IP enrichment & subnet analysis
             commands::enrichment::cmd_enrich_ip,
             commands::enrichment::cmd_get_subnet_analysis,
+            commands::enrichment::cmd_get_shared_sessions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Graph Hunter");

@@ -453,6 +453,22 @@ mod tests {
                 .pop()
                 .ok_or_else(|| LocalLlmError::InferenceFailed("no more replies".into()))
         }
+        // Must mirror `infer`: with the `xgrammar` feature on AND a model
+        // + tokenizer present on the box, `infer_with_optional_json_schema`
+        // routes to the constrained sampler and calls THIS, not `infer`.
+        // Without this override the default trait impl returns
+        // "backend does not support constrained decode", so the dispatcher
+        // tests failed on `--all-features` machines that happen to have a
+        // Phi-3 sitting in models/. A replay mock has no logits to mask,
+        // so the masker is ignored and the canned reply is returned — the
+        // dispatcher behaviour under test is identical on both paths.
+        fn infer_constrained(
+            &self,
+            spec: &PromptSpec,
+            _masker: &mut dyn crate::local_llm::LogitsMasker,
+        ) -> LocalLlmResult<String> {
+            self.infer(spec)
+        }
         fn backend_id(&self) -> &'static str {
             self.id
         }
