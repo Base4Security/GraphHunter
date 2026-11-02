@@ -288,10 +288,10 @@ impl<'a> Grower<'a> {
                 if p <= 0.0 {
                     continue;
                 }
-                if let Some((c, d)) = best_copy(te, v, &self.dist) {
-                    if p - d > 0.0 {
-                        cands.push((p - d, v, c));
-                    }
+                if let Some((c, d)) = best_copy(te, v, &self.dist)
+                    && p - d > 0.0
+                {
+                    cands.push((p - d, v, c));
                 }
             }
             cands.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -318,10 +318,10 @@ impl<'a> Grower<'a> {
                 if !ok {
                     continue;
                 }
-                if let Some(b) = budget {
-                    if tree.arcs.len() + heads.len() > b {
-                        continue;
-                    }
+                if let Some(b) = budget
+                    && tree.arcs.len() + heads.len() > b
+                {
+                    continue;
                 }
                 // Commit.
                 for &ai in &path {

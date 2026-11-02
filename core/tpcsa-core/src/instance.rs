@@ -178,13 +178,13 @@ impl Instance {
                     prize: n.prize,
                 });
             }
-            if let Some(c) = n.root_cost {
-                if !(c.is_finite() && c >= 0.0) {
-                    return Err(InstanceError::BadRootCost {
-                        id: n.id.clone(),
-                        cost: c,
-                    });
-                }
+            if let Some(c) = n.root_cost
+                && !(c.is_finite() && c >= 0.0)
+            {
+                return Err(InstanceError::BadRootCost {
+                    id: n.id.clone(),
+                    cost: c,
+                });
             }
         }
         for (index, a) in self.arcs.iter().enumerate() {

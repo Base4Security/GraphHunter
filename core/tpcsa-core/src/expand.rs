@@ -232,8 +232,8 @@ mod tests {
         i.arcs.push(Arc::point("a", "t", "e", 11, 1.0));
         let te = TeGraph::build(&Compiled::from_instance(&i).unwrap());
         let a = &te.node_copies[1];
-        assert_eq!(te.copies[a[0] as usize].arrival, true);
-        assert_eq!(te.copies[a[1] as usize].arrival, false);
+        assert!(te.copies[a[0] as usize].arrival);
+        assert!(!te.copies[a[1] as usize].arrival);
         assert_eq!(te.copies[a[0] as usize].time, te.copies[a[1] as usize].time);
     }
 
