@@ -140,7 +140,7 @@ fn vrl_field_access(raw: &str) -> String {
 }
 
 fn esc_comment(s: &str) -> String {
-    s.replace('\n', " ").replace('\r', " ")
+    s.replace(['\n', '\r'], " ")
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
