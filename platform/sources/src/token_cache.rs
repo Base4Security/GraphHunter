@@ -95,6 +95,10 @@ impl std::error::Error for TokenError {}
 /// The real implementation (Phase 3) wraps `reqwest` to hit
 /// `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`.
 /// Tests use an in-memory mock that counts calls.
+// `async_trait` tags every generated method with `#[must_use]` even though
+// the returned `Pin<Box<dyn Future>>` already is; the lint fires on the
+// macro expansion, not on code written here.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TokenFetcher: Send + Sync {
     /// Fetches a new access token for the given `(tenant, scope)` pair.
@@ -139,10 +143,10 @@ impl AzureTokenCache {
         // Fast path: read lock.
         {
             let tokens = self.tokens.read().await;
-            if let Some(cached) = tokens.get(key) {
-                if cached.is_fresh(self.refresh_horizon) {
-                    return Ok(cached.access_token.clone());
-                }
+            if let Some(cached) = tokens.get(key)
+                && cached.is_fresh(self.refresh_horizon)
+            {
+                return Ok(cached.access_token.clone());
             }
         }
 
@@ -150,10 +154,10 @@ impl AzureTokenCache {
         // may have refreshed this key in the gap between releasing the
         // read lock and acquiring the write lock.
         let mut tokens = self.tokens.write().await;
-        if let Some(cached) = tokens.get(key) {
-            if cached.is_fresh(self.refresh_horizon) {
-                return Ok(cached.access_token.clone());
-            }
+        if let Some(cached) = tokens.get(key)
+            && cached.is_fresh(self.refresh_horizon)
+        {
+            return Ok(cached.access_token.clone());
         }
 
         let (access_token, expires_in) = self.fetcher.fetch(key).await?;
@@ -183,6 +187,11 @@ impl AzureTokenCache {
     /// Returns the number of cached entries. For metrics / debugging.
     pub async fn len(&self) -> usize {
         self.tokens.read().await.len()
+    }
+
+    /// True when no token is cached.
+    pub async fn is_empty(&self) -> bool {
+        self.tokens.read().await.is_empty()
     }
 }
 

@@ -349,6 +349,10 @@ impl SourceCapabilities {
 /// Implementations must be `Send + Sync` because connector tasks spawn
 /// them on the tokio multi-thread runtime. State that needs interior
 /// mutation should live behind `Mutex` or `RwLock`.
+// `async_trait` tags every generated method with `#[must_use]` even though
+// the returned `Pin<Box<dyn Future>>` already is; the lint fires on the
+// macro expansion, not on code written here.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait LogSource: Send + Sync {
     /// Stable identifier for this source instance. Typically a combination
