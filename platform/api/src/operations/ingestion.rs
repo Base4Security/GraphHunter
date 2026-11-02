@@ -11,12 +11,12 @@ use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::sync::Arc;
 
+use graph_hunter_canonical::ProvenanceCtx;
 use graph_hunter_core::drift::DriftSnapshot;
 use graph_hunter_core::{
     ConfigurableParser, EntityType, FieldConfig, FieldMapping, FieldRole, GenericParser,
     GraphHunter, LogParser,
 };
-use graph_hunter_canonical::ProvenanceCtx;
 use graph_hunter_parsers::{extract_fields_header, haproxy_iso_date};
 use uuid::Uuid;
 
@@ -26,11 +26,9 @@ use crate::dto::ingestion::{
     PcapPreviewRequest, PcapPreviewResult, PreviewIngestRequest, PreviewIngestResult,
 };
 use crate::events::events::{INGEST_COMPLETE, INGEST_ERROR, INGEST_PROGRESS};
-use crate::paths::PathPolicy;
-use crate::evtx::{
-    evtx_preview_sample, evtx_to_sysmon_ndjson, file_looks_like_evtx, path_is_evtx,
-};
+use crate::evtx::{evtx_preview_sample, evtx_to_sysmon_ndjson, file_looks_like_evtx, path_is_evtx};
 use crate::format_registry::{make_parser_for_format, resolve_format, rich_preview_for_format};
+use crate::paths::PathPolicy;
 use crate::scoring::{run_full_scoring, run_scoring_adaptive};
 use crate::state::{DatasetInfo, Session, SessionPhase};
 use crate::util::now_secs;
@@ -103,13 +101,15 @@ fn journal_batch_best_effort(
         return None;
     }
     let store = match dirs::data_dir() {
-        Some(d) => match crate::journal::JournalStore::open(d.join("GraphHunter").join("journal")) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                tracing::warn!(target: "journal", error = %e, "journal open failed; continuing");
-                None
+        Some(d) => {
+            match crate::journal::JournalStore::open(d.join("GraphHunter").join("journal")) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(target: "journal", error = %e, "journal open failed; continuing");
+                    None
+                }
             }
-        },
+        }
         None => {
             tracing::warn!(
                 target: "journal",
@@ -393,9 +393,7 @@ pub fn auto_field_config_for(format_name: &str, contents: &str) -> Option<FieldC
             // classifies timestamps as non-entities.
             if suggested != "Skip"
                 && fi.suggestion_source.as_deref() == Some("name")
-                && graph_hunter_core::field_preview::values_look_like_timestamps(
-                    &fi.sample_values,
-                )
+                && graph_hunter_core::field_preview::values_look_like_timestamps(&fi.sample_values)
             {
                 suggested = "Skip".to_string();
             }
@@ -527,17 +525,15 @@ impl GraphHunterApi {
         } else {
             let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let contents = if file_size > LARGE_FILE_THRESHOLD {
-                let mut file = std::fs::File::open(&path).map_err(|e| {
-                    ApiError::Io(format!("open '{}': {e}", checked.display_hint()))
-                })?;
+                let mut file = std::fs::File::open(&path)
+                    .map_err(|e| ApiError::Io(format!("open '{}': {e}", checked.display_hint())))?;
                 let mut buf = vec![0u8; PREVIEW_READ_SIZE];
                 let n = std::io::Read::read(&mut file, &mut buf)
                     .map_err(|e| ApiError::Io(format!("read: {e}")))?;
                 String::from_utf8_lossy(&buf[..n]).to_string()
             } else {
-                std::fs::read_to_string(&path).map_err(|e| {
-                    ApiError::Io(format!("read '{}': {e}", checked.display_hint()))
-                })?
+                std::fs::read_to_string(&path)
+                    .map_err(|e| ApiError::Io(format!("read '{}': {e}", checked.display_hint())))?
             };
             let resolved = resolve_format(&contents, &req.format);
             (contents, resolved)
@@ -598,7 +594,10 @@ impl GraphHunterApi {
     /// `NotFound` covers three cases a client cannot distinguish and does
     /// not need to: never existed, evicted from the bounded store, or the
     /// process restarted (which also killed the detached ingest thread).
-    pub fn ingest_job_status(&self, job_id: &str) -> ApiResult<crate::dto::ingestion::IngestJobSnapshot> {
+    pub fn ingest_job_status(
+        &self,
+        job_id: &str,
+    ) -> ApiResult<crate::dto::ingestion::IngestJobSnapshot> {
         self.inner
             .ingest_jobs
             .get(job_id)
@@ -607,7 +606,10 @@ impl GraphHunterApi {
 
     /// Recent ingest jobs, most recently updated first. Lets a client
     /// find a job it lost the id for, or spot one stalled by a restart.
-    pub fn list_ingest_jobs(&self, limit: Option<usize>) -> Vec<crate::dto::ingestion::IngestJobSnapshot> {
+    pub fn list_ingest_jobs(
+        &self,
+        limit: Option<usize>,
+    ) -> Vec<crate::dto::ingestion::IngestJobSnapshot> {
         self.inner.ingest_jobs.list(limit.unwrap_or(32).min(64))
     }
 
@@ -647,9 +649,8 @@ impl GraphHunterApi {
             // `display_hint` is the caller's own string: echoing the
             // canonical absolute path alongside the OS error would be an
             // existence oracle for paths outside the allowed root.
-            let contents = std::fs::read_to_string(&path).map_err(|e| {
-                ApiError::Io(format!("read '{}': {e}", resolved.display_hint()))
-            })?;
+            let contents = std::fs::read_to_string(&path)
+                .map_err(|e| ApiError::Io(format!("read '{}': {e}", resolved.display_hint())))?;
             (contents, req.format)
         };
 
@@ -706,12 +707,17 @@ impl GraphHunterApi {
                 // from the auto-built config directly, independent of the
                 // `field_config` field above (which a later mapping-review
                 // promotion may overwrite for display purposes).
-                mapping_hash: auto_config.as_ref().map(ProvenanceCtx::mapping_hash_for_config),
+                mapping_hash: auto_config
+                    .as_ref()
+                    .map(ProvenanceCtx::mapping_hash_for_config),
             });
         }
         let resume_phase = resume_phase_after_finalize(session.phase());
         session.set_phase(crate::state::SessionPhase::Finalizing);
-        let _phase_guard = FinalizePhaseGuard { session: Arc::clone(&session), resume: resume_phase };
+        let _phase_guard = FinalizePhaseGuard {
+            session: Arc::clone(&session),
+            resume: resume_phase,
+        };
         let (new_entities, new_relations, ingest_stats, used_auto_config) = {
             let mut graph = session
                 .graph
@@ -734,8 +740,11 @@ impl GraphHunterApi {
             // the frozen provenance reflects the real producer (matches the
             // `load_data_with_config` branch below, which always used
             // "configurable").
-            let journaled_parser_name =
-                if used_auto { "configurable" } else { resolved_format.as_str() };
+            let journaled_parser_name = if used_auto {
+                "configurable"
+            } else {
+                resolved_format.as_str()
+            };
             // Journal step (4-5 of the 12-step order): must run BEFORE the
             // graph insert below so a crash in between is replayable. Gated
             // behind GRAPHHUNTER_JOURNAL (default off = no-op); failures only
@@ -972,7 +981,10 @@ impl GraphHunterApi {
 
         let resume_phase = resume_phase_after_finalize(session.phase());
         session.set_phase(crate::state::SessionPhase::Finalizing);
-        let _phase_guard = FinalizePhaseGuard { session: Arc::clone(&session), resume: resume_phase };
+        let _phase_guard = FinalizePhaseGuard {
+            session: Arc::clone(&session),
+            resume: resume_phase,
+        };
         let (new_entities, new_relations, stats, window_end_ts) = {
             let mut graph = session
                 .graph
@@ -1140,7 +1152,10 @@ impl GraphHunterApi {
 
         let resume_phase = resume_phase_after_finalize(session.phase());
         session.set_phase(crate::state::SessionPhase::Finalizing);
-        let _phase_guard = FinalizePhaseGuard { session: Arc::clone(&session), resume: resume_phase };
+        let _phase_guard = FinalizePhaseGuard {
+            session: Arc::clone(&session),
+            resume: resume_phase,
+        };
         let (new_entities, new_relations, ingest_stats) = {
             let mut graph = session
                 .graph
@@ -1406,9 +1421,7 @@ impl GraphHunterApi {
                 //    `crate::ingestors`. Future PRs add Zeek,
                 //    Suricata, NetFlow, live capture by registering
                 //    new ingestors — no edit to this dispatch.
-                if let Some(ingestor) =
-                    crate::ingestors::resolve_ingestor(&bg_path, &bg_format)
-                {
+                if let Some(ingestor) = crate::ingestors::resolve_ingestor(&bg_path, &bg_format) {
                     // Freeze the resolved ingestor identity onto the
                     // dataset BEFORE any event is parsed under it — this
                     // registry branch (EVTX/PCAP/Zeek/Suricata/Netflow)
@@ -1418,9 +1431,7 @@ impl GraphHunterApi {
                     // `ds.parser = Some(resolved.clone())` patch below for
                     // the tabular path.
                     if let Ok(mut datasets) = bg_session.datasets.write() {
-                        if let Some(ds) =
-                            datasets.iter_mut().find(|d| d.id == bg_dataset_id)
-                        {
+                        if let Some(ds) = datasets.iter_mut().find(|d| d.id == bg_dataset_id) {
                             ds.parser = Some(ingestor.name().to_string());
                         }
                     }
@@ -1624,8 +1635,7 @@ impl GraphHunterApi {
                             // (still before any event is parsed under this
                             // dataset — see `DatasetInfo::mapping_hash`)
                             // and never touched again after this point.
-                            ds.mapping_hash =
-                                Some(ProvenanceCtx::mapping_hash_for_config(cfg));
+                            ds.mapping_hash = Some(ProvenanceCtx::mapping_hash_for_config(cfg));
                         }
                         ds.parser = Some(resolved.clone());
                     }
@@ -2375,9 +2385,7 @@ fn _ensure_arc_imported() -> Option<Arc<u8>> {
 /// Determines which phase to restore after a synchronous ingest re-finalizes.
 /// If the session was in LiveTail (live streaming active), we must not clobber
 /// that — restore LiveTail. For any other entry phase, restore Ready.
-fn resume_phase_after_finalize(
-    prior: crate::state::SessionPhase,
-) -> crate::state::SessionPhase {
+fn resume_phase_after_finalize(prior: crate::state::SessionPhase) -> crate::state::SessionPhase {
     match prior {
         crate::state::SessionPhase::LiveTail => crate::state::SessionPhase::LiveTail,
         _ => crate::state::SessionPhase::Ready,
@@ -2431,7 +2439,12 @@ mod resume_phase_tests {
     fn finalize_guard_restores_phase_on_early_exit() {
         use crate::state::SessionPhase;
 
-        let session = Arc::new(Session::new("guard-test", "guard-test", GraphHunter::new(), 0));
+        let session = Arc::new(Session::new(
+            "guard-test",
+            "guard-test",
+            GraphHunter::new(),
+            0,
+        ));
         session.set_phase(SessionPhase::Ready);
 
         // Simulate the ingest preamble: set Finalizing, create the guard.
@@ -2443,7 +2456,10 @@ mod resume_phase_tests {
         // reaching a normal success path. The closure returns an Err, which
         // causes the guard to be dropped when the block scope ends.
         let result: Result<(), &str> = (|| {
-            let _guard = FinalizePhaseGuard { session: Arc::clone(&session), resume };
+            let _guard = FinalizePhaseGuard {
+                session: Arc::clone(&session),
+                resume,
+            };
             // Simulate a mid-ingest error that would have `?`-returned in
             // the real load_data / ingest_siem / load_data_with_config.
             return Err("simulated lock-poisoned error");
@@ -2451,7 +2467,10 @@ mod resume_phase_tests {
             Ok(())
         })();
 
-        assert!(result.is_err(), "closure must return Err to simulate early exit");
+        assert!(
+            result.is_err(),
+            "closure must return Err to simulate early exit"
+        );
         // The critical assertion: the session must NOT be stranded in Finalizing.
         assert_ne!(
             session.phase(),

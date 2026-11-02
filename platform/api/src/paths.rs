@@ -114,9 +114,7 @@ impl PathPolicy {
         for d in declared {
             match std::fs::canonicalize(d) {
                 Ok(p) => roots.push(p),
-                Err(e) => tracing::warn!(
-                    "{INGEST_ROOT_ENV}: ignoring unreadable root '{d}': {e}"
-                ),
+                Err(e) => tracing::warn!("{INGEST_ROOT_ENV}: ignoring unreadable root '{d}': {e}"),
             }
         }
         if roots.is_empty() {
@@ -185,8 +183,8 @@ impl PathPolicy {
         // ---- Canonicalize, then contain ----
         // Resolves symlinks, `..`, and Windows 8.3 short names, so the
         // comparison below is against what will actually be opened.
-        let canonical = std::fs::canonicalize(raw)
-            .map_err(|_| ApiError::NotFound("path not found".into()))?;
+        let canonical =
+            std::fs::canonicalize(raw).map_err(|_| ApiError::NotFound("path not found".into()))?;
 
         // A path outside the root and a path that does not exist return
         // the SAME error on purpose — distinguishing them leaks the
@@ -372,11 +370,14 @@ mod tests {
     fn rejects_nul_unc_and_device_names() {
         let dir = tempfile::tempdir().expect("tempdir");
         let policy = rooted(dir.path());
-        for bad in ["", "  ", "with\0nul", r"\\server\share\f.csv", "//server/share"] {
-            assert!(
-                policy.resolve(bad).is_err(),
-                "must reject {bad:?}"
-            );
+        for bad in [
+            "",
+            "  ",
+            "with\0nul",
+            r"\\server\share\f.csv",
+            "//server/share",
+        ] {
+            assert!(policy.resolve(bad).is_err(), "must reject {bad:?}");
         }
         let dev = policy
             .resolve(dir.path().join("NUL").to_str().expect("utf8"))
@@ -393,7 +394,10 @@ mod tests {
         let raw = format!("{}/./log.csv", dir.path().display());
         let resolved = rooted(dir.path()).resolve(&raw).expect("resolves");
         assert_eq!(resolved.display_hint(), raw);
-        assert_ne!(resolved.display_hint(), resolved.as_path().to_string_lossy());
+        assert_ne!(
+            resolved.display_hint(),
+            resolved.as_path().to_string_lossy()
+        );
     }
 
     #[test]

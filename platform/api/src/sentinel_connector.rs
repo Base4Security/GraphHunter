@@ -17,19 +17,19 @@ use std::time::Duration;
 
 use graph_hunter_core::{LogParser, SentinelJsonParser};
 use rand::Rng;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use graph_hunter_siem::{
-    normalize_response, KqlQueryBuilder, SentinelPollingConfig, SentinelTokenCache,
-    SentinelTransport, SentinelWatermarkStore,
+    KqlQueryBuilder, SentinelPollingConfig, SentinelTokenCache, SentinelTransport,
+    SentinelWatermarkStore, normalize_response,
 };
 
+use crate::EventEmitter;
 use crate::events::events as event_names;
 use crate::scoring::run_scoring_incremental;
 use crate::state::Session;
-use crate::EventEmitter;
 
 /// Maximum exponential back-off (seconds) between retries after poll failures.
 const MAX_BACKOFF_SECS: u64 = 300;

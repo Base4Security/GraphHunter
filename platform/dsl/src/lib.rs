@@ -719,8 +719,7 @@ impl<'a> Cursor<'a> {
                         .or_insert_with(|| step.dest_type.clone());
                 }
             }
-            let (clause_type, clause_binding) =
-                self.parse_clause_head(&binding_to_type)?;
+            let (clause_type, clause_binding) = self.parse_clause_head(&binding_to_type)?;
             prev_type = clause_type;
             prev_binding = clause_binding;
         }
@@ -996,7 +995,12 @@ impl<'a> Cursor<'a> {
             }
         }
 
-        Ok((aggregations, window_seconds, skew_tolerance_seconds, max_gap))
+        Ok((
+            aggregations,
+            window_seconds,
+            skew_tolerance_seconds,
+            max_gap,
+        ))
     }
 
     /// Parse `count(distinct <col>) [>=|>] <N>`. Only `count(distinct ...)`
@@ -1144,10 +1148,12 @@ impl<'a> Cursor<'a> {
                 position: self.pos,
             });
         }
-        self.input[num_start..self.pos].parse().map_err(|_| DslError {
-            message: "Invalid integer in GAP clause".into(),
-            position: num_start,
-        })
+        self.input[num_start..self.pos]
+            .parse()
+            .map_err(|_| DslError {
+                message: "Invalid integer in GAP clause".into(),
+                position: num_start,
+            })
     }
 }
 
@@ -1237,7 +1243,10 @@ mod parser_tests {
     #[test]
     fn legacy_chain_stays_chain_shape() {
         let r = parse_dsl("User u -[Auth]-> Host h -[Connect]-> IP i", None).unwrap();
-        assert_eq!(r.hypothesis.shape, crate::hypothesis::HypothesisShape::Chain);
+        assert_eq!(
+            r.hypothesis.shape,
+            crate::hypothesis::HypothesisShape::Chain
+        );
         assert_eq!(r.hypothesis.steps.len(), 2);
     }
 
@@ -1250,7 +1259,10 @@ mod parser_tests {
             None,
         )
         .unwrap();
-        assert_eq!(r.hypothesis.shape, crate::hypothesis::HypothesisShape::Graph);
+        assert_eq!(
+            r.hypothesis.shape,
+            crate::hypothesis::HypothesisShape::Graph
+        );
         assert_eq!(r.hypothesis.steps.len(), 3);
         // Every step's origin_binding is "c" (declared in clause 1, referenced in 2 and 3).
         for (i, step) in r.hypothesis.steps.iter().enumerate() {
@@ -1270,12 +1282,11 @@ mod parser_tests {
     fn semicolon_clause_inherits_referenced_binding_type() {
         // The second clause's bare `c` reference resolves to `User`
         // because clause 1 declared `User c`.
-        let r = parse_dsl(
-            "User c -[Auth]-> Host h1; c -[Auth]-> Process p",
-            None,
-        )
-        .unwrap();
-        assert_eq!(r.hypothesis.shape, crate::hypothesis::HypothesisShape::Graph);
+        let r = parse_dsl("User c -[Auth]-> Host h1; c -[Auth]-> Process p", None).unwrap();
+        assert_eq!(
+            r.hypothesis.shape,
+            crate::hypothesis::HypothesisShape::Graph
+        );
         assert_eq!(r.hypothesis.steps.len(), 2);
         assert_eq!(r.hypothesis.steps[1].origin_type, EntityType::User);
         assert_eq!(r.hypothesis.steps[1].dest_type, EntityType::Process);
@@ -1283,11 +1294,7 @@ mod parser_tests {
 
     #[test]
     fn semicolon_unknown_binding_errors_with_hint() {
-        let err = parse_dsl(
-            "User c -[Auth]-> Host h1; q -[Auth]-> Process p",
-            None,
-        )
-        .unwrap_err();
+        let err = parse_dsl("User c -[Auth]-> Host h1; q -[Auth]-> Process p", None).unwrap_err();
         assert!(
             err.message.contains("'q'") && err.message.contains("declared bindings"),
             "error should name the unknown binding and list known ones: {}",
@@ -1300,12 +1307,11 @@ mod parser_tests {
         // `;User u` after a `;` is allowed: declares a brand-new
         // User vertex with binding `u`, distinct from anything in
         // the prior clause.
-        let r = parse_dsl(
-            "User c -[Auth]-> Host h1; User u -[Auth]-> Host h2",
-            None,
-        )
-        .unwrap();
-        assert_eq!(r.hypothesis.shape, crate::hypothesis::HypothesisShape::Graph);
+        let r = parse_dsl("User c -[Auth]-> Host h1; User u -[Auth]-> Host h2", None).unwrap();
+        assert_eq!(
+            r.hypothesis.shape,
+            crate::hypothesis::HypothesisShape::Graph
+        );
         assert_eq!(r.hypothesis.steps.len(), 2);
         assert_eq!(r.hypothesis.steps[1].origin_binding.as_deref(), Some("u"));
         // u was declared fresh in clause 2 — it's NOT the same vertex

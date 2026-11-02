@@ -141,7 +141,10 @@ impl MappingDiff {
 pub enum NegotiationOutcome {
     /// Heuristic produced a confident config (≥1 Node mapping). No LLM
     /// call made. Use the embedded config as-is.
-    HeuristicOk { config: FieldConfig, confidence: f32 },
+    HeuristicOk {
+        config: FieldConfig,
+        confidence: f32,
+    },
     /// Heuristic was weak; LLM produced a non-empty refinement that
     /// differs meaningfully from the heuristic. Hot-path callers must
     /// **not** insert triples until the analyst chooses between the
@@ -439,9 +442,7 @@ mod tests {
     impl ReplayBackend {
         fn new(replies: Vec<&str>, id: &'static str) -> Self {
             Self {
-                replies: parking_lot::Mutex::new(
-                    replies.into_iter().map(str::to_string).collect(),
-                ),
+                replies: parking_lot::Mutex::new(replies.into_iter().map(str::to_string).collect()),
                 id,
             }
         }
@@ -507,10 +508,8 @@ mod tests {
         // `supports_configurable` set — heuristic returns `None`
         // unconditionally, forcing the dispatcher onto the LLM path.
         let sample = "#Fields: date time c-ip cs-method\n2024-01-01 00:00:00 10.0.0.1 GET\n";
-        let backend = ReplayBackend::new(
-            vec!["{\"mappings\":[],\"confidence\":0.5}"],
-            "test-empty",
-        );
+        let backend =
+            ReplayBackend::new(vec!["{\"mappings\":[],\"confidence\":0.5}"], "test-empty");
         let outcome = negotiate_field_config("iis", sample, &backend);
         match outcome {
             NegotiationOutcome::LlmUnavailable { reason, .. } => {

@@ -3,4 +3,6 @@
 //! compiling while the remaining Tauri-side users (currently only
 //! `cmd_load_data_streaming`) are migrated.
 
-pub use graph_hunter_api::scoring::{run_full_scoring, run_scoring_adaptive, run_scoring_incremental};
+pub use graph_hunter_api::scoring::{
+    run_full_scoring, run_scoring_adaptive, run_scoring_incremental,
+};

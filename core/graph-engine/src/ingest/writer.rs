@@ -186,9 +186,7 @@ impl<A: GraphAccess + 'static> GraphWriter<A> {
                 }
                 Err(e) => {
                     if matches!(e, GraphError::Spill(_)) {
-                        self.metrics
-                            .spill_errors
-                            .fetch_add(1, Ordering::Relaxed);
+                        self.metrics.spill_errors.fetch_add(1, Ordering::Relaxed);
                     } else {
                         self.metrics.errors.fetch_add(1, Ordering::Relaxed);
                     }

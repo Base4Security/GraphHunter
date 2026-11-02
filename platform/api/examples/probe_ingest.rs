@@ -61,9 +61,16 @@ fn main() {
     let headed = format_is_headed(&resolved);
 
     println!("file        : {path}");
-    println!("size        : {:.1} MB (probing {:.1} MB)", mb(total), mb(buf.len() as u64));
+    println!(
+        "size        : {:.1} MB (probing {:.1} MB)",
+        mb(total),
+        mb(buf.len() as u64)
+    );
     println!("format      : {resolved}");
-    println!("stream mode : {mode:?}  (streamable: {})", mode.is_streamable());
+    println!(
+        "stream mode : {mode:?}  (streamable: {})",
+        mode.is_streamable()
+    );
     println!("headed      : {headed}");
 
     if !mode.is_streamable() && total > 512 * 1024 * 1024 {

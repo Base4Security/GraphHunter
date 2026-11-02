@@ -1,5 +1,5 @@
-use serde_json::Value;
 use super::event::Touched;
+use serde_json::Value;
 
 /// Classifies the endpoint path to a semantic kind.
 pub fn classify_kind(path: &str) -> &'static str {

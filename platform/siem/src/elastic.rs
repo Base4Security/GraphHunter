@@ -187,8 +187,7 @@ pub fn run_elastic_query(
             ) {
                 req = req.basic_auth(user, Some(pass));
             }
-        } else if std::env::var("ELASTIC_API_KEY").is_ok()
-            || std::env::var("ELASTIC_USER").is_ok()
+        } else if std::env::var("ELASTIC_API_KEY").is_ok() || std::env::var("ELASTIC_USER").is_ok()
         {
             eprintln!(
                 "elastic: refusing to send environment credentials to host {:?} — \
@@ -198,7 +197,9 @@ pub fn run_elastic_query(
         }
     }
 
-    let resp = req.send().map_err(|e| format!("search request failed: {}", e))?;
+    let resp = req
+        .send()
+        .map_err(|e| format!("search request failed: {}", e))?;
     if !resp.status().is_success() {
         let status = resp.status();
         // Truncated: this string is surfaced to the caller, and an
@@ -211,7 +212,9 @@ pub fn run_elastic_query(
         }
         return Err(format!("search failed: {} {}", status, text));
     }
-    let json: serde_json::Value = resp.json().map_err(|e| format!("response parse failed: {}", e))?;
+    let json: serde_json::Value = resp
+        .json()
+        .map_err(|e| format!("response parse failed: {}", e))?;
     normalize_elastic_response(&json)
 }
 
@@ -227,7 +230,10 @@ fn normalize_elastic_response(raw: &serde_json::Value) -> Result<ElasticQueryRes
     let mut last_sort: Option<Value> = None;
 
     for hit in hits {
-        let source = hit.get("_source").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+        let source = hit
+            .get("_source")
+            .cloned()
+            .unwrap_or(Value::Object(serde_json::Map::new()));
         let mut doc = source.as_object().cloned().unwrap_or_default();
         // Map @timestamp to TimeGenerated for SentinelJsonParser compatibility
         if let Some(ts) = doc.get("@timestamp").cloned() {
@@ -328,15 +334,8 @@ mod tests {
     /// would otherwise be the thing that fails, masking the real reason.
     #[test]
     fn index_is_validated_before_the_request_is_sent() {
-        let err = run_elastic_query(
-            "http://127.0.0.1:1",
-            "../../secret",
-            "",
-            None,
-            None,
-            None,
-        )
-        .expect_err("bad index must be refused");
+        let err = run_elastic_query("http://127.0.0.1:1", "../../secret", "", None, None, None)
+            .expect_err("bad index must be refused");
         assert!(
             err.contains("not a valid Elasticsearch index"),
             "expected the index error, got: {err}"

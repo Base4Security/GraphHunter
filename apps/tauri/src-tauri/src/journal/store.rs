@@ -266,7 +266,8 @@ impl JournalStore {
     /// the hunt is unknown.
     pub fn stats(&self, id: &str) -> Option<serde_json::Value> {
         let (meta, events) = self.read(id)?;
-        let mut by_kind: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        let mut by_kind: std::collections::BTreeMap<String, u64> =
+            std::collections::BTreeMap::new();
         for ev in &events {
             *by_kind.entry(ev.kind.clone()).or_insert(0) += 1;
         }

@@ -99,8 +99,11 @@ const FORTI_TOP_USER_CHART: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 /// `journal_parsed_events_per_source` below, so both sides of the certificate
 /// start from byte-identical parsed events, not two separate re-parses that
 /// merely happen to agree.
-fn parse_real_multi_source_events()
--> (Vec<RawIngestEvent>, Vec<RawIngestEvent>, Vec<RawIngestEvent>) {
+fn parse_real_multi_source_events() -> (
+    Vec<RawIngestEvent>,
+    Vec<RawIngestEvent>,
+    Vec<RawIngestEvent>,
+) {
     let sysmon_events: Vec<RawIngestEvent> = SysmonJsonParser
         .parse(SYSMON_PROCESS_CREATE_1)
         .into_iter()
@@ -151,8 +154,17 @@ fn journal_parsed_events_per_source(
     forti_events: &[RawIngestEvent],
     now_ms: i64,
 ) {
-    journal_batch(store, "ds-sysmon", "sysmon", "ds-sysmon", "sysmon", sysmon_events, &[], now_ms)
-        .expect("journal sysmon batch");
+    journal_batch(
+        store,
+        "ds-sysmon",
+        "sysmon",
+        "ds-sysmon",
+        "sysmon",
+        sysmon_events,
+        &[],
+        now_ms,
+    )
+    .expect("journal sysmon batch");
     journal_batch(
         store,
         "ds-sentinel",
@@ -185,7 +197,13 @@ fn journal_parsed_events_per_source(
 /// point is a missing-record divergence, not memory-vs-disk separation).
 fn journal_real_multi_source_fixtures(store: &JournalStore, now_ms: i64) {
     let (sysmon_events, sentinel_events, forti_events) = parse_real_multi_source_events();
-    journal_parsed_events_per_source(store, &sysmon_events, &sentinel_events, &forti_events, now_ms);
+    journal_parsed_events_per_source(
+        store,
+        &sysmon_events,
+        &sentinel_events,
+        &forti_events,
+        now_ms,
+    );
 }
 
 /// Apply a slice of already-parsed, purely in-memory `RawIngestEvent`s to

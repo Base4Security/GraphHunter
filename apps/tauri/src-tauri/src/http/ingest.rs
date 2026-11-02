@@ -1,9 +1,9 @@
 //! Agentic ingest negotiation, mapping generation, and mapping-library endpoints.
 
 use axum::{
+    Json,
     extract::State,
     response::{IntoResponse, Response},
-    Json,
 };
 use std::sync::Arc;
 

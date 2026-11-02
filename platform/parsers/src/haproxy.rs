@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use graph_hunter_core::entity::Entity;
-use graph_hunter_core::parser::{LogParser, ParseError, ParsedTriple, ParseStats, RawIngestEvent};
+use graph_hunter_core::parser::{LogParser, ParseError, ParseStats, ParsedTriple, RawIngestEvent};
 use graph_hunter_core::relation::Relation;
 use graph_hunter_core::types::{EntityType, RelationType};
 
@@ -62,7 +62,10 @@ fn parse_haproxy_line(line: &str) -> Option<HaproxyRecord<'_>> {
     }
 
     // client `ip:port` -> strip the port (last colon keeps IPv6 intact).
-    let client_ip = toks[0].rsplit_once(':').map(|(ip, _)| ip).unwrap_or(toks[0]);
+    let client_ip = toks[0]
+        .rsplit_once(':')
+        .map(|(ip, _)| ip)
+        .unwrap_or(toks[0]);
     if client_ip.is_empty() {
         return None;
     }
@@ -223,7 +226,12 @@ fn record_to_triples(rec: &HaproxyRecord<'_>) -> Vec<ParsedTriple> {
     if !rec.domain.is_empty() {
         let src = Entity::new(rec.client_ip, EntityType::IP);
         let dst = Entity::new(rec.domain, EntityType::Domain);
-        let mut rel = Relation::new(rec.client_ip, rec.domain, RelationType::Connect, rec.timestamp);
+        let mut rel = Relation::new(
+            rec.client_ip,
+            rec.domain,
+            RelationType::Connect,
+            rec.timestamp,
+        );
         rel.metadata = meta.clone();
         triples.push((src, rel, dst));
     }
@@ -506,14 +514,15 @@ mod tests {
     #[test]
     fn rejects_apache_combined() {
         // Apache: bare IP (no port) and a space-split date with timezone.
-        let apache =
-            "127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] \"GET /apache_pb.gif HTTP/1.0\" 200 2326";
+        let apache = "127.0.0.1 - frank [10/Oct/2000:13:55:36 -0700] \"GET /apache_pb.gif HTTP/1.0\" 200 2326";
         assert!(!looks_like_haproxy(apache));
     }
 
     #[test]
     fn rejects_non_http_text() {
-        assert!(!looks_like_haproxy("just some plain text\nwith no structure"));
+        assert!(!looks_like_haproxy(
+            "just some plain text\nwith no structure"
+        ));
         assert!(!looks_like_haproxy("{\"Type\":\"SecurityEvent\"}"));
     }
 
@@ -590,7 +599,10 @@ mod tests {
     fn path_normalization_leaves_real_endpoint_names_alone() {
         // Version-ish and alphanumeric segments must survive, or the
         // collapse would merge genuinely different endpoints.
-        assert_eq!(normalize_path_ids("/rest/wrm/2.0/resources"), "/rest/wrm/2.0/resources");
+        assert_eq!(
+            normalize_path_ids("/rest/wrm/2.0/resources"),
+            "/rest/wrm/2.0/resources"
+        );
         assert_eq!(normalize_path_ids("/api/v2/users"), "/api/v2/users");
         assert_eq!(normalize_path_ids("/health"), "/health");
         assert_eq!(normalize_path_ids("/"), "/");
@@ -630,7 +642,10 @@ mod tests {
     #[test]
     fn timestamp_parses_haproxy_date() {
         // 10/Jun/2026:00:00:27.428 UTC == 1781049627 (seconds; ms truncated)
-        assert_eq!(parse_haproxy_datetime("10/Jun/2026:00:00:27.428"), 1781049627);
+        assert_eq!(
+            parse_haproxy_datetime("10/Jun/2026:00:00:27.428"),
+            1781049627
+        );
         assert_eq!(parse_haproxy_datetime(""), 0);
         assert_eq!(parse_haproxy_datetime("garbage"), 0);
     }
@@ -678,8 +693,14 @@ mod tests {
         let triples = HaproxyParser.parse(RELATIVE);
         let (_, url_rel, dst) = &triples[0];
         assert_eq!(dst.entity_type, EntityType::URL);
-        assert_eq!(url_rel.metadata.get("status").map(String::as_str), Some("401"));
-        assert_eq!(url_rel.metadata.get("method").map(String::as_str), Some("GET"));
+        assert_eq!(
+            url_rel.metadata.get("status").map(String::as_str),
+            Some("401")
+        );
+        assert_eq!(
+            url_rel.metadata.get("method").map(String::as_str),
+            Some("GET")
+        );
     }
 
     #[test]
@@ -689,7 +710,10 @@ mod tests {
         let triples = HaproxyParser.parse(SAMPLE_LOG);
         let (_, domain_rel, dst) = &triples[0];
         assert_eq!(dst.entity_type, EntityType::Domain);
-        assert_eq!(domain_rel.metadata.get("status").map(String::as_str), Some("200"));
+        assert_eq!(
+            domain_rel.metadata.get("status").map(String::as_str),
+            Some("200")
+        );
         // ...and the URL edge stays bare, as before.
         assert!(triples[1].1.metadata.is_empty());
     }
@@ -715,6 +739,9 @@ mod tests {
             .iter()
             .find(|e| e.dst_type == EntityType::URL)
             .expect("raw path must emit the URL edge");
-        assert_eq!(url.rel_metadata.get("status").map(String::as_str), Some("401"));
+        assert_eq!(
+            url.rel_metadata.get("status").map(String::as_str),
+            Some("401")
+        );
     }
 }

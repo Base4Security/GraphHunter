@@ -385,7 +385,11 @@ impl CsvParser {
     /// entry represents a skipped row (the rows still parsed), so — like
     /// `duplicate_header` before it — `double_encoded_row` is deliberately
     /// NOT added to `rows_skipped`; it's a parallel channel for the UI.
-    fn insert_diagnostics(stats: &mut crate::parser::ParseStats, dup_count: usize, unwrapped: usize) {
+    fn insert_diagnostics(
+        stats: &mut crate::parser::ParseStats,
+        dup_count: usize,
+        unwrapped: usize,
+    ) {
         if dup_count > 0 {
             stats
                 .skip_reasons

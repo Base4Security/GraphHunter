@@ -6,11 +6,11 @@
 //! must never journal itself.
 
 use axum::{
+    Json,
     body::Bytes,
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -158,7 +158,11 @@ fn filter_rows(rows: &[Value], column: Option<&str>, value: &str, limit: usize) 
             },
         }
     };
-    rows.iter().filter(|r| matches(r)).take(limit).cloned().collect()
+    rows.iter()
+        .filter(|r| matches(r))
+        .take(limit)
+        .cloned()
+        .collect()
 }
 
 /// `POST /journal/:id/expand` — the L2 "reconstruct" layer (Task expand).
@@ -214,8 +218,8 @@ pub(super) async fn handler_expand(
     let kql_result = match result {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             return (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
         }
         Err(_) => {

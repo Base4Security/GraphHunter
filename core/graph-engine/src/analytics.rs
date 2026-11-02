@@ -593,10 +593,7 @@ impl GraphHunter {
 
                     if let Some(f) = filter {
                         if let Some(ref rel_types) = f.relation_types {
-                            if !rel_types
-                                .iter()
-                                .any(|rt| rt.to_u8() == edge.rel_type_tag)
-                            {
+                            if !rel_types.iter().any(|rt| rt.to_u8() == edge.rel_type_tag) {
                                 continue;
                             }
                         }
@@ -642,10 +639,8 @@ impl GraphHunter {
                         edges.push(NeighborEdge {
                             source: self.interner.resolve(edge.source_sid).to_string(),
                             target: dest_id_str.to_string(),
-                            rel_type: self.resolve_rel_type_name_raw(
-                                edge.rel_type_tag,
-                                edge.metadata_offset,
-                            ),
+                            rel_type: self
+                                .resolve_rel_type_name_raw(edge.rel_type_tag, edge.metadata_offset),
                             timestamp: edge.timestamp,
                             metadata: meta,
                         });
@@ -1028,10 +1023,9 @@ impl GraphHunter {
         let mut weighted_edges: Vec<(usize, usize, f64)> = Vec::new();
 
         self.streaming.for_each_edge(|src_sid, edge| {
-            if let (Some(&src_idx), Some(&dst_idx)) = (
-                sid_to_idx.get(&src_sid),
-                sid_to_idx.get(&edge.dest_sid),
-            ) {
+            if let (Some(&src_idx), Some(&dst_idx)) =
+                (sid_to_idx.get(&src_sid), sid_to_idx.get(&edge.dest_sid))
+            {
                 let dt = (t_ref - edge.timestamp).max(0) as f64;
                 let w = (-lambda * dt).exp();
                 w_out[src_idx] += w;
@@ -2100,8 +2094,9 @@ impl GraphHunter {
         // MetadataStore (cf. its existing `visit_keys`) to avoid the alloc.
         self.streaming.for_each_edge(|src, e| {
             let md = self.meta_store.get(e.metadata_offset);
-            let rt = md.get("_rel_type").cloned()
-                .unwrap_or_else(|| format!("{}", crate::types::RelationType::from_u8(e.rel_type_tag)));
+            let rt = md.get("_rel_type").cloned().unwrap_or_else(|| {
+                format!("{}", crate::types::RelationType::from_u8(e.rel_type_tag))
+            });
             let entry = groups.entry((src, e.dest_sid, rt)).or_insert_with(|| Agg {
                 count: 0,
                 bytes: 0,
@@ -2152,7 +2147,11 @@ impl GraphHunter {
                 last_ts: a.last_ts,
             })
             .collect();
-        out.sort_by(|x, y| y.count.cmp(&x.count).then(y.total_bytes.cmp(&x.total_bytes)));
+        out.sort_by(|x, y| {
+            y.count
+                .cmp(&x.count)
+                .then(y.total_bytes.cmp(&x.total_bytes))
+        });
         out.truncate(opts.top_n);
         out
     }
@@ -2168,14 +2167,21 @@ impl GraphHunter {
         let mut groups: HashMap<(StrId, StrId, String), Vec<(i64, u64, bool)>> = HashMap::new();
         self.streaming.for_each_edge(|src, ed| {
             let md = self.meta_store.get(ed.metadata_offset);
-            let rt = md.get("_rel_type").cloned()
-                .unwrap_or_else(|| format!("{}", crate::types::RelationType::from_u8(ed.rel_type_tag)));
-            let bytes = md.get("sentbyte").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let rt = md.get("_rel_type").cloned().unwrap_or_else(|| {
+                format!("{}", crate::types::RelationType::from_u8(ed.rel_type_tag))
+            });
+            let bytes = md
+                .get("sentbyte")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
             let is_reset = matches!(
                 md.get("action").map(|s| s.as_str()),
                 Some("client-rst") | Some("server-rst")
             );
-            groups.entry((src, ed.dest_sid, rt)).or_default().push((ed.timestamp, bytes, is_reset));
+            groups
+                .entry((src, ed.dest_sid, rt))
+                .or_default()
+                .push((ed.timestamp, bytes, is_reset));
         });
 
         let mut out: Vec<ChannelBehavior> = Vec::new();
@@ -2199,17 +2205,12 @@ impl GraphHunter {
             let mut interval_cv = 0.0_f64;
             let mut beacon_score = 0.0_f64;
             if count >= 2 {
-                let intervals: Vec<f64> = edges
-                    .windows(2)
-                    .map(|w| (w[1].0 - w[0].0) as f64)
-                    .collect();
+                let intervals: Vec<f64> =
+                    edges.windows(2).map(|w| (w[1].0 - w[0].0) as f64).collect();
                 let mean = intervals.iter().sum::<f64>() / intervals.len() as f64;
                 interval_mean_secs = mean;
                 if count >= 3 && mean > 0.0 {
-                    let var = intervals
-                        .iter()
-                        .map(|x| (x - mean).powi(2))
-                        .sum::<f64>()
+                    let var = intervals.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
                         / intervals.len() as f64;
                     interval_cv = var.sqrt() / mean;
                     beacon_score = 1.0 - interval_cv.min(1.0);
@@ -2308,7 +2309,14 @@ impl GraphHunter {
             edge: None,
         }];
         self.dfs_paths(
-            from_sid, to_sid, max_depth, rel_filter, &mut path, &mut on_path, &mut out, max_paths,
+            from_sid,
+            to_sid,
+            max_depth,
+            rel_filter,
+            &mut path,
+            &mut on_path,
+            &mut out,
+            max_paths,
         );
         out
     }
@@ -2374,7 +2382,9 @@ impl GraphHunter {
                 edge: Some(self.resolve_rel_type_name_raw(tag, off)),
             });
             on_path.insert(dest);
-            self.dfs_paths(dest, to_sid, max_depth, rel_filter, path, on_path, out, max_paths);
+            self.dfs_paths(
+                dest, to_sid, max_depth, rel_filter, path, on_path, out, max_paths,
+            );
             on_path.remove(&dest);
             path.pop();
         }
@@ -2457,7 +2467,11 @@ impl GraphHunter {
                 });
             }
         }
-        hits.sort_by(|a, b| b.z_score.partial_cmp(&a.z_score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.z_score
+                .partial_cmp(&a.z_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(top_n);
         hits
     }
@@ -2467,9 +2481,9 @@ impl GraphHunter {
 mod heavy_edges_tests {
     use super::*;
     use crate::GraphHunter;
-    use crate::types::{EntityType, RelationType};
     use crate::entity::Entity;
     use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
     use std::collections::HashMap;
 
     fn edge(
@@ -2489,7 +2503,11 @@ mod heavy_edges_tests {
         }
         let mut rel = Relation::new(s, d, rt, ts);
         rel.metadata = md;
-        (Entity::new(s, EntityType::IP), rel, Entity::new(d, EntityType::IP))
+        (
+            Entity::new(s, EntityType::IP),
+            rel,
+            Entity::new(d, EntityType::IP),
+        )
     }
 
     #[test]
@@ -2497,16 +2515,55 @@ mod heavy_edges_tests {
         let mut g = GraphHunter::new();
         g.insert_triples(
             vec![
-                edge("A", "B", RelationType::Connect, 10, Some("100"), Some("close")),
-                edge("A", "B", RelationType::Connect, 20, Some("200"), Some("close")),
-                edge("A", "B", RelationType::Connect, 30, Some("300"), Some("close")),
-                edge("A", "B", RelationType::Connect, 40, Some("400"), Some("client-rst")),
-                edge("A", "C", RelationType::Connect, 50, Some("999"), Some("close")),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    10,
+                    Some("100"),
+                    Some("close"),
+                ),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    20,
+                    Some("200"),
+                    Some("close"),
+                ),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    30,
+                    Some("300"),
+                    Some("close"),
+                ),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    40,
+                    Some("400"),
+                    Some("client-rst"),
+                ),
+                edge(
+                    "A",
+                    "C",
+                    RelationType::Connect,
+                    50,
+                    Some("999"),
+                    Some("close"),
+                ),
             ],
             None,
         )
         .unwrap();
-        let out = g.heavy_edges(&HeavyEdgesOpts { top_n: 10, min_count: None, rel_type: None });
+        let out = g.heavy_edges(&HeavyEdgesOpts {
+            top_n: 10,
+            min_count: None,
+            rel_type: None,
+        });
         let ab = out
             .iter()
             .find(|e| e.source == "A" && e.target == "B")
@@ -2520,10 +2577,17 @@ mod heavy_edges_tests {
         // count 4 ranks first
         assert_eq!(out[0].source, "A");
         assert_eq!(out[0].target, "B");
-        let filtered =
-            g.heavy_edges(&HeavyEdgesOpts { top_n: 10, min_count: Some(2), rel_type: None });
+        let filtered = g.heavy_edges(&HeavyEdgesOpts {
+            top_n: 10,
+            min_count: Some(2),
+            rel_type: None,
+        });
         assert!(filtered.iter().all(|e| e.count >= 2));
-        assert!(filtered.iter().all(|e| !(e.source == "A" && e.target == "C")));
+        assert!(
+            filtered
+                .iter()
+                .all(|e| !(e.source == "A" && e.target == "C"))
+        );
     }
 
     #[test]
@@ -2567,15 +2631,16 @@ mod heavy_edges_tests {
             None,
         )
         .unwrap();
-        let hood = g
-            .get_neighborhood("a", 1, 50, None)
-            .expect("neighborhood");
+        let hood = g.get_neighborhood("a", 1, 50, None).expect("neighborhood");
         let e = hood
             .edges
             .iter()
             .find(|e| e.source == "a" && e.target == "b")
             .expect("edge a->b");
-        assert_eq!(e.rel_type, "SNAT", "rel_type should be recovered custom name");
+        assert_eq!(
+            e.rel_type, "SNAT",
+            "rel_type should be recovered custom name"
+        );
         assert!(
             !e.metadata.contains_key("_rel_type"),
             "_rel_type must not leak into public edge metadata"
@@ -2599,7 +2664,10 @@ mod hydration_outcome_tests {
             hydration: None,
         };
         let json = serde_json::to_string(&hood).unwrap();
-        assert!(!json.contains("hydration"), "None hydration must be skipped: {json}");
+        assert!(
+            !json.contains("hydration"),
+            "None hydration must be skipped: {json}"
+        );
     }
 
     #[test]
@@ -2621,12 +2689,18 @@ mod hydration_outcome_tests {
 mod channel_behavior_tests {
     use super::*;
     use crate::GraphHunter;
-    use crate::types::{EntityType, RelationType};
     use crate::entity::Entity;
     use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
     use std::collections::HashMap;
 
-    fn e(s: &str, d: &str, ts: i64, sentbyte: Option<&str>, action: Option<&str>) -> crate::parser::ParsedTriple {
+    fn e(
+        s: &str,
+        d: &str,
+        ts: i64,
+        sentbyte: Option<&str>,
+        action: Option<&str>,
+    ) -> crate::parser::ParsedTriple {
         let mut md = HashMap::new();
         if let Some(b) = sentbyte {
             md.insert("sentbyte".into(), b.into());
@@ -2636,7 +2710,11 @@ mod channel_behavior_tests {
         }
         let mut rel = Relation::new(s, d, RelationType::Connect, ts);
         rel.metadata = md;
-        (Entity::new(s, EntityType::IP), rel, Entity::new(d, EntityType::IP))
+        (
+            Entity::new(s, EntityType::IP),
+            rel,
+            Entity::new(d, EntityType::IP),
+        )
     }
 
     fn opts(sort_by: ChannelSortBy) -> ChannelBehaviorOpts {
@@ -2737,32 +2815,64 @@ mod channel_behavior_tests {
     #[test]
     fn min_count_filters_small_channels() {
         let mut g = GraphHunter::new();
-        g.insert_triples(vec![
-            e("A","B",0,None,None), e("A","B",60,None,None), e("A","B",120,None,None), // count 3
-            e("A","C",0,None,None), // count 1
-        ], None).unwrap();
+        g.insert_triples(
+            vec![
+                e("A", "B", 0, None, None),
+                e("A", "B", 60, None, None),
+                e("A", "B", 120, None, None), // count 3
+                e("A", "C", 0, None, None),   // count 1
+            ],
+            None,
+        )
+        .unwrap();
         let out = g.channel_behavior(&ChannelBehaviorOpts {
-            top_n: 10, min_count: Some(3), window_secs: 60, rel_type: None, sort_by: ChannelSortBy::Beacon,
+            top_n: 10,
+            min_count: Some(3),
+            window_secs: 60,
+            rel_type: None,
+            sort_by: ChannelSortBy::Beacon,
         });
-        assert!(out.iter().any(|c| c.source=="A" && c.target=="B"));
-        assert!(out.iter().all(|c| !(c.source=="A" && c.target=="C")), "A->C (count 1) must be filtered by min_count=3");
+        assert!(out.iter().any(|c| c.source == "A" && c.target == "B"));
+        assert!(
+            out.iter().all(|c| !(c.source == "A" && c.target == "C")),
+            "A->C (count 1) must be filtered by min_count=3"
+        );
     }
 
     #[test]
     fn rel_type_filter_restricts_channels() {
         let mut g = GraphHunter::new();
         // A->B Connect (built-in) and A->D Other("SNAT")
-        let mut snat = Relation::new("A","D",RelationType::Other("SNAT".to_string()),0);
+        let mut snat = Relation::new("A", "D", RelationType::Other("SNAT".to_string()), 0);
         snat.metadata = HashMap::new();
-        g.insert_triples(vec![
-            e("A","B",0,None,None), e("A","B",60,None,None),
-            (Entity::new("A",EntityType::IP), snat, Entity::new("D",EntityType::IP)),
-        ], None).unwrap();
+        g.insert_triples(
+            vec![
+                e("A", "B", 0, None, None),
+                e("A", "B", 60, None, None),
+                (
+                    Entity::new("A", EntityType::IP),
+                    snat,
+                    Entity::new("D", EntityType::IP),
+                ),
+            ],
+            None,
+        )
+        .unwrap();
         let out = g.channel_behavior(&ChannelBehaviorOpts {
-            top_n: 10, min_count: None, window_secs: 60, rel_type: Some("SNAT".to_string()), sort_by: ChannelSortBy::Beacon,
+            top_n: 10,
+            min_count: None,
+            window_secs: 60,
+            rel_type: Some("SNAT".to_string()),
+            sort_by: ChannelSortBy::Beacon,
         });
-        assert!(out.iter().all(|c| c.rel_type=="SNAT"), "only SNAT channels");
-        assert!(out.iter().any(|c| c.source=="A" && c.target=="D"), "the SNAT channel is present");
+        assert!(
+            out.iter().all(|c| c.rel_type == "SNAT"),
+            "only SNAT channels"
+        );
+        assert!(
+            out.iter().any(|c| c.source == "A" && c.target == "D"),
+            "the SNAT channel is present"
+        );
     }
 }
 

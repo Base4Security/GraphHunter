@@ -160,10 +160,7 @@ pub fn detect_version(data: &[u8]) -> Option<NetflowVersion> {
 ///
 /// Templates discovered in v9/IPFIX template flowsets are merged
 /// into `cache` so later data records can be decoded.
-pub fn parse_packet(
-    data: &[u8],
-    cache: &mut TemplateCache,
-) -> Option<(Vec<NetflowRecord>, usize)> {
+pub fn parse_packet(data: &[u8], cache: &mut TemplateCache) -> Option<(Vec<NetflowRecord>, usize)> {
     let v = detect_version(data)?;
     match v {
         NetflowVersion::V5 => parse_v5_packet(data),
@@ -237,10 +234,7 @@ fn parse_v5_packet(data: &[u8]) -> Option<(Vec<NetflowRecord>, usize)> {
 
 const V9_HEADER_LEN: usize = 20;
 
-fn parse_v9_packet(
-    data: &[u8],
-    cache: &mut TemplateCache,
-) -> Option<(Vec<NetflowRecord>, usize)> {
+fn parse_v9_packet(data: &[u8], cache: &mut TemplateCache) -> Option<(Vec<NetflowRecord>, usize)> {
     if data.len() < V9_HEADER_LEN {
         return None;
     }
@@ -633,35 +627,37 @@ mod tests {
     fn build_v5_packet(records: &[(u32, u32, u16, u16, u8, u32, u32, u8)]) -> Vec<u8> {
         // record tuple: (src, dst, sport, dport, proto, packets, bytes, tcp_flags)
         let mut p = Vec::new();
-        p.extend_from_slice(&5u16.to_be_bytes());                       // version
-        p.extend_from_slice(&(records.len() as u16).to_be_bytes());     // count
-        p.extend_from_slice(&60_000u32.to_be_bytes());                  // sys_uptime ms
-        p.extend_from_slice(&1_700_000_000u32.to_be_bytes());           // unix_secs
-        p.extend_from_slice(&0u32.to_be_bytes());                       // unix_nsecs
-        p.extend_from_slice(&1u32.to_be_bytes());                       // flow_sequence
-        p.push(0); p.push(0);                                           // engine_type/id
-        p.extend_from_slice(&0u16.to_be_bytes());                       // sampling
+        p.extend_from_slice(&5u16.to_be_bytes()); // version
+        p.extend_from_slice(&(records.len() as u16).to_be_bytes()); // count
+        p.extend_from_slice(&60_000u32.to_be_bytes()); // sys_uptime ms
+        p.extend_from_slice(&1_700_000_000u32.to_be_bytes()); // unix_secs
+        p.extend_from_slice(&0u32.to_be_bytes()); // unix_nsecs
+        p.extend_from_slice(&1u32.to_be_bytes()); // flow_sequence
+        p.push(0);
+        p.push(0); // engine_type/id
+        p.extend_from_slice(&0u16.to_be_bytes()); // sampling
 
         for (src, dst, sport, dport, proto, packets, bytes, flags) in records {
-            p.extend_from_slice(&src.to_be_bytes());                    // srcaddr
-            p.extend_from_slice(&dst.to_be_bytes());                    // dstaddr
-            p.extend_from_slice(&0u32.to_be_bytes());                   // nexthop
-            p.extend_from_slice(&0u16.to_be_bytes());                   // input
-            p.extend_from_slice(&0u16.to_be_bytes());                   // output
-            p.extend_from_slice(&packets.to_be_bytes());                // dPkts
-            p.extend_from_slice(&bytes.to_be_bytes());                  // dOctets
-            p.extend_from_slice(&50_000u32.to_be_bytes());              // First (sys_uptime)
-            p.extend_from_slice(&55_000u32.to_be_bytes());              // Last
-            p.extend_from_slice(&sport.to_be_bytes());                  // srcport
-            p.extend_from_slice(&dport.to_be_bytes());                  // dstport
-            p.push(0);                                                  // pad
-            p.push(*flags);                                             // tcp_flags
-            p.push(*proto);                                             // prot
-            p.push(0);                                                  // tos
-            p.extend_from_slice(&0u16.to_be_bytes());                   // src_as
-            p.extend_from_slice(&0u16.to_be_bytes());                   // dst_as
-            p.push(24); p.push(24);                                     // masks
-            p.extend_from_slice(&0u16.to_be_bytes());                   // pad2
+            p.extend_from_slice(&src.to_be_bytes()); // srcaddr
+            p.extend_from_slice(&dst.to_be_bytes()); // dstaddr
+            p.extend_from_slice(&0u32.to_be_bytes()); // nexthop
+            p.extend_from_slice(&0u16.to_be_bytes()); // input
+            p.extend_from_slice(&0u16.to_be_bytes()); // output
+            p.extend_from_slice(&packets.to_be_bytes()); // dPkts
+            p.extend_from_slice(&bytes.to_be_bytes()); // dOctets
+            p.extend_from_slice(&50_000u32.to_be_bytes()); // First (sys_uptime)
+            p.extend_from_slice(&55_000u32.to_be_bytes()); // Last
+            p.extend_from_slice(&sport.to_be_bytes()); // srcport
+            p.extend_from_slice(&dport.to_be_bytes()); // dstport
+            p.push(0); // pad
+            p.push(*flags); // tcp_flags
+            p.push(*proto); // prot
+            p.push(0); // tos
+            p.extend_from_slice(&0u16.to_be_bytes()); // src_as
+            p.extend_from_slice(&0u16.to_be_bytes()); // dst_as
+            p.push(24);
+            p.push(24); // masks
+            p.extend_from_slice(&0u16.to_be_bytes()); // pad2
         }
         p
     }
@@ -677,7 +673,7 @@ mod tests {
             ipv4_u32(1, 1, 1, 1),
             54321,
             443,
-            6,  // TCP
+            6, // TCP
             42,
             1500,
             0x18, // PSH|ACK
@@ -705,8 +701,26 @@ mod tests {
     #[test]
     fn v5_parses_multiple_records() {
         let pkt = build_v5_packet(&[
-            (ipv4_u32(10, 0, 0, 1), ipv4_u32(1, 1, 1, 1), 1, 2, 6, 1, 100, 0),
-            (ipv4_u32(10, 0, 0, 2), ipv4_u32(8, 8, 8, 8), 3, 4, 17, 1, 200, 0),
+            (
+                ipv4_u32(10, 0, 0, 1),
+                ipv4_u32(1, 1, 1, 1),
+                1,
+                2,
+                6,
+                1,
+                100,
+                0,
+            ),
+            (
+                ipv4_u32(10, 0, 0, 2),
+                ipv4_u32(8, 8, 8, 8),
+                3,
+                4,
+                17,
+                1,
+                200,
+                0,
+            ),
         ]);
         let mut cache = TemplateCache::new();
         let (records, _) = parse_packet(&pkt, &mut cache).expect("parsed");
@@ -739,12 +753,12 @@ mod tests {
     fn build_v9_packet() -> Vec<u8> {
         let mut p = Vec::new();
         // Header
-        p.extend_from_slice(&9u16.to_be_bytes());           // version
-        p.extend_from_slice(&2u16.to_be_bytes());           // count (2 flowsets)
-        p.extend_from_slice(&60_000u32.to_be_bytes());      // sys_uptime
-        p.extend_from_slice(&1_700_000_000u32.to_be_bytes());// unix_secs
-        p.extend_from_slice(&42u32.to_be_bytes());          // sequence
-        p.extend_from_slice(&7u32.to_be_bytes());           // source_id (domain)
+        p.extend_from_slice(&9u16.to_be_bytes()); // version
+        p.extend_from_slice(&2u16.to_be_bytes()); // count (2 flowsets)
+        p.extend_from_slice(&60_000u32.to_be_bytes()); // sys_uptime
+        p.extend_from_slice(&1_700_000_000u32.to_be_bytes()); // unix_secs
+        p.extend_from_slice(&42u32.to_be_bytes()); // sequence
+        p.extend_from_slice(&7u32.to_be_bytes()); // source_id (domain)
 
         // Template FlowSet: id=0, length=4+4+8*4 = 40
         // Template: tid=256, field_count=8
@@ -752,13 +766,20 @@ mod tests {
         //         11/2 (DST_PORT), 4/1 (PROTOCOL), 6/1 (TCP_FLAGS),
         //         1/4 (IN_BYTES), 2/4 (IN_PKTS)
         let template: [(u16, u16); 8] = [
-            (8, 4), (12, 4), (7, 2), (11, 2), (4, 1), (6, 1), (1, 4), (2, 4),
+            (8, 4),
+            (12, 4),
+            (7, 2),
+            (11, 2),
+            (4, 1),
+            (6, 1),
+            (1, 4),
+            (2, 4),
         ];
         let template_body_len = 4 + template.len() * 4; // 4 (tid+fcount) + N*4
-        let template_set_len = 4 + template_body_len;   // + 4 flowset header
-        p.extend_from_slice(&0u16.to_be_bytes());                // set_id = 0
+        let template_set_len = 4 + template_body_len; // + 4 flowset header
+        p.extend_from_slice(&0u16.to_be_bytes()); // set_id = 0
         p.extend_from_slice(&(template_set_len as u16).to_be_bytes());
-        p.extend_from_slice(&256u16.to_be_bytes());              // template_id
+        p.extend_from_slice(&256u16.to_be_bytes()); // template_id
         p.extend_from_slice(&(template.len() as u16).to_be_bytes());
         for (t, l) in template.iter() {
             p.extend_from_slice(&t.to_be_bytes());
@@ -772,14 +793,14 @@ mod tests {
         p.extend_from_slice(&256u16.to_be_bytes());
         p.extend_from_slice(&(data_set_len as u16).to_be_bytes());
         // Record (18 bytes per template above)
-        p.extend_from_slice(&[10, 0, 0, 1]);                      // src
-        p.extend_from_slice(&[1, 1, 1, 1]);                       // dst
-        p.extend_from_slice(&54321u16.to_be_bytes());             // sport
-        p.extend_from_slice(&443u16.to_be_bytes());               // dport
-        p.push(6);                                                // proto
-        p.push(0x18);                                             // flags
-        p.extend_from_slice(&1500u32.to_be_bytes());              // bytes
-        p.extend_from_slice(&42u32.to_be_bytes());                // packets
+        p.extend_from_slice(&[10, 0, 0, 1]); // src
+        p.extend_from_slice(&[1, 1, 1, 1]); // dst
+        p.extend_from_slice(&54321u16.to_be_bytes()); // sport
+        p.extend_from_slice(&443u16.to_be_bytes()); // dport
+        p.push(6); // proto
+        p.push(0x18); // flags
+        p.extend_from_slice(&1500u32.to_be_bytes()); // bytes
+        p.extend_from_slice(&42u32.to_be_bytes()); // packets
         p
     }
 
@@ -863,8 +884,15 @@ mod tests {
     /// time branch.
     fn build_ipfix_packet() -> Vec<u8> {
         let template: [(u16, u16); 9] = [
-            (8, 4), (12, 4), (7, 2), (11, 2),
-            (4, 1), (6, 1), (1, 8), (152, 8), (153, 8),
+            (8, 4),
+            (12, 4),
+            (7, 2),
+            (11, 2),
+            (4, 1),
+            (6, 1),
+            (1, 8),
+            (152, 8),
+            (153, 8),
         ];
         let record_len: usize = template.iter().map(|(_, l)| *l as usize).sum();
 
@@ -874,16 +902,16 @@ mod tests {
         let total_len = IPFIX_HEADER_LEN + template_set_len + data_set_len;
 
         let mut p = Vec::new();
-        p.extend_from_slice(&10u16.to_be_bytes());                  // version
-        p.extend_from_slice(&(total_len as u16).to_be_bytes());     // length
-        p.extend_from_slice(&1_700_000_000u32.to_be_bytes());       // export time
-        p.extend_from_slice(&100u32.to_be_bytes());                 // sequence
-        p.extend_from_slice(&42u32.to_be_bytes());                  // observation_domain_id
+        p.extend_from_slice(&10u16.to_be_bytes()); // version
+        p.extend_from_slice(&(total_len as u16).to_be_bytes()); // length
+        p.extend_from_slice(&1_700_000_000u32.to_be_bytes()); // export time
+        p.extend_from_slice(&100u32.to_be_bytes()); // sequence
+        p.extend_from_slice(&42u32.to_be_bytes()); // observation_domain_id
 
         // Template Set: id=2
         p.extend_from_slice(&2u16.to_be_bytes());
         p.extend_from_slice(&(template_set_len as u16).to_be_bytes());
-        p.extend_from_slice(&300u16.to_be_bytes());                 // template_id
+        p.extend_from_slice(&300u16.to_be_bytes()); // template_id
         p.extend_from_slice(&(template.len() as u16).to_be_bytes());
         for (t, l) in template.iter() {
             p.extend_from_slice(&t.to_be_bytes());
@@ -892,13 +920,13 @@ mod tests {
         // Data Set
         p.extend_from_slice(&300u16.to_be_bytes());
         p.extend_from_slice(&(data_set_len as u16).to_be_bytes());
-        p.extend_from_slice(&[192, 168, 1, 5]);                     // src
-        p.extend_from_slice(&[1, 1, 1, 1]);                         // dst
-        p.extend_from_slice(&50000u16.to_be_bytes());               // sport
-        p.extend_from_slice(&443u16.to_be_bytes());                 // dport
-        p.push(6);                                                  // proto
-        p.push(0x10);                                               // tcp_flags = ACK
-        p.extend_from_slice(&9_000u64.to_be_bytes());               // bytes (64-bit)
+        p.extend_from_slice(&[192, 168, 1, 5]); // src
+        p.extend_from_slice(&[1, 1, 1, 1]); // dst
+        p.extend_from_slice(&50000u16.to_be_bytes()); // sport
+        p.extend_from_slice(&443u16.to_be_bytes()); // dport
+        p.push(6); // proto
+        p.push(0x10); // tcp_flags = ACK
+        p.extend_from_slice(&9_000u64.to_be_bytes()); // bytes (64-bit)
         let start_ms: u64 = 1_700_000_000_000;
         let end_ms: u64 = 1_700_000_001_500;
         p.extend_from_slice(&start_ms.to_be_bytes());
@@ -935,13 +963,16 @@ mod tests {
         // Header length = 16; template_set raw layout below.
         let mut template_set = Vec::new();
         template_set.extend_from_slice(&301u16.to_be_bytes()); // template_id
-        template_set.extend_from_slice(&4u16.to_be_bytes());   // field_count = 4
-        template_set.extend_from_slice(&8u16.to_be_bytes()); template_set.extend_from_slice(&4u16.to_be_bytes());
-        template_set.extend_from_slice(&12u16.to_be_bytes()); template_set.extend_from_slice(&4u16.to_be_bytes());
+        template_set.extend_from_slice(&4u16.to_be_bytes()); // field_count = 4
+        template_set.extend_from_slice(&8u16.to_be_bytes());
+        template_set.extend_from_slice(&4u16.to_be_bytes());
+        template_set.extend_from_slice(&12u16.to_be_bytes());
+        template_set.extend_from_slice(&4u16.to_be_bytes());
         template_set.extend_from_slice(&0x8001u16.to_be_bytes()); // enterprise bit set, type 1
         template_set.extend_from_slice(&4u16.to_be_bytes());
-        template_set.extend_from_slice(&9999u32.to_be_bytes());   // PEN
-        template_set.extend_from_slice(&4u16.to_be_bytes()); template_set.extend_from_slice(&1u16.to_be_bytes()); // protocol
+        template_set.extend_from_slice(&9999u32.to_be_bytes()); // PEN
+        template_set.extend_from_slice(&4u16.to_be_bytes());
+        template_set.extend_from_slice(&1u16.to_be_bytes()); // protocol
         let template_set_len = 4 + template_set.len();
 
         // Record: src(4) + dst(4) + enterprise_bytes(4) + protocol(1) = 13 bytes.
@@ -971,7 +1002,10 @@ mod tests {
         let r = &records[0];
         assert_eq!(r.src_ip, "10.0.0.9");
         assert_eq!(r.dst_ip, "8.8.8.8");
-        assert_eq!(r.protocol, 17, "protocol byte after enterprise PEN must be read correctly");
+        assert_eq!(
+            r.protocol, 17,
+            "protocol byte after enterprise PEN must be read correctly"
+        );
     }
 
     #[test]

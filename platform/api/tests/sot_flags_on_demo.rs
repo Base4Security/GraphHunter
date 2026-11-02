@@ -143,10 +143,11 @@ fn sot_all_flags_on_end_to_end_demo() {
     let journal_count_baseline = journal_store
         .count()
         .expect("count pre-existing journal records");
-    eprintln!("\n[setup] production journal path: {}", journal_dir.display());
     eprintln!(
-        "[setup] journal record count BEFORE this test touches it: {journal_count_baseline}"
+        "\n[setup] production journal path: {}",
+        journal_dir.display()
     );
+    eprintln!("[setup] journal record count BEFORE this test touches it: {journal_count_baseline}");
 
     let api = GraphHunterApi::new_noop();
     api.create_session(CreateSessionRequest {
@@ -160,26 +161,47 @@ fn sot_all_flags_on_end_to_end_demo() {
     let sysmon_path = write_source_file("sysmon-proc", SYSMON_PROCESS_LOG);
 
     let sources: [(&str, String, &str); 4] = [
-        ("FortiGate firewall (edge-fw)", fortigate_path.clone(), "fortigate"),
-        ("Sentinel DeviceNetworkEvents", sentinel_net_path.clone(), "sentinel"),
-        ("Sentinel SecurityEvent 4624", sentinel_auth_path.clone(), "sentinel"),
+        (
+            "FortiGate firewall (edge-fw)",
+            fortigate_path.clone(),
+            "fortigate",
+        ),
+        (
+            "Sentinel DeviceNetworkEvents",
+            sentinel_net_path.clone(),
+            "sentinel",
+        ),
+        (
+            "Sentinel SecurityEvent 4624",
+            sentinel_auth_path.clone(),
+            "sentinel",
+        ),
         ("Sysmon EventID 1", sysmon_path.clone(), "sysmon"),
     ];
 
     for (label, path, format) in &sources {
         let r = api
-            .load_data(LoadDataRequest {
-                session: None,
-                path: path.clone(),
-                format: format.to_string(),
-            }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
+            .load_data(
+                LoadDataRequest {
+                    session: None,
+                    path: path.clone(),
+                    format: format.to_string(),
+                },
+                &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+            )
             .unwrap_or_else(|e| panic!("load_data failed for {label} ({path}): {e}"));
         eprintln!(
             "[ingest] {label}: +{} entities, +{} relations (zero_triples={})",
             r.new_entities, r.new_relations, r.zero_triples
         );
-        assert!(!r.zero_triples, "{label}: parser produced rows but zero triples");
-        assert!(r.new_relations > 0, "{label}: expected new relations from a first-time ingest");
+        assert!(
+            !r.zero_triples,
+            "{label}: parser produced rows but zero triples"
+        );
+        assert!(
+            r.new_relations > 0,
+            "{label}: expected new relations from a first-time ingest"
+        );
     }
 
     let session = api
@@ -192,7 +214,10 @@ fn sot_all_flags_on_end_to_end_demo() {
     };
     eprintln!("\n=== GRAPH SUMMARY after ingesting 4 sources ===");
     eprintln!("entity_count = {entity_count}, relation_count = {relation_count_after_ingest}");
-    assert!(relation_count_after_ingest > 0, "graph must have relations after ingest");
+    assert!(
+        relation_count_after_ingest > 0,
+        "graph must have relations after ingest"
+    );
 
     // ══════════════════════════════════════════════════════════════════
     // [1/5] JOURNAL — append-only journal receives records
@@ -230,14 +255,19 @@ fn sot_all_flags_on_end_to_end_demo() {
     // [2/5] IDEMPOTENT DEDUP (GraphDelta) — crash-replay simulation
     // ══════════════════════════════════════════════════════════════════
     eprintln!("\n--- [2/5] IDEMPOTENT DEDUP (GRAPHHUNTER_GRAPHDELTA=1) ---");
-    eprintln!("re-ingesting the IDENTICAL FortiGate batch into the SAME session/graph (crash-and-reingest)");
+    eprintln!(
+        "re-ingesting the IDENTICAL FortiGate batch into the SAME session/graph (crash-and-reingest)"
+    );
     let relations_before_replay = relation_count_after_ingest;
     let replay = api
-        .load_data(LoadDataRequest {
-            session: None,
-            path: fortigate_path.clone(),
-            format: "fortigate".to_string(),
-        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
+        .load_data(
+            LoadDataRequest {
+                session: None,
+                path: fortigate_path.clone(),
+                format: "fortigate".to_string(),
+            },
+            &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+        )
         .expect("re-ingest (crash replay) load_data must not error");
     let relations_after_replay = {
         let graph = session.graph.read().expect("graph lock");
@@ -245,7 +275,11 @@ fn sot_all_flags_on_end_to_end_demo() {
     };
     eprintln!(
         "before re-ingest: {relations_before_replay} rels, after: {relations_after_replay} rels (dedup {})",
-        if relations_after_replay == relations_before_replay { "\u{2713}" } else { "FAILED" }
+        if relations_after_replay == relations_before_replay {
+            "\u{2713}"
+        } else {
+            "FAILED"
+        }
     );
     eprintln!(
         "LoadResult.new_relations reported by the replay call: {}",
@@ -268,7 +302,10 @@ fn sot_all_flags_on_end_to_end_demo() {
     eprintln!("\n--- [3/5] ANSWER COVERAGE (GRAPHHUNTER_COVERAGE=1) ---");
     let dsl = "User -[Auth]-> Host";
     let parsed = api
-        .parse_dsl(ParseDslRequest { input: dsl.into(), name: None })
+        .parse_dsl(ParseDslRequest {
+            input: dsl.into(),
+            name: None,
+        })
         .expect("parse_dsl");
     let baseline_hunt = api
         .run_hunt(RunHuntRequest {
@@ -288,7 +325,8 @@ fn sot_all_flags_on_end_to_end_demo() {
         "expected the User-Auth->Host hunt to find alice -> WORKSTATION-01"
     );
     assert!(
-        baseline_hunt.coverage.coverage_start.is_some() && baseline_hunt.coverage.coverage_end.is_some(),
+        baseline_hunt.coverage.coverage_start.is_some()
+            && baseline_hunt.coverage.coverage_end.is_some(),
         "with GRAPHHUNTER_COVERAGE on and a non-empty graph, coverage span must be populated; got {:?}",
         baseline_hunt.coverage
     );
@@ -302,7 +340,9 @@ fn sot_all_flags_on_end_to_end_demo() {
     // [4/5] SOURCE COVERAGE / missing_sources
     // ══════════════════════════════════════════════════════════════════
     eprintln!("\n--- [4/5] SOURCE COVERAGE (GRAPHHUNTER_SOURCE_COVERAGE=1) ---");
-    eprintln!("marking source 'fortigate:edge-fw' blind on the session, then re-running the SAME hunt");
+    eprintln!(
+        "marking source 'fortigate:edge-fw' blind on the session, then re-running the SAME hunt"
+    );
     session
         .source_coverage
         .write()
@@ -310,7 +350,10 @@ fn sot_all_flags_on_end_to_end_demo() {
         .record_missing("fortigate:edge-fw");
 
     let parsed2 = api
-        .parse_dsl(ParseDslRequest { input: dsl.into(), name: None })
+        .parse_dsl(ParseDslRequest {
+            input: dsl.into(),
+            name: None,
+        })
         .expect("parse_dsl");
     let blind_hunt = api
         .run_hunt(RunHuntRequest {
@@ -322,7 +365,10 @@ fn sot_all_flags_on_end_to_end_demo() {
             dedup_mode: None,
         })
         .expect("run_hunt after marking source blind");
-    eprintln!("resp.coverage (after marking blind) = {:?}", blind_hunt.coverage);
+    eprintln!(
+        "resp.coverage (after marking blind) = {:?}",
+        blind_hunt.coverage
+    );
     assert_eq!(
         blind_hunt.path_count, baseline_hunt.path_count,
         "marking a source blind must not change the DFS result set itself (blind != empty)"

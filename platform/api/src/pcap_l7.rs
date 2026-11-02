@@ -78,9 +78,8 @@ pub fn extract_tls_client_hello(payload: &[u8]) -> Option<TlsClientHelloInfo> {
         // Not a ClientHello.
         return None;
     }
-    let hs_len = ((fragment[1] as usize) << 16)
-        | ((fragment[2] as usize) << 8)
-        | (fragment[3] as usize);
+    let hs_len =
+        ((fragment[1] as usize) << 16) | ((fragment[2] as usize) << 8) | (fragment[3] as usize);
     let body_end = (4 + hs_len).min(fragment.len());
     let body = &fragment[4..body_end];
 
@@ -347,10 +346,7 @@ fn read_qname(payload: &[u8], mut p: usize) -> Option<(String, usize)> {
     }
 }
 
-fn read_qname_no_compression<'a>(
-    payload: &'a [u8],
-    mut p: usize,
-) -> Option<Vec<&'a [u8]>> {
+fn read_qname_no_compression<'a>(payload: &'a [u8], mut p: usize) -> Option<Vec<&'a [u8]>> {
     let mut out: Vec<&[u8]> = Vec::new();
     let mut total = 0usize;
     loop {
@@ -403,7 +399,13 @@ fn looks_like_domain(s: &str) -> bool {
 pub fn extract_http_host(payload: &[u8]) -> Option<String> {
     let payload = &payload[..payload.len().min(MAX_DECODE_BYTES)];
     let methods: &[&[u8]] = &[
-        b"GET ", b"POST ", b"HEAD ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ",
+        b"GET ",
+        b"POST ",
+        b"HEAD ",
+        b"PUT ",
+        b"DELETE ",
+        b"OPTIONS ",
+        b"PATCH ",
         b"CONNECT ",
     ];
     if !methods.iter().any(|m| payload.starts_with(m)) {
@@ -421,8 +423,7 @@ pub fn extract_http_host(payload: &[u8]) -> Option<String> {
             if key.trim().eq_ignore_ascii_case("host") {
                 let host = value.trim();
                 // Strip optional :port.
-                let host_no_port =
-                    host.rsplit_once(':').map(|(a, _)| a).unwrap_or(host);
+                let host_no_port = host.rsplit_once(':').map(|(a, _)| a).unwrap_or(host);
                 if looks_like_domain(host_no_port) || is_ip_literal(host_no_port) {
                     return Some(host_no_port.to_string());
                 }
@@ -739,10 +740,7 @@ mod tests {
     #[test]
     fn http_extracts_host_from_get() {
         let payload = b"GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: test\r\n\r\n";
-        assert_eq!(
-            extract_http_host(payload).as_deref(),
-            Some("example.com")
-        );
+        assert_eq!(extract_http_host(payload).as_deref(), Some("example.com"));
     }
 
     #[test]

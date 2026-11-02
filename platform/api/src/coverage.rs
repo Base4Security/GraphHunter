@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize};
 /// is bounded by GRAPHHUNTER_JOURNAL_MAX_BYTES rotation (Task 1).
 pub fn coverage_enabled() -> bool {
     match std::env::var("GRAPHHUNTER_COVERAGE") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
         Err(_) => true,
     }
 }
@@ -103,7 +106,10 @@ pub fn answer_coverage(
 /// by GRAPHHUNTER_JOURNAL_MAX_BYTES rotation (Task 1).
 pub fn source_coverage_enabled() -> bool {
     match std::env::var("GRAPHHUNTER_SOURCE_COVERAGE") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
         Err(_) => true,
     }
 }
@@ -181,7 +187,10 @@ impl SourceCoverage {
     /// Mark a window as not covered (breaker-skipped or errored) for
     /// `source_id`.
     pub fn record_missing(&mut self, source_id: &str) {
-        self.sources.entry(source_id.to_string()).or_default().missing = true;
+        self.sources
+            .entry(source_id.to_string())
+            .or_default()
+            .missing = true;
     }
 
     /// Snapshot for the answer: `(source -> last_covered_ts` where known`,
@@ -271,10 +280,11 @@ mod tests {
         assert!(!ic.possibly_incomplete);
         ic.observe(true, false); // one that stopped early
         assert!(ic.possibly_incomplete);
-        assert!(ic
-            .incomplete_reasons
-            .iter()
-            .any(|r| r.contains("stopped_early")));
+        assert!(
+            ic.incomplete_reasons
+                .iter()
+                .any(|r| r.contains("stopped_early"))
+        );
     }
 
     #[test]
@@ -318,10 +328,11 @@ mod tests {
         assert!(ac.possibly_incomplete);
         assert_eq!(ac.coverage_start, Some(100));
         assert_eq!(ac.coverage_end, Some(200));
-        assert!(ac
-            .incomplete_reasons
-            .iter()
-            .any(|r| r.contains("stopped_early")));
+        assert!(
+            ac.incomplete_reasons
+                .iter()
+                .any(|r| r.contains("stopped_early"))
+        );
     }
 
     #[test]
@@ -376,7 +387,10 @@ mod tests {
 
         for off in ["0", "false", "FALSE", "no", "off", " off "] {
             unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", off) };
-            assert!(!source_coverage_enabled(), "{off:?} should disable source coverage");
+            assert!(
+                !source_coverage_enabled(),
+                "{off:?} should disable source coverage"
+            );
         }
         for on in ["1", "true", "yes", "on", "anything"] {
             unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", on) };

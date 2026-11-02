@@ -4,21 +4,21 @@
 //! this root owns `HttpState`, the auth middleware, and router assembly.
 
 use axum::{
-    body::{to_bytes, Body, Bytes, HttpBody},
+    Json, Router,
+    body::{Body, Bytes, HttpBody, to_bytes},
     extract::{FromRef, Request, State},
-    http::{header::CONTENT_LENGTH, StatusCode},
+    http::{StatusCode, header::CONTENT_LENGTH},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use std::sync::Arc;
 use std::time::Instant;
 use subtle::ConstantTimeEq;
-use tower_http::cors::{CorsLayer, Any};
+use tower_http::cors::{Any, CorsLayer};
 
-use crate::journal::event::GraphCounts;
 use crate::AppState;
+use crate::journal::event::GraphCounts;
 use graph_hunter_api::GraphHunterApi;
 
 mod agentic;
@@ -259,7 +259,15 @@ async fn capture(
         // to pull the full detail from via the journal API.
         let detail_ref = app.journal.current_hunt_id();
         let mut event = crate::journal::capture::build_event(
-            &path, &method, status, dur_ms, &req_json, &resp_json, before, after, &detail_ref,
+            &path,
+            &method,
+            status,
+            dur_ms,
+            &req_json,
+            &resp_json,
+            before,
+            after,
+            &detail_ref,
         );
         event.result.body_bytes = known_len.unwrap_or(0);
         // IMPORTANT fix: build_event derived est_tokens from resp_json
@@ -273,7 +281,11 @@ async fn capture(
 
         tracing::debug!(
             "journal: captured {} {} -> {} ({} ms, oversized response {} bytes, buffering skipped)",
-            method, path, status, dur_ms, event_body_bytes
+            method,
+            path,
+            status,
+            dur_ms,
+            event_body_bytes
         );
         return response;
     }
@@ -300,7 +312,10 @@ async fn capture(
                 "journal: response body for {} {} exceeded {} bytes with no usable \
                  Content-Length/size hint; forwarding EMPTY body to client — \
                  this is unrecoverable data loss for this one response: {}",
-                method, path, RESP_CAPTURE_LIMIT, e
+                method,
+                path,
+                RESP_CAPTURE_LIMIT,
+                e
             );
             Bytes::new()
         }
@@ -319,7 +334,15 @@ async fn capture(
     // rationale.
     let detail_ref = app.journal.current_hunt_id();
     let mut event = crate::journal::capture::build_event(
-        &path, &method, status, dur_ms, &req_json, &resp_json, before, after, &detail_ref,
+        &path,
+        &method,
+        status,
+        dur_ms,
+        &req_json,
+        &resp_json,
+        before,
+        after,
+        &detail_ref,
     );
     // build_event derives body_bytes/est_tokens from resp_json, which is
     // Null for oversized bodies; correct body_bytes to the real wire size
@@ -340,7 +363,13 @@ async fn capture(
     }
     app.journal.append(event);
 
-    tracing::debug!("journal: captured {} {} -> {} ({} ms)", method, path, status, dur_ms);
+    tracing::debug!(
+        "journal: captured {} {} -> {} ({} ms)",
+        method,
+        path,
+        status,
+        dur_ms
+    );
     Response::from_parts(resp_parts, Body::from(resp_bytes))
 }
 
@@ -349,7 +378,10 @@ async fn capture(
 /// `pub(crate)` so the `/run_hunt` cross-transport equivalence test in
 /// `http::hunt::tests` can drive the real router via `tower::ServiceExt::oneshot`.
 pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> Router {
-    let state = HttpState { app: app_state, api };
+    let state = HttpState {
+        app: app_state,
+        api,
+    };
     Router::new()
         .route("/", get(misc::handler_api_root))
         .route("/health", get(misc::handler_health))
@@ -374,20 +406,32 @@ pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> R
         .route("/graph_summary", get(graph::handler_graph_summary))
         .route("/graph/summary", get(graph_meta::handler_graph_summary))
         .route("/graph/overlap", post(graph_meta::handler_graph_overlap))
-        .route("/entity_type_counts", get(graph::handler_entity_type_counts))
+        .route(
+            "/entity_type_counts",
+            get(graph::handler_entity_type_counts),
+        )
         .route("/temporal_heatmap", get(anomaly::handler_temporal_heatmap))
         .route("/subnet_analysis", get(anomaly::handler_subnet_analysis))
         .route("/sessions/shared", get(anomaly::handler_shared_sessions))
         .route("/enrich_ip", post(anomaly::handler_enrich_ip))
         .route("/catalog", get(catalog::handler_catalog))
         .route("/catalog/status", get(catalog::handler_catalog_with_status))
-        .route("/catalog/diagnostics", get(catalog::handler_catalog_diagnostics))
+        .route(
+            "/catalog/diagnostics",
+            get(catalog::handler_catalog_diagnostics),
+        )
         .route("/tag", post(tags::handler_tag_entity))
         .route("/untag", post(tags::handler_untag_entity))
         .route("/tags", get(tags::handler_list_tagged))
         .route("/export_iocs", post(export::handler_export_iocs))
-        .route("/publish_iocs_to_sentinel", post(export::handler_publish_iocs_to_sentinel))
-        .route("/save_hypothesis_as_sigma", post(export::handler_save_hypothesis_as_sigma))
+        .route(
+            "/publish_iocs_to_sentinel",
+            post(export::handler_publish_iocs_to_sentinel),
+        )
+        .route(
+            "/save_hypothesis_as_sigma",
+            post(export::handler_save_hypothesis_as_sigma),
+        )
         .route("/file_ticket", post(export::handler_file_ticket))
         .route("/datasets", get(misc::handler_list_datasets))
         .route("/path_nodes", get(graph::handler_path_nodes))
@@ -395,14 +439,20 @@ pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> R
         .route("/export_ocsf", post(export::handler_export_ocsf))
         .route("/tpcsa/export", post(tpcsa::handler_export_instance))
         .route("/reconstruct_chain", post(tpcsa::handler_reconstruct_chain))
-        .route("/check_invariants", post(invariants::handler_check_invariants))
+        .route(
+            "/check_invariants",
+            post(invariants::handler_check_invariants),
+        )
         .route("/ingest_negotiate", post(ingest::handler_ingest_negotiate))
         // File ingest over HTTP. All three are gated by
         // GRAPHHUNTER_INGEST_ROOT (403 until an operator sets it) — see
         // `graph_hunter_api::paths`. Trailing-slash duplicates match the
         // existing convention for POSTs that MCP tools hit.
         .route("/ingest/preview", post(ingest_data::handler_preview_ingest))
-        .route("/ingest/preview/", post(ingest_data::handler_preview_ingest))
+        .route(
+            "/ingest/preview/",
+            post(ingest_data::handler_preview_ingest),
+        )
         .route("/ingest/load", post(ingest_data::handler_load_data))
         .route("/ingest/load/", post(ingest_data::handler_load_data))
         .route(
@@ -413,8 +463,14 @@ pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> R
             "/ingest/load_with_config/",
             post(ingest_data::handler_load_data_with_config),
         )
-        .route("/ingest/stream", post(ingest_data::handler_load_data_streaming))
-        .route("/ingest/stream/", post(ingest_data::handler_load_data_streaming))
+        .route(
+            "/ingest/stream",
+            post(ingest_data::handler_load_data_streaming),
+        )
+        .route(
+            "/ingest/stream/",
+            post(ingest_data::handler_load_data_streaming),
+        )
         .route("/ingest/status", get(ingest_data::handler_ingest_status))
         .route("/ingest/jobs", get(ingest_data::handler_ingest_jobs))
         .route("/session/create", post(session::handler_create_session))
@@ -428,24 +484,54 @@ pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> R
         .route("/pcap_preview", post(ingest::handler_pcap_preview))
         .route("/canonical_map", post(ingest::handler_canonical_map))
         .route("/parser_generate", post(ingest::handler_parser_generate))
-        .route("/schema_drift_detect", post(ingest::handler_schema_drift_detect))
-        .route("/mapping_regression_test", post(ingest::handler_mapping_regression_test))
-        .route("/invariant_check_hypothetical", post(invariants::handler_invariant_check_hypothetical))
-        .route("/agentic_review_list", post(agentic::handler_agentic_review_list))
-        .route("/agentic_review_approve", post(agentic::handler_agentic_review_approve))
-        .route("/agentic_review_reject", post(agentic::handler_agentic_review_reject))
+        .route(
+            "/schema_drift_detect",
+            post(ingest::handler_schema_drift_detect),
+        )
+        .route(
+            "/mapping_regression_test",
+            post(ingest::handler_mapping_regression_test),
+        )
+        .route(
+            "/invariant_check_hypothetical",
+            post(invariants::handler_invariant_check_hypothetical),
+        )
+        .route(
+            "/agentic_review_list",
+            post(agentic::handler_agentic_review_list),
+        )
+        .route(
+            "/agentic_review_approve",
+            post(agentic::handler_agentic_review_approve),
+        )
+        .route(
+            "/agentic_review_reject",
+            post(agentic::handler_agentic_review_reject),
+        )
         .route("/list_dead_letters", post(dlq::handler_list_dead_letters))
-        .route("/reingest_dead_letter", post(dlq::handler_reingest_dead_letter))
+        .route(
+            "/reingest_dead_letter",
+            post(dlq::handler_reingest_dead_letter),
+        )
         .route("/purge_dead_letters", post(dlq::handler_purge_dead_letters))
         .route("/publish_mapping", post(ingest::handler_publish_mapping))
-        .route("/fetch_shared_mappings", post(ingest::handler_fetch_shared_mappings))
+        .route(
+            "/fetch_shared_mappings",
+            post(ingest::handler_fetch_shared_mappings),
+        )
         .route("/parse_dsl", post(hunt::handler_parse_dsl))
         .route("/events_paginated", get(graph::handler_events_paginated))
         .route("/expand_grouped", get(graph::handler_expand_grouped))
         .route("/heavy_edges", get(graph::handler_heavy_edges))
         .route("/channel_behavior", get(graph::handler_channel_behavior))
-        .route("/export_hunt_results", post(export::handler_export_hunt_results))
-        .route("/enable_anomaly_scoring", post(anomaly::handler_enable_anomaly_scoring))
+        .route(
+            "/export_hunt_results",
+            post(export::handler_export_hunt_results),
+        )
+        .route(
+            "/enable_anomaly_scoring",
+            post(anomaly::handler_enable_anomaly_scoring),
+        )
         .route("/compute_scores", post(anomaly::handler_compute_scores))
         .route("/kql", post(siem::handler_run_kql))
         .route("/kql/", post(siem::handler_run_kql))
@@ -474,17 +560,22 @@ pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> R
         // or hostile. Without this, a POST with a 1 GB JSON body would OOM
         // the whole process before a handler ever runs.
         .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
-        .layer(CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         // `capture` is added *before* `auth_middleware` here, which makes
         // it the layer auth's `next.run()` calls into — i.e. capture only
         // sees requests that already passed authentication. Needs the
         // full `HttpState` (not just `Arc<AppState>`) so it can also pull
         // `Arc<GraphHunterApi>` for the graph-count fingerprint.
         .layer(axum::middleware::from_fn_with_state(state.clone(), capture))
-        .layer(axum::middleware::from_fn_with_state(state.app.clone(), auth_middleware))
+        .layer(axum::middleware::from_fn_with_state(
+            state.app.clone(),
+            auth_middleware,
+        ))
         .layer(axum::middleware::from_fn(log_requests))
         .with_state(state)
 }
@@ -492,7 +583,11 @@ pub(crate) fn build_app(app_state: Arc<AppState>, api: Arc<GraphHunterApi>) -> R
 /// Run the HTTP API on Tauri's async runtime. Use this from lib.rs via
 /// `tauri::async_runtime::spawn(async move { http::run_async(state, api, port).await })`
 /// so the server shares Tauri's executor and avoids cross-runtime lock contention.
-pub async fn run_async(state: Arc<AppState>, api: Arc<GraphHunterApi>, port: u16) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn run_async(
+    state: Arc<AppState>,
+    api: Arc<GraphHunterApi>,
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let host = std::env::var("GRAPHHUNTER_API_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr = format!("{}:{}", host, port);
     tracing::info!("GraphHunter HTTP API: binding to {} ...", addr);
@@ -504,7 +599,10 @@ pub async fn run_async(state: Arc<AppState>, api: Arc<GraphHunterApi>, port: u16
     );
     tracing::info!("GraphHunter HTTP API: ready to accept connections.");
     if host == "0.0.0.0" {
-        tracing::info!("Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)", port);
+        tracing::info!(
+            "Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)",
+            port
+        );
     }
 
     let app = build_app(state, api);
@@ -520,7 +618,12 @@ pub fn run(state: Arc<AppState>, api: Arc<GraphHunterApi>, port: u16) {
     tracing::info!("GraphHunter HTTP API: binding to {}:{} ...", host, port);
     let addr = (host.as_str(), port);
     let listener = std::net::TcpListener::bind(addr).unwrap_or_else(|e| {
-        tracing::error!("GraphHunter HTTP API: failed to bind to {}:{}: {}", host, port, e);
+        tracing::error!(
+            "GraphHunter HTTP API: failed to bind to {}:{}: {}",
+            host,
+            port,
+            e
+        );
         std::process::exit(1);
     });
     tracing::info!("GraphHunter HTTP API: bind OK, building router ...");
@@ -535,11 +638,15 @@ pub fn run(state: Arc<AppState>, api: Arc<GraphHunterApi>, port: u16) {
         let listener = tokio::net::TcpListener::from_std(listener).expect("tcp listener");
         tracing::info!(
             "GraphHunter HTTP API listening on http://{}:{}/ (health: /health)",
-            host, port
+            host,
+            port
         );
         tracing::info!("GraphHunter HTTP API: ready to accept connections.");
         if host == "0.0.0.0" {
-            tracing::info!("Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)", port);
+            tracing::info!(
+                "Use http://127.0.0.1:{}/ in browser (localhost may fail on Windows due to IPv6)",
+                port
+            );
         }
         axum::serve(listener, app).await.expect("serve");
     });

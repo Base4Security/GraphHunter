@@ -10,7 +10,7 @@
 //! model stays put and the question gets a dedicated walk.
 
 use crate::dto::session_analytics::{
-    SharedSession, SharedSessionsRequest, SharedSessionsResponse, DEFAULT_SHARED_SESSION_LIMIT,
+    DEFAULT_SHARED_SESSION_LIMIT, SharedSession, SharedSessionsRequest, SharedSessionsResponse,
 };
 use crate::{ApiResult, GraphHunterApi};
 

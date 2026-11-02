@@ -623,7 +623,10 @@ mod tests {
 
     #[test]
     fn trait_default_capabilities_matches_struct_default() {
-        let m = MockSource { id: "cap".to_string(), tables: vec!["SecurityEvent"] };
+        let m = MockSource {
+            id: "cap".to_string(),
+            tables: vec!["SecurityEvent"],
+        };
         // MockSource does NOT override capabilities(), so it gets the default.
         assert_eq!(m.capabilities(), SourceCapabilities::default());
     }

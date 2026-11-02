@@ -65,9 +65,7 @@ impl TimeWindow {
                 format!("where TimeGenerated > ago({})", lookback.as_kql())
             }
             Self::Absolute { from_iso, to_iso } => {
-                format!(
-                    "where TimeGenerated between (datetime({from_iso}) .. datetime({to_iso}))"
-                )
+                format!("where TimeGenerated between (datetime({from_iso}) .. datetime({to_iso}))")
             }
         }
     }

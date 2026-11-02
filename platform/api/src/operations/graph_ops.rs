@@ -477,10 +477,7 @@ impl GraphHunterApi {
     /// `expand_node` and reshapes to the doc contract — the center entity's
     /// attributes plus its directly-connected entities and per-edge metadata.
     /// Pure graph read; no SIEM round-trip (the value over raw KQL pivoting).
-    pub fn graph_neighbors(
-        &self,
-        req: GraphNeighborsRequest,
-    ) -> ApiResult<GraphNeighborsResult> {
+    pub fn graph_neighbors(&self, req: GraphNeighborsRequest) -> ApiResult<GraphNeighborsResult> {
         let center = req.entity.value.clone();
         let filter = req.edge_filter.clone().map(|rt| ExpandFilter {
             relation_types: Some(rt),
@@ -532,7 +529,11 @@ impl GraphHunterApi {
             neighbors.push(NeighborItem {
                 edge: edge.rel_type.clone(),
                 node: NeighborRef {
-                    class: class_of.get(other.as_str()).copied().unwrap_or("").to_string(),
+                    class: class_of
+                        .get(other.as_str())
+                        .copied()
+                        .unwrap_or("")
+                        .to_string(),
                     value: other.clone(),
                 },
                 attributes: edge.metadata.clone(),
@@ -540,7 +541,11 @@ impl GraphHunterApi {
         }
 
         Ok(GraphNeighborsResult {
-            entity: NeighborsCenter { class: center_class, value: center, label },
+            entity: NeighborsCenter {
+                class: center_class,
+                value: center,
+                label,
+            },
             attributes,
             neighbors,
         })
@@ -584,7 +589,11 @@ impl GraphHunterApi {
                             });
                             PathHopDto {
                                 edge: h.edge,
-                                node: PathNode { class: h.node_class, value: h.node_id, geoip },
+                                node: PathNode {
+                                    class: h.node_class,
+                                    value: h.node_id,
+                                    geoip,
+                                },
                             }
                         })
                         .collect();
@@ -611,7 +620,10 @@ impl GraphHunterApi {
             let anomalies = hits
                 .into_iter()
                 .map(|h| AnomalyItem {
-                    entity: NeighborRef { class: h.node_class, value: h.node_id },
+                    entity: NeighborRef {
+                        class: h.node_class,
+                        value: h.node_id,
+                    },
                     metric: h.metric,
                     observation: h.observation,
                     z_score: h.z_score,
@@ -655,7 +667,9 @@ impl GraphHunterApi {
             rel_type: req.rel_type,
             sort_by,
         };
-        self.with_graph_read(req.session.as_ref(), |graph| Ok(graph.channel_behavior(&opts)))
+        self.with_graph_read(req.session.as_ref(), |graph| {
+            Ok(graph.channel_behavior(&opts))
+        })
     }
 
     /// Live-backed expansion (Enfoque A): hydrate the target node from
@@ -709,10 +723,7 @@ impl GraphHunterApi {
 
         let outcome = match (entity_type, creds) {
             (None, _) => skip("node not in graph; cannot infer entity type"),
-            (
-                Some(ty),
-                (Some(ws), Some(tenant), Some(client), Some(secret)),
-            ) => {
+            (Some(ty), (Some(ws), Some(tenant), Some(client), Some(secret))) => {
                 let transport = graph_hunter_siem::HttpSentinelTransport::new();
                 let cache = graph_hunter_siem::SentinelTokenCache::new();
                 let auth = graph_hunter_siem::SentinelAuth {
@@ -733,9 +744,9 @@ impl GraphHunterApi {
                 .await
                 .unwrap_or_else(|e| skip(&format!("hydration error: {e}")))
             }
-            (Some(_), _) => skip(
-                "Azure credentials not configured (set AZURE_* or connect Sentinel)",
-            ),
+            (Some(_), _) => {
+                skip("Azure credentials not configured (set AZURE_* or connect Sentinel)")
+            }
         };
 
         let mut hood = self.expand_node(req)?;
@@ -915,22 +926,33 @@ mod graph_neighbors_tests {
     #[test]
     fn neighbors_reshapes_to_doc_contract() {
         let api = GraphHunterApi::new_noop();
-        api.create_session(CreateSessionRequest { name: Some("nbr-test".into()) })
-            .unwrap();
+        api.create_session(CreateSessionRequest {
+            name: Some("nbr-test".into()),
+        })
+        .unwrap();
         {
             let session = api.resolve_session(None).unwrap();
             let mut g = session.graph.write().unwrap();
             let user = Entity::new("alice@corp.com", EntityType::User);
             let ip = Entity::new("203.0.113.7", EntityType::IP);
-            let rel = Relation::new("alice@corp.com", "203.0.113.7", RelationType::Auth, 1_700_000_000)
-                .with_metadata("ResultType", "0");
-            g.insert_triples(vec![(user, rel, ip)], Some("test")).unwrap();
+            let rel = Relation::new(
+                "alice@corp.com",
+                "203.0.113.7",
+                RelationType::Auth,
+                1_700_000_000,
+            )
+            .with_metadata("ResultType", "0");
+            g.insert_triples(vec![(user, rel, ip)], Some("test"))
+                .unwrap();
         }
 
         let res = api
             .graph_neighbors(GraphNeighborsRequest {
                 session: None,
-                entity: EntityRef { class: Some("User".into()), value: "alice@corp.com".into() },
+                entity: EntityRef {
+                    class: Some("User".into()),
+                    value: "alice@corp.com".into(),
+                },
                 degree: Some(1),
                 edge_filter: None,
                 max_nodes: None,
@@ -946,14 +968,19 @@ mod graph_neighbors_tests {
             .expect("IP neighbor present");
         assert_eq!(ip_nbr.node.class, "IP");
         assert_eq!(ip_nbr.edge, "Auth");
-        assert_eq!(ip_nbr.attributes.get("ResultType").map(String::as_str), Some("0"));
+        assert_eq!(
+            ip_nbr.attributes.get("ResultType").map(String::as_str),
+            Some("0")
+        );
     }
 
     #[test]
     fn edge_filter_restricts_relation_types() {
         let api = GraphHunterApi::new_noop();
-        api.create_session(CreateSessionRequest { name: Some("nbr-filter".into()) })
-            .unwrap();
+        api.create_session(CreateSessionRequest {
+            name: Some("nbr-filter".into()),
+        })
+        .unwrap();
         {
             let session = api.resolve_session(None).unwrap();
             let mut g = session.graph.write().unwrap();
@@ -982,13 +1009,19 @@ mod graph_neighbors_tests {
         let res = api
             .graph_neighbors(GraphNeighborsRequest {
                 session: None,
-                entity: EntityRef { class: None, value: "alice@corp.com".into() },
+                entity: EntityRef {
+                    class: None,
+                    value: "alice@corp.com".into(),
+                },
                 degree: Some(1),
                 edge_filter: Some(vec!["Auth".into()]),
                 max_nodes: None,
             })
             .expect("graph_neighbors");
-        assert!(res.neighbors.iter().all(|n| n.edge == "Auth"), "only Auth edges pass the filter");
+        assert!(
+            res.neighbors.iter().all(|n| n.edge == "Auth"),
+            "only Auth edges pass the filter"
+        );
         assert!(res.neighbors.iter().any(|n| n.node.value == "203.0.113.7"));
     }
 
@@ -1008,7 +1041,8 @@ mod graph_neighbors_tests {
         let mut g = GraphHunter::new();
         g.add_entity(Entity::new("user@example.com", EntityType::User))
             .expect("user");
-        g.add_entity(Entity::new("10.0.0.1", EntityType::IP)).expect("ip");
+        g.add_entity(Entity::new("10.0.0.1", EntityType::IP))
+            .expect("ip");
         // Three events, same pair, same instant — exactly the Keycloak
         // shape where one action emits several typed records at once.
         for t in ["LOGIN", "UPDATE_PASSWORD", "VERIFY_EMAIL"] {

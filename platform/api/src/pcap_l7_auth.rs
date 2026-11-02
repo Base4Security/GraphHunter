@@ -330,21 +330,14 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Read a security buffer at `(offset, len)` relative to the start
 /// of the NTLMSSP message. Decodes UTF-16-LE when `unicode` is set,
 /// else treats as ASCII. Bounded so a malicious offset/length pair
 /// can never read past the message.
-fn read_security_buffer(
-    msg: &[u8],
-    offset: usize,
-    len: usize,
-    unicode: bool,
-) -> Option<String> {
+fn read_security_buffer(msg: &[u8], offset: usize, len: usize, unicode: bool) -> Option<String> {
     if len == 0 {
         return Some(String::new());
     }
@@ -638,8 +631,10 @@ mod tests {
     fn ntlm_finds_signature_inside_spnego_wrapper() {
         // 16 random bytes (SPNEGO ASN.1 header stub) before the NTLMSSP
         // signature — decoder should still find it via the byte scan.
-        let mut payload = vec![0xa1, 0x82, 0x01, 0x00, 0x60, 0x82, 0x00, 0xfa,
-                               0x06, 0x06, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02];
+        let mut payload = vec![
+            0xa1, 0x82, 0x01, 0x00, 0x60, 0x82, 0x00, 0xfa, 0x06, 0x06, 0x2b, 0x06, 0x01, 0x05,
+            0x05, 0x02,
+        ];
         let inner = build_ntlm_type3("bob", "CORP", true);
         payload.extend_from_slice(&inner);
         let info = extract_ntlm_type3(&payload).expect("decoded");

@@ -353,8 +353,8 @@ pub fn count_triangles_lftj_simd(trie: &MaterializedCsrTrie) -> usize {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             // Triangle iff a→c and b→c for some c. The set of valid c
             // is exactly `a_dsts ∩ b_dsts`. Hand both sorted slices to
             // the SIMD-aware intersector.
@@ -389,8 +389,8 @@ pub fn count_triangles_canonical_lftj_simd(trie: &MaterializedCsrTrie) -> usize 
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             // c > b: tail-slice b_dsts past b before SIMD intersect.
             let c_lo_b = b_dsts.partition_point(|&x| x <= b);
             let b_dsts_c = &b_dsts[c_lo_b..];
@@ -415,8 +415,8 @@ pub fn count_triangles_canonical_lftj_simd_par(trie: &MaterializedCsrTrie) -> us
         .into_par_iter()
         .map(|ai| {
             let a = trie.src_keys[ai];
-            let a_dsts = &trie.dst_keys
-                [trie.dst_offsets[ai] as usize..trie.dst_offsets[ai + 1] as usize];
+            let a_dsts =
+                &trie.dst_keys[trie.dst_offsets[ai] as usize..trie.dst_offsets[ai + 1] as usize];
             let a_lo = a_dsts.partition_point(|&x| x <= a);
             let a_dsts_b = &a_dsts[a_lo..];
             let mut local = 0usize;
@@ -459,8 +459,8 @@ pub fn count_4cliques_naive(trie: &MaterializedCsrTrie) -> usize {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             for &c in a_dsts {
                 if b_dsts.binary_search(&c).is_err() {
                     continue;
@@ -511,8 +511,8 @@ pub fn count_4cliques_lftj_simd(trie: &MaterializedCsrTrie) -> usize {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
 
             ab_isect.clear();
             crate::simd_rust::intersect_sorted_u32_collect(a_dsts, b_dsts, &mut ab_isect);
@@ -577,8 +577,8 @@ pub fn count_4cliques_canonical_lftj_simd(trie: &MaterializedCsrTrie) -> usize {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
 
             ab_isect.clear();
             crate::simd_rust::intersect_sorted_u32_collect(a_dsts, b_dsts, &mut ab_isect);
@@ -615,8 +615,8 @@ pub fn count_4cliques_lftj_simd_par(trie: &MaterializedCsrTrie) -> usize {
         .into_par_iter()
         .map_init(Vec::<u32>::new, |ab_isect, ai| {
             let mut local = 0usize;
-            let a_dsts = &trie.dst_keys
-                [trie.dst_offsets[ai] as usize..trie.dst_offsets[ai + 1] as usize];
+            let a_dsts =
+                &trie.dst_keys[trie.dst_offsets[ai] as usize..trie.dst_offsets[ai + 1] as usize];
             for &b in a_dsts {
                 let bi = match trie.src_keys.binary_search(&b) {
                     Ok(i) => i,
@@ -654,8 +654,8 @@ pub fn count_4cliques_canonical_lftj_simd_par(trie: &MaterializedCsrTrie) -> usi
         .into_par_iter()
         .map_init(Vec::<u32>::new, |ab_isect, ai| {
             let a = trie.src_keys[ai];
-            let a_dsts = &trie.dst_keys
-                [trie.dst_offsets[ai] as usize..trie.dst_offsets[ai + 1] as usize];
+            let a_dsts =
+                &trie.dst_keys[trie.dst_offsets[ai] as usize..trie.dst_offsets[ai + 1] as usize];
             let a_lo = a_dsts.partition_point(|&x| x <= a);
             let a_dsts_b = &a_dsts[a_lo..];
             let mut local = 0usize;
@@ -704,8 +704,8 @@ pub fn count_5cliques_naive(trie: &MaterializedCsrTrie) -> usize {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             for &c in a_dsts {
                 if b_dsts.binary_search(&c).is_err() {
                     continue;
@@ -776,8 +776,8 @@ pub fn count_5cliques_lftj_simd(trie: &MaterializedCsrTrie) -> usize {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             ab_isect.clear();
             crate::simd_rust::intersect_sorted_u32_collect(a_dsts, b_dsts, &mut ab_isect);
             if ab_isect.len() < 2 {
@@ -842,8 +842,8 @@ pub fn count_5cliques_canonical_lftj_simd(trie: &MaterializedCsrTrie) -> usize {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             ab_isect.clear();
             crate::simd_rust::intersect_sorted_u32_collect(a_dsts, b_dsts, &mut ab_isect);
             if ab_isect.len() < 2 {
@@ -934,11 +934,10 @@ pub fn count_5cliques_lftj_simd_par(trie: &MaterializedCsrTrie) -> usize {
                                 Ok(i) => i,
                                 Err(_) => continue,
                             };
-                            let d_dsts = &trie.dst_keys[trie.dst_offsets[di] as usize
-                                ..trie.dst_offsets[di + 1] as usize];
-                            local += crate::simd_rust::intersect_sorted_u32_count(
-                                abc_isect, d_dsts,
-                            );
+                            let d_dsts = &trie.dst_keys
+                                [trie.dst_offsets[di] as usize..trie.dst_offsets[di + 1] as usize];
+                            local +=
+                                crate::simd_rust::intersect_sorted_u32_count(abc_isect, d_dsts);
                         }
                     }
                 }
@@ -987,9 +986,7 @@ pub fn count_5cliques_canonical_lftj_simd_par(trie: &MaterializedCsrTrie) -> usi
                             [trie.dst_offsets[ci] as usize..trie.dst_offsets[ci + 1] as usize];
                         abc_isect.clear();
                         let d_pool = &ab_isect_c[c_idx + 1..];
-                        crate::simd_rust::intersect_sorted_u32_collect(
-                            d_pool, c_dsts, abc_isect,
-                        );
+                        crate::simd_rust::intersect_sorted_u32_collect(d_pool, c_dsts, abc_isect);
                         if abc_isect.is_empty() {
                             continue;
                         }
@@ -998,12 +995,10 @@ pub fn count_5cliques_canonical_lftj_simd_par(trie: &MaterializedCsrTrie) -> usi
                                 Ok(i) => i,
                                 Err(_) => continue,
                             };
-                            let d_dsts = &trie.dst_keys[trie.dst_offsets[di] as usize
-                                ..trie.dst_offsets[di + 1] as usize];
+                            let d_dsts = &trie.dst_keys
+                                [trie.dst_offsets[di] as usize..trie.dst_offsets[di + 1] as usize];
                             let e_pool = &abc_isect[d_idx + 1..];
-                            local += crate::simd_rust::intersect_sorted_u32_count(
-                                e_pool, d_dsts,
-                            );
+                            local += crate::simd_rust::intersect_sorted_u32_count(e_pool, d_dsts);
                         }
                     }
                 }
@@ -1077,8 +1072,7 @@ pub fn count_6cycles_lftj_simd(
                     let d_dsts = forward.neighbors_of(d);
                     for &e in d_dsts {
                         let e_dsts = forward.neighbors_of(e);
-                        count +=
-                            crate::simd_rust::intersect_sorted_u32_count(e_dsts, pred_a);
+                        count += crate::simd_rust::intersect_sorted_u32_count(e_dsts, pred_a);
                     }
                 }
             }
@@ -1153,10 +1147,8 @@ pub fn count_6cycles_canonical_lftj_simd(
                         // e_dsts before the SIMD intersect.
                         let f_lo_e = e_dsts.partition_point(|&x| x <= a);
                         let e_dsts_f = &e_dsts[f_lo_e..];
-                        count += crate::simd_rust::intersect_sorted_u32_count(
-                            e_dsts_f,
-                            pred_a_canon,
-                        );
+                        count +=
+                            crate::simd_rust::intersect_sorted_u32_count(e_dsts_f, pred_a_canon);
                     }
                 }
             }
@@ -1192,8 +1184,7 @@ pub fn count_6cycles_lftj_simd_par(
                         let d_dsts = forward.neighbors_of(d);
                         for &e in d_dsts {
                             let e_dsts = forward.neighbors_of(e);
-                            local +=
-                                crate::simd_rust::intersect_sorted_u32_count(e_dsts, pred_a);
+                            local += crate::simd_rust::intersect_sorted_u32_count(e_dsts, pred_a);
                         }
                     }
                 }
@@ -1484,9 +1475,7 @@ impl MaterializedCsrTrie {
     /// key in this trie.
     pub fn neighbors_of(&self, vertex: u32) -> &[u32] {
         match self.src_keys.binary_search(&vertex) {
-            Ok(i) => {
-                &self.dst_keys[self.dst_offsets[i] as usize..self.dst_offsets[i + 1] as usize]
-            }
+            Ok(i) => &self.dst_keys[self.dst_offsets[i] as usize..self.dst_offsets[i + 1] as usize],
             Err(_) => &[],
         }
     }
@@ -1740,7 +1729,10 @@ mod tests {
         // dst_offsets is monotonic.
         assert!(trie.dst_offsets.windows(2).all(|w| w[0] <= w[1]));
         // Final offset matches edge count.
-        assert_eq!(*trie.dst_offsets.last().unwrap() as usize, trie.edge_count());
+        assert_eq!(
+            *trie.dst_offsets.last().unwrap() as usize,
+            trie.edge_count()
+        );
     }
 
     #[test]
@@ -1906,7 +1898,10 @@ mod tests {
         let naive = count_triangles_naive(&trie);
         // Aut(K_3) = S_3, |Aut| = 6. Canonical chain a<b<c emits each
         // triangle exactly once on a bidirectional host.
-        assert_eq!(canonical, 1, "bidirectional triangle has one canonical instance");
+        assert_eq!(
+            canonical, 1,
+            "bidirectional triangle has one canonical instance"
+        );
         assert_eq!(canonical * 6, naive, "canonical * |Aut(K_3)| == naive");
     }
 
@@ -2002,7 +1997,10 @@ mod tests {
         let naive = count_4cliques_naive(&trie);
         // Aut(K_4) = S_4, |Aut| = 24. Canonical chain a<b<c<d emits
         // each K_4 instance exactly once.
-        assert_eq!(canonical, 1, "K4 fixture has exactly one canonical 4-clique");
+        assert_eq!(
+            canonical, 1,
+            "K4 fixture has exactly one canonical 4-clique"
+        );
         assert_eq!(canonical * 24, naive, "canonical * |Aut(K_4)| == naive");
     }
 
@@ -2090,7 +2088,10 @@ mod tests {
         let naive = count_5cliques_naive(&trie);
         // Aut(K_5) = S_5, |Aut| = 120. Canonical chain a<b<c<d<e emits
         // each K_5 instance exactly once.
-        assert_eq!(canonical, 1, "K5 fixture has exactly one canonical 5-clique");
+        assert_eq!(
+            canonical, 1,
+            "K5 fixture has exactly one canonical 5-clique"
+        );
         assert_eq!(canonical * 120, naive, "canonical * |Aut(K_5)| == naive");
     }
 
@@ -2147,7 +2148,10 @@ mod tests {
         let naive = count_6cycles_naive(&fwd);
         let lftj = count_6cycles_lftj_simd(&fwd, &rev);
         assert_eq!(lftj, naive, "LFTJ C6 count must match brute-force baseline");
-        assert_eq!(lftj, 6, "directed C6 yields 6 rotations as ordered 6-cycles");
+        assert_eq!(
+            lftj, 6,
+            "directed C6 yields 6 rotations as ordered 6-cycles"
+        );
     }
 
     #[test]
@@ -2198,7 +2202,11 @@ mod tests {
         // emits each cycle once (the rotation starting at the smallest
         // StrId).
         assert_eq!(canonical, 1, "C6 fixture has exactly one canonical cycle");
-        assert_eq!(canonical * 6, naive, "canonical * |Aut(directed C_6)| == naive");
+        assert_eq!(
+            canonical * 6,
+            naive,
+            "canonical * |Aut(directed C_6)| == naive"
+        );
     }
 
     #[test]
@@ -2244,8 +2252,8 @@ mod tests {
         let rev = MaterializedCsrTrie::build_reverse(&g);
         for ai in 0..fwd.src_keys.len() {
             let s = fwd.src_keys[ai];
-            let dsts = &fwd.dst_keys
-                [fwd.dst_offsets[ai] as usize..fwd.dst_offsets[ai + 1] as usize];
+            let dsts =
+                &fwd.dst_keys[fwd.dst_offsets[ai] as usize..fwd.dst_offsets[ai + 1] as usize];
             for &d in dsts {
                 let preds = rev.neighbors_of(d);
                 assert!(

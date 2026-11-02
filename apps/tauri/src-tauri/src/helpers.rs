@@ -128,9 +128,10 @@ pub fn parse_relation_type(s: &str) -> Option<graph_hunter_core::RelationType> {
 /// Converts frontend ExpandFilter to core NeighborhoodFilter.
 pub fn to_core_filter(f: &ExpandFilter) -> NeighborhoodFilter {
     NeighborhoodFilter {
-        entity_types: f.entity_types.as_ref().map(|types| {
-            types.iter().filter_map(|s| parse_entity_type(s)).collect()
-        }),
+        entity_types: f
+            .entity_types
+            .as_ref()
+            .map(|types| types.iter().filter_map(|s| parse_entity_type(s)).collect()),
         relation_types: f.relation_types.as_ref().map(|types| {
             types
                 .iter()

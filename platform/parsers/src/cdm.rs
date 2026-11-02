@@ -72,10 +72,17 @@ fn entity_type_for(cdm_key: &str) -> Option<EntityType> {
 /// in the Python port; unmapped events are dropped (counted as skips).
 fn relation_type_for(event_type: &str) -> Option<RelationType> {
     let rt = match event_type {
-        "EVENT_OPEN" | "EVENT_READ" | "EVENT_MMAP" | "EVENT_LSEEK"
+        "EVENT_OPEN"
+        | "EVENT_READ"
+        | "EVENT_MMAP"
+        | "EVENT_LSEEK"
         | "EVENT_CHECK_FILE_ATTRIBUTES" => RelationType::Read,
-        "EVENT_WRITE" | "EVENT_CLOSE" | "EVENT_MODIFY_FILE_ATTRIBUTES" | "EVENT_RENAME"
-        | "EVENT_LINK" | "EVENT_UNLINK" => RelationType::Write,
+        "EVENT_WRITE"
+        | "EVENT_CLOSE"
+        | "EVENT_MODIFY_FILE_ATTRIBUTES"
+        | "EVENT_RENAME"
+        | "EVENT_LINK"
+        | "EVENT_UNLINK" => RelationType::Write,
         "EVENT_EXECUTE" | "EVENT_FORK" | "EVENT_CLONE" | "EVENT_SIGNAL" => RelationType::Execute,
         "EVENT_CONNECT" | "EVENT_ACCEPT" | "EVENT_SENDTO" | "EVENT_RECVFROM" | "EVENT_SENDMSG"
         | "EVENT_RECVMSG" | "EVENT_OTHER" => RelationType::Connect,
@@ -110,7 +117,11 @@ fn entity_name(entity: &Value, uuid: &str) -> String {
     {
         return name.to_string();
     }
-    if let Some(path) = entity.get("path").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+    if let Some(path) = entity
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
         return path.to_string();
     }
     uuid.chars().take(12).collect()
@@ -192,7 +203,10 @@ impl CdmParser {
 
             // CDM stamps nanoseconds; the edge carries seconds (see the
             // module note) with the raw ns preserved as metadata.
-            let ts_nanos = event.get("timestampNanos").and_then(Value::as_i64).unwrap_or(0);
+            let ts_nanos = event
+                .get("timestampNanos")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
             let ts_seconds = ts_nanos / 1_000_000_000;
             let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
 
@@ -282,7 +296,10 @@ mod tests {
         assert_eq!(exec.2.id, "proc-2");
         assert_eq!(exec.0.entity_type, EntityType::Process);
         // The name resolved from the referenced entity record, not the event.
-        assert_eq!(exec.0.metadata.get("name").map(String::as_str), Some("bash"));
+        assert_eq!(
+            exec.0.metadata.get("name").map(String::as_str),
+            Some("bash")
+        );
     }
 
     #[test]
@@ -307,7 +324,10 @@ mod tests {
 {"datum":{"com.bbn.tc.schema.avro.cdm18.FileObject":{"uuid":"file-1","path":"/x"}}}
 {"datum":{"com.bbn.tc.schema.avro.cdm18.Event":{"uuid":"ev-x","type":"EVENT_READ","subject":{"com.bbn.tc.schema.avro.cdm18.UUID":"ghost"},"predicateObject":{"com.bbn.tc.schema.avro.cdm18.UUID":"file-1"},"timestampNanos":1}}}
 "#;
-        assert!(CdmParser.parse(orphan).is_empty(), "no guessing a missing endpoint");
+        assert!(
+            CdmParser.parse(orphan).is_empty(),
+            "no guessing a missing endpoint"
+        );
     }
 
     #[test]
@@ -329,7 +349,11 @@ mod tests {
 "#;
         let triples = CdmParser.parse(rename);
         assert_eq!(triples.len(), 2, "predicateObject and predicateObject2");
-        assert!(triples.iter().all(|(_, r, _)| r.rel_type == RelationType::Write));
+        assert!(
+            triples
+                .iter()
+                .all(|(_, r, _)| r.rel_type == RelationType::Write)
+        );
         let dests: Vec<&str> = triples.iter().map(|(_, _, d)| d.id.as_str()).collect();
         assert!(dests.contains(&"old") && dests.contains(&"new"));
     }

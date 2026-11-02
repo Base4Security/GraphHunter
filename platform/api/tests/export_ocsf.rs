@@ -279,10 +279,7 @@ fn dataset_with_field_config_stamps_real_cfg_hash() {
         stamped_hash, expected_hash,
         "mapping_hash must be cfg:sha256(serde_json(field_config)), not a placeholder"
     );
-    assert!(
-        stamped_hash.starts_with("cfg:"),
-        "got: {stamped_hash}"
-    );
+    assert!(stamped_hash.starts_with("cfg:"), "got: {stamped_hash}");
     assert!(
         !stamped_hash.starts_with("builtin:"),
         "must not fall back to builtin:* placeholder"

@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use tauri::State;
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::dto::enrichment::{SubnetAnalysisRequest, SubnetGroup};
 use graph_hunter_api::dto::geoip::EnrichIpRequest;
 use graph_hunter_api::dto::session_analytics::{SharedSessionsRequest, SharedSessionsResponse};
-use graph_hunter_api::GraphHunterApi;
 use graph_hunter_core::geoip::GeoIpResult;
 
 use crate::error::CommandError;

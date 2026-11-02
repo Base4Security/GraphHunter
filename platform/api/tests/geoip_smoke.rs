@@ -33,7 +33,10 @@ fn bootstrap_lights_up_geoip_and_asn_capabilities() {
     assert!(!before.geoip, "provider slot must start empty");
 
     let (mmdb_loaded, _http) = api.bootstrap_geoip(Some(dir));
-    assert!(mmdb_loaded, "bootstrap must load the databases it was handed");
+    assert!(
+        mmdb_loaded,
+        "bootstrap must load the databases it was handed"
+    );
 
     let after = api.capabilities();
     assert!(after.geoip, "geoip capability must be true after bootstrap");

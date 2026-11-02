@@ -1,7 +1,11 @@
 //! Shared helpers: response builders and frontend-emitters used by
 //! multiple domain routers.
 
-use axum::{http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::Serialize;
 
 use crate::{AppState, Subgraph, SubgraphEdge, SubgraphNode};
@@ -34,12 +38,14 @@ pub(super) fn neighborhood_to_subgraph(hood: &Neighborhood) -> Subgraph {
     let nodes = hood
         .nodes
         .iter()
-        .map(|n| SubgraphNode::new(
-            n.id.clone(),
-            n.entity_type.clone(),
-            n.score,
-            n.metadata.clone(),
-        ))
+        .map(|n| {
+            SubgraphNode::new(
+                n.id.clone(),
+                n.entity_type.clone(),
+                n.score,
+                n.metadata.clone(),
+            )
+        })
         .collect();
     let edges: Vec<SubgraphEdge> = hood
         .edges
@@ -101,15 +107,14 @@ pub(super) fn api_response<T: Serialize>(result: graph_hunter_api::ApiResult<T>)
     match result {
         Ok(v) => ok_json(v),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
 }
 
 pub(super) fn api_err_response(e: graph_hunter_api::ApiError) -> Response {
-    let code = StatusCode::from_u16(e.status_code())
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let code = StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
 }

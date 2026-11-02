@@ -303,7 +303,10 @@ pub struct EntityReader<'a, R: Read> {
 impl<'a, R: Read> EntityReader<'a, R> {
     pub fn new(r: &'a mut R) -> Result<Self, BinaryError> {
         let count = read_u64(r)?;
-        Ok(Self { r, remaining: count })
+        Ok(Self {
+            r,
+            remaining: count,
+        })
     }
 
     pub fn count(&self) -> u64 {
@@ -343,7 +346,11 @@ impl<'a, R: Read> RelationReader<'a, R> {
     /// matching layout.
     pub fn new(r: &'a mut R, body_version: u32) -> Result<Self, BinaryError> {
         let count = read_u64(r)?;
-        Ok(Self { r, remaining: count, body_version })
+        Ok(Self {
+            r,
+            remaining: count,
+            body_version,
+        })
     }
 
     pub fn count(&self) -> u64 {
@@ -533,7 +540,9 @@ mod tests {
         assert!(too_new.to_string().contains("newer"));
         let too_old = check_body_compatible(0).unwrap_err();
         assert!(matches!(too_old, BinaryError::IncompatibleBody { .. }));
-        assert!(too_old.to_string().contains("older") || too_old.to_string().contains("incompatible"));
+        assert!(
+            too_old.to_string().contains("older") || too_old.to_string().contains("incompatible")
+        );
     }
 
     #[test]
@@ -551,7 +560,7 @@ mod tests {
         let future_json = br#"{"id":"sess-x","name":"niubiz","created_at":1780667944,"path_node_ids":[],"notes":[],"datasets":[],"future_field":{"whatever":true}}"#;
         let mut buf = Vec::new();
         buf.extend_from_slice(&MAGIC);
-        buf.extend_from_slice(&2u32.to_le_bytes());                 // version 2 = JSON header
+        buf.extend_from_slice(&2u32.to_le_bytes()); // version 2 = JSON header
         buf.extend_from_slice(&(future_json.len() as u32).to_le_bytes());
         buf.extend_from_slice(future_json);
         // (no entity/relation bytes needed — read_header stops after the header)

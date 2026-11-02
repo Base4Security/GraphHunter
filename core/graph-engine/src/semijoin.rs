@@ -139,7 +139,11 @@ pub fn is_trivial(hypothesis: &Hypothesis) -> bool {
 /// Run the bidirectional semi-join, refining `cands` in place. Returns
 /// the surviving candidate count for position 0 (the start set the DFS
 /// will iterate over).
-pub fn refine(graph: &crate::graph::GraphHunter, hypothesis: &Hypothesis, cands: &mut CandidateSets) {
+pub fn refine(
+    graph: &crate::graph::GraphHunter,
+    hypothesis: &Hypothesis,
+    cands: &mut CandidateSets,
+) {
     let steps = &hypothesis.steps;
     let n = steps.len();
     if n == 0 {
@@ -151,7 +155,13 @@ pub fn refine(graph: &crate::graph::GraphHunter, hypothesis: &Hypothesis, cands:
     for i in 1..=n {
         let step = &steps[i - 1];
         let mut next = Bitset::with_capacity(cands.candidates[i].len);
-        forward_step(graph, step, &cands.candidates[i - 1], &cands.candidates[i], &mut next);
+        forward_step(
+            graph,
+            step,
+            &cands.candidates[i - 1],
+            &cands.candidates[i],
+            &mut next,
+        );
         cands.candidates[i] = next;
     }
 
@@ -160,7 +170,13 @@ pub fn refine(graph: &crate::graph::GraphHunter, hypothesis: &Hypothesis, cands:
     for i in (0..n).rev() {
         let step = &steps[i];
         let mut prev = Bitset::with_capacity(cands.candidates[i].len);
-        backward_step(graph, step, &cands.candidates[i], &cands.candidates[i + 1], &mut prev);
+        backward_step(
+            graph,
+            step,
+            &cands.candidates[i],
+            &cands.candidates[i + 1],
+            &mut prev,
+        );
         cands.candidates[i] = prev;
     }
 }

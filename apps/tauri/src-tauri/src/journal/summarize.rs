@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::interpret::classify_kind;
 
@@ -46,40 +46,95 @@ const MAX_PROJECTED_KEYS: usize = 12;
 /// SecurityEvent's `EventID` matches no generic signal substring).
 /// `priority_for_table` selects the right list per-row via the `Type` field.
 const IDENTITY_PRIORITY: &[&str] = &[
-    "timegenerated", "userprincipalname", "userdisplayname", "ipaddress",
-    "location", "resulttype", "resultdescription", "appdisplayname",
-    "clientappused", "devicedetail", "riskstate", "status",
-    "conditionalaccessstatus", "category", "identity", "operationname",
+    "timegenerated",
+    "userprincipalname",
+    "userdisplayname",
+    "ipaddress",
+    "location",
+    "resulttype",
+    "resultdescription",
+    "appdisplayname",
+    "clientappused",
+    "devicedetail",
+    "riskstate",
+    "status",
+    "conditionalaccessstatus",
+    "category",
+    "identity",
+    "operationname",
 ];
 
 const SECURITYEVENT_PRIORITY: &[&str] = &[
-    "timegenerated", "computer", "account", "accountdomain", "eventid",
-    "activity", "ipaddress", "clientipaddress", "logontype", "commandline",
-    "callerprocessname", "newprocessname", "targetusername", "subjectusername",
+    "timegenerated",
+    "computer",
+    "account",
+    "accountdomain",
+    "eventid",
+    "activity",
+    "ipaddress",
+    "clientipaddress",
+    "logontype",
+    "commandline",
+    "callerprocessname",
+    "newprocessname",
+    "targetusername",
+    "subjectusername",
 ];
 
 const CLOUDTRAIL_PRIORITY: &[&str] = &[
-    "timegenerated", "eventname", "eventsource", "eventtypename",
-    "useridentitytype", "useridentityarn", "useridentityusername",
-    "useridentityaccountid", "sourceipaddress", "awsregion", "errorcode",
+    "timegenerated",
+    "eventname",
+    "eventsource",
+    "eventtypename",
+    "useridentitytype",
+    "useridentityarn",
+    "useridentityusername",
+    "useridentityaccountid",
+    "sourceipaddress",
+    "awsregion",
+    "errorcode",
     "useragent",
 ];
 
 const DEVICE_PRIORITY: &[&str] = &[
-    "timegenerated", "devicename", "accountname", "actiontype", "filename",
-    "processcommandline", "initiatingprocessfilename", "initiatingprocesscommandline",
-    "initiatingprocesssignaturestatus", "initiatingprocesssignertype", "sha256", "folderpath",
-    "initiatingprocessaccountname", "processid",
+    "timegenerated",
+    "devicename",
+    "accountname",
+    "actiontype",
+    "filename",
+    "processcommandline",
+    "initiatingprocessfilename",
+    "initiatingprocesscommandline",
+    "initiatingprocesssignaturestatus",
+    "initiatingprocesssignertype",
+    "sha256",
+    "folderpath",
+    "initiatingprocessaccountname",
+    "processid",
 ];
 
 const NETFLOW_PRIORITY: &[&str] = &[
-    "timegenerated", "firewallname", "srcip", "srcport", "destip",
-    "destport", "proto", "appproto", "eventtype", "action",
+    "timegenerated",
+    "firewallname",
+    "srcip",
+    "srcport",
+    "destip",
+    "destport",
+    "proto",
+    "appproto",
+    "eventtype",
+    "action",
 ];
 
 const SYSLOG_PRIORITY: &[&str] = &[
-    "timegenerated", "computer", "hostname", "hostip", "facility",
-    "severitylevel", "processname", "syslogmessage",
+    "timegenerated",
+    "computer",
+    "hostname",
+    "hostip",
+    "facility",
+    "severitylevel",
+    "processname",
+    "syslogmessage",
 ];
 
 /// Selects the priority column list for `table` (matched case-insensitively,
@@ -87,10 +142,14 @@ const SYSLOG_PRIORITY: &[&str] = &[
 /// list fall back to `IDENTITY_PRIORITY`.
 fn priority_for_table(table: &str) -> &'static [&'static str] {
     match table.to_lowercase().as_str() {
-        "signinlogs" | "aadnoninteractiveusersigninlogs" | "aadsignineventslogs" => IDENTITY_PRIORITY,
+        "signinlogs" | "aadnoninteractiveusersigninlogs" | "aadsignineventslogs" => {
+            IDENTITY_PRIORITY
+        }
         "securityevent" => SECURITYEVENT_PRIORITY,
         "awscloudtrail" | "awscloudtrail_cl" => CLOUDTRAIL_PRIORITY,
-        "deviceprocessevents" | "deviceevents" | "devicenetworkevents" | "devicefileevents" => DEVICE_PRIORITY,
+        "deviceprocessevents" | "deviceevents" | "devicenetworkevents" | "devicefileevents" => {
+            DEVICE_PRIORITY
+        }
         "awsnetworkfirewallflow" | "awsnetworkfirewallalert" => NETFLOW_PRIORITY,
         "syslog" => SYSLOG_PRIORITY,
         _ => IDENTITY_PRIORITY, // sensible default (same as the previous single generic list)
@@ -192,7 +251,10 @@ pub fn summarize(path: &str, resp: &Value, detail_ref: &str) -> Option<Value> {
         obj.insert("aggregates".to_string(), aggregates);
     }
     obj.insert("top".to_string(), Value::Array(top));
-    obj.insert("detail_ref".to_string(), Value::String(detail_ref.to_string()));
+    obj.insert(
+        "detail_ref".to_string(),
+        Value::String(detail_ref.to_string()),
+    );
     Some(Value::Object(obj))
 }
 
@@ -212,7 +274,12 @@ fn summarize_query(resp: &Value) -> (Value, Vec<Value>, Value) {
         .unwrap_or("");
     let priority = priority_for_table(table);
     let top: Vec<Value> = rows
-        .map(|r| r.iter().take(TOP_N).map(|row| trim_row(row, priority)).collect())
+        .map(|r| {
+            r.iter()
+                .take(TOP_N)
+                .map(|row| trim_row(row, priority))
+                .collect()
+        })
         .unwrap_or_default();
 
     // Only worth aggregating when `top` doesn't already show every row (the
@@ -461,7 +528,10 @@ mod tests {
     #[test]
     fn summarizes_large_kql_response() {
         let resp = big_kql_response(100);
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "hunt-x#3").expect("should summarize");
 
@@ -487,10 +557,16 @@ mod tests {
     fn unknown_kind_is_not_summarized_even_if_large() {
         let mut padding = Map::new();
         for i in 0..200 {
-            padding.insert(format!("field_{i}"), json!("some moderately sized filler value"));
+            padding.insert(
+                format!("field_{i}"),
+                json!("some moderately sized filler value"),
+            );
         }
         let resp = Value::Object(padding);
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
         assert_eq!(summarize("/something_new", &resp, "hunt-x#9"), None);
     }
 
@@ -541,7 +617,10 @@ mod tests {
     #[test]
     fn summarize_query_compresses_wide_column_rows() {
         let resp = wide_sentinel_like_response(25);
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#1").expect("should summarize");
 
@@ -630,7 +709,10 @@ mod tests {
     fn trim_row_projects_wide_row_to_signal_columns() {
         let row = wide_signin_row(1);
         let obj = row.as_object().unwrap();
-        assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
+        assert!(
+            obj.len() > WIDE_ROW_KEYS,
+            "fixture must exceed WIDE_ROW_KEYS"
+        );
 
         let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
@@ -650,9 +732,18 @@ mod tests {
             assert!(trimmed_obj.contains_key(key), "missing signal key {key}");
         }
 
-        let noise_keys = ["TenantId", "ResourceId", "CorrelationId", "SourceSystem", "OperationVersion"];
+        let noise_keys = [
+            "TenantId",
+            "ResourceId",
+            "CorrelationId",
+            "SourceSystem",
+            "OperationVersion",
+        ];
         for key in noise_keys {
-            assert!(!trimmed_obj.contains_key(key), "noise key {key} should be projected out");
+            assert!(
+                !trimmed_obj.contains_key(key),
+                "noise key {key} should be projected out"
+            );
         }
 
         assert!(trimmed_obj.len() <= signal_keys.len() + 2);
@@ -689,7 +780,10 @@ mod tests {
             map.insert(format!("col{i}"), json!(format!("v{i}")));
         }
         let row = Value::Object(map.clone());
-        assert!(map.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
+        assert!(
+            map.len() > WIDE_ROW_KEYS,
+            "fixture must exceed WIDE_ROW_KEYS"
+        );
 
         let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
@@ -709,7 +803,10 @@ mod tests {
     fn summarize_query_compresses_realistic_wide_sentinel_payload() {
         let rows: Vec<Value> = (0..25).map(wide_signin_row).collect();
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#1").expect("should summarize");
 
@@ -796,7 +893,10 @@ mod tests {
     fn trim_row_caps_wide_row_to_priority_columns() {
         let row = all_priority_plus_noise_row();
         let obj = row.as_object().unwrap();
-        assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
+        assert!(
+            obj.len() > WIDE_ROW_KEYS,
+            "fixture must exceed WIDE_ROW_KEYS"
+        );
 
         let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
@@ -808,7 +908,10 @@ mod tests {
         );
 
         for key in ["IPAddress", "ResultType", "UserPrincipalName"] {
-            assert!(trimmed_obj.contains_key(key), "expected priority key {key} to survive the cap");
+            assert!(
+                trimmed_obj.contains_key(key),
+                "expected priority key {key} to survive the cap"
+            );
         }
 
         for key in ["AuthenticationDetails", "TokenIssuerName"] {
@@ -833,7 +936,10 @@ mod tests {
         map.insert("IPAddress".to_string(), json!("10.0.0.9"));
         let row = Value::Object(map);
         let obj = row.as_object().unwrap();
-        assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
+        assert!(
+            obj.len() > WIDE_ROW_KEYS,
+            "fixture must exceed WIDE_ROW_KEYS"
+        );
 
         let trimmed = trim_row(&row, IDENTITY_PRIORITY);
         let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
@@ -874,7 +980,10 @@ mod tests {
         }
         let row = Value::Object(map);
         let obj = row.as_object().unwrap();
-        assert!(obj.len() > WIDE_ROW_KEYS, "fixture must exceed WIDE_ROW_KEYS");
+        assert!(
+            obj.len() > WIDE_ROW_KEYS,
+            "fixture must exceed WIDE_ROW_KEYS"
+        );
         assert!(signal_keys.len() < MAX_PROJECTED_KEYS);
 
         let trimmed = trim_row(&row, IDENTITY_PRIORITY);
@@ -897,10 +1006,22 @@ mod tests {
         let mut map = Map::new();
         map.insert("Type".to_string(), json!("SigninLogs"));
         // 10 priority hunt columns.
-        map.insert("TimeGenerated".to_string(), json!(format!("2026-07-14T12:{:02}:00Z", i % 60)));
-        map.insert("UserPrincipalName".to_string(), json!(format!("user{i}@contoso.com")));
-        map.insert("IPAddress".to_string(), json!(format!("10.0.{}.{}", i % 256, (i * 7) % 256)));
-        map.insert("ResultType".to_string(), json!(if i % 3 == 0 { "50126" } else { "0" }));
+        map.insert(
+            "TimeGenerated".to_string(),
+            json!(format!("2026-07-14T12:{:02}:00Z", i % 60)),
+        );
+        map.insert(
+            "UserPrincipalName".to_string(),
+            json!(format!("user{i}@contoso.com")),
+        );
+        map.insert(
+            "IPAddress".to_string(),
+            json!(format!("10.0.{}.{}", i % 256, (i * 7) % 256)),
+        );
+        map.insert(
+            "ResultType".to_string(),
+            json!(if i % 3 == 0 { "50126" } else { "0" }),
+        );
         map.insert("AppDisplayName".to_string(), json!("Azure Portal"));
         map.insert("Location".to_string(), json!("US"));
         map.insert("ClientAppUsed".to_string(), json!("Browser"));
@@ -918,33 +1039,60 @@ mod tests {
             ("OriginalRequestIds", "req-0001"),
             ("SubscriptionId", "sub-abc"),
             ("AadTenantId", "aad-xyz"),
-            ("AuthenticationDetails", "[{\"authenticationStepDateTime\":\"2026-07-14T12:00:00Z\",\"authenticationMethod\":\"Password\",\"authenticationStepResultDetail\":\"First factor requirement satisfied by password\",\"succeeded\":true}]"),
+            (
+                "AuthenticationDetails",
+                "[{\"authenticationStepDateTime\":\"2026-07-14T12:00:00Z\",\"authenticationMethod\":\"Password\",\"authenticationStepResultDetail\":\"First factor requirement satisfied by password\",\"succeeded\":true}]",
+            ),
             ("AuthenticationRequirement", "singleFactorAuthentication"),
             ("AuthenticationMethodsUsed", "Password"),
-            ("AuthenticationProcessingDetails", "[{\"key\":\"Root Key Type\",\"value\":\"Unknown\"},{\"key\":\"Is CA Compliant\",\"value\":\"False\"},{\"key\":\"ProcessingTimeInMilliseconds\",\"value\":\"37\"},{\"key\":\"Legacy TLS (TLS 1.0, 1.1, 3DES)\",\"value\":\"False\"},{\"key\":\"Autologon Type\",\"value\":\"None\"}]"),
+            (
+                "AuthenticationProcessingDetails",
+                "[{\"key\":\"Root Key Type\",\"value\":\"Unknown\"},{\"key\":\"Is CA Compliant\",\"value\":\"False\"},{\"key\":\"ProcessingTimeInMilliseconds\",\"value\":\"37\"},{\"key\":\"Legacy TLS (TLS 1.0, 1.1, 3DES)\",\"value\":\"False\"},{\"key\":\"Autologon Type\",\"value\":\"None\"}]",
+            ),
             ("AuthenticationAppDeviceDetails", "[]"),
-            ("AuthenticationContextClassReferences", "[{\"id\":\"c1\",\"detail\":\"Multifactor authentication\"}]"),
+            (
+                "AuthenticationContextClassReferences",
+                "[{\"id\":\"c1\",\"detail\":\"Multifactor authentication\"}]",
+            ),
             ("RiskLevelAggregated", "none"),
             ("RiskLevelDuringSignIn", "none"),
             ("RiskDetail", "none"),
-            ("RiskEventTypes", "[\"unfamiliarFeatures\",\"anonymizedIPAddress\"]"),
-            ("RiskEventTypesV2", "[\"unfamiliarFeatures\",\"anonymizedIPAddress\"]"),
-            ("ConditionalAccessPolicies", "[{\"id\":\"p1\",\"displayName\":\"Require MFA for all users\",\"enforcedGrantControls\":[\"Mfa\"],\"result\":\"success\"},{\"id\":\"p2\",\"displayName\":\"Block legacy authentication\",\"enforcedGrantControls\":[\"Block\"],\"result\":\"notApplied\"}]"),
+            (
+                "RiskEventTypes",
+                "[\"unfamiliarFeatures\",\"anonymizedIPAddress\"]",
+            ),
+            (
+                "RiskEventTypesV2",
+                "[\"unfamiliarFeatures\",\"anonymizedIPAddress\"]",
+            ),
+            (
+                "ConditionalAccessPolicies",
+                "[{\"id\":\"p1\",\"displayName\":\"Require MFA for all users\",\"enforcedGrantControls\":[\"Mfa\"],\"result\":\"success\"},{\"id\":\"p2\",\"displayName\":\"Block legacy authentication\",\"enforcedGrantControls\":[\"Block\"],\"result\":\"notApplied\"}]",
+            ),
             ("ConditionalAccessStatusDetail", "notApplied"),
-            ("AppliedConditionalAccessPolicies", "[{\"id\":\"p1\",\"displayName\":\"Require MFA for all users\",\"result\":\"success\",\"enforcedGrantControls\":[\"Mfa\"],\"enforcedSessionControls\":[]},{\"id\":\"p2\",\"displayName\":\"Block legacy authentication\",\"result\":\"notApplied\",\"enforcedGrantControls\":[\"Block\"],\"enforcedSessionControls\":[]}]"),
+            (
+                "AppliedConditionalAccessPolicies",
+                "[{\"id\":\"p1\",\"displayName\":\"Require MFA for all users\",\"result\":\"success\",\"enforcedGrantControls\":[\"Mfa\"],\"enforcedSessionControls\":[]},{\"id\":\"p2\",\"displayName\":\"Block legacy authentication\",\"result\":\"notApplied\",\"enforcedGrantControls\":[\"Block\"],\"enforcedSessionControls\":[]}]",
+            ),
             ("TokenIssuerName", "contoso.onmicrosoft.com"),
             ("TokenIssuerType", "AzureAD"),
             ("ServicePrincipalName", "graph-api"),
             ("ServicePrincipalId", "sp-0001"),
             ("ManagedIdentityName", "mi-0001"),
             ("ClientCredentialType", "none"),
-            ("UserAgentDetail", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0"),
+            (
+                "UserAgentDetail",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
+            ),
             ("UserTypeDetail", "Member"),
             ("AccountDisplayName", "Contoso User Account Display Name"),
             ("ActorUserPrincipalName", "actor@contoso.com"),
             ("TargetUserName", "target@contoso.com"),
             ("SignInIdentifier", "sid-0001"),
-            ("ErrorReasonDetail", "The user could not be authenticated due to an invalid password or expired credential state on the account"),
+            (
+                "ErrorReasonDetail",
+                "The user could not be authenticated due to an invalid password or expired credential state on the account",
+            ),
         ];
         for (key, value) in noise_fields {
             map.insert(key.to_string(), json!(value));
@@ -956,7 +1104,10 @@ mod tests {
     fn summarize_query_compresses_realistic_45_column_signin_payload() {
         let rows: Vec<Value> = (0..25).map(wide_signin_row_45).collect();
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#1").expect("should summarize");
 
@@ -1083,18 +1234,33 @@ mod tests {
     fn summarize_detects_securityevent_table_and_keeps_eventid_and_computer() {
         let rows: Vec<Value> = (0..25).map(security_event_row).collect();
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#se").expect("should summarize");
         let top = summary["top"].as_array().expect("top is an array");
         let first = top[0].as_object().expect("row is an object");
 
-        assert!(first.contains_key("EventID"), "SecurityEvent priority list should keep EventID");
-        assert!(first.contains_key("Computer"), "SecurityEvent priority list should keep Computer");
-        assert!(!is_signal_key("EventID"), "EventID must not match the generic signal filter");
+        assert!(
+            first.contains_key("EventID"),
+            "SecurityEvent priority list should keep EventID"
+        );
+        assert!(
+            first.contains_key("Computer"),
+            "SecurityEvent priority list should keep Computer"
+        );
+        assert!(
+            !is_signal_key("EventID"),
+            "EventID must not match the generic signal filter"
+        );
 
         for noise_key in ["TenantId", "ResourceId", "CorrelationId", "col_noise_1"] {
-            assert!(!first.contains_key(noise_key), "noise key {noise_key} should be projected out");
+            assert!(
+                !first.contains_key(noise_key),
+                "noise key {noise_key} should be projected out"
+            );
         }
         assert!(first.len() <= MAX_PROJECTED_KEYS);
     }
@@ -1103,16 +1269,29 @@ mod tests {
     fn summarize_detects_cloudtrail_table_with_its_own_columns() {
         let rows: Vec<Value> = (0..25).map(cloudtrail_row).collect();
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#ct").expect("should summarize");
         let top = summary["top"].as_array().expect("top is an array");
         let first = top[0].as_object().expect("row is an object");
 
-        assert!(first.contains_key("EventName"), "CloudTrail priority list should keep EventName");
-        assert!(first.contains_key("SourceIpAddress"), "CloudTrail priority list should keep SourceIpAddress");
+        assert!(
+            first.contains_key("EventName"),
+            "CloudTrail priority list should keep EventName"
+        );
+        assert!(
+            first.contains_key("SourceIpAddress"),
+            "CloudTrail priority list should keep SourceIpAddress"
+        );
 
-        for signin_only_key in ["UserPrincipalName", "AppDisplayName", "ConditionalAccessStatus"] {
+        for signin_only_key in [
+            "UserPrincipalName",
+            "AppDisplayName",
+            "ConditionalAccessStatus",
+        ] {
             assert!(
                 !first.contains_key(signin_only_key),
                 "SigninLogs-only key {signin_only_key} should not appear in a CloudTrail projection"
@@ -1129,20 +1308,29 @@ mod tests {
             .insert("Type".to_string(), json!("SomethingElse"));
         let rows: Vec<Value> = (0..25).map(|_| row.clone()).collect();
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#unk").expect("should summarize");
         let top = summary["top"].as_array().expect("top is an array");
         let first = top[0].as_object().expect("row is an object");
 
-        assert!(!first.is_empty(), "unknown-table row should still project a non-empty result");
+        assert!(
+            !first.is_empty(),
+            "unknown-table row should still project a non-empty result"
+        );
         assert!(first.len() <= MAX_PROJECTED_KEYS);
     }
 
     #[test]
     fn trim_row_keeps_eventid_via_priority_bypass_of_signal_filter() {
         let row = security_event_row(1);
-        assert!(!is_signal_key("EventID"), "EventID must not match is_signal_key");
+        assert!(
+            !is_signal_key("EventID"),
+            "EventID must not match is_signal_key"
+        );
 
         let trimmed = trim_row(&row, SECURITYEVENT_PRIORITY);
         let trimmed_obj = trimmed.as_object().expect("trimmed row is an object");
@@ -1157,8 +1345,12 @@ mod tests {
         let neighbors: Vec<Value> = (0..50)
             .map(|i| json!({"edge": "Connect", "node": {"class": "IP", "value": format!("10.0.0.{i}")}}))
             .collect();
-        let resp = json!({ "entity": {"class": "User", "value": "a@b.com"}, "neighbors": neighbors });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        let resp =
+            json!({ "entity": {"class": "User", "value": "a@b.com"}, "neighbors": neighbors });
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/graph/neighbors", &resp, "hunt-x#2").expect("should summarize");
         assert_eq!(summary["_summary"], json!(true));
@@ -1198,7 +1390,10 @@ mod tests {
     #[test]
     fn aggregates_report_distinct_counts_and_top_n_for_key_columns() {
         let resp = signin_distribution_response();
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#agg1").expect("should summarize");
 
@@ -1207,7 +1402,10 @@ mod tests {
             summary["aggregates"]["ResultType"]["top"][0],
             json!({"value": "50126", "count": 12})
         );
-        assert_eq!(summary["aggregates"]["UserPrincipalName"]["distinct"], json!(7));
+        assert_eq!(
+            summary["aggregates"]["UserPrincipalName"]["distinct"],
+            json!(7)
+        );
     }
 
     #[test]
@@ -1231,11 +1429,17 @@ mod tests {
             })
             .collect();
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#agg2").expect("should summarize");
 
-        assert_eq!(summary["aggregates"]["UserIdentityArn"]["top"][0]["count"], json!(17));
+        assert_eq!(
+            summary["aggregates"]["UserIdentityArn"]["top"][0]["count"],
+            json!(17)
+        );
         assert_eq!(
             summary["aggregates"]["UserIdentityArn"]["top"][0]["value"],
             json!("arn:aws:iam::123456789012:user/dominant-actor")
@@ -1278,12 +1482,18 @@ mod tests {
             })
             .collect();
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
         assert!(rows.len() <= TOP_N, "fixture row_count must be <= TOP_N");
 
         let summary = summarize("/kql", &resp, "h#small").expect("should summarize");
 
-        assert!(summary.get("aggregates").is_none(), "small responses should have no aggregates field");
+        assert!(
+            summary.get("aggregates").is_none(),
+            "small responses should have no aggregates field"
+        );
         let top = summary["top"].as_array().expect("top is an array");
         assert_eq!(top.len(), 4, "top should still show every row");
     }
@@ -1350,7 +1560,10 @@ mod tests {
     fn summarize_projects_and_aggregates_signature_status_for_device_rows() {
         let rows: Vec<Value> = (0..25).map(device_process_event_row).collect();
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#sig").expect("should summarize");
         let top = summary["top"].as_array().expect("top is an array");
@@ -1364,7 +1577,9 @@ mod tests {
         assert_eq!(first["InitiatingProcessSignatureStatus"], json!("Unsigned"));
 
         assert!(
-            summary["aggregates"].get("InitiatingProcessSignatureStatus").is_some(),
+            summary["aggregates"]
+                .get("InitiatingProcessSignatureStatus")
+                .is_some(),
             "signer status column should be aggregated across all rows"
         );
     }
@@ -1414,7 +1629,10 @@ mod tests {
     fn summarize_promotes_signer_columns_into_full_device_row_projection() {
         let rows: Vec<Value> = (0..25).map(realistic_full_device_row).collect();
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
         assert!(
             rows[0].as_object().unwrap().len() > WIDE_ROW_KEYS,
             "fixture must exceed WIDE_ROW_KEYS to trigger projection"
@@ -1458,7 +1676,11 @@ mod tests {
         // in 20/25 rows (80%) — total must make that proportion computable.
         let rows: Vec<Value> = (0..25)
             .map(|i| {
-                let source = if i < 20 { "ec2.amazonaws.com" } else { "s3.amazonaws.com" };
+                let source = if i < 20 {
+                    "ec2.amazonaws.com"
+                } else {
+                    "s3.amazonaws.com"
+                };
                 json!({
                     "Type": "AWSCloudTrail",
                     "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
@@ -1469,7 +1691,10 @@ mod tests {
             })
             .collect();
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#total").expect("should summarize");
 
@@ -1503,7 +1728,10 @@ mod tests {
             })
             .collect();
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#rare").expect("should summarize");
 
@@ -1593,7 +1821,10 @@ mod tests {
             }));
         }
         let resp = json!({ "rows": rows, "row_count": rows.len() });
-        assert!(est_tokens(&resp) > THRESHOLD, "fixture must exceed THRESHOLD");
+        assert!(
+            est_tokens(&resp) > THRESHOLD,
+            "fixture must exceed THRESHOLD"
+        );
 
         let summary = summarize("/kql", &resp, "h#rare6").expect("should summarize");
 

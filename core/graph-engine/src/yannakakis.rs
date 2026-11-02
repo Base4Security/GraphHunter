@@ -129,9 +129,7 @@ impl Hypergraph {
         // its own unique var; explicit bindings are the only
         // mechanism that ties positions together.
         let mut position_to_var: Vec<u32> = match hypothesis.shape {
-            graph_hunter_dsl::hypothesis::HypothesisShape::Chain => {
-                (0..=n_steps as u32).collect()
-            }
+            graph_hunter_dsl::hypothesis::HypothesisShape::Chain => (0..=n_steps as u32).collect(),
             graph_hunter_dsl::hypothesis::HypothesisShape::Graph => {
                 // Two unique slots per step: one for origin, one
                 // for dest. Total = 2 * n_steps positions. We map
@@ -266,8 +264,7 @@ pub fn gyo_reduce(g: &Hypergraph) -> Option<Vec<usize>> {
         }
 
         // Vertex degree count over the alive edges.
-        let mut degree: std::collections::HashMap<VarId, usize> =
-            std::collections::HashMap::new();
+        let mut degree: std::collections::HashMap<VarId, usize> = std::collections::HashMap::new();
         for &i in &alive_edges {
             let (a, b) = g.edges[i].endpoints();
             *degree.entry(a).or_insert(0) += 1;
@@ -445,9 +442,7 @@ fn selectivity_join_tree(g: &Hypergraph, bags: &[Bag]) -> JoinTree {
         // still correct, just no shared key to prune on).
         let next = (0..n)
             .filter(|&i| !used[i])
-            .filter(|&i| {
-                covered.contains(&g.edges[i].origin) || covered.contains(&g.edges[i].dest)
-            })
+            .filter(|&i| covered.contains(&g.edges[i].origin) || covered.contains(&g.edges[i].dest))
             .min_by_key(|&i| bags[i].len())
             .or_else(|| (0..n).filter(|&i| !used[i]).min_by_key(|&i| bags[i].len()));
         let pick = next.expect("placed.len() < n guarantees an unused edge");
@@ -520,12 +515,7 @@ impl Bag {
 /// O(|E|) per step; identical work to what the DFS does inline,
 /// just batched up-front so the semi-join reducer can prune dead
 /// rows before enumeration runs.
-pub fn materialize_bag(
-    graph: &GraphHunter,
-    step: &HypothesisStep,
-    t_lo: i64,
-    t_hi: i64,
-) -> Bag {
+pub fn materialize_bag(graph: &GraphHunter, step: &HypothesisStep, t_lo: i64, t_hi: i64) -> Bag {
     let mut rows = Vec::new();
     graph.streaming.for_each_edge(|src_sid, edge| {
         if edge.timestamp < t_lo || edge.timestamp > t_hi {
@@ -546,10 +536,8 @@ pub fn materialize_bag(
             } else {
                 std::collections::HashMap::new()
             };
-            if !graph_hunter_dsl::hypothesis::all_predicates_match(
-                &step.edge_predicates,
-                &metadata,
-            ) {
+            if !graph_hunter_dsl::hypothesis::all_predicates_match(&step.edge_predicates, &metadata)
+            {
                 return;
             }
         }
@@ -598,8 +586,7 @@ pub fn semijoin_reduce_chain(bags: &mut [Bag]) {
     // Bottom-up pass: each bag[i] keeps only rows whose dest is
     // some origin in bag[i+1].
     for i in (0..n - 1).rev() {
-        let live_origins: HashSet<StrId> =
-            bags[i + 1].rows.iter().map(|r| r.origin).collect();
+        let live_origins: HashSet<StrId> = bags[i + 1].rows.iter().map(|r| r.origin).collect();
         bags[i].rows.retain(|r| live_origins.contains(&r.dest));
     }
 
@@ -706,7 +693,9 @@ pub fn enumerate_chain_from_prefix(
             out.push(result);
             return;
         }
-        let last = *path_sids.last().expect("path always has the chain start before recursing");
+        let last = *path_sids
+            .last()
+            .expect("path always has the chain start before recursing");
         let candidates = match by_origin[step_idx].get(&last) {
             Some(v) => v,
             None => return,
@@ -1002,12 +991,7 @@ fn enumerate_tree(
         true
     }
 
-    fn try_bind(
-        binding: &mut [Option<StrId>],
-        var: VarId,
-        value: StrId,
-        k: usize,
-    ) -> bool {
+    fn try_bind(binding: &mut [Option<StrId>], var: VarId, value: StrId, k: usize) -> bool {
         // Existing-binding check first. A separate scope releases
         // the &mut before we run the k_ok &-borrow.
         if let Some(existing) = binding[var.0 as usize] {
@@ -1221,14 +1205,7 @@ pub fn search_temporal_pattern_yannakakis_with_bags(
             // (see its doc), so this only changes speed, never the result set
             // — the end-to-end star test and the parity test pin that.
             let tree = selectivity_join_tree(&g, &bags);
-            enumerate_tree(
-                graph,
-                &g,
-                &tree,
-                &bags,
-                cap,
-                hypothesis.k_simplicity.max(1),
-            )
+            enumerate_tree(graph, &g, &tree, &bags, cap, hypothesis.k_simplicity.max(1))
         }
     };
     let truncated = paths.len() >= cap;
@@ -1299,25 +1276,13 @@ mod tests {
         //   step 1: B(b) -> C(c)      origin=b, dest=c   (b shared)
         //   step 2: C(c) -> A(a)      origin=c, dest=a   (a, c shared)
         // Variables collapse to {a, b, c}; edges {(a,b), (b,c), (c,a)}.
-        let mut step0 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step0 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step0.origin_binding = Some("a".into());
         step0.dest_binding = Some("b".into());
-        let mut step1 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step1 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step1.origin_binding = Some("b".into());
         step1.dest_binding = Some("c".into());
-        let mut step2 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step2 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step2.origin_binding = Some("c".into());
         step2.dest_binding = Some("a".into());
         let h = Hypothesis {
@@ -1325,7 +1290,10 @@ mod tests {
             ..Hypothesis::new("test")
         };
         let g = Hypergraph::of(&h);
-        assert_eq!(g.n_vars, 3, "triangle should collapse to 3 vars via bindings");
+        assert_eq!(
+            g.n_vars, 3,
+            "triangle should collapse to 3 vars via bindings"
+        );
         assert_eq!(g.edges.len(), 3);
         assert!(!is_alpha_acyclic(&g), "K_3 is the canonical cyclic example");
         assert!(JoinTree::build(&g).is_none());
@@ -1338,25 +1306,13 @@ mod tests {
         // HypothesisShape::Graph the auto-chain default is dropped,
         // so the three (c, leaf_i) pairs become three independent
         // hyperedges sharing the variable `c`.
-        let mut step0 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step0 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step0.origin_binding = Some("c".into());
         step0.dest_binding = Some("l0".into());
-        let mut step1 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step1 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step1.origin_binding = Some("c".into());
         step1.dest_binding = Some("l1".into());
-        let mut step2 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step2 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step2.origin_binding = Some("c".into());
         step2.dest_binding = Some("l2".into());
         let h = Hypothesis {
@@ -1374,8 +1330,7 @@ mod tests {
             assert_eq!(e.origin, center, "all star edges share center vertex");
         }
         // The three dest variables are pairwise distinct (l0, l1, l2).
-        let dests: std::collections::BTreeSet<VarId> =
-            g.edges.iter().map(|e| e.dest).collect();
+        let dests: std::collections::BTreeSet<VarId> = g.edges.iter().map(|e| e.dest).collect();
         assert_eq!(dests.len(), 3);
         // Star is α-acyclic and produces a 3-edge join tree.
         assert!(is_alpha_acyclic(&g));
@@ -1393,7 +1348,9 @@ mod tests {
         // result is still α-acyclic.
         let h = Hypothesis {
             steps: (0..3)
-                .map(|_| HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User))
+                .map(|_| {
+                    HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User)
+                })
                 .collect(),
             shape: graph_hunter_dsl::hypothesis::HypothesisShape::Graph,
             ..Hypothesis::new("disconnected")
@@ -1412,18 +1369,10 @@ mod tests {
         // The hypergraph collapses to two variables {a, b} with two
         // edges {(a,b), (b,a)} — degree-2 on both ends, so the GYO
         // step finds no ear and the result is correctly cyclic.
-        let mut step0 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step0 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step0.origin_binding = Some("a".into());
         step0.dest_binding = Some("b".into());
-        let mut step1 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step1 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step1.origin_binding = Some("b".into());
         step1.dest_binding = Some("a".into());
         let h = Hypothesis {
@@ -1504,8 +1453,7 @@ mod tests {
     fn yannakakis_chain_finds_3hop_path() {
         let g = small_chain_graph();
         let h = user_auth_chain(3);
-        let (paths, truncated) =
-            search_temporal_pattern_yannakakis(&g, &h, None, Some(10));
+        let (paths, truncated) = search_temporal_pattern_yannakakis(&g, &h, None, Some(10));
         assert!(!truncated);
         assert_eq!(paths.len(), 1, "exactly one 3-hop chain in the fixture");
         let p = &paths[0];
@@ -1534,7 +1482,10 @@ mod tests {
             .into_iter()
             .map(|p| p.iter().map(|s| s.to_string()).collect())
             .collect();
-        assert_eq!(yanni_set, dfs_set, "Yannakakis and DFS must enumerate the same path set");
+        assert_eq!(
+            yanni_set, dfs_set,
+            "Yannakakis and DFS must enumerate the same path set"
+        );
     }
 
     #[test]
@@ -1559,25 +1510,13 @@ mod tests {
             .unwrap();
         g.sort_edges_by_timestamp().unwrap();
 
-        let mut step0 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step0 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step0.origin_binding = Some("c".into());
         step0.dest_binding = Some("l0".into());
-        let mut step1 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step1 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step1.origin_binding = Some("c".into());
         step1.dest_binding = Some("l1".into());
-        let mut step2 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step2 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step2.origin_binding = Some("c".into());
         step2.dest_binding = Some("l2".into());
         // Default k_simplicity = 1 forces all bound vertices to be
@@ -1594,8 +1533,7 @@ mod tests {
             ..Hypothesis::new("star")
         };
 
-        let (paths, truncated) =
-            search_temporal_pattern_yannakakis(&g, &h, None, Some(100));
+        let (paths, truncated) = search_temporal_pattern_yannakakis(&g, &h, None, Some(100));
         assert!(!truncated);
         // The star has one unordered match {c, a, b, d}; the
         // enumerator's bindings can pair (l0, l1, l2) with any
@@ -1606,8 +1544,7 @@ mod tests {
         // which is the center "c".
         for p in &paths {
             assert_eq!(p.len(), 4);
-            let unique: std::collections::HashSet<&str> =
-                p.iter().map(|s| &**s).collect();
+            let unique: std::collections::HashSet<&str> = p.iter().map(|s| &**s).collect();
             assert_eq!(unique.len(), 4);
             assert!(unique.contains("c"));
             assert!(!unique.contains("extra"), "decoy must not appear");
@@ -1634,15 +1571,19 @@ mod tests {
             g.add_entity(Entity::new(p, EntityType::Process)).unwrap();
         }
         // Connect branch: 2 rows (one is a decoy from ip2).
-        g.add_relation(Relation::new("ip1", "h1", RelationType::Connect, 100)).unwrap();
-        g.add_relation(Relation::new("ip2", "h1", RelationType::Connect, 101)).unwrap();
+        g.add_relation(Relation::new("ip1", "h1", RelationType::Connect, 100))
+            .unwrap();
+        g.add_relation(Relation::new("ip2", "h1", RelationType::Connect, 101))
+            .unwrap();
         // Auth branch: 3 rows from ip1.
         for (u, t) in [("u1", 110i64), ("u2", 111), ("u3", 112)] {
-            g.add_relation(Relation::new("ip1", u, RelationType::Auth, t)).unwrap();
+            g.add_relation(Relation::new("ip1", u, RelationType::Auth, t))
+                .unwrap();
         }
         // Execute branch: 2 rows from ip1.
         for (p, t) in [("p1", 120i64), ("p2", 121)] {
-            g.add_relation(Relation::new("ip1", p, RelationType::Execute, t)).unwrap();
+            g.add_relation(Relation::new("ip1", p, RelationType::Execute, t))
+                .unwrap();
         }
         g.sort_edges_by_timestamp().unwrap();
 
@@ -1652,7 +1593,8 @@ mod tests {
         let mut s1 = HypothesisStep::new(EntityType::IP, RelationType::Auth, EntityType::User);
         s1.origin_binding = Some("c".into());
         s1.dest_binding = Some("l1".into());
-        let mut s2 = HypothesisStep::new(EntityType::IP, RelationType::Execute, EntityType::Process);
+        let mut s2 =
+            HypothesisStep::new(EntityType::IP, RelationType::Execute, EntityType::Process);
         s2.origin_binding = Some("c".into());
         s2.dest_binding = Some("l2".into());
         let h = Hypothesis {
@@ -1694,7 +1636,10 @@ mod tests {
         // A hand-made reversed order (still a valid permutation).
         let mut rev_nodes = gyo.nodes.clone();
         rev_nodes.reverse();
-        let rev = JoinTree { parent: vec![0; rev_nodes.len()], nodes: rev_nodes };
+        let rev = JoinTree {
+            parent: vec![0; rev_nodes.len()],
+            nodes: rev_nodes,
+        };
 
         let r_gyo = norm(&enumerate_tree(&g, &hg, &gyo, &bags, 1000, k));
         let r_sel = norm(&enumerate_tree(&g, &hg, &sel, &bags, 1000, k));
@@ -1703,7 +1648,12 @@ mod tests {
         assert_eq!(r_gyo, r_sel, "selectivity order changed the result set");
         assert_eq!(r_gyo, r_rev, "reversed order changed the result set");
         // Sanity: the star really does match (3 users × 2 processes).
-        assert_eq!(r_sel.len(), 6, "expected 6 star matches, got {}", r_sel.len());
+        assert_eq!(
+            r_sel.len(),
+            6,
+            "expected 6 star matches, got {}",
+            r_sel.len()
+        );
     }
 
     /// The order is a valid permutation, seeds the smallest bag, and is
@@ -1751,14 +1701,18 @@ mod tests {
         for n in ["a", "b", "c", "d"] {
             g.add_entity(Entity::new(n, EntityType::User)).unwrap();
         }
-        g.add_relation(Relation::new("a", "b", RelationType::Auth, 100)).unwrap();
-        g.add_relation(Relation::new("c", "d", RelationType::Auth, 110)).unwrap();
+        g.add_relation(Relation::new("a", "b", RelationType::Auth, 100))
+            .unwrap();
+        g.add_relation(Relation::new("c", "d", RelationType::Auth, 110))
+            .unwrap();
         g.sort_edges_by_timestamp().unwrap();
 
         // Two independent steps, no bindings → disconnected hypergraph.
         let h = Hypothesis {
             steps: (0..2)
-                .map(|_| HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User))
+                .map(|_| {
+                    HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User)
+                })
                 .collect(),
             shape: graph_hunter_dsl::hypothesis::HypothesisShape::Graph,
             ..Hypothesis::new("disconnected")
@@ -1787,8 +1741,7 @@ mod tests {
         let h = user_auth_chain(2);
         let (paths, _) = search_temporal_pattern_yannakakis(&g, &h, None, Some(10));
         assert_eq!(paths.len(), 2);
-        let starts: std::collections::HashSet<&str> =
-            paths.iter().map(|p| &*p[0]).collect();
+        let starts: std::collections::HashSet<&str> = paths.iter().map(|p| &*p[0]).collect();
         // Crucially, u1 → u5 (the decoy) cannot start a 2-hop, so
         // u5 never appears in any emitted path.
         for p in &paths {
@@ -1803,18 +1756,10 @@ mod tests {
         // free-connex requires α-acyclic AND head coverage.
         // Empty head trivially covered, but the alpha-acyclic
         // gate must still fail on cycles.
-        let mut step0 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step0 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step0.origin_binding = Some("a".into());
         step0.dest_binding = Some("b".into());
-        let mut step1 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step1 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step1.origin_binding = Some("b".into());
         step1.dest_binding = Some("a".into());
         let h = Hypothesis {

@@ -1,18 +1,15 @@
 use std::sync::Arc;
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::dto::entity::{NodeScopedRequest, SessionOnly};
 use graph_hunter_api::dto::graph_ops::{
     ComputeScoresRequest, EventsForNodeRequest, EventsPaginatedRequest, ExpandNodeRequest,
     PreviewFieldsRequest, SearchEntitiesRequest, SubgraphRequest,
 };
 use graph_hunter_api::dto::hunt::{
-    DiffHuntsRequest, GetHuntPageRequest, RunHuntBatchRequest, RunHuntBatchResponse,
-    RunHuntRequest,
+    DiffHuntsRequest, GetHuntPageRequest, RunHuntBatchRequest, RunHuntBatchResponse, RunHuntRequest,
 };
-use graph_hunter_api::GraphHunterApi;
-use graph_hunter_core::{
-    DedupMode, FieldConfig, FieldInfo, Hypothesis, Neighborhood,
-};
+use graph_hunter_core::{DedupMode, FieldConfig, FieldInfo, Hypothesis, Neighborhood};
 use tauri::State;
 
 use crate::error::CommandError;

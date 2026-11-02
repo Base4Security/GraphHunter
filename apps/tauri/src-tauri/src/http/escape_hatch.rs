@@ -6,9 +6,9 @@
 //! and system-generated collection KQL (graph_build/graph_propose) are
 //! unaffected — only free-text analyst KQL entering via POST /kql is gated.
 
-use axum::http::StatusCode;
 use axum::Json;
-use serde_json::{json, Value};
+use axum::http::StatusCode;
+use serde_json::{Value, json};
 
 /// Whether the raw-KQL escape hatch is enabled. Default: enabled. Only an
 /// explicit falsy value ("0"/"false"/"no"/"off", case-insensitive) disables it.

@@ -200,7 +200,12 @@ impl MetadataStore {
     /// Decodes the record at `offset`, handing each pair to `f`. Stops at
     /// the first malformed byte: a corrupt or out-of-range offset yields
     /// nothing (or a prefix), never a panic or a huge allocation.
-    fn visit<'a, F: FnMut(&'a str, Option<&'a str>)>(&'a self, offset: u64, want_values: bool, mut f: F) {
+    fn visit<'a, F: FnMut(&'a str, Option<&'a str>)>(
+        &'a self,
+        offset: u64,
+        want_values: bool,
+        mut f: F,
+    ) {
         if offset == 0 {
             return;
         }
@@ -466,7 +471,10 @@ mod tests {
         let mut s = MetadataStore::new();
         let mut offs = Vec::new();
         for i in 0..MAX_DICT_VALUES_PER_KEY + 100 {
-            offs.push((i, s.append(&meta(&[("log_id", &i.to_string()), ("type", "sepft")]))));
+            offs.push((
+                i,
+                s.append(&meta(&[("log_id", &i.to_string()), ("type", "sepft")])),
+            ));
         }
         assert!(s.dict_values_total <= MAX_DICT_VALUES_PER_KEY + 1);
         for (i, off) in offs {
@@ -484,7 +492,10 @@ mod tests {
             meta(&[
                 ("client_id", "RDJAkcTmOhU6SnZ0jzPjECXmV3nj7TjS"),
                 ("scope", "openid profile email read:current_user"),
-                ("log_id", &format!("9002026082202595762685800000000000000122337218437{i:07}")),
+                (
+                    "log_id",
+                    &format!("9002026082202595762685800000000000000122337218437{i:07}"),
+                ),
             ])
         };
         s.append(&row(0));

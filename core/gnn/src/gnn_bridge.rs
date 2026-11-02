@@ -158,11 +158,7 @@ pub fn extract_subgraph_features(
         node_features[base + 9] = (out_degree as f32 / K_MAX as f32).min(1.0);
 
         // Normalized in-degree (dim 10)
-        let in_degree = graph
-            .reverse_adj
-            .get(&sid)
-            .map(|r| r.len())
-            .unwrap_or(0);
+        let in_degree = graph.reverse_adj.get(&sid).map(|r| r.len()).unwrap_or(0);
         node_features[base + 10] = (in_degree as f32 / K_MAX as f32).min(1.0);
 
         // Anomaly scorer features (dims 11-13) — use 0.0 if scorer not available
@@ -281,7 +277,11 @@ fn app_bucket_index(app: &str) -> usize {
         0
     } else if a.contains("powershell") || a.contains("aad powershell") || a.contains("azure cli") {
         1
-    } else if a.contains("mobile") || a.contains("ios") || a.contains("android") || a.contains("outlook") {
+    } else if a.contains("mobile")
+        || a.contains("ios")
+        || a.contains("android")
+        || a.contains("outlook")
+    {
         2
     } else if a.contains("authenticator") || a.contains("auth agent") || a.contains("sso") {
         3
@@ -350,7 +350,9 @@ pub fn extract_subgraph_features_v2(
             if let Some(arc) = graph.streaming.neighbors_arc(sid) {
                 let g = arc.read();
                 for edge in g.as_slice() {
-                    if edge.rel_type_tag != 0 /* Auth */ {
+                    if edge.rel_type_tag != 0
+                    /* Auth */
+                    {
                         continue;
                     }
                     if edge.metadata_offset == 0 {

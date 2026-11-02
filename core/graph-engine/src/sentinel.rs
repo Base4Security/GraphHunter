@@ -619,7 +619,11 @@ impl SentinelJsonParser {
         if let Some(ip) = Self::extract_str(event, "IpAddress") {
             host_meta.insert("source_ip".into(), ip.into());
         }
-        let status = if event_id == 4624 { "Success" } else { "Failure" };
+        let status = if event_id == 4624 {
+            "Success"
+        } else {
+            "Failure"
+        };
         let mut rel_meta: HashMap<String, String> = HashMap::new();
         rel_meta.insert("event_id".into(), event_id.to_string());
         rel_meta.insert("status".into(), status.into());
@@ -1204,7 +1208,10 @@ impl LogParser for SentinelJsonParser {
     fn parse_raw_with_stats(
         &self,
         data: &str,
-    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+    ) -> (
+        Vec<crate::parser::RawIngestEvent>,
+        crate::parser::ParseStats,
+    ) {
         use rayon::prelude::*;
         let trimmed = data.trim();
 
@@ -1293,9 +1300,15 @@ pub fn sentinel_entity_targets(
     use crate::types::EntityType;
     match ty {
         EntityType::User => &[
-            ("SecurityEvent", &["TargetUserName", "Account", "SubjectUserName"]),
+            (
+                "SecurityEvent",
+                &["TargetUserName", "Account", "SubjectUserName"],
+            ),
             ("SigninLogs", &["UserPrincipalName", "UserDisplayName"]),
-            ("DeviceProcessEvents", &["AccountName", "InitiatingProcessAccountName"]),
+            (
+                "DeviceProcessEvents",
+                &["AccountName", "InitiatingProcessAccountName"],
+            ),
         ],
         EntityType::IP => &[
             ("SigninLogs", &["IPAddress"]),
@@ -1307,9 +1320,23 @@ pub fn sentinel_entity_targets(
             ("DeviceNetworkEvents", &["DeviceName"]),
         ],
         EntityType::Process => &[
-            ("SecurityEvent", &["NewProcessName", "ParentProcessName", "ProcessName", "Process"]),
-            ("DeviceProcessEvents", &["FolderPath", "FileName", "InitiatingProcessFolderPath"]),
-            ("DeviceFileEvents", &["InitiatingProcessFolderPath", "InitiatingProcessFileName"]),
+            (
+                "SecurityEvent",
+                &[
+                    "NewProcessName",
+                    "ParentProcessName",
+                    "ProcessName",
+                    "Process",
+                ],
+            ),
+            (
+                "DeviceProcessEvents",
+                &["FolderPath", "FileName", "InitiatingProcessFolderPath"],
+            ),
+            (
+                "DeviceFileEvents",
+                &["InitiatingProcessFolderPath", "InitiatingProcessFileName"],
+            ),
         ],
         EntityType::File => &[
             ("SecurityEvent", &["ObjectName"]),
@@ -1341,7 +1368,10 @@ pub fn build_hydration_kql(
     time_filter: &str,
     take: u32,
 ) -> String {
-    assert!(!columns.is_empty(), "build_hydration_kql: columns must not be empty");
+    assert!(
+        !columns.is_empty(),
+        "build_hydration_kql: columns must not be empty"
+    );
     let escaped = kql_escape(value);
     let predicate = columns
         .iter()
@@ -1368,7 +1398,9 @@ mod hydration_tests {
     #[test]
     fn targets_for_user_include_signin_upn() {
         let targets = sentinel_entity_targets(&EntityType::User);
-        let signin = targets.iter().find(|(t, _)| *t == "SigninLogs")
+        let signin = targets
+            .iter()
+            .find(|(t, _)| *t == "SigninLogs")
             .expect("User targets should include SigninLogs");
         assert!(signin.1.contains(&"UserPrincipalName"));
     }
@@ -1383,8 +1415,8 @@ mod hydration_tests {
     /// an entity *identifier* (not metadata), grouped by entity type. When a
     /// parser starts reading a new identifier column, add it here AND to
     /// `sentinel_entity_targets` — this test fails until both match.
-    fn parser_identifier_columns() -> &'static [(crate::types::EntityType, &'static str, &'static str)]
-    {
+    fn parser_identifier_columns()
+    -> &'static [(crate::types::EntityType, &'static str, &'static str)] {
         use crate::types::EntityType as E;
         &[
             (E::User, "SecurityEvent", "TargetUserName"),
@@ -1393,7 +1425,11 @@ mod hydration_tests {
             (E::User, "SigninLogs", "UserPrincipalName"),
             (E::User, "SigninLogs", "UserDisplayName"),
             (E::User, "DeviceProcessEvents", "AccountName"),
-            (E::User, "DeviceProcessEvents", "InitiatingProcessAccountName"),
+            (
+                E::User,
+                "DeviceProcessEvents",
+                "InitiatingProcessAccountName",
+            ),
             (E::IP, "SigninLogs", "IPAddress"),
             (E::IP, "DeviceNetworkEvents", "RemoteIP"),
             (E::IP, "CommonSecurityLog", "SourceIP"),
@@ -1406,8 +1442,16 @@ mod hydration_tests {
             (E::Process, "SecurityEvent", "Process"),
             (E::Process, "DeviceProcessEvents", "FolderPath"),
             (E::Process, "DeviceProcessEvents", "FileName"),
-            (E::Process, "DeviceProcessEvents", "InitiatingProcessFolderPath"),
-            (E::Process, "DeviceFileEvents", "InitiatingProcessFolderPath"),
+            (
+                E::Process,
+                "DeviceProcessEvents",
+                "InitiatingProcessFolderPath",
+            ),
+            (
+                E::Process,
+                "DeviceFileEvents",
+                "InitiatingProcessFolderPath",
+            ),
             (E::Process, "DeviceFileEvents", "InitiatingProcessFileName"),
             (E::File, "SecurityEvent", "ObjectName"),
             (E::File, "DeviceFileEvents", "FolderPath"),
@@ -1445,7 +1489,10 @@ mod hydration_tests {
             "where TimeGenerated > ago(1h)",
             100,
         );
-        assert!(kql.contains(r#"UserPrincipalName == "ev\"il""#), "value not escaped: {kql}");
+        assert!(
+            kql.contains(r#"UserPrincipalName == "ev\"il""#),
+            "value not escaped: {kql}"
+        );
     }
 
     #[test]
@@ -1487,11 +1534,13 @@ mod raw_line_tests {
         // Every produced event carries the original row.
         assert!(events.iter().all(|e| e.raw_line.is_some()));
         // The raw_line contains a field from the original row.
-        assert!(events[0]
-            .raw_line
-            .as_ref()
-            .unwrap()
-            .contains("TargetUserName"));
+        assert!(
+            events[0]
+                .raw_line
+                .as_ref()
+                .unwrap()
+                .contains("TargetUserName")
+        );
     }
 
     #[test]

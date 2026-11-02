@@ -102,11 +102,8 @@ impl GraphHunterApi {
                 // Cap at 10 to keep the per-subnet payload bounded —
                 // the long-tail ports are noise once the top
                 // categories are visible.
-                let top_services: Vec<String> = top
-                    .into_iter()
-                    .take(10)
-                    .map(|(name, _)| name)
-                    .collect();
+                let top_services: Vec<String> =
+                    top.into_iter().take(10).map(|(name, _)| name).collect();
 
                 result.push(SubnetGroup {
                     subnet,

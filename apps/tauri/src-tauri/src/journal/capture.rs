@@ -114,8 +114,14 @@ mod tests {
             12,
             &req,
             &resp,
-            GraphCounts { entities: 0, relations: 0 },
-            GraphCounts { entities: 0, relations: 0 },
+            GraphCounts {
+                entities: 0,
+                relations: 0,
+            },
+            GraphCounts {
+                entities: 0,
+                relations: 0,
+            },
             "h#0",
         );
         assert_eq!(ev.kind, "query");
@@ -137,8 +143,14 @@ mod tests {
             5,
             &Value::Null,
             &json!({"new_entities": 8, "new_relations": 227}),
-            GraphCounts { entities: 10, relations: 20 },
-            GraphCounts { entities: 18, relations: 247 },
+            GraphCounts {
+                entities: 10,
+                relations: 20,
+            },
+            GraphCounts {
+                entities: 18,
+                relations: 247,
+            },
             "h#0",
         );
         assert_eq!(ev.kind, "build");
@@ -173,11 +185,20 @@ mod tests {
             10,
             &Value::Null,
             &resp,
-            GraphCounts { entities: 0, relations: 0 },
-            GraphCounts { entities: 0, relations: 0 },
+            GraphCounts {
+                entities: 0,
+                relations: 0,
+            },
+            GraphCounts {
+                entities: 0,
+                relations: 0,
+            },
             "h#1",
         );
-        assert!(ev.result.summary.is_some(), "large response should be summarized");
+        assert!(
+            ev.result.summary.is_some(),
+            "large response should be summarized"
+        );
         let summary = ev.result.summary.as_ref().unwrap();
         assert_eq!(summary["_summary"], json!(true));
         assert_eq!(summary["detail_ref"], json!("h#1"));
@@ -214,12 +235,21 @@ mod tests {
             10,
             &Value::Null,
             &resp,
-            GraphCounts { entities: 0, relations: 0 },
-            GraphCounts { entities: 0, relations: 0 },
+            GraphCounts {
+                entities: 0,
+                relations: 0,
+            },
+            GraphCounts {
+                entities: 0,
+                relations: 0,
+            },
             "h#secret",
         );
 
-        assert!(ev.result.summary.is_some(), "large response should be summarized");
+        assert!(
+            ev.result.summary.is_some(),
+            "large response should be summarized"
+        );
         let serialized = serde_json::to_string(&ev.result.summary).unwrap();
         assert!(
             !serialized.contains("SECRET-XYZ"),
@@ -241,8 +271,14 @@ mod tests {
             10,
             &Value::Null,
             &resp,
-            GraphCounts { entities: 0, relations: 0 },
-            GraphCounts { entities: 0, relations: 0 },
+            GraphCounts {
+                entities: 0,
+                relations: 0,
+            },
+            GraphCounts {
+                entities: 0,
+                relations: 0,
+            },
             "h#2",
         );
         assert!(ev.result.summary.is_none());
@@ -271,8 +307,14 @@ mod tests {
             10,
             &Value::Null,
             &resp,
-            GraphCounts { entities: 0, relations: 0 },
-            GraphCounts { entities: 0, relations: 0 },
+            GraphCounts {
+                entities: 0,
+                relations: 0,
+            },
+            GraphCounts {
+                entities: 0,
+                relations: 0,
+            },
             "h#touched",
         );
 

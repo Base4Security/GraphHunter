@@ -24,14 +24,9 @@
 //!     --manifest-path platform/api/Cargo.toml
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use graph_hunter_api::{
-    GraphHunterApi,
-    dto::hunt::RunHuntBatchRequest,
-    state::Session,
-};
+use graph_hunter_api::{GraphHunterApi, dto::hunt::RunHuntBatchRequest, state::Session};
 use graph_hunter_core::{
-    GraphHunter, Hypothesis, HypothesisStep,
-    generate_barabasi_albert,
+    GraphHunter, Hypothesis, HypothesisStep, generate_barabasi_albert,
     types::{EntityType, RelationType},
 };
 use std::sync::Arc;

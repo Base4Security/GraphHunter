@@ -319,25 +319,31 @@ mod tests {
     fn graph_summary_surfaces_last_build() {
         use crate::dto::session::CreateSessionRequest;
         let api = GraphHunterApi::new_noop();
-        api.create_session(CreateSessionRequest { name: Some("lb-test".into()) }).unwrap();
+        api.create_session(CreateSessionRequest {
+            name: Some("lb-test".into()),
+        })
+        .unwrap();
         // No build yet → last_build absent.
-        let before = api.get_graph_summary(GraphSummaryRequest::default()).unwrap();
+        let before = api
+            .get_graph_summary(GraphSummaryRequest::default())
+            .unwrap();
         assert!(before.last_build.is_none());
 
         // Record a build, then it must surface in the summary (§5).
         {
             let session = api.resolve_session(None).unwrap();
-            *session.last_build.write().unwrap() =
-                Some(crate::dto::sentinel::BuildRecord {
-                    build_id: "build-abc123".into(),
-                    proposal_id: "signinlogs-user-ip".into(),
-                    at: 1_700_000_000,
-                    entities_created: 1238,
-                    relations_created: 4791,
-                    merge_mode: "append".into(),
-                });
+            *session.last_build.write().unwrap() = Some(crate::dto::sentinel::BuildRecord {
+                build_id: "build-abc123".into(),
+                proposal_id: "signinlogs-user-ip".into(),
+                at: 1_700_000_000,
+                entities_created: 1238,
+                relations_created: 4791,
+                merge_mode: "append".into(),
+            });
         }
-        let after = api.get_graph_summary(GraphSummaryRequest::default()).unwrap();
+        let after = api
+            .get_graph_summary(GraphSummaryRequest::default())
+            .unwrap();
         let lb = after.last_build.expect("last_build surfaced");
         assert_eq!(lb.build_id, "build-abc123");
         assert_eq!(lb.relations_created, 4791);

@@ -229,12 +229,7 @@ mod tests {
     fn node_preserves_metadata() {
         let mut meta = HashMap::new();
         meta.insert("key".to_string(), "value".to_string());
-        let node = SubgraphNode::new(
-            "10.0.0.1".to_string(),
-            "IP".to_string(),
-            99.5,
-            meta,
-        );
+        let node = SubgraphNode::new("10.0.0.1".to_string(), "IP".to_string(), 99.5, meta);
         assert_eq!(node.score, 99.5);
         assert_eq!(node.metadata.get("key").map(|s| s.as_str()), Some("value"));
     }

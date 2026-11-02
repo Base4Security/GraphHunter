@@ -207,14 +207,10 @@ impl GraphHunterApi {
                 // starts with a clean completeness record; any
                 // incompleteness from the ingest that originally
                 // produced this saved graph is not reconstructable here.
-                ingest_coverage: std::sync::RwLock::new(
-                    crate::coverage::IngestCoverage::default(),
-                ),
+                ingest_coverage: std::sync::RwLock::new(crate::coverage::IngestCoverage::default()),
                 // Not persisted — same ephemeral policy as `ingest_coverage`
                 // above: a reloaded session starts with a clean breaker.
-                source_coverage: std::sync::RwLock::new(
-                    crate::coverage::SourceCoverage::default(),
-                ),
+                source_coverage: std::sync::RwLock::new(crate::coverage::SourceCoverage::default()),
             });
             self.sessions().insert(session);
         }
@@ -474,12 +470,13 @@ fn load_binary_into_graph<R: std::io::Read>(
 
     let mut graph = GraphHunter::new();
 
-    let mut entity_iter = EntityReader::new(reader)
-        .map_err(|e| ApiError::InvalidInput(format!(
+    let mut entity_iter = EntityReader::new(reader).map_err(|e| {
+        ApiError::InvalidInput(format!(
             "session '{}' data could not be read — it was likely saved by an incompatible \
              GraphHunter version (body format mismatch): {e}",
             header.name
-        )))?;
+        ))
+    })?;
     let entity_count = entity_iter.count() as usize;
     let entity_stride = progress_stride(entity_count);
     emitter.emit(
@@ -488,14 +485,13 @@ fn load_binary_into_graph<R: std::io::Read>(
     );
     graph.reserve(entity_count, 0);
     let mut i = 0usize;
-    while let Some(entity) = entity_iter
-        .next()
-        .map_err(|e| ApiError::InvalidInput(format!(
+    while let Some(entity) = entity_iter.next().map_err(|e| {
+        ApiError::InvalidInput(format!(
             "session '{}' data could not be read — it was likely saved by an incompatible \
              GraphHunter version (body format mismatch): {e}",
             header.name
-        )))?
-    {
+        ))
+    })? {
         let _ = graph.add_entity(entity);
         i += 1;
         if i % entity_stride == 0 {
@@ -510,12 +506,14 @@ fn load_binary_into_graph<R: std::io::Read>(
         json_progress("entities", entity_count, entity_count),
     );
 
-    let mut relation_iter = RelationReader::new(reader, header.body_format_version)
-        .map_err(|e| ApiError::InvalidInput(format!(
-            "session '{}' data could not be read — it was likely saved by an incompatible \
+    let mut relation_iter =
+        RelationReader::new(reader, header.body_format_version).map_err(|e| {
+            ApiError::InvalidInput(format!(
+                "session '{}' data could not be read — it was likely saved by an incompatible \
              GraphHunter version (body format mismatch): {e}",
-            header.name
-        )))?;
+                header.name
+            ))
+        })?;
     let relation_count = relation_iter.count() as usize;
     let relation_stride = progress_stride(relation_count);
     emitter.emit(
@@ -523,14 +521,13 @@ fn load_binary_into_graph<R: std::io::Read>(
         json_progress("relations", 0, relation_count),
     );
     let mut i = 0usize;
-    while let Some(rel) = relation_iter
-        .next()
-        .map_err(|e| ApiError::InvalidInput(format!(
+    while let Some(rel) = relation_iter.next().map_err(|e| {
+        ApiError::InvalidInput(format!(
             "session '{}' data could not be read — it was likely saved by an incompatible \
              GraphHunter version (body format mismatch): {e}",
             header.name
-        )))?
-    {
+        ))
+    })? {
         // Preserve the relation's own ingested_at (the real receive time
         // captured at save) instead of add_relation's now-stamp — a
         // reloaded session must not silently rewrite every edge's
@@ -762,9 +759,8 @@ mod tests {
 
     #[test]
     fn load_accepts_current_body_version_empty_body() {
-        let buf = framed_session_with_body_version(
-            crate::state::session_binary::BODY_FORMAT_VERSION,
-        );
+        let buf =
+            framed_session_with_body_version(crate::state::session_binary::BODY_FORMAT_VERSION);
         let mut cur = std::io::Cursor::new(buf);
         let (_g, file, e, r) = load_binary_into_graph(&mut cur, &test_emitter())
             .expect("current-version empty body must load");
@@ -775,14 +771,13 @@ mod tests {
 
     #[test]
     fn load_maps_corrupt_body_to_clear_message() {
-        let mut buf = framed_session_with_body_version(
-            crate::state::session_binary::BODY_FORMAT_VERSION,
-        );
-        let header_len = buf.len() - 16;      // strip the two 0u64 we appended
+        let mut buf =
+            framed_session_with_body_version(crate::state::session_binary::BODY_FORMAT_VERSION);
+        let header_len = buf.len() - 16; // strip the two 0u64 we appended
         buf.truncate(header_len);
         buf.extend_from_slice(&1u64.to_le_bytes()); // entity_count = 1
         buf.extend_from_slice(&8u32.to_le_bytes()); // record len = 8
-        buf.extend_from_slice(&[0xFF; 8]);          // garbage payload
+        buf.extend_from_slice(&[0xFF; 8]); // garbage payload
         let mut cur = std::io::Cursor::new(buf);
         let err = match load_binary_into_graph(&mut cur, &test_emitter()) {
             Err(e) => e,

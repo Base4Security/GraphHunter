@@ -34,7 +34,11 @@ pub struct GraphDelta {
 
 impl GraphDelta {
     pub fn new(event: RawIngestEvent, event_id: String, dataset_id: Option<String>) -> Self {
-        GraphDelta { event, event_id, dataset_id }
+        GraphDelta {
+            event,
+            event_id,
+            dataset_id,
+        }
     }
 }
 

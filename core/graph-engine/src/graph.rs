@@ -160,8 +160,7 @@ pub struct GraphHunter {
     /// `streaming_snapshot().neighbors_arc(sid)` to skip the
     /// per-frame outer-table `RwLock` acquire that
     /// `streaming.neighbors_arc(sid)` performs.
-    pub(crate) streaming_snapshot:
-        std::sync::OnceLock<crate::streaming::FrozenSnapshot>,
+    pub(crate) streaming_snapshot: std::sync::OnceLock<crate::streaming::FrozenSnapshot>,
     /// D3 stage 3 — monotonic mutation counter. Bumped on every
     /// edge / entity ingestion or removal. External caches keyed
     /// on this counter (e.g. the per-Session LFTJ trie cache in
@@ -610,8 +609,7 @@ impl GraphHunter {
         let reverse_adj_view: &ahash::HashMap<StrId, Vec<StrId>> = &self.reverse_adj;
         let reverse_adj_ptr: *const ahash::HashMap<StrId, Vec<StrId>> = reverse_adj_view;
         if let Some(reach) = self.khop_reach.get_mut() {
-            let reverse_adj_safe: &ahash::HashMap<StrId, Vec<StrId>> =
-                unsafe { &*reverse_adj_ptr };
+            let reverse_adj_safe: &ahash::HashMap<StrId, Vec<StrId>> = unsafe { &*reverse_adj_ptr };
             if reach.try_record_edge_delta(
                 src_sid,
                 &streaming_handle,
@@ -776,9 +774,8 @@ impl GraphHunter {
             .iter()
             .map(|edge| {
                 // SAFETY: layout-identical with CompactRelation.
-                let compact: CompactRelation = unsafe {
-                    std::ptr::read(edge as *const _ as *const CompactRelation)
-                };
+                let compact: CompactRelation =
+                    unsafe { std::ptr::read(edge as *const _ as *const CompactRelation) };
                 self.materialize_relation(&compact)
             })
             .collect()
@@ -962,11 +959,9 @@ impl GraphHunter {
     fn push_to_streaming(&self, compact: &CompactRelation) -> Result<(), GraphError> {
         // SAFETY: CompactRelation and StreamEdge are both
         // #[repr(C)] with identical field order and types.
-        let edge: crate::streaming::StreamEdge = unsafe {
-            std::ptr::read(compact as *const _ as *const crate::streaming::StreamEdge)
-        };
-        self.streaming
-            .append_edge_checked(compact.source_sid, edge)
+        let edge: crate::streaming::StreamEdge =
+            unsafe { std::ptr::read(compact as *const _ as *const crate::streaming::StreamEdge) };
+        self.streaming.append_edge_checked(compact.source_sid, edge)
     }
 
     /// Internal: get compact relations by StrId and type.
@@ -1172,11 +1167,7 @@ impl GraphHunter {
         };
         match plan {
             crate::planner::DispatchPlan::TriangleLftj => {
-                return self.search_temporal_pattern_triangle(
-                    hypothesis,
-                    time_window,
-                    max_results,
-                );
+                return self.search_temporal_pattern_triangle(hypothesis, time_window, max_results);
             }
             crate::planner::DispatchPlan::K4Lftj => {
                 return self.search_temporal_pattern_k4_lftj(hypothesis, time_window, max_results);
@@ -1188,13 +1179,12 @@ impl GraphHunter {
                 return self.search_temporal_pattern_c6_lftj(hypothesis, time_window, max_results);
             }
             crate::planner::DispatchPlan::Yannakakis => {
-                let (paths, truncated) =
-                    crate::yannakakis::search_temporal_pattern_yannakakis(
-                        self,
-                        hypothesis,
-                        time_window,
-                        max_results,
-                    );
+                let (paths, truncated) = crate::yannakakis::search_temporal_pattern_yannakakis(
+                    self,
+                    hypothesis,
+                    time_window,
+                    max_results,
+                );
                 let paths = self.apply_aggregation(paths, hypothesis);
                 return Ok((paths, truncated));
             }
@@ -1405,7 +1395,11 @@ impl GraphHunter {
         let trie = self.build_lftj_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
         self.search_temporal_pattern_k4_lftj_with_trie(
-            hypothesis, &trie, &ts_map, time_window, max_results,
+            hypothesis,
+            &trie,
+            &ts_map,
+            time_window,
+            max_results,
         )
     }
 
@@ -1450,7 +1444,12 @@ impl GraphHunter {
         let reverse = self.build_lftj_reverse_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &forward);
         self.search_temporal_pattern_c6_lftj_with_trie(
-            hypothesis, &forward, &reverse, &ts_map, time_window, max_results,
+            hypothesis,
+            &forward,
+            &reverse,
+            &ts_map,
+            time_window,
+            max_results,
         )
     }
 
@@ -1491,7 +1490,11 @@ impl GraphHunter {
         let trie = self.build_lftj_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
         self.search_temporal_pattern_k5_lftj_with_trie(
-            hypothesis, &trie, &ts_map, time_window, max_results,
+            hypothesis,
+            &trie,
+            &ts_map,
+            time_window,
+            max_results,
         )
     }
 
@@ -1528,7 +1531,11 @@ impl GraphHunter {
         let trie = self.build_lftj_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
         self.search_temporal_pattern_triangle_with_trie(
-            hypothesis, &trie, &ts_map, time_window, max_results,
+            hypothesis,
+            &trie,
+            &ts_map,
+            time_window,
+            max_results,
         )
     }
 
@@ -1563,10 +1570,7 @@ impl GraphHunter {
     /// Note that the caller already knows the hypothesis routes
     /// to LFTJ — this helper only decides whether the trie should
     /// be filtered, not whether LFTJ applies.
-    pub fn build_lftj_trie_for(
-        &self,
-        hypothesis: &Hypothesis,
-    ) -> crate::lftj::MaterializedCsrTrie {
+    pub fn build_lftj_trie_for(&self, hypothesis: &Hypothesis) -> crate::lftj::MaterializedCsrTrie {
         if let Some((rel_tag, ent_tag)) = self.homogeneous_lftj_signature(hypothesis) {
             crate::lftj::MaterializedCsrTrie::build_filtered(self, |src_sid, edge| {
                 if edge.rel_type_tag != rel_tag {
@@ -1650,10 +1654,7 @@ impl GraphHunter {
         ) {
             return None;
         }
-        if matches!(
-            first.origin_type,
-            EntityType::Any | EntityType::Other(_)
-        ) {
+        if matches!(first.origin_type, EntityType::Any | EntityType::Other(_)) {
             return None;
         }
         if first.origin_type != first.dest_type {
@@ -1847,11 +1848,7 @@ impl GraphHunter {
         // Per-thread state used by both branches: a top-K min-heap plus
         // two DFS scratch buffers. C0 dropped the visit_count HashMap.
         let _ = visit_cap;
-        type SmartChunk = (
-            SmartHeap,
-            Vec<StrId>,
-            Vec<AnomalyFrame>,
-        );
+        type SmartChunk = (SmartHeap, Vec<StrId>, Vec<AnomalyFrame>);
         let init_chunk = || -> SmartChunk {
             (
                 BinaryHeap::with_capacity(top_k + 1),
@@ -1888,8 +1885,7 @@ impl GraphHunter {
                 .par_iter()
                 .with_min_len(256)
                 .fold(init_chunk, |mut chunk, &start_sid| {
-                    let (heap, path, stack) =
-                        (&mut chunk.0, &mut chunk.1, &mut chunk.2);
+                    let (heap, path, stack) = (&mut chunk.0, &mut chunk.1, &mut chunk.2);
                     self.dfs_match_smart(
                         start_sid,
                         &hypothesis.steps,
@@ -2938,9 +2934,8 @@ impl GraphHunter {
         self.streaming.for_each_edge(|_src, edge| {
             if ds_tag.map_or(true, |tag| edge.dataset_tag != tag) {
                 // SAFETY: layout-identical (#[repr(C)]).
-                let compact: CompactRelation = unsafe {
-                    std::ptr::read(edge as *const _ as *const CompactRelation)
-                };
+                let compact: CompactRelation =
+                    unsafe { std::ptr::read(edge as *const _ as *const CompactRelation) };
                 kept.push(compact);
             }
         });
@@ -3038,9 +3033,8 @@ impl GraphHunter {
         let mut relations: Vec<Relation> = Vec::new();
         self.streaming.for_each_edge(|_src, edge| {
             // SAFETY: layout-identical with CompactRelation.
-            let compact: CompactRelation = unsafe {
-                std::ptr::read(edge as *const _ as *const CompactRelation)
-            };
+            let compact: CompactRelation =
+                unsafe { std::ptr::read(edge as *const _ as *const CompactRelation) };
             relations.push(self.materialize_relation(&compact));
         });
         (entities, relations)
@@ -3300,7 +3294,16 @@ impl GraphHunter {
         let mut seen: HashSet<StrId> = HashSet::new();
         seen.insert(from);
         let mut chain: Vec<StrId> = vec![from];
-        self.gap_walk(from, floor, delta, g, time_window, &mut seen, &mut chain, &mut out);
+        self.gap_walk(
+            from,
+            floor,
+            delta,
+            g,
+            time_window,
+            &mut seen,
+            &mut chain,
+            &mut out,
+        );
         out
     }
 
@@ -3338,7 +3341,16 @@ impl GraphHunter {
             out.push((next, ts));
             seen.insert(next);
             chain.push(next);
-            self.gap_walk(next, ts, delta, remaining - 1, time_window, seen, chain, out);
+            self.gap_walk(
+                next,
+                ts,
+                delta,
+                remaining - 1,
+                time_window,
+                seen,
+                chain,
+                out,
+            );
             chain.pop();
             seen.remove(&next);
         }
@@ -3360,7 +3372,11 @@ impl GraphHunter {
         results: &mut Vec<HuntResult>,
     ) {
         if step_idx >= steps.len() {
-            results.push(path.iter().map(|&sid| self.interner.resolve_arc(sid)).collect());
+            results.push(
+                path.iter()
+                    .map(|&sid| self.interner.resolve_arc(sid))
+                    .collect(),
+            );
             return;
         }
         if results.len() >= cap {
@@ -3371,8 +3387,7 @@ impl GraphHunter {
         // Candidate origins for this step: `cur`, plus anything reachable
         // from it across a wildcard gap. Dedup on vertex, keeping the
         // earliest reach timestamp so the tightest monotonicity bound wins.
-        let mut origins: std::collections::HashMap<StrId, i64> =
-            std::collections::HashMap::new();
+        let mut origins: std::collections::HashMap<StrId, i64> = std::collections::HashMap::new();
         for (v, ts) in self.gap_frontier(cur, last_ts, delta, g, time_window) {
             origins
                 .entry(v)
@@ -3928,15 +3943,11 @@ impl GraphHunter {
                     .or_default()
                     .entry(hour)
                     .or_insert(0) += 1;
-                let min = type_min
-                    .entry(type_name.clone())
-                    .or_insert(edge.timestamp);
+                let min = type_min.entry(type_name.clone()).or_insert(edge.timestamp);
                 if edge.timestamp < *min {
                     *min = edge.timestamp;
                 }
-                let max = type_max
-                    .entry(type_name.clone())
-                    .or_insert(edge.timestamp);
+                let max = type_max.entry(type_name.clone()).or_insert(edge.timestamp);
                 if edge.timestamp > *max {
                     *max = edge.timestamp;
                 }
@@ -3971,9 +3982,8 @@ impl GraphHunter {
             // SAFETY: StreamEdge is layout-compatible with
             // CompactRelation; copy by transmute since both are
             // 32-byte #[repr(C)] structs with identical fields.
-            let mut compact: CompactRelation = unsafe {
-                std::ptr::read(edge as *const _ as *const CompactRelation)
-            };
+            let mut compact: CompactRelation =
+                unsafe { std::ptr::read(edge as *const _ as *const CompactRelation) };
             // for_each_edge gives us the source from the table key;
             // streaming carries source_sid in the StreamEdge too,
             // but assert agreement defensively.
@@ -4037,8 +4047,7 @@ impl GraphHunter {
         self.reverse_adj.clear();
         self.meta_store = MetadataStore::new();
 
-        let all_edges: Vec<(Relation, u32)> =
-            keep_edges.into_iter().chain(summary_edges).collect();
+        let all_edges: Vec<(Relation, u32)> = keep_edges.into_iter().chain(summary_edges).collect();
         for (rel, ingested_at_delta) in all_edges {
             let src_sid = self.interner.intern(&rel.source_id);
             let dst_sid = self.interner.intern(&rel.dest_id);
@@ -4136,14 +4145,21 @@ mod tests {
     #[test]
     fn empty_other_rel_type_roundtrips_without_key() {
         let mut g = GraphHunter::new();
-        g.insert_triples(vec![(
-            Entity::new("a", EntityType::IP),
-            Relation::new("a", "b", RelationType::Other(String::new()), 7),
-            Entity::new("b", EntityType::IP),
-        )], None).unwrap();
+        g.insert_triples(
+            vec![(
+                Entity::new("a", EntityType::IP),
+                Relation::new("a", "b", RelationType::Other(String::new()), 7),
+                Entity::new("b", EntityType::IP),
+            )],
+            None,
+        )
+        .unwrap();
         let rels = g.get_relations("a");
         // Other("") injects no _rel_type; round-trips back to Other("").
-        assert!(rels.iter().any(|r| matches!(&r.rel_type, RelationType::Other(n) if n.is_empty())));
+        assert!(
+            rels.iter()
+                .any(|r| matches!(&r.rel_type, RelationType::Other(n) if n.is_empty()))
+        );
         assert!(rels.iter().all(|r| !r.metadata.contains_key("_rel_type")));
     }
 
@@ -4236,7 +4252,10 @@ mod tests {
         let _ = g.search_temporal_pattern(&warmup, None, None);
 
         // Both indexes must be populated after the hunt.
-        assert!(g.nlf.get().is_some(), "NLF must be built after warm-up hunt");
+        assert!(
+            g.nlf.get().is_some(),
+            "NLF must be built after warm-up hunt"
+        );
         assert!(
             g.khop_reach.get().is_some(),
             "khop_reach must be built after warm-up hunt"
@@ -4367,7 +4386,10 @@ mod tests {
         // ds-b tail edge was silently dropped in the rebuild.
         let (entities_removed, relations_removed) =
             g.remove_entities_and_relations_by_dataset("ds-a").unwrap();
-        assert_eq!(relations_removed, 1, "should remove exactly the 1 ds-a edge");
+        assert_eq!(
+            relations_removed, 1,
+            "should remove exactly the 1 ds-a edge"
+        );
         assert!(entities_removed >= 1, "at least one ds-a entity removed");
 
         // After removal, ds-b edges must be intact (both base + tail).
@@ -4451,7 +4473,11 @@ mod tests {
             .expect("user insert");
 
         // Grand-total node counter must equal 6.
-        assert_eq!(g.entity_count(), 6, "entity_count() must equal total inserted");
+        assert_eq!(
+            g.entity_count(),
+            6,
+            "entity_count() must equal total inserted"
+        );
 
         // Collect the per-type map (sorted by name, so deterministic).
         let counts: std::collections::HashMap<String, usize> =
@@ -4469,7 +4495,11 @@ mod tests {
             .expect("late ip insert");
         let counts2: std::collections::HashMap<String, usize> =
             g.entity_type_counts().into_iter().collect();
-        assert_eq!(counts2.get("IP").copied().unwrap_or(0), 4, "IP count after late insert");
+        assert_eq!(
+            counts2.get("IP").copied().unwrap_or(0),
+            4,
+            "IP count after late insert"
+        );
         assert_eq!(g.entity_count(), 7, "entity_count() after late insert");
     }
 
@@ -4495,7 +4525,11 @@ mod tests {
         let mut g = GraphHunter::new();
         // insert 3 events with timestamps 100, 300, 200 (unsorted on purpose)
         g.insert_raw_events(
-            vec![ev("u1", "h1", 100), ev("u2", "h2", 300), ev("u3", "h3", 200)],
+            vec![
+                ev("u1", "h1", 100),
+                ev("u2", "h2", 300),
+                ev("u3", "h3", 200),
+            ],
             None,
         )
         .unwrap();

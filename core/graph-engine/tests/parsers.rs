@@ -256,7 +256,8 @@ timestamp,computer,image,queryname,user
         "canonical Domain id must be lowercased; got {ids:?}"
     );
     assert!(
-        !ids.iter().any(|id| id.contains("DC01") || id.contains("EXAMPLE")),
+        !ids.iter()
+            .any(|id| id.contains("DC01") || id.contains("EXAMPLE")),
         "no uppercase host/domain ids may remain; got {ids:?}"
     );
     let _ = RelationType::Connect;

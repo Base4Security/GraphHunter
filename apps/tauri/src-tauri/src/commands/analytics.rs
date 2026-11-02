@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::dto::analytics::{
     CompactRequest, ComputeBetweennessRequest, ComputeCompositeScoresRequest,
     ComputePagerankRequest, TemporalHeatmapRequest, TimelineDataRequest,
@@ -8,7 +9,6 @@ use graph_hunter_api::dto::anomaly::{
     ComputeGnnScoresRequest, EnableAnomalyScoringRequest, GetAnomalyConfigRequest,
     LoadGnnModelRequest, UpdateAnomalyWeightsRequest,
 };
-use graph_hunter_api::GraphHunterApi;
 use graph_hunter_core::{CompactionStats, ScoringWeights};
 use tauri::State;
 
@@ -122,9 +122,7 @@ pub fn cmd_compact(
 /// Test the local HTTP API by GET /health and report on-demand
 /// enrichment capabilities. Delegates to the canonical API.
 #[tauri::command]
-pub fn cmd_test_http_api(
-    api: State<Arc<GraphHunterApi>>,
-) -> Result<ApiTestResult, CommandError> {
+pub fn cmd_test_http_api(api: State<Arc<GraphHunterApi>>) -> Result<ApiTestResult, CommandError> {
     api.test_http_api().map_err(CommandError::from)
 }
 

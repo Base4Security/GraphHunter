@@ -4,8 +4,8 @@ pub mod error;
 pub mod evtx;
 pub mod format_registry;
 pub mod helpers;
-pub mod journal;
 mod http;
+pub mod journal;
 pub mod scoring;
 pub mod sentinel_connector;
 pub mod state;
@@ -86,10 +86,14 @@ pub fn run() {
         }
     }
 
-    let api_token = std::env::var("GRAPHHUNTER_API_TOKEN")
-        .unwrap_or_else(|_| Uuid::new_v4().to_string());
+    let api_token =
+        std::env::var("GRAPHHUNTER_API_TOKEN").unwrap_or_else(|_| Uuid::new_v4().to_string());
     let masked = if api_token.len() > 4 {
-        format!("{}...{}", &api_token[..4], &api_token[api_token.len() - 4..])
+        format!(
+            "{}...{}",
+            &api_token[..4],
+            &api_token[api_token.len() - 4..]
+        )
     } else {
         "****".to_string()
     };
@@ -233,7 +237,10 @@ pub fn run() {
             if let Ok(mut h) = app_handle_slot.write() {
                 *h = Some(app.handle().clone());
             }
-            tracing::info!("GraphHunter HTTP API starting on Tauri async runtime (port {})", http_port);
+            tracing::info!(
+                "GraphHunter HTTP API starting on Tauri async runtime (port {})",
+                http_port
+            );
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = http::run_async(state_for_http, api_for_http, http_port).await {
                     tracing::error!("GraphHunter HTTP API error: {}", e);

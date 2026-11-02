@@ -12,14 +12,14 @@
 //! Own test binary: it disables the journal through the environment, which
 //! is process-wide.
 
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::dto::ingestion::LoadDataStreamingRequest;
 use graph_hunter_api::dto::session::CreateSessionRequest;
 use graph_hunter_api::events::FnEmitter;
-use graph_hunter_api::GraphHunterApi;
 
 /// Spans three batches of the streaming path's 50k records.
 const ROWS: usize = 120_000;
@@ -53,8 +53,10 @@ fn every_batch_parses_against_the_header() {
         }
     });
     let api = GraphHunterApi::new(Arc::new(emitter));
-    api.create_session(CreateSessionRequest { name: Some("t".into()) })
-        .unwrap();
+    api.create_session(CreateSessionRequest {
+        name: Some("t".into()),
+    })
+    .unwrap();
     api.load_data_streaming(
         LoadDataStreamingRequest {
             session: None,

@@ -58,7 +58,8 @@ fn k4_with(ts: [i64; 6]) -> GraphHunter {
         ("c", "d", ts[5]),
     ];
     for (s, d, t) in edges {
-        g.add_relation(Relation::new(s, d, RelationType::Connect, t)).unwrap();
+        g.add_relation(Relation::new(s, d, RelationType::Connect, t))
+            .unwrap();
     }
     g.sort_edges_by_timestamp().unwrap();
     g
@@ -145,13 +146,21 @@ fn later_edges_outside_the_window_are_no_longer_emitted() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // First edge inside [100,200]; the other five far in the future.
     assert_eq!(
-        via_operator(&k4_with([150, 5_000, 6_000, 7_000, 8_000, 9_000]), Some((100, 200))).len(),
+        via_operator(
+            &k4_with([150, 5_000, 6_000, 7_000, 8_000, 9_000]),
+            Some((100, 200))
+        )
+        .len(),
         0,
         "five edges up to 45x outside the requested window must not be \
          emitted as a match inside it"
     );
     assert_eq!(
-        via_operator(&k4_with([150, 5_000, 6_000, 7_000, 8_000, 9_000]), Some((100, 10_000))).len(),
+        via_operator(
+            &k4_with([150, 5_000, 6_000, 7_000, 8_000, 9_000]),
+            Some((100, 10_000))
+        )
+        .len(),
         1,
         "with the window covering every edge the same clique matches"
     );
@@ -165,7 +174,8 @@ fn a_valid_combination_of_parallel_edges_is_found() {
     let mut g = k4_with([10, 20, 30, 40, 50, 60]);
     // A decoy a->c edge earlier than t_ab: min(t_ac) would now be 5, which
     // fails `t_ac >= t_ab` — but the real 20 still works.
-    g.add_relation(Relation::new("a", "c", RelationType::Connect, 5)).unwrap();
+    g.add_relation(Relation::new("a", "c", RelationType::Connect, 5))
+        .unwrap();
     g.sort_edges_by_timestamp().unwrap();
     assert_eq!(
         via_operator(&g, None).len(),
@@ -186,7 +196,8 @@ fn self_loops_do_not_produce_degenerate_cliques() {
     // Self-loops of exactly the kind the single-endpoint ingest fallback
     // emits for events that name only one entity.
     for v in ["a", "b", "c", "d"] {
-        g.add_relation(Relation::new(v, v, RelationType::Connect, 15)).unwrap();
+        g.add_relation(Relation::new(v, v, RelationType::Connect, 15))
+            .unwrap();
     }
     g.sort_edges_by_timestamp().unwrap();
 
@@ -199,7 +210,11 @@ fn self_loops_do_not_produce_degenerate_cliques() {
             "a 4-clique must span four DISTINCT vertices, got {tuple:?}"
         );
     }
-    assert_eq!(got.len(), 1, "still exactly the one real clique, got {got:?}");
+    assert_eq!(
+        got.len(),
+        1,
+        "still exactly the one real clique, got {got:?}"
+    );
 }
 
 // ── The gate: an independent reference implementation ──
@@ -225,9 +240,7 @@ fn reference_k4s(g: &GraphHunter, tw: Option<(i64, i64)>) -> BTreeSet<Vec<String
         v
     };
     // Earliest stamp at or after `floor`, or None.
-    let succ = |v: &[i64], floor: i64| -> Option<i64> {
-        v.iter().copied().find(|&t| t >= floor)
-    };
+    let succ = |v: &[i64], floor: i64| -> Option<i64> { v.iter().copied().find(|&t| t >= floor) };
 
     let mut out = BTreeSet::new();
     for a in &ids {
@@ -284,7 +297,8 @@ fn operator_matches_an_independent_reference_across_random_graphs() {
         let n = 4 + (next() % 3) as usize; // 4..6 vertices
         let mut g = GraphHunter::new();
         for i in 0..n {
-            g.add_entity(Entity::new(format!("v{i}"), EntityType::Host)).unwrap();
+            g.add_entity(Entity::new(format!("v{i}"), EntityType::Host))
+                .unwrap();
         }
         // Dense enough that 4-cliques actually occur, with a small stamp
         // range so ties and parallel edges are frequent.
@@ -305,7 +319,11 @@ fn operator_matches_an_independent_reference_across_random_graphs() {
         }
         g.sort_edges_by_timestamp().unwrap();
 
-        let tw = if case % 2 == 0 { None } else { Some((10i64, 40i64)) };
+        let tw = if case % 2 == 0 {
+            None
+        } else {
+            Some((10i64, 40i64))
+        };
 
         clear_flags();
         // SAFETY: ENV_LOCK held.
@@ -323,7 +341,8 @@ fn operator_matches_an_independent_reference_across_random_graphs() {
         let want = reference_k4s(&g, tw);
 
         assert_eq!(
-            got, want,
+            got,
+            want,
             "case {case} (n={n}, edges={edges}, window={tw:?}): operator and \
              independent reference disagree.\n  only operator: {:?}\n  only \
              reference: {:?}",

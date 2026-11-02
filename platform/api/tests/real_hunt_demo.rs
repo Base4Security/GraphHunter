@@ -138,17 +138,32 @@ fn ingest_cross_source_intrusion() -> GraphHunterApi {
     let sysmon_path = write_source_file("sysmon-proc", SYSMON_PROCESS_LOG);
 
     for (label, path, format) in [
-        ("FortiGate firewall (edge-fw)", fortigate_path.as_str(), "fortigate"),
-        ("Sentinel DeviceNetworkEvents", sentinel_net_path.as_str(), "sentinel"),
-        ("Sentinel SecurityEvent 4624", sentinel_auth_path.as_str(), "sentinel"),
+        (
+            "FortiGate firewall (edge-fw)",
+            fortigate_path.as_str(),
+            "fortigate",
+        ),
+        (
+            "Sentinel DeviceNetworkEvents",
+            sentinel_net_path.as_str(),
+            "sentinel",
+        ),
+        (
+            "Sentinel SecurityEvent 4624",
+            sentinel_auth_path.as_str(),
+            "sentinel",
+        ),
         ("Sysmon EventID 1", sysmon_path.as_str(), "sysmon"),
     ] {
         let r = api
-            .load_data(LoadDataRequest {
-                session: None,
-                path: path.to_string(),
-                format: format.to_string(),
-            }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
+            .load_data(
+                LoadDataRequest {
+                    session: None,
+                    path: path.to_string(),
+                    format: format.to_string(),
+                },
+                &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+            )
             .unwrap_or_else(|e| panic!("load_data failed for {label} ({path}): {e}"));
         eprintln!(
             "[ingest] {label}: +{} entities, +{} relations (zero_triples={})",

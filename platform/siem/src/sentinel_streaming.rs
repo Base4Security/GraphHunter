@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value};
 use tokio::sync::RwLock;
 
-use super::sentinel::{parse_query_stats, SentinelAuth, SentinelQueryResult};
+use super::sentinel::{SentinelAuth, SentinelQueryResult, parse_query_stats};
 
 // ── Token response ──
 
@@ -201,8 +201,7 @@ impl SentinelTokenCache {
         let resp = transport
             .acquire_token(&auth.tenant_id, &auth.client_id, &auth.client_secret)
             .await?;
-        let expires_at =
-            Instant::now() + Duration::from_secs(resp.expires_in.saturating_sub(60));
+        let expires_at = Instant::now() + Duration::from_secs(resp.expires_in.saturating_sub(60));
         let token = resp.access_token.clone();
         *guard = Some(CachedToken {
             access_token: resp.access_token,

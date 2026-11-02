@@ -190,8 +190,8 @@ impl MinTimestampMap {
         let dsts = &trie.dst_keys[off..end];
         let idx = dsts.binary_search(&dst).ok()?;
         let slot = off + idx;
-        let run = &self.ts_values[self.ts_offsets[slot] as usize
-            ..self.ts_offsets[slot + 1] as usize];
+        let run =
+            &self.ts_values[self.ts_offsets[slot] as usize..self.ts_offsets[slot + 1] as usize];
         let at = run.partition_point(|&t| t < floor);
         run.get(at).copied()
     }
@@ -199,12 +199,7 @@ impl MinTimestampMap {
     /// Variant for callers that only have the source's StrId, not its
     /// trie index. Does the source-row binary search inside.
     #[inline]
-    pub fn get_by_src(
-        &self,
-        trie: &MaterializedCsrTrie,
-        src: u32,
-        dst: u32,
-    ) -> Option<i64> {
+    pub fn get_by_src(&self, trie: &MaterializedCsrTrie, src: u32, dst: u32) -> Option<i64> {
         let ai = trie.src_keys.binary_search(&src).ok()?;
         self.get(trie, ai, dst)
     }
@@ -446,8 +441,8 @@ pub fn enumerate_triangles_naive(
                 Some(t) => t,
                 None => continue,
             };
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             for &c in b_dsts {
                 if a_dsts.binary_search(&c).is_err() {
                     continue;
@@ -660,8 +655,8 @@ pub fn enumerate_4cliques_naive(
             if t_ab > t_hi {
                 continue;
             }
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             for &c in a_dsts {
                 if c == a || c == b {
                     continue;
@@ -1033,13 +1028,10 @@ pub fn enumerate_4cliques_lftj_simd_par(
                 local
             },
         )
-        .reduce(
-            Vec::new,
-            |mut a, b| {
-                a.extend(b);
-                a
-            },
-        );
+        .reduce(Vec::new, |mut a, b| {
+            a.extend(b);
+            a
+        });
     if all.len() > max_results {
         all.truncate(max_results);
     }
@@ -1092,8 +1084,8 @@ pub fn enumerate_5cliques_naive(
             if t_ab < t_lo || t_ab > t_hi {
                 continue;
             }
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             for &c in a_dsts {
                 if c == b {
                     continue;
@@ -1525,13 +1517,10 @@ pub fn enumerate_5cliques_lftj_simd_par(
                 local
             },
         )
-        .reduce(
-            Vec::new,
-            |mut a, b| {
-                a.extend(b);
-                a
-            },
-        );
+        .reduce(Vec::new, |mut a, b| {
+            a.extend(b);
+            a
+        });
     if all.len() > max_results {
         all.truncate(max_results);
     }
@@ -1801,7 +1790,9 @@ pub fn enumerate_6cycles_lftj_simd(
                         let e_dsts = forward.neighbors_of(e);
                         ef_isect.clear();
                         crate::simd_rust::intersect_sorted_u32_collect(
-                            e_dsts, pred_a, &mut ef_isect,
+                            e_dsts,
+                            pred_a,
+                            &mut ef_isect,
                         );
                         for &f in ef_isect.iter() {
                             if f == a || f == b || f == c || f == d || f == e {
@@ -1989,13 +1980,10 @@ pub fn enumerate_6cycles_lftj_simd_par(
                 local
             },
         )
-        .reduce(
-            Vec::new,
-            |mut a, b| {
-                a.extend(b);
-                a
-            },
-        );
+        .reduce(Vec::new, |mut a, b| {
+            a.extend(b);
+            a
+        });
     if all.len() > max_results {
         all.truncate(max_results);
     }
@@ -2098,9 +2086,17 @@ mod tests {
 
         // Windowed variant: full-range window must match unwindowed.
         let win_full = sort_triangles(enumerate_triangles_lftj_simd_window(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 10_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            10_000,
         ));
-        assert_eq!(win_full, naive, "windowed enumerator must match unwindowed at full range");
+        assert_eq!(
+            win_full, naive,
+            "windowed enumerator must match unwindowed at full range"
+        );
 
         // Sub-windows are SOUND but not COMPLETE, and that is correct.
         //
@@ -2210,12 +2206,9 @@ mod tests {
         let g = make_k4_chronological();
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
-        let naive =
-            enumerate_4cliques_naive(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
-        let simd =
-            enumerate_4cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
-        let par =
-            enumerate_4cliques_lftj_simd_par(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let naive = enumerate_4cliques_naive(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let simd = enumerate_4cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let par = enumerate_4cliques_lftj_simd_par(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
         for (label, r) in [("naive", &naive), ("simd", &simd), ("par", &par)] {
             assert_eq!(r.len(), 1, "{label}: exactly one chronological K4");
             assert_eq!(&*r[0][0], "a", "{label}");
@@ -2248,9 +2241,7 @@ mod tests {
         g.sort_edges_by_timestamp().unwrap();
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
-        let r = enumerate_4cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let r = enumerate_4cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
         assert!(r.is_empty(), "out-of-order K4 must be rejected");
     }
 
@@ -2265,17 +2256,35 @@ mod tests {
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
         let naive = sort_4cliques(enumerate_4cliques_naive(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let simd = sort_4cliques(enumerate_4cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let par = sort_4cliques(enumerate_4cliques_lftj_simd_par(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         assert_eq!(simd, naive, "LFTJ-SIMD K4 enumerate must match naive");
         assert_eq!(par, naive, "rayon-parallel K4 enumerate must match naive");
-        assert!(!naive.is_empty(), "expected at least one chronological K4 at p=0.40");
+        assert!(
+            !naive.is_empty(),
+            "expected at least one chronological K4 at p=0.40"
+        );
     }
 
     #[test]
@@ -2285,7 +2294,12 @@ mod tests {
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
         let full = sort_4cliques(enumerate_4cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         // Disjoint window union over the full timestamp range must
         // reconstruct the unwindowed result.
@@ -2367,9 +2381,7 @@ mod tests {
         // Type-aware trie via the new helper.
         let trie = g.build_lftj_trie_for(&h);
         let ts_map = MinTimestampMap::build(&g, &trie);
-        let mut results = enumerate_4cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let mut results = enumerate_4cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
         results.sort_by(|a, b| a[0].cmp(&b[0]));
 
         assert_eq!(
@@ -2383,9 +2395,8 @@ mod tests {
         // Sanity: the type-blind trie sees both K4s.
         let blind_trie = MaterializedCsrTrie::build(&g);
         let blind_ts = MinTimestampMap::build(&g, &blind_trie);
-        let blind = enumerate_4cliques_lftj_simd(
-            &g, &blind_trie, &blind_ts, i64::MIN, i64::MAX, 100,
-        );
+        let blind =
+            enumerate_4cliques_lftj_simd(&g, &blind_trie, &blind_ts, i64::MIN, i64::MAX, 100);
         assert_eq!(
             blind.len(),
             2,
@@ -2428,12 +2439,9 @@ mod tests {
         let g = make_k5_chronological();
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
-        let naive =
-            enumerate_5cliques_naive(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
-        let simd =
-            enumerate_5cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
-        let par =
-            enumerate_5cliques_lftj_simd_par(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let naive = enumerate_5cliques_naive(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let simd = enumerate_5cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let par = enumerate_5cliques_lftj_simd_par(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
         for (label, r) in [("naive", &naive), ("simd", &simd), ("par", &par)] {
             assert_eq!(r.len(), 1, "{label}: exactly one chronological K5");
             assert_eq!(&*r[0][0], "a", "{label}");
@@ -2471,9 +2479,7 @@ mod tests {
         g.sort_edges_by_timestamp().unwrap();
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
-        let r = enumerate_5cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let r = enumerate_5cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
         assert!(r.is_empty(), "out-of-order K5 must be rejected");
     }
 
@@ -2490,13 +2496,28 @@ mod tests {
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
         let naive = sort_5cliques(enumerate_5cliques_naive(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let simd = sort_5cliques(enumerate_5cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let par = sort_5cliques(enumerate_5cliques_lftj_simd_par(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         assert_eq!(simd, naive, "LFTJ-SIMD K5 enumerate must match naive");
         assert_eq!(par, naive, "rayon-parallel K5 enumerate must match naive");
@@ -2546,14 +2567,9 @@ mod tests {
         let fwd = MaterializedCsrTrie::build(&g);
         let rev = MaterializedCsrTrie::build_reverse(&g);
         let ts_map = MinTimestampMap::build(&g, &fwd);
-        let naive =
-            enumerate_6cycles_naive(&g, &fwd, &ts_map, i64::MIN, i64::MAX, 100);
-        let simd = enumerate_6cycles_lftj_simd(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100,
-        );
-        let par = enumerate_6cycles_lftj_simd_par(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let naive = enumerate_6cycles_naive(&g, &fwd, &ts_map, i64::MIN, i64::MAX, 100);
+        let simd = enumerate_6cycles_lftj_simd(&g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100);
+        let par = enumerate_6cycles_lftj_simd_par(&g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100);
         for (label, r) in [("naive", &naive), ("simd", &simd), ("par", &par)] {
             assert_eq!(r.len(), 1, "{label}: exactly one chronological C6");
             assert_eq!(&*r[0][0], "a", "{label}");
@@ -2589,9 +2605,7 @@ mod tests {
         let fwd = MaterializedCsrTrie::build(&g);
         let rev = MaterializedCsrTrie::build_reverse(&g);
         let ts_map = MinTimestampMap::build(&g, &fwd);
-        let r = enumerate_6cycles_lftj_simd(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let r = enumerate_6cycles_lftj_simd(&g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100);
         assert!(r.is_empty(), "out-of-order C6 must be rejected");
     }
 
@@ -2618,9 +2632,7 @@ mod tests {
         let fwd = MaterializedCsrTrie::build(&g);
         let rev = MaterializedCsrTrie::build_reverse(&g);
         let ts_map = MinTimestampMap::build(&g, &fwd);
-        let r = enumerate_6cycles_lftj_simd(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let r = enumerate_6cycles_lftj_simd(&g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100);
         assert!(r.is_empty(), "open path must not produce C6 matches");
     }
 
@@ -2635,13 +2647,30 @@ mod tests {
         let rev = MaterializedCsrTrie::build_reverse(&g);
         let ts_map = MinTimestampMap::build(&g, &fwd);
         let naive = sort_6cycles(enumerate_6cycles_naive(
-            &g, &fwd, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &fwd,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let simd = sort_6cycles(enumerate_6cycles_lftj_simd(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &fwd,
+            &rev,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let par = sort_6cycles(enumerate_6cycles_lftj_simd_par(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &fwd,
+            &rev,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         assert_eq!(simd, naive, "LFTJ-SIMD C6 enumerate must match naive");
         assert_eq!(par, naive, "rayon-parallel C6 enumerate must match naive");
@@ -2656,9 +2685,7 @@ mod tests {
         // Only one C6 in the chronological fixture; cap=1 is a
         // tautology so this just verifies that the cap doesn't
         // exceed the requested bound.
-        let r = enumerate_6cycles_lftj_simd(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 1,
-        );
+        let r = enumerate_6cycles_lftj_simd(&g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 1);
         assert!(r.len() <= 1, "max_results must cap output");
     }
 }

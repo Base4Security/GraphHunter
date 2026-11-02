@@ -142,8 +142,7 @@ pub mod maxmind {
                     if let Ok(Some(city)) = lookup.decode::<geoip2::City>() {
                         if !city.country.is_empty() {
                             result.country_code = city.country.iso_code.map(|s| s.to_string());
-                            result.country_name =
-                                city.country.names.english.map(|s| s.to_string());
+                            result.country_name = city.country.names.english.map(|s| s.to_string());
                         }
                         if !city.city.is_empty() {
                             result.city = city.city.names.english.map(|s| s.to_string());
@@ -159,8 +158,7 @@ pub mod maxmind {
                 if let Ok(lookup) = reader.lookup(addr) {
                     if let Ok(Some(asn)) = lookup.decode::<geoip2::Asn>() {
                         result.asn = asn.autonomous_system_number;
-                        result.as_org =
-                            asn.autonomous_system_organization.map(|s| s.to_string());
+                        result.as_org = asn.autonomous_system_organization.map(|s| s.to_string());
                         // Use AS org as ISP approximation.
                         result.isp = result.as_org.clone();
                     }

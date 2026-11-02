@@ -91,10 +91,8 @@ impl GraphHunter {
                     .insert(K_FIRST_SEEN.to_string(), span.first_seen.to_string());
                 e.metadata
                     .insert(K_LAST_SEEN.to_string(), span.last_seen.to_string());
-                e.metadata.insert(
-                    K_DURATION.to_string(),
-                    span.duration_seconds().to_string(),
-                );
+                e.metadata
+                    .insert(K_DURATION.to_string(), span.duration_seconds().to_string());
                 e.metadata
                     .insert(K_EVENTS.to_string(), span.event_count.to_string());
                 written += 1;
@@ -284,8 +282,14 @@ mod tests {
         let e = sustained.get_entity("session:long").expect("node");
         assert_eq!(e.metadata.get(K_DURATION).map(String::as_str), Some("5220"));
         assert_eq!(e.metadata.get(K_EVENTS).map(String::as_str), Some("3"));
-        assert_eq!(e.metadata.get(K_FIRST_SEEN).map(String::as_str), Some("1000"));
-        assert_eq!(e.metadata.get(K_LAST_SEEN).map(String::as_str), Some("6220"));
+        assert_eq!(
+            e.metadata.get(K_FIRST_SEEN).map(String::as_str),
+            Some("1000")
+        );
+        assert_eq!(
+            e.metadata.get(K_LAST_SEEN).map(String::as_str),
+            Some("6220")
+        );
 
         let mut quick = graph_with_session("session:short", &[500, 578]);
         quick.summarize_sessions();
@@ -355,7 +359,7 @@ mod tests {
     /// confirmed takeovers.
     #[test]
     fn a_session_shared_by_two_accounts_is_reported() {
-        use crate::generic::{session_entity_type, GenericParser};
+        use crate::generic::{GenericParser, session_entity_type};
         use crate::parser::LogParser;
 
         let log = r#"[
@@ -422,8 +426,8 @@ mod tests {
     /// past it in aggregate. This is the streaming case.
     #[test]
     fn the_ceiling_holds_across_separate_ingests() {
-        use crate::parser::LogParser;
         use crate::generic::GenericParser;
+        use crate::parser::LogParser;
 
         // SAFETY: restored before the test returns.
         unsafe { std::env::set_var("GRAPHHUNTER_MAX_SESSION_ENTITIES", "3") };
@@ -459,8 +463,8 @@ mod tests {
     /// Under the ceiling nothing is refused and nothing is reported.
     #[test]
     fn an_ingest_under_the_ceiling_refuses_nothing() {
-        use crate::parser::LogParser;
         use crate::generic::GenericParser;
+        use crate::parser::LogParser;
 
         let mut g = GraphHunter::new();
         let log = r#"[{"timestamp":"2026-07-24T19:42:51Z","username":"a","sessionId":"s1","ipAddress":"10.0.0.1"}]"#;
@@ -483,7 +487,7 @@ mod tests {
     /// `Session -[From]-> IP` reaches directly.
     #[test]
     fn one_session_seen_from_two_addresses_is_graph_structure() {
-        use crate::generic::{is_session_entity, GenericParser};
+        use crate::generic::{GenericParser, is_session_entity};
         use crate::parser::LogParser;
 
         let log = r#"[

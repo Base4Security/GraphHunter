@@ -166,10 +166,7 @@ pub(crate) fn is_known_suricata_event(s: &str) -> bool {
 
 /// Parse a single Suricata record. Returns `None` for event types
 /// we don't map (e.g. `stats`, `fileinfo`).
-pub(crate) fn parse_record(
-    v: &serde_json::Value,
-    source_file: &str,
-) -> Option<RawIngestEvent> {
+pub(crate) fn parse_record(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent> {
     let evt = v.get("event_type").and_then(|x| x.as_str())?;
     match evt {
         "flow" => parse_flow(v, source_file),
@@ -779,7 +776,10 @@ mod tests {
         assert_eq!(e.rel_type, RelationType::Auth);
         let m = &e.rel_metadata;
         assert_eq!(m.get("kerberos_kind").map(String::as_str), Some("AS-REQ"));
-        assert_eq!(m.get("kerberos_realm").map(String::as_str), Some("EXAMPLE.COM"));
+        assert_eq!(
+            m.get("kerberos_realm").map(String::as_str),
+            Some("EXAMPLE.COM")
+        );
         assert_eq!(
             m.get("kerberos_service").map(String::as_str),
             Some("krbtgt/EXAMPLE.COM"),

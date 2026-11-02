@@ -468,7 +468,11 @@ k_simplicity: 1
 
         let mut unregistered = Vec::new();
         for entry in std::fs::read_dir(&dir).expect("builtin dir") {
-            let name = entry.expect("dir entry").file_name().to_string_lossy().to_string();
+            let name = entry
+                .expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string();
             // `shape_rules.yaml` is configuration, not a catalog entry.
             if !name.ends_with(".yaml") || name == "shape_rules.yaml" {
                 continue;

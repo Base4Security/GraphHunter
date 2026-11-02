@@ -11,7 +11,7 @@
 //! care must pass an explicit `session` handle on every subsequent call
 //! rather than relying on the fallback.
 
-use axum::{extract::State, response::Response, Json};
+use axum::{Json, extract::State, response::Response};
 use std::sync::Arc;
 
 use graph_hunter_api::GraphHunterApi;

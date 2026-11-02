@@ -115,8 +115,7 @@ pub trait GraphAccess: Send + Sync {
                 src.metadata = ev.src_metadata;
                 let mut dst = Entity::new(ev.dst_id, ev.dst_type);
                 dst.metadata = ev.dst_metadata;
-                let mut rel =
-                    Relation::new(&src.id, &dst.id, ev.rel_type, ev.timestamp);
+                let mut rel = Relation::new(&src.id, &dst.id, ev.rel_type, ev.timestamp);
                 rel.metadata = ev.rel_metadata;
                 (src, rel, dst)
             })

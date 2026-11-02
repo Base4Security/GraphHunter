@@ -26,8 +26,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::dto::ingestion::{IngestJobSnapshot, LoadResult};
-use crate::events::events::{INGEST_COMPLETE, INGEST_ERROR, INGEST_PROGRESS};
 use crate::events::EventEmitter;
+use crate::events::events::{INGEST_COMPLETE, INGEST_ERROR, INGEST_PROGRESS};
 use crate::util::now_secs;
 
 /// Hard cap on retained job records.

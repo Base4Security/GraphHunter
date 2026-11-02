@@ -582,9 +582,17 @@ mod tests {
 
         // Verify variant tags were stamped onto raw_event.
         let raws: Vec<String> = resp.entries.iter().map(|e| e.raw_event.clone()).collect();
-        assert!(raws.iter().any(|r| r.contains("MalformedRow")), "{:?}", raws);
+        assert!(
+            raws.iter().any(|r| r.contains("MalformedRow")),
+            "{:?}",
+            raws
+        );
         assert!(raws.iter().any(|r| r.contains("Encoding")), "{:?}", raws);
-        assert!(raws.iter().any(|r| r.contains("MissingField")), "{:?}", raws);
+        assert!(
+            raws.iter().any(|r| r.contains("MissingField")),
+            "{:?}",
+            raws
+        );
 
         // All entries route through ParseFailure (not InsertFailure).
         for e in &resp.entries {

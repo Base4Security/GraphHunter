@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use tauri::State;
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::dto::dataset::{
     DatasetEntityTypesRequest, ListDatasetsRequest, RemoveDatasetRequest,
     RenameTypeInDatasetRequest,
 };
-use graph_hunter_api::GraphHunterApi;
 
 use crate::error::CommandError;
 use crate::state::DatasetInfo;

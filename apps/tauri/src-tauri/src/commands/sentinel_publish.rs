@@ -7,15 +7,15 @@ use std::sync::Arc;
 
 use tauri::State;
 
-use graph_hunter_api::dto::sentinel::{PublishIocsRequest, PublishIocsResponse};
 use graph_hunter_api::GraphHunterApi;
+use graph_hunter_api::dto::sentinel::{PublishIocsRequest, PublishIocsResponse};
 
 use crate::error::CommandError;
 use crate::state::AppState;
 
 /// Re-exports so `http_api.rs` can keep delegating through this module.
 pub use graph_hunter_api::operations::sentinel_publish::{
-    build_watchlist_payload, build_watchlist_url, to_watchlist_alias, AzureCreds,
+    AzureCreds, build_watchlist_payload, build_watchlist_url, to_watchlist_alias,
 };
 
 #[tauri::command]

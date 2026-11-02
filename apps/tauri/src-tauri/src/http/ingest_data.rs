@@ -14,12 +14,12 @@
 //! (the parser saw rows but produced no triples — usually a bad mapping)
 //! and `stopped_early` (truncated by the memory guard) on `LoadResult`.
 
-use axum::{extract::State, response::Response, Json};
+use axum::{Json, extract::State, response::Response};
 use std::sync::Arc;
 use std::time::Duration;
 
-use graph_hunter_api::paths::PathPolicy;
 use graph_hunter_api::GraphHunterApi;
+use graph_hunter_api::paths::PathPolicy;
 
 use super::helpers::{api_err_response, ok_json};
 

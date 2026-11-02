@@ -309,8 +309,10 @@ mod tests {
 
     #[test]
     fn canonical_value_string_is_stable_across_key_order() {
-        let a: serde_json::Value = serde_json::from_str(r#"{"b":2,"a":1,"c":{"y":2,"x":1}}"#).unwrap();
-        let b: serde_json::Value = serde_json::from_str(r#"{"c":{"x":1,"y":2},"a":1,"b":2}"#).unwrap();
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"b":2,"a":1,"c":{"y":2,"x":1}}"#).unwrap();
+        let b: serde_json::Value =
+            serde_json::from_str(r#"{"c":{"x":1,"y":2},"a":1,"b":2}"#).unwrap();
         assert_eq!(canonical_value_string(&a), canonical_value_string(&b));
         let back: serde_json::Value = serde_json::from_str(&canonical_value_string(&a)).unwrap();
         assert_eq!(back["a"], serde_json::json!(1));

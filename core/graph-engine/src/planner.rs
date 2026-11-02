@@ -78,11 +78,7 @@ impl CostHints {
 /// (1 MB). DFS-Match's per-edge HashMap-style lookups cost ~10 ns
 /// hot, ~80 ns cold (L3-miss dominated). LFTJ's trie iteration is
 /// sequential and stays mostly hot until E·32B exceeds L3.
-fn cost_estimate(
-    plan: DispatchPlan,
-    hypothesis: &Hypothesis,
-    hints: &CostHints,
-) -> f64 {
+fn cost_estimate(plan: DispatchPlan, hypothesis: &Hypothesis, hints: &CostHints) -> f64 {
     let v = hints.vertex_count as f64;
     let e = hints.edge_count as f64;
     let d = hints.avg_degree.max(1.0);
@@ -245,7 +241,10 @@ pub fn plan_with_hints(hypothesis: &Hypothesis, hints: &CostHints) -> DispatchPl
     // Enumerate structurally-valid plans for this hypothesis shape,
     // then pick the lowest-cost one. Yannakakis only valid on
     // α-acyclic queries (delegated to its own gate).
-    let mut best = (DispatchPlan::DfsMatch, cost_estimate(DispatchPlan::DfsMatch, hypothesis, hints));
+    let mut best = (
+        DispatchPlan::DfsMatch,
+        cost_estimate(DispatchPlan::DfsMatch, hypothesis, hints),
+    );
 
     // Candidacy requires BOTH the shape and the author's explicit marker.
     // These were `||`, which made shape ALONE enough to make a clique
@@ -327,7 +326,10 @@ fn is_homogeneous_triangle_shape(hypothesis: &Hypothesis) -> bool {
     if matches!(first.origin_type, EntityType::Any | EntityType::Other(_)) {
         return false;
     }
-    if matches!(first.relation_type, RelationType::Any | RelationType::Other(_)) {
+    if matches!(
+        first.relation_type,
+        RelationType::Any | RelationType::Other(_)
+    ) {
         return false;
     }
     if first.origin_type != first.dest_type {
@@ -411,7 +413,10 @@ fn is_homogeneous_k4_shape(hypothesis: &Hypothesis) -> bool {
     if matches!(first.origin_type, EntityType::Any | EntityType::Other(_)) {
         return false;
     }
-    if matches!(first.relation_type, RelationType::Any | RelationType::Other(_)) {
+    if matches!(
+        first.relation_type,
+        RelationType::Any | RelationType::Other(_)
+    ) {
         return false;
     }
     if first.origin_type != first.dest_type {
@@ -454,7 +459,10 @@ fn is_homogeneous_k5_shape(hypothesis: &Hypothesis) -> bool {
     if matches!(first.origin_type, EntityType::Any | EntityType::Other(_)) {
         return false;
     }
-    if matches!(first.relation_type, RelationType::Any | RelationType::Other(_)) {
+    if matches!(
+        first.relation_type,
+        RelationType::Any | RelationType::Other(_)
+    ) {
         return false;
     }
     if first.origin_type != first.dest_type {
@@ -495,7 +503,10 @@ fn is_homogeneous_c6_shape(hypothesis: &Hypothesis) -> bool {
     if matches!(first.origin_type, EntityType::Any | EntityType::Other(_)) {
         return false;
     }
-    if matches!(first.relation_type, RelationType::Any | RelationType::Other(_)) {
+    if matches!(
+        first.relation_type,
+        RelationType::Any | RelationType::Other(_)
+    ) {
         return false;
     }
     if first.origin_type != first.dest_type {
@@ -621,9 +632,11 @@ mod tests {
 
     #[test]
     fn name_marker_route_dispatches() {
-        let h = Hypothesis::new("APT lateral movement (k4-clique)").add_step(
-            HypothesisStep::new(EntityType::Host, RelationType::Connect, EntityType::Host),
-        );
+        let h = Hypothesis::new("APT lateral movement (k4-clique)").add_step(HypothesisStep::new(
+            EntityType::Host,
+            RelationType::Connect,
+            EntityType::Host,
+        ));
         with_var("GRAPHHUNTER_K4_LFTJ", "1", || {
             assert_eq!(plan(&h), DispatchPlan::K4Lftj);
         });
@@ -880,9 +893,11 @@ mod tests {
 
     #[test]
     fn k5_name_marker_route_dispatches() {
-        let h = Hypothesis::new("APT lateral movement (k5-clique)").add_step(
-            HypothesisStep::new(EntityType::Host, RelationType::Connect, EntityType::Host),
-        );
+        let h = Hypothesis::new("APT lateral movement (k5-clique)").add_step(HypothesisStep::new(
+            EntityType::Host,
+            RelationType::Connect,
+            EntityType::Host,
+        ));
         with_var("GRAPHHUNTER_K5_LFTJ", "1", || {
             assert_eq!(plan(&h), DispatchPlan::K5Lftj);
         });
@@ -984,16 +999,12 @@ mod tests {
             return;
         }
         let raw = std::fs::read_to_string(path).expect("read calibration");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&raw).expect("parse calibration JSON");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse calibration JSON");
         let hosts = parsed
             .get("hosts")
             .and_then(|h| h.as_array())
             .expect("hosts array");
-        assert!(
-            hosts.len() >= 1,
-            "calibration must list at least one host"
-        );
+        assert!(hosts.len() >= 1, "calibration must list at least one host");
     }
 
     #[test]

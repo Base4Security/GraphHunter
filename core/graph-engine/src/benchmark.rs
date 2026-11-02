@@ -232,7 +232,10 @@ pub fn plant_chain(g: &mut GraphHunter, hypothesis: &Hypothesis, idx: usize, bas
         let _ = g.add_entity(Entity::new(vid(i), concrete(&step.origin_type)));
     }
     let last = steps.len() - 1;
-    let _ = g.add_entity(Entity::new(vid(steps.len()), concrete(&steps[last].dest_type)));
+    let _ = g.add_entity(Entity::new(
+        vid(steps.len()),
+        concrete(&steps[last].dest_type),
+    ));
 
     for (i, step) in steps.iter().enumerate() {
         let ts = base_ts + i as i64;
@@ -716,14 +719,54 @@ pub struct PerfRow {
 pub fn default_perf_configs() -> Vec<PerfConfig> {
     use BenchGenerator::{BarabasiAlbert, ErdosRenyi};
     vec![
-        PerfConfig { label: "ER-100", generator: ErdosRenyi { n: 100, p: 0.10 }, hypothesis_len: 3, planted_chains: 0 },
-        PerfConfig { label: "ER-500", generator: ErdosRenyi { n: 500, p: 0.02 }, hypothesis_len: 3, planted_chains: 0 },
-        PerfConfig { label: "ER-1K", generator: ErdosRenyi { n: 1000, p: 0.01 }, hypothesis_len: 3, planted_chains: 0 },
-        PerfConfig { label: "ER-5K", generator: ErdosRenyi { n: 5000, p: 0.002 }, hypothesis_len: 3, planted_chains: 0 },
-        PerfConfig { label: "BA-100", generator: BarabasiAlbert { n: 100, m: 3 }, hypothesis_len: 3, planted_chains: 0 },
-        PerfConfig { label: "BA-500", generator: BarabasiAlbert { n: 500, m: 3 }, hypothesis_len: 3, planted_chains: 0 },
-        PerfConfig { label: "BA-1K", generator: BarabasiAlbert { n: 1000, m: 3 }, hypothesis_len: 3, planted_chains: 0 },
-        PerfConfig { label: "BA-5K", generator: BarabasiAlbert { n: 5000, m: 3 }, hypothesis_len: 3, planted_chains: 0 },
+        PerfConfig {
+            label: "ER-100",
+            generator: ErdosRenyi { n: 100, p: 0.10 },
+            hypothesis_len: 3,
+            planted_chains: 0,
+        },
+        PerfConfig {
+            label: "ER-500",
+            generator: ErdosRenyi { n: 500, p: 0.02 },
+            hypothesis_len: 3,
+            planted_chains: 0,
+        },
+        PerfConfig {
+            label: "ER-1K",
+            generator: ErdosRenyi { n: 1000, p: 0.01 },
+            hypothesis_len: 3,
+            planted_chains: 0,
+        },
+        PerfConfig {
+            label: "ER-5K",
+            generator: ErdosRenyi { n: 5000, p: 0.002 },
+            hypothesis_len: 3,
+            planted_chains: 0,
+        },
+        PerfConfig {
+            label: "BA-100",
+            generator: BarabasiAlbert { n: 100, m: 3 },
+            hypothesis_len: 3,
+            planted_chains: 0,
+        },
+        PerfConfig {
+            label: "BA-500",
+            generator: BarabasiAlbert { n: 500, m: 3 },
+            hypothesis_len: 3,
+            planted_chains: 0,
+        },
+        PerfConfig {
+            label: "BA-1K",
+            generator: BarabasiAlbert { n: 1000, m: 3 },
+            hypothesis_len: 3,
+            planted_chains: 0,
+        },
+        PerfConfig {
+            label: "BA-5K",
+            generator: BarabasiAlbert { n: 5000, m: 3 },
+            hypothesis_len: 3,
+            planted_chains: 0,
+        },
     ]
 }
 
@@ -866,7 +909,10 @@ pub fn run_perf_suite_planted(seed: u64, runs: usize, planted_chains: usize) -> 
     default_perf_configs()
         .iter()
         .map(|c| {
-            let cfg = PerfConfig { planted_chains, ..*c };
+            let cfg = PerfConfig {
+                planted_chains,
+                ..*c
+            };
             run_perf_config(&cfg, seed, runs)
         })
         .collect()
@@ -959,8 +1005,14 @@ mod perf_harness_tests {
     /// plant — not incidental structure — is what produced the match.
     #[test]
     fn planting_a_chain_makes_the_search_find_it() {
-        let base = PerfConfig { planted_chains: 0, ..default_perf_configs()[0] };
-        let planted = PerfConfig { planted_chains: 5, ..default_perf_configs()[0] };
+        let base = PerfConfig {
+            planted_chains: 0,
+            ..default_perf_configs()[0]
+        };
+        let planted = PerfConfig {
+            planted_chains: 5,
+            ..default_perf_configs()[0]
+        };
         let none = run_perf_config(&base, 3, 1);
         let some = run_perf_config(&planted, 3, 1);
         assert_eq!(none.paths_found, 0, "no plant, no match on this seed");
@@ -999,7 +1051,11 @@ mod perf_harness_tests {
         plant_chain(&mut g, &h, 0, 1000);
         let _ = g.sort_edges_by_timestamp();
         let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
-        assert_eq!(paths.len(), 1, "one planted chain → one match, got {paths:?}");
+        assert_eq!(
+            paths.len(),
+            1,
+            "one planted chain → one match, got {paths:?}"
+        );
     }
 }
 

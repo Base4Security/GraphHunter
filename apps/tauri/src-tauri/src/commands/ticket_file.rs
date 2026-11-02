@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use tauri::State;
 
-use graph_hunter_api::dto::ticket::{FileTicketRequest, TicketResponse};
 use graph_hunter_api::GraphHunterApi;
+use graph_hunter_api::dto::ticket::{FileTicketRequest, TicketResponse};
 
 use crate::error::CommandError;
 use crate::state::AppState;

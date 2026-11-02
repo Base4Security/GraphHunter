@@ -26,14 +26,17 @@ fn mde_csv_streaming_ingest_probe() {
 
     let t0 = Instant::now();
     let started = api
-        .load_data_streaming(LoadDataStreamingRequest {
-            session: None,
-            path: path.clone(),
-            format: "csv".into(),
-            config: None,
-            date_from: None,
-            date_to: None,
-        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
+        .load_data_streaming(
+            LoadDataStreamingRequest {
+                session: None,
+                path: path.clone(),
+                format: "csv".into(),
+                config: None,
+                date_from: None,
+                date_to: None,
+            },
+            &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+        )
         .expect("load_data_streaming should start");
     println!("job started in {:?}: {:?}", t0.elapsed(), started.job_id);
 

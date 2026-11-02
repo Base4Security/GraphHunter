@@ -12,10 +12,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::dto::ingestion::LoadDataStreamingRequest;
 use graph_hunter_api::dto::session::CreateSessionRequest;
 use graph_hunter_api::events::FnEmitter;
-use graph_hunter_api::GraphHunterApi;
 
 // Same allocator as the desktop binary (apps/tauri/src-tauri/src/main.rs).
 #[global_allocator]
@@ -71,7 +71,10 @@ fn main() {
         let (c, w) = mem_mb();
         peak_commit = peak_commit.max(c);
         if last_print.elapsed() > Duration::from_secs(10) {
-            eprintln!("t={:>6.1}s commit={c} MB ws={w} MB", t0.elapsed().as_secs_f64());
+            eprintln!(
+                "t={:>6.1}s commit={c} MB ws={w} MB",
+                t0.elapsed().as_secs_f64()
+            );
             last_print = Instant::now();
         }
     }
@@ -95,11 +98,13 @@ fn main() {
     println!("commit end    : {c_end} MB (retained graph)");
     println!("ws end / peak : {w_end} / {peak_ws} MB");
     // Event-time span: `None` / zeros means the timestamp column never mapped.
-    if let Ok(s) = api.get_graph_summary(graph_hunter_api::dto::geoip::GraphSummaryRequest {
-        session: None,
-    }) {
+    if let Ok(s) =
+        api.get_graph_summary(graph_hunter_api::dto::geoip::GraphSummaryRequest { session: None })
+    {
         let fmt = |t: i64| {
-            chrono::DateTime::from_timestamp(t, 0).map(|d| d.to_rfc3339()).unwrap_or_default()
+            chrono::DateTime::from_timestamp(t, 0)
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_default()
         };
         match s.summary.time_range {
             Some((a, b)) => println!("time range    : {} .. {}", fmt(a), fmt(b)),
@@ -119,7 +124,10 @@ fn phases(path: &str) {
     println!("format={resolved} auto_config={}", cfg.is_some());
     if let Some(c) = &cfg {
         for m in &c.mappings {
-            println!("  map {:<14} role={:?} type={:?}", m.raw_name, m.role, m.entity_type);
+            println!(
+                "  map {:<14} role={:?} type={:?}",
+                m.raw_name, m.role, m.entity_type
+            );
         }
     }
     let parser: Box<dyn LogParser + Send + Sync> = match cfg {
@@ -140,8 +148,14 @@ fn phases(path: &str) {
             for ev in events.iter().take(6) {
                 println!(
                     "  {:?}:{} -[{:?}]-> {:?}:{}\n    src_md={:?}\n    dst_md={:?}\n    rel_md={:?}\n    raw_line={}",
-                    ev.src_type, ev.src_id, ev.rel_type, ev.dst_type, ev.dst_id,
-                    ev.src_metadata, ev.dst_metadata, ev.rel_metadata,
+                    ev.src_type,
+                    ev.src_id,
+                    ev.rel_type,
+                    ev.dst_type,
+                    ev.dst_id,
+                    ev.src_metadata,
+                    ev.dst_metadata,
+                    ev.rel_metadata,
                     ev.raw_line.as_ref().map(|s| s.len()).unwrap_or(0)
                 );
             }
@@ -211,7 +225,7 @@ fn phases(path: &str) {
 /// journal). "unshared" gives every event a distinct source row — the
 /// on-disk shape before rows were shared — at a cost of a few bytes a line.
 fn journal_bytes(events: &[graph_hunter_core::RawIngestEvent], rows: usize) {
-    use graph_hunter_api::journal::{journal_batch_keyed, JournalStore};
+    use graph_hunter_api::journal::{JournalStore, journal_batch_keyed};
     let mut unshared = events.to_vec();
     for (i, ev) in unshared.iter_mut().enumerate() {
         if let Some(r) = ev.raw_line.as_mut() {
@@ -221,7 +235,8 @@ fn journal_bytes(events: &[graph_hunter_core::RawIngestEvent], rows: usize) {
     for (name, evs) in [("shared", events), ("unshared", &unshared[..])] {
         let dir = std::env::temp_dir().join(format!("gh-jbench-{}-{name}", std::process::id()));
         let store = JournalStore::open(&dir).unwrap();
-        let (_, err) = journal_batch_keyed(Some(&store), "s", "file_stream", "ds", "csv", evs, &[], 0);
+        let (_, err) =
+            journal_batch_keyed(Some(&store), "s", "file_stream", "ds", "csv", evs, &[], 0);
         assert!(err.is_none());
         let bytes = ["journal.jsonl", "journal.jsonl.1"]
             .iter()

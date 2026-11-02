@@ -114,23 +114,19 @@ fn bench_cycle6_query(c: &mut Criterion) {
                 ))
             })
         });
-        group.bench_with_input(
-            BenchmarkId::new("lftj+simd+par", &label),
-            &&fx,
-            |b, &fx| {
-                b.iter(|| {
-                    black_box(enumerate_6cycles_lftj_simd_par(
-                        black_box(&fx.graph),
-                        black_box(&fx.forward),
-                        black_box(&fx.reverse),
-                        black_box(&fx.ts_map),
-                        i64::MIN,
-                        i64::MAX,
-                        10_000_000,
-                    ))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("lftj+simd+par", &label), &&fx, |b, &fx| {
+            b.iter(|| {
+                black_box(enumerate_6cycles_lftj_simd_par(
+                    black_box(&fx.graph),
+                    black_box(&fx.forward),
+                    black_box(&fx.reverse),
+                    black_box(&fx.ts_map),
+                    i64::MIN,
+                    i64::MAX,
+                    10_000_000,
+                ))
+            })
+        });
 
         // Windowed: keep only C6s whose t_ab falls in the lower 25%
         // of the timestamp range. Validates that the window cut

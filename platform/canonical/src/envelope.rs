@@ -153,8 +153,13 @@ mod tests {
     fn insert_envelope_carries_both_times_and_frozen_provenance() {
         let p = prov();
         let e = CanonicalEnvelope::new_insert(
-            "la:ws-1".into(), "la".into(), 1000, 2000,
-            "{\"raw\":1}".into(), p.clone());
+            "la:ws-1".into(),
+            "la".into(),
+            1000,
+            2000,
+            "{\"raw\":1}".into(),
+            p.clone(),
+        );
         assert_eq!(e.event_time, 1000);
         assert_eq!(e.ingestion_time, 2000);
         assert_eq!(e.change_kind, ChangeKind::Insert);
@@ -163,16 +168,23 @@ mod tests {
         assert_eq!(e.provenance, p);
         // hash is deterministic and non-empty.
         assert!(!e.canonical_hash.is_empty());
-        assert_eq!(e.canonical_hash,
-                   CanonicalEnvelope::compute_hash("{\"raw\":1}", &p));
+        assert_eq!(
+            e.canonical_hash,
+            CanonicalEnvelope::compute_hash("{\"raw\":1}", &p)
+        );
     }
 
     #[test]
     fn skipped_envelope_records_reason_and_preserves_raw() {
         let e = CanonicalEnvelope::new_insert(
-            "la:ws-1".into(), "la".into(), 0, 5,
-            "malformed-row".into(), prov())
-            .as_skipped("no_triple".into());
+            "la:ws-1".into(),
+            "la".into(),
+            0,
+            5,
+            "malformed-row".into(),
+            prov(),
+        )
+        .as_skipped("no_triple".into());
         assert_eq!(e.change_kind, ChangeKind::Skipped);
         assert_eq!(e.skip_reason.as_deref(), Some("no_triple"));
         // the raw row survives even though it was skipped (row_completeness).
@@ -190,8 +202,7 @@ mod tests {
 
     #[test]
     fn envelope_roundtrips_through_json() {
-        let e = CanonicalEnvelope::new_insert(
-            "s".into(), "la".into(), 1, 2, "{}".into(), prov());
+        let e = CanonicalEnvelope::new_insert("s".into(), "la".into(), 1, 2, "{}".into(), prov());
         let s = serde_json::to_string(&e).unwrap();
         let back: CanonicalEnvelope = serde_json::from_str(&s).unwrap();
         assert_eq!(e, back);

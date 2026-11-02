@@ -110,7 +110,9 @@ impl CircuitBreaker {
     }
 
     fn record_success(&self, metrics: &PollerMetrics) {
-        metrics.circuit_consecutive_failures.store(0, Ordering::Relaxed);
+        metrics
+            .circuit_consecutive_failures
+            .store(0, Ordering::Relaxed);
         metrics.circuit_open_until.store(0, Ordering::Relaxed);
     }
 
@@ -180,11 +182,7 @@ impl PollerConfig {
         self
     }
 
-    pub fn with_circuit_breaker(
-        mut self,
-        max_failures: u32,
-        backoff_base: Duration,
-    ) -> Self {
+    pub fn with_circuit_breaker(mut self, max_failures: u32, backoff_base: Duration) -> Self {
         self.circuit_max_failures = max_failures;
         self.circuit_backoff_base = backoff_base;
         self
@@ -246,10 +244,7 @@ impl SourcePoller {
         config: PollerConfig,
         watermarks: Arc<dyn WatermarkStore>,
     ) -> Self {
-        let circuit = CircuitBreaker::new(
-            config.circuit_max_failures,
-            config.circuit_backoff_base,
-        );
+        let circuit = CircuitBreaker::new(config.circuit_max_failures, config.circuit_backoff_base);
         Self {
             source,
             config,
@@ -840,7 +835,10 @@ mod tests {
         for _ in 0..3 {
             breaker.record_failure(&metrics);
         }
-        assert!(CircuitBreaker::is_open(&metrics), "circuit must be open after max failures");
+        assert!(
+            CircuitBreaker::is_open(&metrics),
+            "circuit must be open after max failures"
+        );
 
         // A single success resets everything.
         breaker.record_success(&metrics);
@@ -849,7 +847,9 @@ mod tests {
             "circuit must be closed after record_success"
         );
         assert_eq!(
-            metrics.circuit_consecutive_failures.load(std::sync::atomic::Ordering::Relaxed),
+            metrics
+                .circuit_consecutive_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
             0,
             "consecutive_failures must be zero after recovery"
         );

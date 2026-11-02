@@ -115,8 +115,8 @@ pub fn assess(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use graph_hunter_core::{Entity, EntityType, Relation, RelationType};
     use graph_hunter_core::HypothesisStep;
+    use graph_hunter_core::{Entity, EntityType, Relation, RelationType};
 
     fn graph_with_users(n: usize) -> GraphHunter {
         let mut g = GraphHunter::new();
@@ -178,7 +178,11 @@ mod tests {
         assert_eq!(p.matched_entities, 180);
         assert_eq!(p.population, 200);
         assert!((p.prevalence - 0.9).abs() < 1e-9, "got {}", p.prevalence);
-        assert!(p.note.contains("90%"), "note should quote the share: {}", p.note);
+        assert!(
+            p.note.contains("90%"),
+            "note should quote the share: {}",
+            p.note
+        );
     }
 
     /// A genuinely selective pattern must stay silent, or the warning

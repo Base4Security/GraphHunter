@@ -38,15 +38,24 @@ fn preview_real_world_pcap() {
     }
     eprintln!("\nprotocol mix:");
     for p in &result.protocol_mix {
-        eprintln!("  {:<8} {:>6} pkt  {:>10} bytes", p.protocol, p.packets, p.bytes);
+        eprintln!(
+            "  {:<8} {:>6} pkt  {:>10} bytes",
+            p.protocol, p.packets, p.bytes
+        );
     }
     eprintln!("\ntop source IPs:");
     for ip in &result.top_src_ips {
-        eprintln!("  {:<40} {:>6} pkt  {:>10} bytes", ip.ip, ip.packets, ip.bytes);
+        eprintln!(
+            "  {:<40} {:>6} pkt  {:>10} bytes",
+            ip.ip, ip.packets, ip.bytes
+        );
     }
     eprintln!("\ntop destination IPs:");
     for ip in &result.top_dst_ips {
-        eprintln!("  {:<40} {:>6} pkt  {:>10} bytes", ip.ip, ip.packets, ip.bytes);
+        eprintln!(
+            "  {:<40} {:>6} pkt  {:>10} bytes",
+            ip.ip, ip.packets, ip.bytes
+        );
     }
     eprintln!("\ntop destination ports:");
     for p in &result.top_dst_ports {
@@ -66,7 +75,10 @@ fn preview_real_world_pcap() {
     }
     eprintln!("──────────────────────────────\n");
 
-    assert!(result.packets_sampled > 0, "expected ≥1 packet from real file");
+    assert!(
+        result.packets_sampled > 0,
+        "expected ≥1 packet from real file"
+    );
     assert!(
         !result.protocol_mix.is_empty(),
         "expected some protocol breakdown"

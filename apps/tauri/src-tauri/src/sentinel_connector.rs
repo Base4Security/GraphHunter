@@ -3,5 +3,5 @@
 //! `graph_hunter_api::sentinel_connector`.
 
 pub use graph_hunter_api::sentinel_connector::{
-    default_tables, polling_loop, ConnectorStatus, SentinelConnectorHandle,
+    ConnectorStatus, SentinelConnectorHandle, default_tables, polling_loop,
 };

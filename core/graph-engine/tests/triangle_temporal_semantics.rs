@@ -59,9 +59,12 @@ fn triangle_with(t_ab: i64, t_bc: i64, t_ac: i64) -> GraphHunter {
     for id in ["a", "b", "c"] {
         g.add_entity(Entity::new(id, EntityType::Host)).unwrap();
     }
-    g.add_relation(Relation::new("a", "b", RelationType::Connect, t_ab)).unwrap();
-    g.add_relation(Relation::new("b", "c", RelationType::Connect, t_bc)).unwrap();
-    g.add_relation(Relation::new("a", "c", RelationType::Connect, t_ac)).unwrap();
+    g.add_relation(Relation::new("a", "b", RelationType::Connect, t_ab))
+        .unwrap();
+    g.add_relation(Relation::new("b", "c", RelationType::Connect, t_bc))
+        .unwrap();
+    g.add_relation(Relation::new("a", "c", RelationType::Connect, t_ac))
+        .unwrap();
     g.sort_edges_by_timestamp().unwrap();
     g
 }
@@ -168,11 +171,15 @@ fn a_valid_combination_of_parallel_edges_is_found() {
     for id in ["a", "b", "c"] {
         g.add_entity(Entity::new(id, EntityType::Host)).unwrap();
     }
-    g.add_relation(Relation::new("a", "b", RelationType::Connect, 10)).unwrap();
+    g.add_relation(Relation::new("a", "b", RelationType::Connect, 10))
+        .unwrap();
     // Two parallel b→c edges: one too early to use, one that works.
-    g.add_relation(Relation::new("b", "c", RelationType::Connect, 5)).unwrap();
-    g.add_relation(Relation::new("b", "c", RelationType::Connect, 20)).unwrap();
-    g.add_relation(Relation::new("a", "c", RelationType::Connect, 30)).unwrap();
+    g.add_relation(Relation::new("b", "c", RelationType::Connect, 5))
+        .unwrap();
+    g.add_relation(Relation::new("b", "c", RelationType::Connect, 20))
+        .unwrap();
+    g.add_relation(Relation::new("a", "c", RelationType::Connect, 30))
+        .unwrap();
     g.sort_edges_by_timestamp().unwrap();
 
     assert_eq!(
@@ -187,9 +194,12 @@ fn a_valid_combination_of_parallel_edges_is_found() {
     for id in ["a", "b", "c"] {
         g2.add_entity(Entity::new(id, EntityType::Host)).unwrap();
     }
-    g2.add_relation(Relation::new("a", "b", RelationType::Connect, 10)).unwrap();
-    g2.add_relation(Relation::new("b", "c", RelationType::Connect, 5)).unwrap();
-    g2.add_relation(Relation::new("a", "c", RelationType::Connect, 30)).unwrap();
+    g2.add_relation(Relation::new("a", "b", RelationType::Connect, 10))
+        .unwrap();
+    g2.add_relation(Relation::new("b", "c", RelationType::Connect, 5))
+        .unwrap();
+    g2.add_relation(Relation::new("a", "c", RelationType::Connect, 30))
+        .unwrap();
     g2.sort_edges_by_timestamp().unwrap();
     assert_eq!(
         via_operator(&g2, None),
@@ -311,7 +321,8 @@ fn operator_matches_an_independent_reference_across_random_graphs() {
         let n = 4 + (next() % 3) as usize; // 4..6 vertices
         let mut g = GraphHunter::new();
         for i in 0..n {
-            g.add_entity(Entity::new(format!("v{i}"), EntityType::Host)).unwrap();
+            g.add_entity(Entity::new(format!("v{i}"), EntityType::Host))
+                .unwrap();
         }
         // Edges with deliberately small timestamp range so ties and
         // parallel edges are frequent, not incidental.
@@ -334,7 +345,11 @@ fn operator_matches_an_independent_reference_across_random_graphs() {
         g.sort_edges_by_timestamp().unwrap();
 
         // Half the cases with a window, half without.
-        let tw = if case % 2 == 0 { None } else { Some((10i64, 50i64)) };
+        let tw = if case % 2 == 0 {
+            None
+        } else {
+            Some((10i64, 50i64))
+        };
 
         clear_flags();
         // SAFETY: ENV_LOCK held.
@@ -352,7 +367,8 @@ fn operator_matches_an_independent_reference_across_random_graphs() {
         let want = reference_triangles(&g, tw);
 
         assert_eq!(
-            got, want,
+            got,
+            want,
             "case {case} (n={n}, edges={edges}, window={tw:?}): operator and \
              independent reference disagree.\n  only operator: {:?}\n  only \
              reference: {:?}",

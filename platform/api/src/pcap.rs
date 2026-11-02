@@ -128,8 +128,7 @@ pub fn pcap_ingest_streaming(
         .to_string();
     let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let file = File::open(path).map_err(|e| format!("open '{path}': {e}"))?;
-    let mut reader =
-        create_reader(65_536, file).map_err(|e| format!("pcap reader init: {e:?}"))?;
+    let mut reader = create_reader(65_536, file).map_err(|e| format!("pcap reader init: {e:?}"))?;
 
     let mut aggregator = FlowAggregator::new(pcap_file);
     let mut if_tsresol: Vec<u8> = Vec::new();
@@ -146,13 +145,12 @@ pub fn pcap_ingest_streaming(
             Ok((offset, block)) => {
                 match block {
                     PcapBlockOwned::LegacyHeader(hdr) => {
-                        legacy_nanos = hdr.magic_number == 0xa1b2_3c4d
-                            || hdr.magic_number == 0x4d3c_b2a1;
+                        legacy_nanos =
+                            hdr.magic_number == 0xa1b2_3c4d || hdr.magic_number == 0x4d3c_b2a1;
                     }
                     PcapBlockOwned::Legacy(pkt) => {
                         let ts_us = if legacy_nanos {
-                            (pkt.ts_sec as u128) * 1_000_000
-                                + (pkt.ts_usec as u128) / 1_000
+                            (pkt.ts_sec as u128) * 1_000_000 + (pkt.ts_usec as u128) / 1_000
                         } else {
                             (pkt.ts_sec as u128) * 1_000_000 + (pkt.ts_usec as u128)
                         };
@@ -404,42 +402,53 @@ impl FlowAggregator {
         };
         let mut pkt_icmp_type: Option<u8> = None;
         let mut pkt_icmp_code: Option<u8> = None;
-        let (src_port, dst_port, tcp_flags, is_fin, is_rst) =
-            match parsed.transport.as_ref() {
-                Some(etherparse::TransportHeader::Tcp(t)) => {
-                    let mut flags = 0u8;
-                    if t.fin { flags |= FLAG_FIN; }
-                    if t.syn { flags |= FLAG_SYN; }
-                    if t.rst { flags |= FLAG_RST; }
-                    if t.psh { flags |= FLAG_PSH; }
-                    if t.ack { flags |= FLAG_ACK; }
-                    if t.urg { flags |= FLAG_URG; }
-                    (t.source_port, t.destination_port, flags, t.fin, t.rst)
+        let (src_port, dst_port, tcp_flags, is_fin, is_rst) = match parsed.transport.as_ref() {
+            Some(etherparse::TransportHeader::Tcp(t)) => {
+                let mut flags = 0u8;
+                if t.fin {
+                    flags |= FLAG_FIN;
                 }
-                Some(etherparse::TransportHeader::Udp(u)) => {
-                    (u.source_port, u.destination_port, 0, false, false)
+                if t.syn {
+                    flags |= FLAG_SYN;
                 }
-                Some(etherparse::TransportHeader::Icmpv4(h)) => {
-                    // `Icmpv4Type` is a sum type that recovers
-                    // type/code from variant data — easier to round-
-                    // trip through `to_bytes()` and read offsets 0-1.
-                    let bytes = h.to_bytes();
-                    if bytes.len() >= 2 {
-                        pkt_icmp_type = Some(bytes[0]);
-                        pkt_icmp_code = Some(bytes[1]);
-                    }
-                    (0, 0, 0, false, false)
+                if t.rst {
+                    flags |= FLAG_RST;
                 }
-                Some(etherparse::TransportHeader::Icmpv6(h)) => {
-                    let bytes = h.to_bytes();
-                    if bytes.len() >= 2 {
-                        pkt_icmp_type = Some(bytes[0]);
-                        pkt_icmp_code = Some(bytes[1]);
-                    }
-                    (0, 0, 0, false, false)
+                if t.psh {
+                    flags |= FLAG_PSH;
                 }
-                _ => (0, 0, 0, false, false),
-            };
+                if t.ack {
+                    flags |= FLAG_ACK;
+                }
+                if t.urg {
+                    flags |= FLAG_URG;
+                }
+                (t.source_port, t.destination_port, flags, t.fin, t.rst)
+            }
+            Some(etherparse::TransportHeader::Udp(u)) => {
+                (u.source_port, u.destination_port, 0, false, false)
+            }
+            Some(etherparse::TransportHeader::Icmpv4(h)) => {
+                // `Icmpv4Type` is a sum type that recovers
+                // type/code from variant data — easier to round-
+                // trip through `to_bytes()` and read offsets 0-1.
+                let bytes = h.to_bytes();
+                if bytes.len() >= 2 {
+                    pkt_icmp_type = Some(bytes[0]);
+                    pkt_icmp_code = Some(bytes[1]);
+                }
+                (0, 0, 0, false, false)
+            }
+            Some(etherparse::TransportHeader::Icmpv6(h)) => {
+                let bytes = h.to_bytes();
+                if bytes.len() >= 2 {
+                    pkt_icmp_type = Some(bytes[0]);
+                    pkt_icmp_code = Some(bytes[1]);
+                }
+                (0, 0, 0, false, false)
+            }
+            _ => (0, 0, 0, false, false),
+        };
         let bytes = data.len() as u64;
         let payload: &[u8] = parsed.payload.slice();
 
@@ -507,10 +516,7 @@ impl FlowAggregator {
         let close_now = match matched {
             Some((key, dir)) => {
                 let close = {
-                    let state = self
-                        .active
-                        .get_mut(&key)
-                        .expect("matched flow must exist");
+                    let state = self.active.get_mut(&key).expect("matched flow must exist");
                     state.last_us = ts_us;
                     match dir {
                         Direction::Forward => {
@@ -665,12 +671,12 @@ impl FlowAggregator {
         rel_metadata.insert("first_us".to_string(), state.first_us.to_string());
         rel_metadata.insert("last_us".to_string(), state.last_us.to_string());
         let duration_us = state.last_us.saturating_sub(state.first_us);
-        rel_metadata.insert(
-            "duration_ms".to_string(),
-            (duration_us / 1_000).to_string(),
-        );
+        rel_metadata.insert("duration_ms".to_string(), (duration_us / 1_000).to_string());
         if key.proto == PROTO_TCP {
-            rel_metadata.insert("tcp_flags".to_string(), fmt_tcp_flags(state.tcp_flags_union));
+            rel_metadata.insert(
+                "tcp_flags".to_string(),
+                fmt_tcp_flags(state.tcp_flags_union),
+            );
         }
         // ── ICMP type/code on the L4 edge ─────────────────────────
         // Always surface them when present, regardless of L7 decode.
@@ -1025,9 +1031,7 @@ fn peek_tcp_l7(state: &mut FlowState, payload: &[u8]) {
 /// length — so the byte at offset 0 *or* 4 is the candidate.
 fn krb_byte_prefix_plausible(payload: &[u8]) -> bool {
     payload.first().is_some_and(|b| *b == 0x6a || *b == 0x6c)
-        || payload
-            .get(4)
-            .is_some_and(|b| *b == 0x6a || *b == 0x6c)
+        || payload.get(4).is_some_and(|b| *b == 0x6a || *b == 0x6c)
 }
 
 /// Cheap pre-flight for [`extract_ntlm_type3`]: just confirm the
@@ -1101,12 +1105,24 @@ fn proto_name(p: u8) -> &'static str {
 
 fn fmt_tcp_flags(flags: u8) -> String {
     let mut v: Vec<&str> = Vec::with_capacity(6);
-    if flags & FLAG_FIN != 0 { v.push("FIN"); }
-    if flags & FLAG_SYN != 0 { v.push("SYN"); }
-    if flags & FLAG_RST != 0 { v.push("RST"); }
-    if flags & FLAG_PSH != 0 { v.push("PSH"); }
-    if flags & FLAG_ACK != 0 { v.push("ACK"); }
-    if flags & FLAG_URG != 0 { v.push("URG"); }
+    if flags & FLAG_FIN != 0 {
+        v.push("FIN");
+    }
+    if flags & FLAG_SYN != 0 {
+        v.push("SYN");
+    }
+    if flags & FLAG_RST != 0 {
+        v.push("RST");
+    }
+    if flags & FLAG_PSH != 0 {
+        v.push("PSH");
+    }
+    if flags & FLAG_ACK != 0 {
+        v.push("ACK");
+    }
+    if flags & FLAG_URG != 0 {
+        v.push("URG");
+    }
     v.join(",")
 }
 
@@ -1254,10 +1270,7 @@ mod tests {
             emitted.iter().any(|e| e.dst_id == "1.1.1.1"),
             "stale flow should have been swept"
         );
-        let stale = emitted
-            .iter()
-            .find(|e| e.dst_id == "1.1.1.1")
-            .unwrap();
+        let stale = emitted.iter().find(|e| e.dst_id == "1.1.1.1").unwrap();
         assert_eq!(
             stale.rel_metadata.get("flow_complete").map(String::as_str),
             Some("false")
@@ -1374,12 +1387,7 @@ mod tests {
     }
 
     /// Ethernet/IPv4/ICMP packet with the given type and code.
-    fn icmp_frame(
-        src_ip: [u8; 4],
-        dst_ip: [u8; 4],
-        icmp_type: u8,
-        icmp_code: u8,
-    ) -> Vec<u8> {
+    fn icmp_frame(src_ip: [u8; 4], dst_ip: [u8; 4], icmp_type: u8, icmp_code: u8) -> Vec<u8> {
         let mut f = Vec::<u8>::new();
         f.extend_from_slice(&[0, 0, 0, 0, 0, 1]);
         f.extend_from_slice(&[0, 0, 0, 0, 0, 2]);
@@ -1411,7 +1419,12 @@ mod tests {
         let mut agg = new_agg();
         let banner = b"SSH-2.0-OpenSSH_9.4\r\n";
         let pkt = tcp_frame_with_payload(
-            [10, 0, 0, 1], [1, 1, 1, 1], 50000, 22, FLAG_SYN | FLAG_ACK, banner,
+            [10, 0, 0, 1],
+            [1, 1, 1, 1],
+            50000,
+            22,
+            FLAG_SYN | FLAG_ACK,
+            banner,
         );
         agg.observe(&pkt, 1_000_000);
         agg.flush_all();
@@ -1432,7 +1445,12 @@ mod tests {
     fn ftp_user_emits_secondary_user_auth_edge() {
         let mut agg = new_agg();
         let pkt = tcp_frame_with_payload(
-            [10, 0, 0, 1], [1, 1, 1, 1], 50001, 21, FLAG_SYN, b"USER alice\r\n",
+            [10, 0, 0, 1],
+            [1, 1, 1, 1],
+            50001,
+            21,
+            FLAG_SYN,
+            b"USER alice\r\n",
         );
         agg.observe(&pkt, 1_000_000);
         agg.flush_all();
@@ -1477,7 +1495,12 @@ mod tests {
         hdr[4..6].copy_from_slice(&0x0040u16.to_le_bytes());
         hdr[12..14].copy_from_slice(&0x0001u16.to_le_bytes());
         let pkt = tcp_frame_with_payload(
-            [10, 0, 0, 1], [1, 1, 1, 1], 50002, 445, FLAG_PSH | FLAG_ACK, &hdr,
+            [10, 0, 0, 1],
+            [1, 1, 1, 1],
+            50002,
+            445,
+            FLAG_PSH | FLAG_ACK,
+            &hdr,
         );
         agg.observe(&pkt, 1_000_000);
         agg.flush_all();
@@ -1622,7 +1645,12 @@ mod tests {
 
         let mut agg = new_agg();
         let pkt = tcp_frame_with_payload(
-            [10, 0, 0, 1], [10, 0, 0, 20], 50001, 389, FLAG_PSH | FLAG_ACK, &msg,
+            [10, 0, 0, 1],
+            [10, 0, 0, 20],
+            50001,
+            389,
+            FLAG_PSH | FLAG_ACK,
+            &msg,
         );
         agg.observe(&pkt, 1_000_000);
         agg.flush_all();
@@ -1649,10 +1677,7 @@ mod tests {
         let user = "alice";
         let domain = "EXAMPLE";
         // Encode user + domain as UTF-16-LE (Negotiate Unicode).
-        let user_utf16: Vec<u8> = user
-            .encode_utf16()
-            .flat_map(|u| u.to_le_bytes())
-            .collect();
+        let user_utf16: Vec<u8> = user.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         let dom_utf16: Vec<u8> = domain
             .encode_utf16()
             .flat_map(|u| u.to_le_bytes())
@@ -1681,7 +1706,12 @@ mod tests {
 
         let mut agg = new_agg();
         let pkt = tcp_frame_with_payload(
-            [10, 0, 0, 1], [10, 0, 0, 30], 50002, 445, FLAG_PSH | FLAG_ACK, &smb,
+            [10, 0, 0, 1],
+            [10, 0, 0, 30],
+            50002,
+            445,
+            FLAG_PSH | FLAG_ACK,
+            &smb,
         );
         agg.observe(&pkt, 1_000_000);
         agg.flush_all();

@@ -270,7 +270,14 @@ impl<'a> Grower<'a> {
             if bound <= 0.0 {
                 break;
             }
-            dijkstra(te, &sources, &self.blocked, bound, &mut self.dist, &mut self.pred);
+            dijkstra(
+                te,
+                &sources,
+                &self.blocked,
+                bound,
+                &mut self.dist,
+                &mut self.pred,
+            );
             // Candidate terminals by gain, descending; index breaks ties.
             let mut cands: Vec<(f64, u32, u32)> = Vec::new();
             for v in 0..g.n as u32 {

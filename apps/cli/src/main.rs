@@ -22,7 +22,9 @@ use protocol::{Request, Response};
 /// csv), `--out FILE` (default stdout). Build with `--release` — debug
 /// latencies are not representative, and the harness says so on stderr.
 fn run_bench(args: &[String]) -> ! {
-    use graph_hunter_core::benchmark::{perf_rows_to_csv, run_perf_scaling, run_perf_suite_planted};
+    use graph_hunter_core::benchmark::{
+        perf_rows_to_csv, run_perf_scaling, run_perf_suite_planted,
+    };
 
     let mut runs: usize = 30;
     let mut seed: u64 = 42;
@@ -34,15 +36,43 @@ fn run_bench(args: &[String]) -> ! {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--runs" => runs = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| bail("--runs needs a positive integer")),
-            "--seed" => seed = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| bail("--seed needs an integer")),
-            "--plant" => plant = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| bail("--plant needs a non-negative integer")),
+            "--runs" => {
+                runs = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| bail("--runs needs a positive integer"))
+            }
+            "--seed" => {
+                seed = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| bail("--seed needs an integer"))
+            }
+            "--plant" => {
+                plant = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| bail("--plant needs a non-negative integer"))
+            }
             // Scaling sweep (D3.1): ER at fixed avg degree across growing n,
             // to find where DFS latency breaks. Overrides the fixed suite.
             "--sweep" => sweep = true,
-            "--format" => format = it.next().cloned().unwrap_or_else(|| bail("--format needs csv|json")),
-            "--out" => out_path = Some(it.next().cloned().unwrap_or_else(|| bail("--out needs a path"))),
-            "-h" | "--help" => bail("usage: graph_hunter_cli bench [--runs N] [--seed S] [--plant N] [--sweep] [--format csv|json] [--out FILE]"),
+            "--format" => {
+                format = it
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(|| bail("--format needs csv|json"))
+            }
+            "--out" => {
+                out_path = Some(
+                    it.next()
+                        .cloned()
+                        .unwrap_or_else(|| bail("--out needs a path")),
+                )
+            }
+            "-h" | "--help" => bail(
+                "usage: graph_hunter_cli bench [--runs N] [--seed S] [--plant N] [--sweep] [--format csv|json] [--out FILE]",
+            ),
             other => bail(&format!("unknown bench flag: {other}")),
         }
     }

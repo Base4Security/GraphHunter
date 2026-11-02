@@ -186,7 +186,10 @@ pub(crate) fn record_to_event(r: &NetflowRecord, source_file: &str) -> Option<Ra
         "sensor_uid".to_string(),
         format!("{}:{}", r.exporter_domain_id, r.sequence),
     );
-    md.insert("exporter_domain_id".to_string(), r.exporter_domain_id.to_string());
+    md.insert(
+        "exporter_domain_id".to_string(),
+        r.exporter_domain_id.to_string(),
+    );
     md.insert("flow_sequence".to_string(), r.sequence.to_string());
     md.insert(
         "netflow_version".to_string(),
@@ -255,12 +258,24 @@ fn proto_name(p: u8) -> &'static str {
 
 fn tcp_flags_str(flags: u8) -> String {
     let mut parts: Vec<&str> = Vec::new();
-    if flags & 0x01 != 0 { parts.push("FIN"); }
-    if flags & 0x02 != 0 { parts.push("SYN"); }
-    if flags & 0x04 != 0 { parts.push("RST"); }
-    if flags & 0x08 != 0 { parts.push("PSH"); }
-    if flags & 0x10 != 0 { parts.push("ACK"); }
-    if flags & 0x20 != 0 { parts.push("URG"); }
+    if flags & 0x01 != 0 {
+        parts.push("FIN");
+    }
+    if flags & 0x02 != 0 {
+        parts.push("SYN");
+    }
+    if flags & 0x04 != 0 {
+        parts.push("RST");
+    }
+    if flags & 0x08 != 0 {
+        parts.push("PSH");
+    }
+    if flags & 0x10 != 0 {
+        parts.push("ACK");
+    }
+    if flags & 0x20 != 0 {
+        parts.push("URG");
+    }
     parts.join(",")
 }
 
@@ -318,7 +333,10 @@ mod tests {
         r.tcp_flags = 0x18; // garbage — must NOT be surfaced for UDP
         let ev = record_to_event(&r, "").expect("event");
         assert!(!ev.rel_metadata.contains_key("tcp_flags"));
-        assert_eq!(ev.rel_metadata.get("protocol").map(String::as_str), Some("UDP"));
+        assert_eq!(
+            ev.rel_metadata.get("protocol").map(String::as_str),
+            Some("UDP")
+        );
     }
 
     #[test]

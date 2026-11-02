@@ -1,10 +1,10 @@
 //! Sentinel/KQL endpoints.
 
 use axum::{
+    Json,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -75,8 +75,8 @@ pub(super) async fn handler_run_kql(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("KQL execution timed out (120s)"),
@@ -129,8 +129,8 @@ pub(super) async fn handler_discover_schema(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("Schema discovery timed out (120s)"),
@@ -180,8 +180,8 @@ pub(super) async fn handler_graph_propose(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("graph_propose timed out (120s)"),
@@ -230,8 +230,8 @@ pub(super) async fn handler_graph_build(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("graph_build timed out (300s)"),
@@ -266,8 +266,8 @@ pub(super) async fn handler_seed_from_ioc(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("Sentinel seed timed out (120s)"),
@@ -308,8 +308,8 @@ pub(super) async fn handler_node_enrich(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("Node enrich timed out (120s)"),
@@ -321,8 +321,8 @@ pub(super) async fn handler_sentinel_resume(State(api): State<Arc<GraphHunterApi
     match api.sentinel_resume() {
         Ok(()) => ok_json(serde_json::json!({ "resumed": true })),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -333,8 +333,8 @@ pub(super) async fn handler_sentinel_pause(State(api): State<Arc<GraphHunterApi>
     match api.sentinel_pause() {
         Ok(()) => ok_json(serde_json::json!({ "paused": true })),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -345,8 +345,8 @@ pub(super) async fn handler_sentinel_status(State(api): State<Arc<GraphHunterApi
     match api.sentinel_status() {
         Ok(v) => return ok_json(v),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             return (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
         }
     }

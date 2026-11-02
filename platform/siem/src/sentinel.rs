@@ -55,7 +55,10 @@ pub fn parse_query_stats(raw: &serde_json::Value) -> Option<QueryStats> {
     if server_duration_ms.is_none() && bytes_scanned.is_none() {
         return None;
     }
-    Some(QueryStats { bytes_scanned, server_duration_ms })
+    Some(QueryStats {
+        bytes_scanned,
+        server_duration_ms,
+    })
 }
 
 /// Optional Azure AD credentials. When provided, used instead of env vars.
@@ -165,7 +168,9 @@ fn execute_log_analytics_query(
 
 /// Converts Log Analytics response (tables[].columns + rows) to a JSON array of objects
 /// and finds the latest TimeGenerated for pagination.
-fn normalize_log_analytics_response(raw: &serde_json::Value) -> Result<SentinelQueryResult, String> {
+fn normalize_log_analytics_response(
+    raw: &serde_json::Value,
+) -> Result<SentinelQueryResult, String> {
     let tables = raw
         .get("tables")
         .and_then(|t| t.as_array())
@@ -196,7 +201,11 @@ fn normalize_log_analytics_response(raw: &serde_json::Value) -> Result<SentinelQ
                     let value = cell_value_to_json(cell);
                     if Some(i) == time_col {
                         if let Value::String(s) = &value {
-                            if last_time.as_ref().map(|t| s.as_str() > t.as_str()).unwrap_or(true) {
+                            if last_time
+                                .as_ref()
+                                .map(|t| s.as_str() > t.as_str())
+                                .unwrap_or(true)
+                            {
                                 last_time = Some(s.clone());
                             }
                         }
@@ -224,7 +233,11 @@ fn cell_value_to_json(v: &serde_json::Value) -> Value {
         Value::Number(n) => Value::Number(n.clone()),
         Value::String(s) => Value::String(s.clone()),
         Value::Array(a) => Value::Array(a.iter().map(cell_value_to_json).collect()),
-        Value::Object(o) => Value::Object(o.iter().map(|(k, v)| (k.clone(), cell_value_to_json(v))).collect()),
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, v)| (k.clone(), cell_value_to_json(v)))
+                .collect(),
+        ),
     }
 }
 
@@ -252,7 +265,10 @@ mod tests {
         let result = normalize_log_analytics_response(&raw).unwrap();
         assert!(result.data.contains("SecurityEvent"));
         assert!(result.data.contains("DC-01"));
-        assert_eq!(result.next_query_start.as_deref(), Some("2024-01-15T14:31:00Z"));
+        assert_eq!(
+            result.next_query_start.as_deref(),
+            Some("2024-01-15T14:31:00Z")
+        );
         // No statistics object in this response → no cost captured.
         assert!(result.stats.is_none());
     }

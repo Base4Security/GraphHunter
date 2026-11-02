@@ -7,19 +7,19 @@ use std::sync::Arc;
 
 use tauri::State;
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::dto::sentinel::{
     ConnectorStatusResponse, HuntingTemplateId, KqlResult, RunHuntingTemplateRequest,
     RunKqlRequest, SentinelConnectRequest, SentinelConnectedEvent, SentinelEnvStatus, TimeWindow,
 };
 use graph_hunter_api::operations::sentinel::preview_hunting_template;
-use graph_hunter_api::GraphHunterApi;
 
 use crate::error::CommandError;
 
 // Re-exports for backward compat with anything that still references
 // these by the old path (e.g. tests, external integrations).
 pub use graph_hunter_api::dto::sentinel::{
-    SentinelConnectRequest as SentinelConnectParams, RunKqlRequest as RunKqlParams,
+    RunKqlRequest as RunKqlParams, SentinelConnectRequest as SentinelConnectParams,
 };
 
 /// Start real-time Sentinel streaming. Returns immediately with

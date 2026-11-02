@@ -1193,8 +1193,7 @@ impl SysmonJsonParser {
         }
         if let Some(user_name) = event.user {
             let user_entity = Entity::new(user_name, EntityType::User);
-            let rel =
-                Relation::new(&user_entity.id, &child.id, RelationType::Execute, timestamp);
+            let rel = Relation::new(&user_entity.id, &child.id, RelationType::Execute, timestamp);
             triples.push((user_entity, rel, child.clone()));
         }
         if let Some(parent_image) = event.parent_image {
@@ -1529,10 +1528,7 @@ impl SysmonJsonParser {
     }
 
     #[inline]
-    fn typed_image_load(
-        event: &SysmonEventTyped<'_>,
-        timestamp: i64,
-    ) -> Option<Vec<ParsedTriple>> {
+    fn typed_image_load(event: &SysmonEventTyped<'_>, timestamp: i64) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
         let image_loaded = event.image_loaded?;
         let process = Entity::new(image, EntityType::Process);
@@ -1572,10 +1568,7 @@ impl SysmonJsonParser {
         timestamp: i64,
     ) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         let mut process = Entity::new(image, EntityType::Process);
         if let Some(pid) = event.process_id {
             process.metadata.insert("pid".into(), pid.to_string());
@@ -1938,10 +1931,7 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let user_name = event.target_user_name?;
         let user_id = Self::build_user_id(user_name, event.target_domain_name);
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         let user = Entity::new(&user_id, EntityType::User);
         let host = Entity::new(host_name, EntityType::Host);
         let mut rel = Relation::new(&user.id, &host.id, RelationType::Auth, timestamp);
@@ -1996,10 +1986,7 @@ impl SysmonJsonParser {
         timestamp: i64,
     ) -> Option<Vec<ParsedTriple>> {
         let process_name = event.process_name?;
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         let process = Entity::new(process_name, EntityType::Process);
         let host = Entity::new(host_name, EntityType::Host);
         let rel = Relation::new(&process.id, &host.id, RelationType::Delete, timestamp);
@@ -2078,10 +2065,7 @@ impl SysmonJsonParser {
         event: &SysmonEventTyped<'_>,
         timestamp: i64,
     ) -> Option<Vec<ParsedTriple>> {
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         let host = Entity::new(host_name, EntityType::Host);
         let mut process = Entity::new("powershell.exe", EntityType::Process);
         if let Some(script_text) = event.script_block_text {
@@ -2089,7 +2073,9 @@ impl SysmonJsonParser {
             process.metadata.insert("script_preview".into(), preview);
         }
         if let Some(sbid) = event.script_block_id {
-            process.metadata.insert("script_block_id".into(), sbid.into());
+            process
+                .metadata
+                .insert("script_block_id".into(), sbid.into());
         }
         let rel = Relation::new(&host.id, &process.id, RelationType::Execute, timestamp);
         Some(vec![(host, rel, process)])
@@ -2163,9 +2149,7 @@ impl LogParser for SysmonJsonParser {
             .map_init(
                 || Vec::<u8>::with_capacity(2048),
                 |scratch, line| {
-                    if let Some(triples) =
-                        Self::try_parse_typed_with_scratch(line, scratch)
-                    {
+                    if let Some(triples) = Self::try_parse_typed_with_scratch(line, scratch) {
                         return triples;
                     }
                     scratch.clear();
@@ -2253,7 +2237,10 @@ impl LogParser for SysmonJsonParser {
     fn parse_raw_with_stats(
         &self,
         data: &str,
-    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+    ) -> (
+        Vec<crate::parser::RawIngestEvent>,
+        crate::parser::ParseStats,
+    ) {
         use rayon::prelude::*;
         let trimmed = data.trim();
 

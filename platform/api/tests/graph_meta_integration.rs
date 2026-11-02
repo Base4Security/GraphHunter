@@ -20,8 +20,8 @@
 
 use std::sync::Arc;
 
-use graph_hunter_api::state::{Session, session_types::DatasetInfo};
 use graph_hunter_api::GraphHunterApi;
+use graph_hunter_api::state::{Session, session_types::DatasetInfo};
 use graph_hunter_core::GraphHunter;
 use serde_json::Value;
 
@@ -30,7 +30,7 @@ use serde_json::Value;
 #[test]
 fn graph_summary_returns_schema_v1_shape() {
     use graph_hunter_api::operations::graph_meta::{
-        _flush_summary_cache_for_test, _GRAPH_META_TEST_MUTEX,
+        _GRAPH_META_TEST_MUTEX, _flush_summary_cache_for_test,
     };
     let _g = _GRAPH_META_TEST_MUTEX
         .lock()
@@ -38,7 +38,9 @@ fn graph_summary_returns_schema_v1_shape() {
     _flush_summary_cache_for_test();
 
     let api = GraphHunterApi::new_noop();
-    let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary must succeed");
+    let summary = api
+        .get_graph_meta_summary()
+        .expect("get_graph_meta_summary must succeed");
 
     // Serialize to Value so the assertions are transport-agnostic —
     // they verify the same JSON field names that the HTTP handler and
@@ -62,10 +64,7 @@ fn graph_summary_returns_schema_v1_shape() {
         resp["totals"]["by_type"].is_object(),
         "totals.by_type must be an object"
     );
-    assert!(
-        resp["sources"].is_array(),
-        "sources must be an array"
-    );
+    assert!(resp["sources"].is_array(), "sources must be an array");
     assert!(
         resp["active_datasets"].is_array(),
         "active_datasets must be an array"
@@ -95,7 +94,7 @@ fn graph_summary_returns_schema_v1_shape() {
 #[test]
 fn graph_summary_fresh_api_has_no_datasets_or_hunts() {
     use graph_hunter_api::operations::graph_meta::{
-        _flush_recent_pivots_for_test, _flush_summary_cache_for_test, _GRAPH_META_TEST_MUTEX,
+        _GRAPH_META_TEST_MUTEX, _flush_recent_pivots_for_test, _flush_summary_cache_for_test,
     };
     let _g = _GRAPH_META_TEST_MUTEX
         .lock()
@@ -112,9 +111,14 @@ fn graph_summary_fresh_api_has_no_datasets_or_hunts() {
     _flush_recent_pivots_for_test();
 
     let api = GraphHunterApi::new_noop();
-    let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
+    let summary = api
+        .get_graph_meta_summary()
+        .expect("get_graph_meta_summary");
 
-    assert!(summary.graph_empty, "graph must report empty on a fresh API");
+    assert!(
+        summary.graph_empty,
+        "graph must report empty on a fresh API"
+    );
     assert_eq!(summary.totals.nodes, 0, "nodes must be 0 with no session");
     assert_eq!(summary.totals.edges, 0, "edges must be 0 with no session");
     assert!(
@@ -149,22 +153,18 @@ fn api_with_session_dataset(session_id: &str, dataset_id: &str) -> GraphHunterAp
         GraphHunter::new(),
         0,
     ));
-    session
-        .datasets
-        .write()
-        .unwrap()
-        .push(DatasetInfo {
-            id: dataset_id.to_string(),
-            name: dataset_id.to_string(),
-            path: None,
-            created_at: 0,
-            entity_count: 0,
-            relation_count: 0,
-            field_config: None,
-            ingest_stats: None,
-            parser: None,
-            mapping_hash: None,
-        });
+    session.datasets.write().unwrap().push(DatasetInfo {
+        id: dataset_id.to_string(),
+        name: dataset_id.to_string(),
+        path: None,
+        created_at: 0,
+        entity_count: 0,
+        relation_count: 0,
+        field_config: None,
+        ingest_stats: None,
+        parser: None,
+        mapping_hash: None,
+    });
     api.sessions().insert(session);
     api.sessions().set_current(Some(session_id.to_string()));
     api
@@ -173,7 +173,7 @@ fn api_with_session_dataset(session_id: &str, dataset_id: &str) -> GraphHunterAp
 #[test]
 fn graph_summary_lists_active_datasets() {
     use graph_hunter_api::operations::graph_meta::{
-        _flush_summary_cache_for_test, _GRAPH_META_TEST_MUTEX,
+        _GRAPH_META_TEST_MUTEX, _flush_summary_cache_for_test,
     };
     let _g = _GRAPH_META_TEST_MUTEX
         .lock()
@@ -181,9 +181,13 @@ fn graph_summary_lists_active_datasets() {
     _flush_summary_cache_for_test();
 
     let api = api_with_session_dataset("s1", "ator-evtx-snapshot");
-    let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
+    let summary = api
+        .get_graph_meta_summary()
+        .expect("get_graph_meta_summary");
     assert!(
-        summary.active_datasets.contains(&"ator-evtx-snapshot".to_string()),
+        summary
+            .active_datasets
+            .contains(&"ator-evtx-snapshot".to_string()),
         "active_datasets must include the registered dataset id; got: {:?}",
         summary.active_datasets
     );
@@ -192,7 +196,7 @@ fn graph_summary_lists_active_datasets() {
 #[test]
 fn graph_summary_hunt_cache_non_empty_exposes_active_hunt() {
     use graph_hunter_api::operations::graph_meta::{
-        _flush_summary_cache_for_test, _GRAPH_META_TEST_MUTEX,
+        _GRAPH_META_TEST_MUTEX, _flush_summary_cache_for_test,
     };
     let _g = _GRAPH_META_TEST_MUTEX
         .lock()
@@ -211,14 +215,15 @@ fn graph_summary_hunt_cache_non_empty_exposes_active_hunt() {
             vec![Arc::from("u3"), Arc::from("h3")],
         ];
     }
-    let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
+    let summary = api
+        .get_graph_meta_summary()
+        .expect("get_graph_meta_summary");
     assert!(
         !summary.active_hunts.is_empty(),
         "hunt cache should expose entries in active_hunts"
     );
     assert_eq!(
-        summary.active_hunts[0].result_size,
-        3,
+        summary.active_hunts[0].result_size, 3,
         "result_size must equal the number of cached paths"
     );
 }
@@ -241,7 +246,7 @@ fn graph_summary_hunt_cache_non_empty_exposes_active_hunt() {
 async fn seed_from_ioc_appends_to_recent_pivots() {
     use graph_hunter_api::dto::v1::sentinel::SeedFromIocRequest;
     use graph_hunter_api::operations::graph_meta::{
-        _flush_recent_pivots_for_test, RECENT_PIVOTS, _GRAPH_META_TEST_MUTEX,
+        _GRAPH_META_TEST_MUTEX, _flush_recent_pivots_for_test, RECENT_PIVOTS,
     };
 
     // Writers of the process-global pivot buffer must serialise against
@@ -282,7 +287,7 @@ fn expand_node_marks_pivot_expanded_when_buffered() {
     use graph_hunter_api::dto::v1::graph_meta::RecentPivot;
     use graph_hunter_api::dto::v1::graph_ops::ExpandNodeRequest;
     use graph_hunter_api::operations::graph_meta::{
-        _flush_recent_pivots_for_test, RECENT_PIVOTS, _GRAPH_META_TEST_MUTEX,
+        _GRAPH_META_TEST_MUTEX, _flush_recent_pivots_for_test, RECENT_PIVOTS,
     };
 
     // Same reason as the test above: this one pushes into the global
@@ -319,7 +324,10 @@ fn expand_node_marks_pivot_expanded_when_buffered() {
     });
 
     let snap = RECENT_PIVOTS.snapshot();
-    let pivot = snap.iter().find(|p| p.entity == unique).expect("pivot present");
+    let pivot = snap
+        .iter()
+        .find(|p| p.entity == unique)
+        .expect("pivot present");
     // expand_node returned Err (no session) before reaching mark_expanded —
     // so expanded stays false. This pins the "mark only on success" contract.
     assert!(

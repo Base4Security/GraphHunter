@@ -99,7 +99,11 @@ impl HttpClient for ReqwestHttpClient {
         let headers: HashMap<String, String> = response
             .headers()
             .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_string(), v.to_string())))
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|v| (k.as_str().to_string(), v.to_string()))
+            })
             .collect();
 
         let body = tokio::select! {

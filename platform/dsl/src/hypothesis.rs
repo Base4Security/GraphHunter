@@ -458,7 +458,11 @@ mod resolve_tests {
         let defaulted = Hypothesis::new("h");
         assert_eq!(defaulted.resolve_max_gap(), 3, "env supplies the default");
         unsafe { std::env::remove_var("GRAPHHUNTER_MAX_GAP") };
-        assert_eq!(Hypothesis::new("h").resolve_max_gap(), 0, "no field, no env → 0");
+        assert_eq!(
+            Hypothesis::new("h").resolve_max_gap(),
+            0,
+            "no field, no env → 0"
+        );
     }
 
     #[test]
@@ -469,13 +473,26 @@ mod resolve_tests {
         let explicit = Hypothesis::new("h").with_skew_tolerance(2);
         assert_eq!(explicit.resolve_skew_delta(), 2, "field wins over env");
         let defaulted = Hypothesis::new("h");
-        assert_eq!(defaulted.resolve_skew_delta(), 9, "env supplies the default");
+        assert_eq!(
+            defaulted.resolve_skew_delta(),
+            9,
+            "env supplies the default"
+        );
         unsafe { std::env::remove_var("GRAPHHUNTER_SKEW_TOLERANCE_SECONDS") };
-        assert_eq!(Hypothesis::new("h").resolve_skew_delta(), 0, "no field, no env → 0");
+        assert_eq!(
+            Hypothesis::new("h").resolve_skew_delta(),
+            0,
+            "no field, no env → 0"
+        );
     }
 
     #[test]
     fn negative_skew_is_clamped_to_zero() {
-        assert_eq!(Hypothesis::new("h").with_skew_tolerance(-5).skew_tolerance_seconds, Some(0));
+        assert_eq!(
+            Hypothesis::new("h")
+                .with_skew_tolerance(-5)
+                .skew_tolerance_seconds,
+            Some(0)
+        );
     }
 }

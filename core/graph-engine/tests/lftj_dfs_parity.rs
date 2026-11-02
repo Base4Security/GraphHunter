@@ -108,7 +108,9 @@ fn operator_vs_dfs(
     for f in all_flags {
         unsafe { std::env::remove_var(f) };
     }
-    let (dfs_paths, _) = g.search_temporal_pattern(h, None, None).expect("dfs search");
+    let (dfs_paths, _) = g
+        .search_temporal_pattern(h, None, None)
+        .expect("dfs search");
 
     unsafe { std::env::set_var(flag, "1") };
     let (op_paths, _) = g
