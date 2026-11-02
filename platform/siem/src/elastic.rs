@@ -165,11 +165,11 @@ pub fn run_elastic_query(
                 req = req.header("Authorization", format!("ApiKey {}", api_key));
                 auth_applied = true;
             }
-        } else if let (Some(user), pass) = (&a.user, &a.password) {
-            if !user.is_empty() {
-                req = req.basic_auth(user, pass.as_deref());
-                auth_applied = true;
-            }
+        } else if let (Some(user), pass) = (&a.user, &a.password)
+            && !user.is_empty()
+        {
+            req = req.basic_auth(user, pass.as_deref());
+            auth_applied = true;
         }
     }
     // The caller supplied no credentials, so the fallback would spend the

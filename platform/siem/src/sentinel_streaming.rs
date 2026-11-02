@@ -67,6 +67,12 @@ impl HttpSentinelTransport {
     }
 }
 
+impl Default for HttpSentinelTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SentinelTransport for HttpSentinelTransport {
     async fn acquire_token(
         &self,
@@ -185,18 +191,18 @@ impl SentinelTokenCache {
         // Fast path: read lock
         {
             let guard = self.inner.read().await;
-            if let Some(cached) = guard.as_ref() {
-                if Instant::now() < cached.expires_at {
-                    return Ok(cached.access_token.clone());
-                }
+            if let Some(cached) = guard.as_ref()
+                && Instant::now() < cached.expires_at
+            {
+                return Ok(cached.access_token.clone());
             }
         }
         // Slow path: write lock, double-check
         let mut guard = self.inner.write().await;
-        if let Some(cached) = guard.as_ref() {
-            if Instant::now() < cached.expires_at {
-                return Ok(cached.access_token.clone());
-            }
+        if let Some(cached) = guard.as_ref()
+            && Instant::now() < cached.expires_at
+        {
+            return Ok(cached.access_token.clone());
         }
         let resp = transport
             .acquire_token(&auth.tenant_id, &auth.client_id, &auth.client_secret)
@@ -214,6 +220,12 @@ impl SentinelTokenCache {
     pub async fn invalidate(&self) {
         let mut guard = self.inner.write().await;
         *guard = None;
+    }
+}
+
+impl Default for SentinelTokenCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -289,6 +301,12 @@ impl SentinelWatermarkStore {
     }
 }
 
+impl Default for SentinelWatermarkStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Normalize response (async-friendly re-export of existing logic) ──
 
 /// Converts Log Analytics response to a `SentinelQueryResult`.
@@ -328,16 +346,14 @@ pub fn normalize_response(raw: &Value) -> Result<SentinelQueryResult, String> {
             for (i, cell) in arr.iter().enumerate() {
                 if let Some(&name) = col_names.get(i) {
                     let value = cell.clone();
-                    if Some(i) == watermark_col {
-                        if let Value::String(s) = &value {
-                            if last_time
-                                .as_ref()
-                                .map(|t| s.as_str() > t.as_str())
-                                .unwrap_or(true)
-                            {
-                                last_time = Some(s.clone());
-                            }
-                        }
+                    if Some(i) == watermark_col
+                        && let Value::String(s) = &value
+                        && last_time
+                            .as_ref()
+                            .map(|t| s.as_str() > t.as_str())
+                            .unwrap_or(true)
+                    {
+                        last_time = Some(s.clone());
                     }
                     obj.insert(name.to_string(), value);
                 }

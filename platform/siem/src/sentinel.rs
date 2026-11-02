@@ -199,16 +199,14 @@ fn normalize_log_analytics_response(
             for (i, cell) in arr.iter().enumerate() {
                 if let Some(&name) = col_names.get(i) {
                     let value = cell_value_to_json(cell);
-                    if Some(i) == time_col {
-                        if let Value::String(s) = &value {
-                            if last_time
-                                .as_ref()
-                                .map(|t| s.as_str() > t.as_str())
-                                .unwrap_or(true)
-                            {
-                                last_time = Some(s.clone());
-                            }
-                        }
+                    if Some(i) == time_col
+                        && let Value::String(s) = &value
+                        && last_time
+                            .as_ref()
+                            .map(|t| s.as_str() > t.as_str())
+                            .unwrap_or(true)
+                    {
+                        last_time = Some(s.clone());
                     }
                     obj.insert(name.to_string(), value);
                 }
