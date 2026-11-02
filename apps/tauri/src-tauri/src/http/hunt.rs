@@ -1,10 +1,10 @@
 //! Hunt execution, hunt-result paging, diffing, DSL parsing, explain_score.
 
 use axum::{
+    Json,
     extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -62,8 +62,8 @@ pub(super) async fn handler_hunt_results(
             paths: resp.paths,
         }),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -120,13 +120,11 @@ pub(super) async fn handler_run_hunt(
     State(api): State<Arc<GraphHunterApi>>,
     Json(body): Json<RunHuntBody>,
 ) -> Response {
-    let hypothesis: Hypothesis = match graph_hunter_core::parse_dsl(
-        body.hypothesis_dsl.trim(),
-        Some("MCP Hunt"),
-    ) {
-        Ok(r) => r.hypothesis,
-        Err(e) => return err_json(e.to_string()),
-    };
+    let hypothesis: Hypothesis =
+        match graph_hunter_core::parse_dsl(body.hypothesis_dsl.trim(), Some("MCP Hunt")) {
+            Ok(r) => r.hypothesis,
+            Err(e) => return err_json(e.to_string()),
+        };
     let api_clone = api.clone();
     let hypothesis_for_search = hypothesis.clone();
     let scoring = body.scoring;
@@ -189,8 +187,8 @@ pub(super) async fn handler_run_hunt(
             ok_json(project_run_hunt_response(&resp))
         }
         Ok(Ok(Err(e))) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
@@ -209,13 +207,11 @@ pub(super) async fn handler_diff_hunts(
     State(api): State<Arc<GraphHunterApi>>,
     Json(body): Json<DiffHuntsBody>,
 ) -> Response {
-    let hypothesis: Hypothesis = match graph_hunter_core::parse_dsl(
-        body.hypothesis_dsl.trim(),
-        Some("MCP Diff Hunt"),
-    ) {
-        Ok(r) => r.hypothesis,
-        Err(e) => return err_json(e.to_string()),
-    };
+    let hypothesis: Hypothesis =
+        match graph_hunter_core::parse_dsl(body.hypothesis_dsl.trim(), Some("MCP Diff Hunt")) {
+            Ok(r) => r.hypothesis,
+            Err(e) => return err_json(e.to_string()),
+        };
     let api_clone = api.clone();
     let result = tokio::time::timeout(
         Duration::from_secs(60),
@@ -233,8 +229,8 @@ pub(super) async fn handler_diff_hunts(
     match result {
         Ok(Ok(Ok(v))) => ok_json(v),
         Ok(Ok(Err(e))) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
@@ -333,10 +329,8 @@ pub(crate) mod tests_support {
         api.sessions().insert(session);
         api.sessions().set_current(Some(session_id.clone()));
 
-        let journal_dir = std::env::temp_dir().join(format!(
-            "graphhunter-test-journal-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let journal_dir =
+            std::env::temp_dir().join(format!("graphhunter-test-journal-{}", uuid::Uuid::new_v4()));
         let journal = Arc::new(crate::journal::store::JournalStore::new(journal_dir));
 
         let app_state = Arc::new(AppState {
@@ -377,6 +371,7 @@ mod tests {
             truncated: false,
             diagnostic: None,
             live_tail_coverage: None,
+            non_discriminating: None,
             coverage: cov,
         };
 
@@ -398,11 +393,15 @@ mod tests {
             truncated: false,
             diagnostic: None,
             live_tail_coverage: None,
+            non_discriminating: None,
             coverage: AnswerCoverage::default(),
         };
         let http = project_run_hunt_response(&core);
         let v = serde_json::to_value(&http).unwrap();
-        assert!(v.get("coverage").is_none(), "default coverage must be omitted from the wire");
+        assert!(
+            v.get("coverage").is_none(),
+            "default coverage must be omitted from the wire"
+        );
     }
 
     // §25.11 cross-transport certificate: the same hypothesis, run once
@@ -416,9 +415,9 @@ mod tests {
     // 200-against-an-empty-session fallback.
     #[tokio::test]
     async fn same_hypothesis_same_result_core_vs_http() {
-        use tower::ServiceExt; // oneshot
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
+        use tower::ServiceExt; // oneshot
 
         let (app_state, api, _session_id, dsl) = tests_support::seeded_hunt_fixture();
 
@@ -426,7 +425,9 @@ mod tests {
         let core = api
             .run_hunt(graph_hunter_api::dto::hunt::RunHuntRequest {
                 session: None,
-                hypothesis: graph_hunter_core::parse_dsl(&dsl, Some("t")).unwrap().hypothesis,
+                hypothesis: graph_hunter_core::parse_dsl(&dsl, Some("t"))
+                    .unwrap()
+                    .hypothesis,
                 time_window: None,
                 max_results: Some(10_000),
                 scoring: None,
@@ -448,7 +449,9 @@ mod tests {
             .uri("/run_hunt")
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
-            .body(Body::from(serde_json::json!({ "hypothesis_dsl": dsl }).to_string()))
+            .body(Body::from(
+                serde_json::json!({ "hypothesis_dsl": dsl }).to_string(),
+            ))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -458,7 +461,10 @@ mod tests {
         let http: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
         // Same hypothesis => same answer across transports.
-        assert_eq!(http["path_count"].as_u64().unwrap() as usize, core.path_count);
+        assert_eq!(
+            http["path_count"].as_u64().unwrap() as usize,
+            core.path_count
+        );
         assert_eq!(http["truncated"].as_bool().unwrap(), core.truncated);
     }
 }
