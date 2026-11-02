@@ -162,16 +162,16 @@ pub fn extract_subgraph_features(
         node_features[base + 10] = (in_degree as f32 / K_MAX as f32).min(1.0);
 
         // Anomaly scorer features (dims 11-13) — use 0.0 if scorer not available
-        if let Some(ref scorer) = graph.anomaly_scorer {
-            if scorer.is_finalized() {
-                // Entity rarity estimate (dim 11)
-                let er = scorer.node_anomaly_estimate(entity_id);
-                node_features[base + 11] = er as f32;
+        if let Some(ref scorer) = graph.anomaly_scorer
+            && scorer.is_finalized()
+        {
+            // Entity rarity estimate (dim 11)
+            let er = scorer.node_anomaly_estimate(entity_id);
+            node_features[base + 11] = er as f32;
 
-                // NC score (dim 13) — included in node_anomaly_estimate but
-                // we use the full estimate as a proxy
-                node_features[base + 13] = er as f32;
-            }
+            // NC score (dim 13) — included in node_anomaly_estimate but
+            // we use the full estimate as a proxy
+            node_features[base + 13] = er as f32;
         }
 
         // Edge count normalized (dim 14)
@@ -188,13 +188,13 @@ pub fn extract_subgraph_features(
     let mut adjacency = vec![0.0f32; K_MAX * K_MAX];
 
     for &src_sid in &ordered_nodes {
-        if let Some(&src_idx) = sid_to_idx.get(&src_sid) {
-            if let Some(arc) = graph.streaming.neighbors_arc(src_sid) {
-                let g = arc.read();
-                for edge in g.as_slice() {
-                    if let Some(&dst_idx) = sid_to_idx.get(&edge.dest_sid) {
-                        adjacency[src_idx * K_MAX + dst_idx] = 1.0;
-                    }
+        if let Some(&src_idx) = sid_to_idx.get(&src_sid)
+            && let Some(arc) = graph.streaming.neighbors_arc(src_sid)
+        {
+            let g = arc.read();
+            for edge in g.as_slice() {
+                if let Some(&dst_idx) = sid_to_idx.get(&edge.dest_sid) {
+                    adjacency[src_idx * K_MAX + dst_idx] = 1.0;
                 }
             }
         }
@@ -346,24 +346,24 @@ pub fn extract_subgraph_features_v2(
         // family-of-app signal, not cardinality.
         let mut is_cloud_auth: f32 = 0.0;
         let mut app_bucket: Option<usize> = None;
-        if let Some(sid) = graph.interner.get(id) {
-            if let Some(arc) = graph.streaming.neighbors_arc(sid) {
-                let g = arc.read();
-                for edge in g.as_slice() {
-                    if edge.rel_type_tag != 0
-                    /* Auth */
-                    {
-                        continue;
-                    }
-                    if edge.metadata_offset == 0 {
-                        continue;
-                    }
-                    let meta = graph.meta_store.get(edge.metadata_offset);
-                    if let Some(app) = meta.get("app") {
-                        is_cloud_auth = 1.0;
-                        app_bucket = Some(app_bucket_index(app));
-                        break;
-                    }
+        if let Some(sid) = graph.interner.get(id)
+            && let Some(arc) = graph.streaming.neighbors_arc(sid)
+        {
+            let g = arc.read();
+            for edge in g.as_slice() {
+                if edge.rel_type_tag != 0
+                /* Auth */
+                {
+                    continue;
+                }
+                if edge.metadata_offset == 0 {
+                    continue;
+                }
+                let meta = graph.meta_store.get(edge.metadata_offset);
+                if let Some(app) = meta.get("app") {
+                    is_cloud_auth = 1.0;
+                    app_bucket = Some(app_bucket_index(app));
+                    break;
                 }
             }
         }
@@ -494,7 +494,7 @@ mod tests {
             .iter()
             .position(|id| id == "attacker-ip")
             .unwrap();
-        assert_eq!(features.node_features[ip_idx * D_NODE + 0], 1.0); // IP = index 0
+        assert_eq!(features.node_features[ip_idx * D_NODE], 1.0); // IP = index 0
     }
 
     #[test]
