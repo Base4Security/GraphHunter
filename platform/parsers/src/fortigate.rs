@@ -192,11 +192,12 @@ pub fn looks_like_fortigate(contents: &str) -> bool {
     // CSV-header shape: first line has both `srcip` and `dstip` as
     // comma-separated headers. Pinning to BOTH keeps generic CSVs that
     // happen to mention `srcip` from sliding into this branch.
-    if let Some(first) = probe.lines().find(|l| !l.trim().is_empty()) {
-        if first.contains(',') && !first.contains('=') {
-            let lower = first.to_ascii_lowercase();
-            return lower.contains("srcip") && lower.contains("dstip");
-        }
+    if let Some(first) = probe.lines().find(|l| !l.trim().is_empty())
+        && first.contains(',')
+        && !first.contains('=')
+    {
+        let lower = first.to_ascii_lowercase();
+        return lower.contains("srcip") && lower.contains("dstip");
     }
     false
 }
@@ -243,17 +244,17 @@ fn parse_kv_line(line: &str) -> Vec<ParsedTriple> {
     triples.push((src.clone(), rel, dst));
 
     // Satellite triple: srcip -[SNAT]-> transip (only on source NAT).
-    if kv.get("trandisp").map(|d| d == "snat").unwrap_or(false) {
-        if let Some(transip) = kv.get("transip").filter(|v| !v.is_empty()) {
-            let egress = Entity::new(transip, EntityType::IP);
-            let rel_snat = Relation::new(
-                &srcip,
-                transip,
-                RelationType::Other("SNAT".to_string()),
-                timestamp,
-            );
-            triples.push((src.clone(), rel_snat, egress));
-        }
+    if kv.get("trandisp").map(|d| d == "snat").unwrap_or(false)
+        && let Some(transip) = kv.get("transip").filter(|v| !v.is_empty())
+    {
+        let egress = Entity::new(transip, EntityType::IP);
+        let rel_snat = Relation::new(
+            &srcip,
+            transip,
+            RelationType::Other("SNAT".to_string()),
+            timestamp,
+        );
+        triples.push((src.clone(), rel_snat, egress));
     }
 
     // Satellite triple: dstip -[Exposes]-> Service("dstip:port").
@@ -392,10 +393,10 @@ fn parse_vpn_line(kv: &HashMap<String, String>) -> Option<Vec<ParsedTriple>> {
 fn collect_edge_metadata(kv: &HashMap<String, String>) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for field in EDGE_METADATA_FIELDS {
-        if let Some(v) = kv.get(*field) {
-            if !v.is_empty() {
-                out.insert((*field).into(), v.clone());
-            }
+        if let Some(v) = kv.get(*field)
+            && !v.is_empty()
+        {
+            out.insert((*field).into(), v.clone());
         }
     }
     // Preserve the raw timestamp shape if either component is present
@@ -411,7 +412,7 @@ fn collect_edge_metadata(kv: &HashMap<String, String>) -> HashMap<String, String
 /// Derive the Relation::timestamp (epoch seconds) from a FortiGate KV
 /// map. Tries, in order:
 ///  1. `timestamp=` already-numeric epoch (handles `s`, `ms`, `us`, `ns`),
-///  1b. `timestamp=` as ISO 8601 string (FortiGate `.final.csv` shape),
+///     1b. `timestamp=` as ISO 8601 string (FortiGate `.final.csv` shape),
 ///  2. `eventtime=` (FortiOS 6.x+ ns-since-epoch), numeric then ISO,
 ///  3. `date=YYYY-MM-DD` + `time=HH:MM:SS` combined as naive UTC,
 ///  4. 0 + `eprintln!` warn (parser never errors / drops the row;
@@ -763,7 +764,7 @@ mod tests {
         );
 
         // Connect triple: srcip -[Connect]-> dstip.
-        let (ref src, ref rel, ref dst) = triples
+        let (src, rel, dst) = triples
             .iter()
             .find(|(_, r, _)| r.rel_type == RelationType::Connect)
             .map(|(a, b, c)| (a, b, c))
@@ -793,7 +794,7 @@ mod tests {
         );
 
         // Triggered triple: srcip -[Triggered]-> attack (Signature).
-        let (ref src2, ref rel2, ref dst2) = triples
+        let (src2, rel2, dst2) = triples
             .iter()
             .find(|(_, r, _)| r.rel_type == RelationType::Other("Triggered".to_string()))
             .map(|(a, b, c)| (a, b, c))

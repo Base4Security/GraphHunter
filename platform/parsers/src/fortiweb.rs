@@ -290,10 +290,10 @@ fn normalize_epoch(v: i64) -> i64 {
 /// Falls back to 0 rather than dropping the record — a null timestamp is
 /// recoverable, a discarded attack record is not.
 fn derive_timestamp(kv: &HashMap<String, String>) -> i64 {
-    if let Some(raw) = kv.get("eventtime") {
-        if let Ok(ts) = raw.parse::<i64>() {
-            return normalize_epoch(ts);
-        }
+    if let Some(raw) = kv.get("eventtime")
+        && let Ok(ts) = raw.parse::<i64>()
+    {
+        return normalize_epoch(ts);
     }
     if let (Some(d), Some(t)) = (kv.get("date"), kv.get("time")) {
         let combined = format!("{d} {t}");
@@ -313,10 +313,10 @@ fn derive_timestamp(kv: &HashMap<String, String>) -> i64 {
 fn collect_edge_metadata(kv: &HashMap<String, String>) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for field in EDGE_METADATA_FIELDS {
-        if let Some(v) = kv.get(*field) {
-            if !is_placeholder(v) {
-                out.insert((*field).to_string(), v.clone());
-            }
+        if let Some(v) = kv.get(*field)
+            && !is_placeholder(v)
+        {
+            out.insert((*field).to_string(), v.clone());
         }
     }
     if let (Some(d), Some(t)) = (kv.get("date"), kv.get("time")) {
@@ -614,7 +614,7 @@ mod tests {
         assert!(
             !triples
                 .iter()
-                .any(|(_, r, _)| r.metadata.get("signature_cve_id").is_some())
+                .any(|(_, r, _)| r.metadata.contains_key("signature_cve_id"))
         );
     }
 

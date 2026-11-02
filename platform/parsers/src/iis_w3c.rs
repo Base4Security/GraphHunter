@@ -32,7 +32,6 @@ impl LogParser for IisW3cParser {
             if line.starts_with('#') {
                 if let Some(rest) = line.strip_prefix("#Fields:") {
                     fields = rest
-                        .trim()
                         .split_whitespace()
                         .map(|s| s.to_lowercase().to_string())
                         .collect();
@@ -145,7 +144,6 @@ impl LogParser for IisW3cParser {
             if line.starts_with('#') {
                 if let Some(rest) = line.strip_prefix("#Fields:") {
                     fields = rest
-                        .trim()
                         .split_whitespace()
                         .map(|s| s.to_lowercase().to_string())
                         .collect();

@@ -581,22 +581,22 @@ impl ChartHandler for GenericFortiHandler {
                 rel.metadata
                     .insert("handler".to_string(), "generic_forti".to_string());
                 // Enrich Application entities with service classification.
-                if let EntityType::Other(ref kind) = entity.entity_type {
-                    if kind == "Application" {
-                        let app_name = entity.id.strip_prefix("application:").unwrap_or(&entity.id);
-                        let info = service_classifier::classify_application(app_name);
-                        let cat = format!("{:?}", info.category);
-                        entity
-                            .metadata
-                            .insert("service_category".into(), cat.clone());
-                        entity
-                            .metadata
-                            .insert("risk_tag".into(), info.risk_tag.into());
-                        entity
-                            .metadata
-                            .insert("service_description".into(), info.description.into());
-                        rel.metadata.insert("service_category".into(), cat);
-                    }
+                if let EntityType::Other(ref kind) = entity.entity_type
+                    && kind == "Application"
+                {
+                    let app_name = entity.id.strip_prefix("application:").unwrap_or(&entity.id);
+                    let info = service_classifier::classify_application(app_name);
+                    let cat = format!("{:?}", info.category);
+                    entity
+                        .metadata
+                        .insert("service_category".into(), cat.clone());
+                    entity
+                        .metadata
+                        .insert("risk_tag".into(), info.risk_tag.into());
+                    entity
+                        .metadata
+                        .insert("service_description".into(), info.description.into());
+                    rel.metadata.insert("service_category".into(), cat);
                 }
                 out.push((context_entity(ctx), rel, entity));
             }
@@ -653,19 +653,19 @@ fn detect_primary_entity(row: &Row) -> Option<(Entity, RelationType)> {
 
     // 2. Content pattern: first value that parses as an IPv4/IPv6.
     for (_, values) in row.iter() {
-        if let Some(value) = values.first() {
-            if looks_like_ip(value) {
-                return Some((Entity::new(value, EntityType::IP), RelationType::Connect));
-            }
+        if let Some(value) = values.first()
+            && looks_like_ip(value)
+        {
+            return Some((Entity::new(value, EntityType::IP), RelationType::Connect));
         }
     }
 
     // 3. Content pattern: first value that looks like a domain.
     for (_, values) in row.iter() {
-        if let Some(value) = values.first() {
-            if looks_like_domain(value) {
-                return Some((Entity::new(value, EntityType::Domain), RelationType::DNS));
-            }
+        if let Some(value) = values.first()
+            && looks_like_domain(value)
+        {
+            return Some((Entity::new(value, EntityType::Domain), RelationType::DNS));
         }
     }
     None
@@ -835,14 +835,14 @@ impl LogParser for FortiAnalyzerXmlParser {
                 Ok(Event::End(e)) => {
                     let tag_name = e.name().into_inner().to_string();
 
-                    if let Some(ref field) = current_field {
-                        if &tag_name == field {
-                            let trimmed = current_text.trim().to_string();
-                            current_row.push(field.clone(), trimmed);
-                            current_field = None;
-                            current_text.clear();
-                            continue;
-                        }
+                    if let Some(ref field) = current_field
+                        && &tag_name == field
+                    {
+                        let trimmed = current_text.trim().to_string();
+                        current_row.push(field.clone(), trimmed);
+                        current_field = None;
+                        current_text.clear();
+                        continue;
                     }
                     match tag_name.as_str() {
                         "id" if in_row => {
