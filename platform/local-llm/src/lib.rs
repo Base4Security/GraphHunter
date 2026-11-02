@@ -202,22 +202,22 @@ pub fn resolve_model_path() -> Option<PathBuf> {
         );
         return Some(PathBuf::from(p));
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for candidate in [
-                dir.join("resources").join("models").join(MODEL_FILENAME),
-                dir.join("models").join(MODEL_FILENAME),
-            ] {
-                #[cfg(feature = "candle")]
-                tracing::debug!(
-                    target: "graph_hunter_local_llm::resolver",
-                    "resolve_model_path: try exe-relative {} -> {}",
-                    candidate.display(),
-                    if candidate.is_file() { "HIT" } else { "miss" }
-                );
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        for candidate in [
+            dir.join("resources").join("models").join(MODEL_FILENAME),
+            dir.join("models").join(MODEL_FILENAME),
+        ] {
+            #[cfg(feature = "candle")]
+            tracing::debug!(
+                target: "graph_hunter_local_llm::resolver",
+                "resolve_model_path: try exe-relative {} -> {}",
+                candidate.display(),
+                if candidate.is_file() { "HIT" } else { "miss" }
+            );
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
     }
