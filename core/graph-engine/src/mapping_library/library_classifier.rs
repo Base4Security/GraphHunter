@@ -12,6 +12,7 @@
 //!   * 2 prior observations → 0.75.
 //!   * 3+ prior observations → 0.9 (caps to leave room for a future
 //!     ML classifier whose 0.95+ should always win).
+//!
 //! When prior observations disagree (split vote), confidence is scaled
 //! down by the agreement ratio so a tied 1-vs-1 falls below the bar.
 //!

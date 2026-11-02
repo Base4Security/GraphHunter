@@ -637,7 +637,7 @@ fn build_lateral_movement_graph() -> GraphHunter {
 
 #[test]
 fn graph_new_is_empty() {
-    let mut g = GraphHunter::new();
+    let g = GraphHunter::new();
     assert_eq!(g.entity_count(), 0);
     assert_eq!(g.relation_count(), 0);
 }
@@ -683,21 +683,21 @@ fn graph_add_relation_validates_dest() {
 
 #[test]
 fn graph_relation_count() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     assert_eq!(g.entity_count(), 5);
     assert_eq!(g.relation_count(), 4);
 }
 
 #[test]
 fn graph_get_entity() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     let e = g.get_entity("web-server").unwrap();
     assert_eq!(e.entity_type, EntityType::Host);
 }
 
 #[test]
 fn graph_get_relations() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     let rels = g.get_relations("attacker-ip");
     assert_eq!(rels.len(), 1);
     assert_eq!(rels[0].dest_id, "web-server");
@@ -705,7 +705,7 @@ fn graph_get_relations() {
 
 #[test]
 fn graph_get_relations_empty() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     let rels = g.get_relations("payload.dll"); // leaf node, no outgoing
     assert!(rels.is_empty());
 }
@@ -714,7 +714,7 @@ fn graph_get_relations_empty() {
 
 #[test]
 fn search_full_lateral_movement_chain() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let hypothesis = Hypothesis::new("Lateral Movement")
         .add_step(HypothesisStep::new(
@@ -757,7 +757,7 @@ fn search_full_lateral_movement_chain() {
 
 #[test]
 fn search_partial_chain() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     // Only search for the first two steps: IP -> Connect -> Host -> Auth -> User
     let hypothesis = Hypothesis::new("Initial Access")
@@ -785,7 +785,7 @@ fn search_partial_chain() {
 
 #[test]
 fn search_single_step() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let hypothesis = Hypothesis::new("Connection").add_step(HypothesisStep::new(
         EntityType::IP,
@@ -805,7 +805,7 @@ fn search_single_step() {
 
 #[test]
 fn search_no_match_wrong_relation_type() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     // IP -> Auth (wrong: should be Connect) -> Host
     let hypothesis = Hypothesis::new("Wrong Relation").add_step(HypothesisStep::new(
@@ -823,7 +823,7 @@ fn search_no_match_wrong_relation_type() {
 
 #[test]
 fn search_no_match_wrong_dest_type() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     // IP -> Connect -> User (wrong: web-server is a Host, not User)
     let hypothesis = Hypothesis::new("Wrong Dest Type").add_step(HypothesisStep::new(
@@ -841,7 +841,7 @@ fn search_no_match_wrong_dest_type() {
 
 #[test]
 fn search_invalid_hypothesis_returns_error() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     let hypothesis = Hypothesis::new("Empty");
     let err = g
         .search_temporal_pattern(&hypothesis, None, None)
@@ -928,7 +928,7 @@ fn search_allows_same_timestamp() {
 
 #[test]
 fn search_time_window_includes_match() {
-    let mut g = build_lateral_movement_graph(); // timestamps: 100, 200, 300, 400
+    let g = build_lateral_movement_graph(); // timestamps: 100, 200, 300, 400
 
     let hypothesis = Hypothesis::new("Windowed")
         .add_step(HypothesisStep::new(
@@ -952,7 +952,7 @@ fn search_time_window_includes_match() {
 
 #[test]
 fn search_time_window_excludes_match() {
-    let mut g = build_lateral_movement_graph(); // timestamps: 100, 200, 300, 400
+    let g = build_lateral_movement_graph(); // timestamps: 100, 200, 300, 400
 
     let hypothesis = Hypothesis::new("Windowed Excluded")
         .add_step(HypothesisStep::new(
@@ -976,7 +976,7 @@ fn search_time_window_excludes_match() {
 
 #[test]
 fn search_time_window_partial_chain_cutoff() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let hypothesis = Hypothesis::new("Full Chain Windowed")
         .add_step(HypothesisStep::new(
@@ -1243,7 +1243,7 @@ fn graph_error_display() {
 
 #[test]
 fn graph_default_trait() {
-    let mut g = GraphHunter::default();
+    let g = GraphHunter::default();
     assert_eq!(g.entity_count(), 0);
 }
 
@@ -2293,7 +2293,7 @@ fn sysmon_parse_security_4624_logon() {
     assert_eq!(dst.entity_type, EntityType::Host);
     assert_eq!(rel.metadata.get("logon_type").unwrap(), "10");
     assert_eq!(rel.metadata.get("ip_address").unwrap(), "192.168.1.100");
-    assert!(rel.metadata.get("success").is_none()); // 4624 = success, no explicit flag
+    assert!(!rel.metadata.contains_key("success")); // 4624 = success, no explicit flag
 }
 
 #[test]
@@ -2780,7 +2780,7 @@ fn search_entities_empty_query() {
 
 #[test]
 fn get_neighborhood_basic() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let hood = g.get_neighborhood("web-server", 1, 100, None).unwrap();
     assert_eq!(hood.center, "web-server");
@@ -2792,7 +2792,7 @@ fn get_neighborhood_basic() {
 
 #[test]
 fn get_neighborhood_cap() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     // Cap at 2 nodes: center + 1 neighbor
     let hood = g.get_neighborhood("web-server", 2, 2, None).unwrap();
@@ -2802,14 +2802,14 @@ fn get_neighborhood_cap() {
 
 #[test]
 fn get_neighborhood_nonexistent_node() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     assert!(g.get_neighborhood("ghost", 1, 100, None).is_none());
 }
 
 #[test]
 #[ignore = "pre-existing failure: reverse-edge path in analytics doesn't apply entity_types filter"]
 fn get_neighborhood_with_filter() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let filter = analytics::NeighborhoodFilter {
         entity_types: Some(vec![EntityType::User]),
@@ -2860,7 +2860,7 @@ fn compute_scores_high_degree_high_score() {
 
 #[test]
 fn get_node_details_complete() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let details = g.get_node_details("web-server").unwrap();
     assert_eq!(details.id, "web-server");
@@ -2873,7 +2873,7 @@ fn get_node_details_complete() {
 
 #[test]
 fn get_node_details_nonexistent() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     assert!(g.get_node_details("ghost").is_none());
 }
 
@@ -3053,7 +3053,7 @@ fn finalize_makes_post_finalize_appends_visible_to_neighborhood_readers() {
 
 #[test]
 fn get_graph_summary_complete() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let summary = g.get_graph_summary();
     assert_eq!(summary.entity_count, 5);
@@ -3065,7 +3065,7 @@ fn get_graph_summary_complete() {
 #[test]
 fn search_temporal_pattern_still_works_with_indices() {
     // Regression: make sure the optimized search_temporal_pattern still produces correct results
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let hypothesis = Hypothesis::new("Full Chain")
         .add_step(HypothesisStep::new(
@@ -4631,7 +4631,7 @@ fn benchmark_empirical_data_for_paper() {
         for e in &all_edges {
             by_source.entry(e.source_sid.index()).or_default().push(e);
         }
-        for (_sid, edges) in &mut by_source {
+        for edges in by_source.values_mut() {
             edges.sort_by_key(|e| e.timestamp);
             for i in 0..edges.len() {
                 let e = edges[i];
@@ -4834,50 +4834,51 @@ fn benchmark_empirical_data_for_paper() {
         "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n"
     );
 
-    for r in [Some(&r1), Some(&r2), r3_opt.as_ref()] {
-        if let Some(r) = r {
-            println!("â”€â”€ {} â”€â”€", r.name);
-            println!("  n = {} entities, m = {} relations", r.n, r.m);
-            println!("  d_max = {}", r.dmax);
-            println!(
-                "  Entity types (|T_V| = {}): {:?}",
-                r.num_ent_types, r.type_dist
-            );
-            println!("  Relation types: |T_E| = {}", r.num_rel_types);
-            println!("  p_temporal (empirical): {:.4}", r.p_temporal_empirical);
-            println!("  b_eff predicted (uniform): {:.4}", r.beff_predicted);
-            println!();
-            println!(
-                "  L=2: {} results from {} starts in {:.3} ms",
-                r.results_l2, r.starts, r.time_l2_ms
-            );
-            println!(
-                "  L=3: {} results from {} starts in {:.3} ms",
-                r.results_l3, r.starts, r.time_l3_ms
-            );
-            println!(
-                "  L=4: {} results from {} starts in {:.3} ms",
-                r.results_l4, r.starts, r.time_l4_ms
-            );
-            println!(
-                "  L=5: {} results from {} starts in {:.3} ms",
-                r.results_l5, r.starts, r.time_l5_ms
-            );
+    for r in [Some(&r1), Some(&r2), r3_opt.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        println!("â”€â”€ {} â”€â”€", r.name);
+        println!("  n = {} entities, m = {} relations", r.n, r.m);
+        println!("  d_max = {}", r.dmax);
+        println!(
+            "  Entity types (|T_V| = {}): {:?}",
+            r.num_ent_types, r.type_dist
+        );
+        println!("  Relation types: |T_E| = {}", r.num_rel_types);
+        println!("  p_temporal (empirical): {:.4}", r.p_temporal_empirical);
+        println!("  b_eff predicted (uniform): {:.4}", r.beff_predicted);
+        println!();
+        println!(
+            "  L=2: {} results from {} starts in {:.3} ms",
+            r.results_l2, r.starts, r.time_l2_ms
+        );
+        println!(
+            "  L=3: {} results from {} starts in {:.3} ms",
+            r.results_l3, r.starts, r.time_l3_ms
+        );
+        println!(
+            "  L=4: {} results from {} starts in {:.3} ms",
+            r.results_l4, r.starts, r.time_l4_ms
+        );
+        println!(
+            "  L=5: {} results from {} starts in {:.3} ms",
+            r.results_l5, r.starts, r.time_l5_ms
+        );
 
-            // Empirical beff: beff = (results/starts)^(1/L) for non-zero
-            for (l, res) in [
-                (2, r.results_l2),
-                (3, r.results_l3),
-                (4, r.results_l4),
-                (5, r.results_l5),
-            ] {
-                if r.starts > 0 && res > 0 {
-                    let beff = (res as f64 / r.starts as f64).powf(1.0 / l as f64);
-                    println!("  b_eff measured (L={}): {:.4}", l, beff);
-                }
+        // Empirical beff: beff = (results/starts)^(1/L) for non-zero
+        for (l, res) in [
+            (2, r.results_l2),
+            (3, r.results_l3),
+            (4, r.results_l4),
+            (5, r.results_l5),
+        ] {
+            if r.starts > 0 && res > 0 {
+                let beff = (res as f64 / r.starts as f64).powf(1.0 / l as f64);
+                println!("  b_eff measured (L={}): {:.4}", l, beff);
             }
-            println!();
         }
+        println!();
     }
 }
 
@@ -6351,7 +6352,7 @@ fn search_on_clone_matches_original() {
         .add_relation(Relation::new("user1", "host1", RelationType::Auth, 100))
         .unwrap();
 
-    let mut clone = graph.clone();
+    let clone = graph.clone();
 
     let h = Hypothesis::new("Test").add_step(HypothesisStep::new(
         EntityType::User,
@@ -6619,7 +6620,7 @@ fn benchmark_ba_graph_generation() {
 #[test]
 fn benchmark_instrumented_search_correctness() {
     // Instrumented search must return same results as normal search
-    let mut g = generate_erdos_renyi(50, 0.1, 1_000_000, 2_000_000, 123);
+    let g = generate_erdos_renyi(50, 0.1, 1_000_000, 2_000_000, 123);
     let h = build_lateral_movement_hypothesis(3);
 
     let normal_results = g.search_temporal_pattern(&h, None, None).unwrap().0;
@@ -6708,11 +6709,11 @@ fn benchmark_scale_test_er() {
     // Verify search completes in reasonable time at scale
     for &n in &[100, 500, 1000] {
         let p = 10.0 / n as f64; // Keep average degree ~10
-        let mut g = generate_erdos_renyi(n, p, 1_000_000, 2_000_000, 42);
+        let g = generate_erdos_renyi(n, p, 1_000_000, 2_000_000, 42);
         let h = build_lateral_movement_hypothesis(3);
 
         let start = std::time::Instant::now();
-        let results = g.search_temporal_pattern(&h, None, None).unwrap().0;
+        let _results = g.search_temporal_pattern(&h, None, None).unwrap().0;
         let elapsed = start.elapsed();
 
         // Should complete in < 1 second for all sizes
@@ -6729,11 +6730,11 @@ fn benchmark_scale_test_er() {
 fn benchmark_scale_test_ba() {
     // BA graphs with power-law degree distribution
     for &n in &[100, 500, 1000] {
-        let mut g = generate_barabasi_albert(n, 3, 1_000_000, 2_000_000, 42);
+        let g = generate_barabasi_albert(n, 3, 1_000_000, 2_000_000, 42);
         let h = build_spawn_chain_hypothesis(3);
 
         let start = std::time::Instant::now();
-        let results = g.search_temporal_pattern(&h, None, None).unwrap().0;
+        let _results = g.search_temporal_pattern(&h, None, None).unwrap().0;
         let elapsed = start.elapsed();
 
         assert!(
@@ -6888,7 +6889,7 @@ fn benchmark_real_datasets() {
     if let Ok(data) = std::fs::read_to_string("../../demo_data/apt_attack_simulation.json") {
         let mut g = GraphHunter::new();
         g.ingest_logs(&data, &SysmonJsonParser, None).unwrap();
-        let (n, m, d_max, d_avg, n_et, n_rt) = graph_params(&g);
+        let (n, m, d_max, d_avg, _n_et, _n_rt) = graph_params(&g);
         println!(
             "APT Simulation: n={}, m={}, d_max={}, d_avg={:.1}",
             n, m, d_max, d_avg
@@ -6914,7 +6915,7 @@ fn benchmark_real_datasets() {
     if let Ok(data) = std::fs::read_to_string("../../demo_data/sentinel_attack_simulation.json") {
         let mut g = GraphHunter::new();
         g.ingest_logs(&data, &SentinelJsonParser, None).unwrap();
-        let (n, m, d_max, d_avg, n_et, n_rt) = graph_params(&g);
+        let (n, m, d_max, d_avg, _n_et, _n_rt) = graph_params(&g);
         println!(
             "\nSentinel Simulation: n={}, m={}, d_max={}, d_avg={:.1}",
             n, m, d_max, d_avg
@@ -6940,7 +6941,7 @@ fn benchmark_real_datasets() {
     if let Ok(data) = std::fs::read_to_string("../../demo_data/mordor_combined_attacks.json") {
         let mut g = GraphHunter::new();
         g.ingest_logs(&data, &GenericParser, None).unwrap();
-        let (n, m, d_max, d_avg, n_et, n_rt) = graph_params(&g);
+        let (n, m, d_max, d_avg, _n_et, _n_rt) = graph_params(&g);
         println!(
             "\nMordor Combined: n={}, m={}, d_max={}, d_avg={:.1}",
             n, m, d_max, d_avg
@@ -7043,7 +7044,7 @@ fn anomaly_symmetric_graph() {
     let mut g = GraphHunter::new();
     g.enable_anomaly_scoring(ScoringWeights::default());
     for i in 0..5 {
-        g.add_entity(Entity::new(&format!("N{}", i), EntityType::Host))
+        g.add_entity(Entity::new(format!("N{}", i), EntityType::Host))
             .unwrap();
     }
     // Create a complete graph so all have same frequency
@@ -7051,8 +7052,8 @@ fn anomaly_symmetric_graph() {
         for j in 0..5 {
             if i != j {
                 g.add_relation(Relation::new(
-                    &format!("N{}", i),
-                    &format!("N{}", j),
+                    format!("N{}", i),
+                    format!("N{}", j),
                     RelationType::Connect,
                     1000,
                 ))
@@ -7091,7 +7092,7 @@ fn anomaly_single_neighbor_nc() {
     let scorer = g.anomaly_scorer.as_ref().unwrap();
     // center's neighbors are all Host â†’ NC = 1.0
     let nc = scorer
-        .score_path(&vec!["center".to_string()], &g)
+        .score_path(&["center".to_string()], &g)
         .1
         .neighborhood_concentration;
     assert!(
@@ -7129,7 +7130,7 @@ fn anomaly_uniform_nc() {
 
     let scorer = g.anomaly_scorer.as_ref().unwrap();
     let nc = scorer
-        .score_path(&vec!["center".to_string()], &g)
+        .score_path(&["center".to_string()], &g)
         .1
         .neighborhood_concentration;
     assert!(
@@ -7185,7 +7186,7 @@ fn anomaly_temporal_novelty_ordering() {
 
     let scorer = g.anomaly_scorer.as_ref().unwrap();
     // Score path with only the "new" entity
-    let (_, breakdown) = scorer.score_path(&vec!["new".to_string()], &g);
+    let (_, breakdown) = scorer.score_path(&["new".to_string()], &g);
     // TN(new) = (5000-1000)/(5000-1000) = 1.0
     assert!(
         (breakdown.temporal_novelty - 1.0).abs() < 0.01,
@@ -7194,7 +7195,7 @@ fn anomaly_temporal_novelty_ordering() {
     );
 
     // Score path with only the "old" entity
-    let (_, breakdown_old) = scorer.score_path(&vec!["old".to_string()], &g);
+    let (_, breakdown_old) = scorer.score_path(&["old".to_string()], &g);
     // TN(old) = (1000-1000)/(5000-1000) = 0.0
     assert!(
         (breakdown_old.temporal_novelty - 0.0).abs() < 0.01,
@@ -7250,7 +7251,7 @@ fn anomaly_score_range_0_to_1() {
     for path in &paths {
         let (score, bd) = scorer.score_path(path, &g);
         assert!(
-            score >= 0.0 && score <= 1.0,
+            (0.0..=1.0).contains(&score),
             "Score {} out of [0,1] for path {:?}",
             score,
             path
@@ -7270,9 +7271,9 @@ fn anomaly_apt_simulation_scoring() {
 
     // Routine entities
     for i in 0..10 {
-        g.add_entity(Entity::new(&format!("user{}", i), EntityType::User))
+        g.add_entity(Entity::new(format!("user{}", i), EntityType::User))
             .unwrap();
-        g.add_entity(Entity::new(&format!("host{}", i), EntityType::Host))
+        g.add_entity(Entity::new(format!("host{}", i), EntityType::Host))
             .unwrap();
     }
     g.add_entity(Entity::new("dc01", EntityType::Host)).unwrap();
@@ -7285,8 +7286,8 @@ fn anomaly_apt_simulation_scoring() {
     for i in 0..10 {
         for _ in 0..20 {
             g.add_relation(Relation::new(
-                &format!("user{}", i),
-                &format!("host{}", i),
+                format!("user{}", i),
+                format!("host{}", i),
                 RelationType::Auth,
                 1000 + i as i64,
             ))
@@ -7359,8 +7360,8 @@ fn anomaly_incremental_ingestion() {
     g.finalize_anomaly_scorer();
 
     let scorer = g.anomaly_scorer.as_ref().unwrap();
-    let (common_score, _) = scorer.score_path(&vec!["A".to_string(), "B".to_string()], &g);
-    let (rare_score, _) = scorer.score_path(&vec!["C".to_string(), "D".to_string()], &g);
+    let (common_score, _) = scorer.score_path(&["A".to_string(), "B".to_string()], &g);
+    let (rare_score, _) = scorer.score_path(&["C".to_string(), "D".to_string()], &g);
 
     // Rare path Câ†’D should have higher anomaly score than common Aâ†’B
     assert!(
@@ -7496,7 +7497,7 @@ fn scoring_v1_rarer_entity_raises_entity_rarity() {
         .anomaly_scorer
         .as_ref()
         .unwrap()
-        .score_path(&vec!["rare".to_string()], &g_base);
+        .score_path(&["rare".to_string()], &g_base);
 
     // Variant: `common` observed many extra times â†’ `rare` is rarer
     // relative to max_freq, so ER(rare) must strictly increase.
@@ -7524,7 +7525,7 @@ fn scoring_v1_rarer_entity_raises_entity_rarity() {
         .anomaly_scorer
         .as_ref()
         .unwrap()
-        .score_path(&vec!["rare".to_string()], &g_var);
+        .score_path(&["rare".to_string()], &g_var);
 
     assert!(
         bd_var.entity_rarity > bd_base.entity_rarity,

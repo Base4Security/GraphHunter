@@ -12,7 +12,7 @@
 //!
 //!   - "shared":  build trie + ts_map once, run K enumerations.
 //!   - "rebuild": for each of K queries, build trie + ts_map + run
-//!                one enumeration.
+//!     one enumeration.
 //!
 //! Reports total wall time. The amortized per-query cost is the
 //! reported time / K. K=1 is the no-amortization baseline (where the

@@ -370,6 +370,9 @@ fn percentile_of(xs: &[f64], x: f64) -> f64 {
     (100.0 * (below + equal / 2.0) / n).clamp(0.0, 100.0)
 }
 
+// Each argument is a distinct, already-computed score component; bundling
+// them into a one-off struct for a single private caller adds no clarity.
+#[allow(clippy::too_many_arguments)]
 fn build_narrative(
     composite: f64,
     composite_pct: f64,
@@ -592,34 +595,32 @@ impl GraphHunter {
                     let dest_id_str = self.interner.resolve(dest_sid);
 
                     if let Some(f) = filter {
-                        if let Some(ref rel_types) = f.relation_types {
-                            if !rel_types.iter().any(|rt| rt.to_u8() == edge.rel_type_tag) {
-                                continue;
-                            }
+                        if let Some(ref rel_types) = f.relation_types
+                            && !rel_types.iter().any(|rt| rt.to_u8() == edge.rel_type_tag)
+                        {
+                            continue;
                         }
-                        if let Some(start) = f.time_start {
-                            if edge.timestamp < start {
-                                continue;
-                            }
+                        if let Some(start) = f.time_start
+                            && edge.timestamp < start
+                        {
+                            continue;
                         }
-                        if let Some(end) = f.time_end {
-                            if edge.timestamp > end {
-                                continue;
-                            }
+                        if let Some(end) = f.time_end
+                            && edge.timestamp > end
+                        {
+                            continue;
                         }
-                        if let Some(ref entity_types) = f.entity_types {
-                            if let Some(entity) = self.entities.get(&dest_sid) {
-                                if !entity_types.contains(&entity.entity_type) {
-                                    continue;
-                                }
-                            }
+                        if let Some(ref entity_types) = f.entity_types
+                            && let Some(entity) = self.entities.get(&dest_sid)
+                            && !entity_types.contains(&entity.entity_type)
+                        {
+                            continue;
                         }
-                        if let Some(min_score) = f.min_score {
-                            if let Some(entity) = self.entities.get(&dest_sid) {
-                                if entity.score < min_score {
-                                    continue;
-                                }
-                            }
+                        if let Some(min_score) = f.min_score
+                            && let Some(entity) = self.entities.get(&dest_sid)
+                            && entity.score < min_score
+                        {
+                            continue;
                         }
                     }
 
@@ -1168,12 +1169,7 @@ impl GraphHunter {
         // to per-unique-neighbor, matching the intended semantics: "how
         // many neighbors of each type does this node have?".
         self.streaming.with_neighbors_and_tail(sid, |base, tail| {
-            let mut scanned = 0usize;
-            for edge in base.iter().chain(tail.iter()) {
-                if scanned >= config::MAX_SCAN_EDGES {
-                    break;
-                }
-                scanned += 1;
+            for edge in base.iter().chain(tail.iter()).take(config::MAX_SCAN_EDGES) {
                 if edge.timestamp != 0 {
                     min_ts = min_ts.min(edge.timestamp);
                     max_ts = max_ts.max(edge.timestamp);
@@ -1205,12 +1201,7 @@ impl GraphHunter {
         // tail-aware helper and find the first edge that lands on us;
         // any single timestamp suffices to extend the min/max range.
         if let Some(sources) = self.reverse_adj.get(&sid) {
-            let mut scanned = 0usize;
-            for &source_sid in sources.iter() {
-                if scanned >= config::MAX_SCAN_EDGES {
-                    break;
-                }
-                scanned += 1;
+            for &source_sid in sources.iter().take(config::MAX_SCAN_EDGES) {
                 let Some(src_entity) = self.entities.get(&source_sid) else {
                     continue;
                 };
@@ -1365,7 +1356,7 @@ impl GraphHunter {
                 count: ids.len(),
             })
             .collect();
-        type_distribution.sort_by(|a, b| b.count.cmp(&a.count));
+        type_distribution.sort_by_key(|t| std::cmp::Reverse(t.count));
 
         let mut min_ts = i64::MAX;
         let mut max_ts = i64::MIN;
@@ -1689,10 +1680,11 @@ impl GraphHunter {
 
         {
             let cache = self.schema_cache.lock().expect("schema_cache poisoned");
-            if let Some(entry) = cache.as_ref() {
-                if entry.edge_count == edge_count && entry.meta_bytes == meta_bytes {
-                    return (entry.schema.clone(), true);
-                }
+            if let Some(entry) = cache.as_ref()
+                && entry.edge_count == edge_count
+                && entry.meta_bytes == meta_bytes
+            {
+                return (entry.schema.clone(), true);
             }
         }
 
@@ -1745,7 +1737,7 @@ impl GraphHunter {
             })
             .collect();
 
-        out.sort_by(|a, b| b.edge_count.cmp(&a.edge_count));
+        out.sort_by_key(|r| std::cmp::Reverse(r.edge_count));
 
         {
             let mut cache = self.schema_cache.lock().expect("schema_cache poisoned");
@@ -1786,14 +1778,14 @@ impl GraphHunter {
         let (baseline_scored, _) = self.score_and_paginate_paths(
             &baseline_raw,
             0,
-            usize::MAX.min(baseline_raw.len().max(1)),
+            baseline_raw.len().max(1),
             None,
             DedupMode::ByPath,
         );
         let (current_scored, _) = self.score_and_paginate_paths(
             &current_raw,
             0,
-            usize::MAX.min(current_raw.len().max(1)),
+            current_raw.len().max(1),
             None,
             DedupMode::ByPath,
         );
@@ -2129,8 +2121,8 @@ impl GraphHunter {
         // completeness fix), so heavy_edges covers live Sentinel tail data.
         let mut out: Vec<HeavyEdge> = groups
             .into_iter()
-            .filter(|((_, _, rt), _)| opts.rel_type.as_ref().map_or(true, |w| w == rt))
-            .filter(|(_, a)| opts.min_count.map_or(true, |m| a.count >= m))
+            .filter(|((_, _, rt), _)| opts.rel_type.as_ref().is_none_or(|w| w == rt))
+            .filter(|(_, a)| opts.min_count.is_none_or(|m| a.count >= m))
             .map(|((s, d, rt), a)| HeavyEdge {
                 source: self.interner.resolve(s).to_string(),
                 target: self.interner.resolve(d).to_string(),
@@ -2164,7 +2156,9 @@ impl GraphHunter {
         // on-demand analytical query (cf. heavy_edges). `for_each_edge` visits
         // base AND post-finalize tail edges, so live finalized graphs are covered.
         let window = opts.window_secs.max(1) as i64;
-        let mut groups: HashMap<(StrId, StrId, String), Vec<(i64, u64, bool)>> = HashMap::new();
+        // (src, dst, rel_type) -> [(timestamp, sentbyte, is_reset)]
+        type ChannelKey = (StrId, StrId, String);
+        let mut groups: HashMap<ChannelKey, Vec<(i64, u64, bool)>> = HashMap::new();
         self.streaming.for_each_edge(|src, ed| {
             let md = self.meta_store.get(ed.metadata_offset);
             let rt = md.get("_rel_type").cloned().unwrap_or_else(|| {
@@ -2186,15 +2180,15 @@ impl GraphHunter {
 
         let mut out: Vec<ChannelBehavior> = Vec::new();
         for ((s, d, rt), mut edges) in groups {
-            if let Some(m) = opts.min_count {
-                if edges.len() < m {
-                    continue;
-                }
+            if let Some(m) = opts.min_count
+                && edges.len() < m
+            {
+                continue;
             }
-            if let Some(want) = opts.rel_type.as_ref() {
-                if want != &rt {
-                    continue;
-                }
+            if let Some(want) = opts.rel_type.as_ref()
+                && want != &rt
+            {
+                continue;
             }
             edges.sort_by_key(|x| x.0);
             let count = edges.len();
@@ -2878,7 +2872,7 @@ mod channel_behavior_tests {
 
 #[cfg(test)]
 mod find_paths_tests {
-    use super::*;
+
     use crate::GraphHunter;
     use crate::entity::Entity;
     use crate::relation::Relation;
@@ -2966,7 +2960,7 @@ mod find_paths_tests {
 
 #[cfg(test)]
 mod structural_anomaly_tests {
-    use super::*;
+
     use crate::GraphHunter;
     use crate::entity::Entity;
     use crate::relation::Relation;

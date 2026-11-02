@@ -271,30 +271,30 @@ impl CsvParser {
             if val.is_empty() {
                 continue;
             }
-            if val.starts_with('{') && val.ends_with('}') {
-                if let Ok(Value::Object(inner)) = serde_json::from_str::<Value>(val) {
-                    if !inner.is_empty() {
-                        for (k, v) in inner {
-                            let key = if headers.contains(&k) || map.contains_key(&k) {
-                                format!("{}_{}", header, k)
-                            } else {
-                                k
-                            };
-                            let sval = match v {
-                                Value::String(s) => s,
-                                Value::Null => continue,
-                                // Nested objects/arrays stay as compact JSON
-                                // strings — deep expansion would mint dotted
-                                // keys canonical matching can't use anyway.
-                                other => other.to_string(),
-                            };
-                            if !sval.is_empty() {
-                                map.insert(key, Value::String(sval));
-                            }
-                        }
-                        continue;
+            if val.starts_with('{')
+                && val.ends_with('}')
+                && let Ok(Value::Object(inner)) = serde_json::from_str::<Value>(val)
+                && !inner.is_empty()
+            {
+                for (k, v) in inner {
+                    let key = if headers.contains(&k) || map.contains_key(&k) {
+                        format!("{}_{}", header, k)
+                    } else {
+                        k
+                    };
+                    let sval = match v {
+                        Value::String(s) => s,
+                        Value::Null => continue,
+                        // Nested objects/arrays stay as compact JSON
+                        // strings — deep expansion would mint dotted
+                        // keys canonical matching can't use anyway.
+                        other => other.to_string(),
+                    };
+                    if !sval.is_empty() {
+                        map.insert(key, Value::String(sval));
                     }
                 }
+                continue;
             }
             // Duplicate headers silently overwrite — matches prior
             // behavior. The diagnostic is surfaced separately via
@@ -364,7 +364,7 @@ impl CsvParser {
             return Vec::new();
         }
         rows.par_iter()
-            .flat_map(|row| GenericParser::parse_event(row))
+            .flat_map(GenericParser::parse_event)
             .collect()
     }
 
@@ -376,7 +376,7 @@ impl CsvParser {
         let (rows, _, dup_count, unwrapped, _) =
             Self::collect_rows_with_diagnostics(data, Some(delim));
         let (triples, mut stats) =
-            crate::generic::parse_events_with_stats(&rows, |ev| GenericParser::parse_event(ev));
+            crate::generic::parse_events_with_stats(&rows, GenericParser::parse_event);
         Self::insert_diagnostics(&mut stats, dup_count, unwrapped);
         (triples, stats)
     }
@@ -426,14 +426,14 @@ impl LogParser for CsvParser {
             return Vec::new();
         }
         rows.par_iter()
-            .flat_map(|row| GenericParser::parse_event(row))
+            .flat_map(GenericParser::parse_event)
             .collect()
     }
 
     fn parse_with_stats(&self, data: &str) -> (Vec<ParsedTriple>, crate::parser::ParseStats) {
         let (rows, _, dup_count, unwrapped, _) = Self::collect_rows_with_diagnostics(data, None);
         let (triples, mut stats) =
-            crate::generic::parse_events_with_stats(&rows, |ev| GenericParser::parse_event(ev));
+            crate::generic::parse_events_with_stats(&rows, GenericParser::parse_event);
         Self::insert_diagnostics(&mut stats, dup_count, unwrapped);
         (triples, stats)
     }
@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(events[0]["description"], r#"says "hi", loudly"#);
         assert_eq!(events[0]["city"], "rosario");
         let (_, stats) = CsvParser.parse_with_stats(data);
-        assert!(stats.skip_reasons.get("double_encoded_row").is_none());
+        assert!(!stats.skip_reasons.contains_key("double_encoded_row"));
     }
 
     /// A re-sorted Auth0 export arrived as literal `\n` + BOM + header. The

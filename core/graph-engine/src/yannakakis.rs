@@ -243,6 +243,7 @@ impl Hypergraph {
 ///     "ear" — its non-shared endpoint);
 ///   * remove that hyperedge;
 ///   * repeat.
+///
 /// All hyperedges eliminated ⇒ α-acyclic. Some hyperedges remain
 /// with all endpoints of degree ≥ 2 ⇒ the primal graph contains a
 /// cycle ⇒ not α-acyclic. The returned `Vec<usize>` is the
@@ -279,12 +280,10 @@ pub fn gyo_reduce(g: &Hypergraph) -> Option<Vec<usize>> {
             degree.get(&a) == Some(&1) || degree.get(&b) == Some(&1)
         });
 
-        match ear {
-            Some(idx) => {
-                order.push(idx);
-                alive[idx] = false;
-            }
-            None => return None,
+        {
+            let idx = ear?;
+            order.push(idx);
+            alive[idx] = false;
         }
     }
 
@@ -670,6 +669,9 @@ pub fn enumerate_chain_from_prefix(
         true
     }
 
+    // Recursive enumeration state passed explicitly; a context struct
+    // would add indirection on the hot path without improving clarity.
+    #[allow(clippy::too_many_arguments)]
     fn recurse(
         graph: &GraphHunter,
         bags: &[Bag],
@@ -830,8 +832,9 @@ pub fn compute_prefix_snapshot(
         true
     }
 
+    // Same explicit recursive state as `recurse` above.
+    #[allow(clippy::too_many_arguments)]
     fn recurse_prefix(
-        bags: &[Bag],
         by_origin: &[std::collections::HashMap<StrId, Vec<&BagRow>>],
         path_sids: &mut Vec<StrId>,
         last_ts: i64,
@@ -862,7 +865,6 @@ pub fn compute_prefix_snapshot(
             }
             path_sids.push(row.dest);
             recurse_prefix(
-                bags,
                 by_origin,
                 path_sids,
                 row.timestamp,
@@ -881,8 +883,6 @@ pub fn compute_prefix_snapshot(
 
     let mut out: Vec<(Vec<StrId>, i64)> = Vec::new();
     let mut path_sids: Vec<StrId> = Vec::with_capacity(depth + 1);
-    let _ = bags;
-    let bags_ref: &[Bag] = bags;
     for row in &bags[0].rows {
         if !k_ok(&path_sids, row.origin, k_simplicity) {
             continue;
@@ -891,7 +891,6 @@ pub fn compute_prefix_snapshot(
         if k_ok(&path_sids, row.dest, k_simplicity) {
             path_sids.push(row.dest);
             recurse_prefix(
-                bags_ref,
                 &by_origin,
                 &mut path_sids,
                 row.timestamp,
@@ -979,12 +978,12 @@ fn enumerate_tree(
     fn k_ok(binding: &[Option<StrId>], candidate: StrId, k: usize) -> bool {
         let mut count = 0usize;
         for slot in binding {
-            if let Some(s) = slot {
-                if *s == candidate {
-                    count += 1;
-                    if count >= k {
-                        return false;
-                    }
+            if let Some(s) = slot
+                && *s == candidate
+            {
+                count += 1;
+                if count >= k {
+                    return false;
                 }
             }
         }
@@ -1010,6 +1009,9 @@ fn enumerate_tree(
         }
     }
 
+    // Recursive enumeration state passed explicitly; a context struct
+    // would add indirection on the hot path without improving clarity.
+    #[allow(clippy::too_many_arguments)]
     fn recurse(
         graph: &GraphHunter,
         hypergraph: &Hypergraph,
@@ -1067,10 +1069,10 @@ fn enumerate_tree(
 
         for row in candidates {
             // Filter by dest when both sides are pre-bound.
-            if let Some(d) = dest_bound {
-                if row.dest != d {
-                    continue;
-                }
+            if let Some(d) = dest_bound
+                && row.dest != d
+            {
+                continue;
             }
             let origin_was = binding[edge.origin.0 as usize].is_some();
             let dest_was = binding[edge.dest.0 as usize].is_some();

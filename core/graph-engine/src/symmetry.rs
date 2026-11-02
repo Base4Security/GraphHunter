@@ -67,6 +67,7 @@ pub fn analyze(hypothesis: &Hypothesis) -> SymmetryHint {
 ///   - origin/dest type alternation: must mirror around the center.
 ///   - relation type sequence: must mirror.
 ///   - edge/dest predicates: must mirror.
+///
 /// Wildcards (`EntityType::Any`, `RelationType::Any`) match any
 /// counterpart, so a chain of all-`Any` is trivially palindromic.
 fn is_palindromic(hypothesis: &Hypothesis) -> bool {

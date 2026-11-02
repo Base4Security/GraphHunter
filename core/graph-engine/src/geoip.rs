@@ -9,7 +9,6 @@
 //! Both return a [`GeoIpResult`] with country, city, ASN, and ISP info.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// Which source a GeoIP result came from. Useful for the UI to surface a
 /// trust indicator — dataset-metadata enrichment is a weaker signal than
@@ -294,10 +293,10 @@ pub fn geoip_from_metadata(
 ) -> Option<GeoIpResult> {
     let get = |keys: &[&str]| -> Option<String> {
         for k in keys {
-            if let Some(v) = metadata.get(*k) {
-                if !v.is_empty() {
-                    return Some(v.clone());
-                }
+            if let Some(v) = metadata.get(*k)
+                && !v.is_empty()
+            {
+                return Some(v.clone());
             }
         }
         None

@@ -151,13 +151,13 @@ impl SentinelJsonParser {
             && event.get("FolderPath").is_some()
         {
             // Check if it has ActionType that looks like file events
-            if let Some(action) = Self::extract_str(event, "ActionType") {
-                if action.contains("File") {
-                    eprintln!(
-                        "Warning: table type detected via heuristic (fields: InitiatingProcessFileName, FileName, FolderPath, ActionType={action}), not explicit Type field"
-                    );
-                    return SentinelTable::DeviceFileEvents;
-                }
+            if let Some(action) = Self::extract_str(event, "ActionType")
+                && action.contains("File")
+            {
+                eprintln!(
+                    "Warning: table type detected via heuristic (fields: InitiatingProcessFileName, FileName, FolderPath, ActionType={action}), not explicit Type field"
+                );
+                return SentinelTable::DeviceFileEvents;
             }
             eprintln!(
                 "Warning: table type detected via heuristic (fields: InitiatingProcessFileName, FileName, FolderPath), not explicit Type field"
@@ -1040,10 +1040,7 @@ impl LogParser for SentinelJsonParser {
         if trimmed.starts_with('[') {
             let mut buf = trimmed.as_bytes().to_vec();
             if let Ok(events) = simd_json::serde::from_slice::<Vec<Value>>(&mut buf) {
-                return events
-                    .par_iter()
-                    .flat_map(|event| Self::parse_event(event))
-                    .collect();
+                return events.par_iter().flat_map(Self::parse_event).collect();
             }
         }
 
@@ -1064,7 +1061,7 @@ impl LogParser for SentinelJsonParser {
 
     fn parse_with_stats(&self, data: &str) -> (Vec<ParsedTriple>, crate::parser::ParseStats) {
         let events = Self::collect_events(data);
-        crate::generic::parse_events_with_stats(&events, |ev| Self::parse_event(ev))
+        crate::generic::parse_events_with_stats(&events, Self::parse_event)
     }
 
     /// Sentinel Result variant (RH-P1-012).
@@ -1158,9 +1155,7 @@ impl LogParser for SentinelJsonParser {
     /// Uses the same `rayon::par_iter` fan-out as `parse()` so throughput
     /// is identical on large row sets.
     fn parse_rows(&self, rows: &[Value]) -> Vec<ParsedTriple> {
-        rows.par_iter()
-            .flat_map(|event| Self::parse_event(event))
-            .collect()
+        rows.par_iter().flat_map(Self::parse_event).collect()
     }
 
     /// Native raw-event override. Mirrors `parse()` but emits
@@ -1177,10 +1172,7 @@ impl LogParser for SentinelJsonParser {
         if trimmed.starts_with('[') {
             let mut buf = trimmed.as_bytes().to_vec();
             if let Ok(events) = simd_json::serde::from_slice::<Vec<Value>>(&mut buf) {
-                return events
-                    .par_iter()
-                    .flat_map(|event| Self::parse_event_raw(event))
-                    .collect();
+                return events.par_iter().flat_map(Self::parse_event_raw).collect();
             }
         }
 
@@ -1241,7 +1233,7 @@ impl LogParser for SentinelJsonParser {
                 let event = simd_json::serde::from_slice::<Value>(&mut buf).ok();
                 let mut events = event
                     .as_ref()
-                    .map(|e| Self::parse_event_raw(e))
+                    .map(Self::parse_event_raw)
                     .unwrap_or_default();
                 let produced = !events.is_empty();
                 // Attach the verbatim source row to every event this line
@@ -1266,18 +1258,20 @@ impl LogParser for SentinelJsonParser {
             })
             .collect();
 
-        let mut stats = crate::parser::ParseStats::default();
-        stats.rows_seen = per_line.len();
+        let mut stats = crate::parser::ParseStats {
+            rows_seen: per_line.len(),
+            ..Default::default()
+        };
         let mut all_events: Vec<crate::parser::RawIngestEvent> = Vec::new();
         for (events, produced, skip) in per_line {
             if produced {
                 stats.rows_with_triples += 1;
             } else {
                 stats.rows_skipped += 1;
-                if let Some(sample) = skip {
-                    if stats.skipped_samples.len() < crate::parser::SKIP_SAMPLE_CAP {
-                        stats.skipped_samples.push(sample);
-                    }
+                if let Some(sample) = skip
+                    && stats.skipped_samples.len() < crate::parser::SKIP_SAMPLE_CAP
+                {
+                    stats.skipped_samples.push(sample);
                 }
             }
             all_events.extend(events);

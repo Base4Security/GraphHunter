@@ -324,7 +324,7 @@ mod tests {
             .find(|q| q.source_kind == SourceKind::LogAnalytics)
             .unwrap();
         let pen = la2.penalty_remaining_ms.unwrap();
-        assert!(pen >= 29_000 && pen <= 31_000);
+        assert!((29_000..=31_000).contains(&pen));
     }
 
     #[test]

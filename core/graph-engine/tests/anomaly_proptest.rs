@@ -78,8 +78,8 @@ proptest! {
         let n = observations.len().min(timestamps.len());
         let graph = build_graph(n);
         let mut scorer = AnomalyScorer::new(weights);
-        for i in 0..n {
-            for _ in 0..observations[i] {
+        for (i, &obs) in observations.iter().enumerate().take(n) {
+            for _ in 0..obs {
                 scorer.observe_entity(&format!("e{i}"), timestamps[i]);
             }
         }
@@ -121,8 +121,8 @@ proptest! {
             w4_temporal_novelty: 0.0,
             w5_gnn_threat: 0.0,
         });
-        for i in 0..n {
-            for _ in 0..observations[i] {
+        for (i, &obs) in observations.iter().enumerate().take(n) {
+            for _ in 0..obs {
                 scorer.observe_entity(&format!("e{i}"), 100);
             }
         }

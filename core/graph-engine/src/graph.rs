@@ -35,6 +35,14 @@ use crate::types::{
 /// because `Arc<str>: Serialize` produces the same JSON.
 pub type HuntResult = Vec<std::sync::Arc<str>>;
 
+/// One row of [`GraphHunter::temporal_heatmap`]:
+/// `(entity_type, [(bucket_start, count)], bucket_size_seconds)`.
+pub type HeatmapRow = (String, Vec<(i64, usize)>, i64);
+
+/// One row of [`GraphHunter::timeline_data`]:
+/// `(entity_type, min_ts, max_ts, [(bucket, count)])`.
+pub type TimelineRow = (String, i64, i64, Vec<(i64, usize)>);
+
 /// Current wall-clock time in epoch seconds. Falls back to the
 /// [`crate::relation::INGEST_EPOCH_BASE`] if the system clock is
 /// somehow set before 1970 (paranoid; real systems won't hit this).
@@ -692,12 +700,12 @@ impl GraphHunter {
         rel_type: &crate::types::RelationType,
         metadata: &std::collections::HashMap<String, String>,
     ) -> u64 {
-        if let crate::types::RelationType::Other(name) = rel_type {
-            if !name.is_empty() {
-                let mut m = metadata.clone();
-                m.insert("_rel_type".to_string(), name.clone());
-                return self.meta_store.append(&m);
-            }
+        if let crate::types::RelationType::Other(name) = rel_type
+            && !name.is_empty()
+        {
+            let mut m = metadata.clone();
+            m.insert("_rel_type".to_string(), name.clone());
+            return self.meta_store.append(&m);
         }
         self.meta_store.append(metadata)
     }
@@ -738,10 +746,10 @@ impl GraphHunter {
     pub fn resolve_rel_type_name_raw(&self, rel_type_tag: u8, metadata_offset: u64) -> String {
         if rel_type_tag == crate::types::RelationType::Other(String::new()).to_u8() {
             let meta = self.meta_store.get(metadata_offset);
-            if let Some(name) = meta.get("_rel_type") {
-                if !name.is_empty() {
-                    return name.clone();
-                }
+            if let Some(name) = meta.get("_rel_type")
+                && !name.is_empty()
+            {
+                return name.clone();
             }
         }
         format!("{}", crate::types::RelationType::from_u8(rel_type_tag))
@@ -1332,7 +1340,7 @@ impl GraphHunter {
                     DFS_SCRATCH.with(|cell| {
                         let mut s = cell.borrow_mut();
                         init_buffers(&mut s);
-                        let s_ref: &mut (DfsPath, Vec<DfsFrame>) = &mut *s;
+                        let s_ref: &mut (DfsPath, Vec<DfsFrame>) = &mut s;
                         self.dfs_match_iterative(
                             start_sid,
                             &hypothesis.steps,
@@ -2932,7 +2940,7 @@ impl GraphHunter {
         let total_before = self.streaming_edge_count();
         let mut kept: Vec<CompactRelation> = Vec::new();
         self.streaming.for_each_edge(|_src, edge| {
-            if ds_tag.map_or(true, |tag| edge.dataset_tag != tag) {
+            if ds_tag != Some(edge.dataset_tag) {
                 // SAFETY: layout-identical (#[repr(C)]).
                 let compact: CompactRelation =
                     unsafe { std::ptr::read(edge as *const _ as *const CompactRelation) };
@@ -2963,10 +2971,10 @@ impl GraphHunter {
         // Remove entities
         let entities_removed = to_remove.len();
         for sid in &to_remove {
-            if let Some(entity) = self.entities.remove(sid) {
-                if let Some(set) = self.type_index.get_mut(&entity.entity_type) {
-                    set.remove(sid);
-                }
+            if let Some(entity) = self.entities.remove(sid)
+                && let Some(set) = self.type_index.get_mut(&entity.entity_type)
+            {
+                set.remove(sid);
             }
             self.mark_entity_dead(*sid);
             self.reverse_adj.remove(sid);
@@ -3068,7 +3076,7 @@ impl GraphHunter {
         let mut nodes_visited: usize = 0;
         let skew_delta = hypothesis.resolve_skew_delta();
 
-        for (&start_sid, _) in &self.entities {
+        for &start_sid in self.entities.keys() {
             let mut visited = HashSet::new();
             visited.insert(start_sid);
             let mut path = vec![self.interner.resolve(start_sid).to_string()];
@@ -3175,25 +3183,25 @@ impl GraphHunter {
             let edges = self.get_relations(src_id);
             let mut found = false;
             for edge in edges {
-                if edge.dest_id == *dst_id {
-                    if relation_type_matches(&step.relation_type, &edge.rel_type) {
-                        let dst_sid = match self.interner.get(dst_id) {
-                            Some(s) => s,
-                            None => continue,
-                        };
-                        let dest = match self.entities.get(&dst_sid) {
-                            Some(e) => e,
-                            None => continue,
-                        };
-                        if entity_type_matches(&step.dest_type, &dest.entity_type)
-                            && edge.timestamp >= last_timestamp.saturating_sub(skew_delta)
-                        {
-                            // Advance by the real timestamp, not the relaxed
-                            // floor, so tolerance stays per-hop.
-                            last_timestamp = edge.timestamp;
-                            found = true;
-                            break;
-                        }
+                if edge.dest_id == *dst_id
+                    && relation_type_matches(&step.relation_type, &edge.rel_type)
+                {
+                    let dst_sid = match self.interner.get(dst_id) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let dest = match self.entities.get(&dst_sid) {
+                        Some(e) => e,
+                        None => continue,
+                    };
+                    if entity_type_matches(&step.dest_type, &dest.entity_type)
+                        && edge.timestamp >= last_timestamp.saturating_sub(skew_delta)
+                    {
+                        // Advance by the real timestamp, not the relaxed
+                        // floor, so tolerance stays per-hop.
+                        last_timestamp = edge.timestamp;
+                        found = true;
+                        break;
                     }
                 }
             }
@@ -3327,10 +3335,10 @@ impl GraphHunter {
             if ts < prev_ts.saturating_sub(delta) {
                 continue;
             }
-            if let Some((lo, hi)) = time_window {
-                if ts < lo || ts > hi {
-                    continue;
-                }
+            if let Some((lo, hi)) = time_window
+                && (ts < lo || ts > hi)
+            {
+                continue;
             }
             let next = edge.dest_sid;
             if seen.contains(&next) {
@@ -3410,10 +3418,10 @@ impl GraphHunter {
                 if edge_ts < origin_ts.saturating_sub(delta) {
                     continue;
                 }
-                if let Some((lo, hi)) = time_window {
-                    if edge_ts < lo || edge_ts > hi {
-                        continue;
-                    }
+                if let Some((lo, hi)) = time_window
+                    && (edge_ts < lo || edge_ts > hi)
+                {
+                    continue;
                 }
                 let dest_sid = edge.dest_sid;
                 let dest = match self.entities.get(&dest_sid) {
@@ -3881,10 +3889,7 @@ impl GraphHunter {
     /// between that type's first and last event is emitted, including
     /// zero-count ones, so callers can distinguish "no events in this
     /// window" from "window truncated" without guessing from gaps.
-    pub fn temporal_heatmap(
-        &self,
-        bucket_size_seconds: Option<i64>,
-    ) -> Vec<(String, Vec<(i64, usize)>, i64)> {
+    pub fn temporal_heatmap(&self, bucket_size_seconds: Option<i64>) -> Vec<HeatmapRow> {
         use std::collections::BTreeMap;
 
         // Clamp: 60s minimum (avoid pathological per-second bucketing),
@@ -3902,7 +3907,7 @@ impl GraphHunter {
                 .or_insert(0) += 1;
         });
 
-        let mut result: Vec<(String, Vec<(i64, usize)>, i64)> = by_type
+        let mut result: Vec<HeatmapRow> = by_type
             .into_iter()
             .map(|(type_name, bins)| {
                 // Densify: fill zero buckets between min_key and max_key
@@ -3928,7 +3933,7 @@ impl GraphHunter {
     }
 
     /// Returns timestamp distribution per entity type for sparkline visualization.
-    pub fn timeline_data(&self) -> Vec<(String, i64, i64, Vec<(i64, usize)>)> {
+    pub fn timeline_data(&self) -> Vec<TimelineRow> {
         use std::collections::BTreeMap;
         let mut type_data: HashMap<String, BTreeMap<i64, usize>> = HashMap::new();
         let mut type_min: HashMap<String, i64> = HashMap::new();
@@ -3954,7 +3959,7 @@ impl GraphHunter {
             }
         });
 
-        let mut result: Vec<(String, i64, i64, Vec<(i64, usize)>)> = type_data
+        let mut result: Vec<TimelineRow> = type_data
             .into_iter()
             .map(|(type_name, bins)| {
                 let min = *type_min.get(&type_name).unwrap_or(&0);
@@ -4462,11 +4467,11 @@ mod tests {
 
         // Three IPs, two Hosts, one User.
         for i in 0..3u32 {
-            g.add_entity(Entity::new(&format!("ip-{}", i), EntityType::IP))
+            g.add_entity(Entity::new(format!("ip-{}", i), EntityType::IP))
                 .expect("ip insert");
         }
         for i in 0..2u32 {
-            g.add_entity(Entity::new(&format!("host-{}", i), EntityType::Host))
+            g.add_entity(Entity::new(format!("host-{}", i), EntityType::Host))
                 .expect("host insert");
         }
         g.add_entity(Entity::new("user-0", EntityType::User))

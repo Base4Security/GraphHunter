@@ -163,6 +163,10 @@ impl StreamEdge {
 /// O(log d + window), but in practice no production code path
 /// called `iter_window` (the matcher uses `edge_store`'s timestamp
 /// binary search, not streaming's window iter).
+// The `Inline` variant is large on purpose: low-degree vertices keep
+// their edges inline with no heap allocation. Boxing it would defeat
+// the point of the SmallVec.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum NeighborList {
     Inline(SmallVec<[StreamEdge; INLINE_CAPACITY]>),
@@ -686,7 +690,7 @@ impl InMemoryStreamingBackend {
         let outer = self.vertices.read();
         let slot = outer.get(&src)?;
         let guard = slot.read();
-        Some(f(&*guard))
+        Some(f(&guard))
     }
 
     /// Tail-aware companion to [`Self::with_neighbors`]: invoke `f` with
@@ -780,10 +784,8 @@ impl InMemoryStreamingBackend {
                     len: *len,
                 },
             };
-            if merge_tails {
-                if let Some(tail) = tails.get(&sid) {
-                    f = Self::frozen_neighbor_merging_tail(&f, &guard, tail);
-                }
+            if merge_tails && let Some(tail) = tails.get(&sid) {
+                f = Self::frozen_neighbor_merging_tail(&f, &guard, tail);
             }
             frozen.insert(sid, f);
         }
@@ -868,7 +870,7 @@ impl InMemoryStreamingBackend {
     pub fn finalize(&self) {
         let outer = self.vertices.read();
         for slot in outer.values() {
-            Self::sort_neighbor_slot(&mut *slot.write());
+            Self::sort_neighbor_slot(&mut slot.write());
         }
         self.finalized.store(true, Ordering::Release);
     }
@@ -891,7 +893,7 @@ impl InMemoryStreamingBackend {
             if slot.read().len() < 2 {
                 return;
             }
-            Self::sort_neighbor_slot(&mut *slot.write());
+            Self::sort_neighbor_slot(&mut slot.write());
         });
         self.finalized.store(true, Ordering::Release);
     }
@@ -1912,7 +1914,7 @@ mod tests {
         assert!(snap.neighbors(b).is_none());
         assert_eq!(snap.vertex_count(), 1);
         // Live backend sees `b`.
-        assert_eq!(backend.neighbors_arc(b).is_some(), true);
+        assert!(backend.neighbors_arc(b).is_some());
 
         // Snapshot is Clone-cheap (Arc bump).
         let snap2 = snap.clone();
@@ -2039,6 +2041,8 @@ mod tests {
     }
 
     #[test]
+    // Index access is the point: it mirrors the matcher's `&edges[idx]`.
+    #[allow(clippy::needless_range_loop)]
     fn neighbors_arc_exposes_slice_for_matcher_hotpath() {
         // L3 stage 2c part 2: the matcher hot-path takes the per-vertex
         // Arc, takes a read guard on it, and reads guard.as_slice() to

@@ -285,8 +285,8 @@ pub fn count_triangles_lftj(trie: &MaterializedCsrTrie) -> usize {
             // CsrTrieIter at level 0 to find where `b` lives, then
             // open it.
             let mut r2 = CsrTrieIter::new(trie);
-            r2.seek(kb as u64);
-            if r2.at_end() || r2.key() != kb as u64 {
+            r2.seek(kb);
+            if r2.at_end() || r2.key() != kb {
                 // b has no outgoing edges → no c can complete.
                 r1.next();
                 continue;
@@ -1635,8 +1635,8 @@ mod tests {
 
     #[test]
     fn leapfrog_two_way_basic() {
-        let mut a = SortedVecTrieIter::new(vec![1, 2, 3, 5, 8]);
-        let mut b = SortedVecTrieIter::new(vec![2, 5, 6, 8, 10]);
+        let a = SortedVecTrieIter::new(vec![1, 2, 3, 5, 8]);
+        let b = SortedVecTrieIter::new(vec![2, 5, 6, 8, 10]);
         let mut its = [a, b];
         let mut join = LeapfrogJoin::new(&mut its);
         let mut out = Vec::new();
@@ -2130,11 +2130,9 @@ mod tests {
             ("u5", "u6"),
             ("u6", "u1"),
         ];
-        let mut t = 100;
-        for (s, d) in cycle {
+        for (t, (s, d)) in (100..).zip(cycle) {
             g.add_relation(Relation::new(s, d, RelationType::Auth, t))
                 .unwrap();
-            t += 1;
         }
         g.sort_edges_by_timestamp().unwrap();
         g
@@ -2290,8 +2288,8 @@ mod tests {
         let trie = MaterializedCsrTrie::build(&g);
 
         // Build two iters over the same trie via cloned reference.
-        let mut a = CsrTrieIter::new(&trie);
-        let mut b = CsrTrieIter::new(&trie);
+        let a = CsrTrieIter::new(&trie);
+        let b = CsrTrieIter::new(&trie);
         // Keep them at level 0; we want sources only.
         let mut its = [a, b];
         let mut join = LeapfrogJoin::new(&mut its);

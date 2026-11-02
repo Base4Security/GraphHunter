@@ -367,6 +367,9 @@ pub fn search_instrumented(
     Ok((results, stats))
 }
 
+// Recursive DFS state threaded explicitly (same shape as the production
+// matcher it instruments); a context struct would only obscure the mirror.
+#[allow(clippy::too_many_arguments)]
 fn dfs_instrumented<'a>(
     graph: &'a GraphHunter,
     current_node: &str,
@@ -426,11 +429,11 @@ fn dfs_instrumented<'a>(
         }
 
         // Prune 4: time window
-        if let Some((tw_start, tw_end)) = time_window {
-            if edge.timestamp < tw_start || edge.timestamp > tw_end {
-                stats.rejected_time_window += 1;
-                continue;
-            }
+        if let Some((tw_start, tw_end)) = time_window
+            && (edge.timestamp < tw_start || edge.timestamp > tw_end)
+        {
+            stats.rejected_time_window += 1;
+            continue;
         }
 
         // Prune 5: k-simplicity
@@ -613,7 +616,7 @@ pub fn build_spawn_chain_hypothesis(length: usize) -> Hypothesis {
 /// Build a lateral movement hypothesis of given length.
 /// IP -[Connect]-> Host -[Auth]-> User -[Execute]-> Process -[Write]-> File
 pub fn build_lateral_movement_hypothesis(length: usize) -> Hypothesis {
-    let steps_template = vec![
+    let steps_template = [
         HypothesisStep::new(EntityType::IP, RelationType::Connect, EntityType::Host),
         HypothesisStep::new(EntityType::Host, RelationType::Auth, EntityType::User),
         HypothesisStep::new(EntityType::User, RelationType::Execute, EntityType::Process),
@@ -622,9 +625,7 @@ pub fn build_lateral_movement_hypothesis(length: usize) -> Hypothesis {
     ];
 
     let mut h = Hypothesis::new(format!("lateral_L{}", length));
-    for i in 0..length.min(steps_template.len()) {
-        h.steps.push(steps_template[i].clone());
-    }
+    h.steps.extend(steps_template.iter().take(length).cloned());
     h
 }
 
@@ -950,6 +951,28 @@ pub fn perf_rows_to_csv(rows: &[PerfRow]) -> String {
     out
 }
 
+/// Format benchmark results as a LaTeX table row.
+pub fn format_latex_row(r: &BenchmarkResult) -> String {
+    let (rr_rel, rr_ent, rr_temp, _rr_win, _rr_cycle) = r.pruning_stats.rejection_rates();
+    format!(
+        "{} & {} & {} & {} & {:.1} & {} & {} & {:.1} & {} & {:.1} & {:.1} & {:.1} & {:.1} & {:.1} \\\\",
+        r.label,
+        r.n_entities,
+        r.n_relations,
+        r.d_max,
+        r.d_avg,
+        r.hypothesis_length,
+        r.results_found,
+        r.time_us as f64 / 1000.0, // ms
+        r.nodes_visited_pruned,
+        r.measured_beff,
+        rr_rel * 100.0,
+        rr_ent * 100.0,
+        rr_temp * 100.0,
+        r.speedup,
+    )
+}
+
 #[cfg(test)]
 mod perf_harness_tests {
     use super::*;
@@ -1057,26 +1080,4 @@ mod perf_harness_tests {
             "one planted chain → one match, got {paths:?}"
         );
     }
-}
-
-/// Format benchmark results as a LaTeX table row.
-pub fn format_latex_row(r: &BenchmarkResult) -> String {
-    let (rr_rel, rr_ent, rr_temp, _rr_win, _rr_cycle) = r.pruning_stats.rejection_rates();
-    format!(
-        "{} & {} & {} & {} & {:.1} & {} & {} & {:.1} & {} & {:.1} & {:.1} & {:.1} & {:.1} & {:.1} \\\\",
-        r.label,
-        r.n_entities,
-        r.n_relations,
-        r.d_max,
-        r.d_avg,
-        r.hypothesis_length,
-        r.results_found,
-        r.time_us as f64 / 1000.0, // ms
-        r.nodes_visited_pruned,
-        r.measured_beff,
-        rr_rel * 100.0,
-        rr_ent * 100.0,
-        rr_temp * 100.0,
-        r.speedup,
-    )
 }

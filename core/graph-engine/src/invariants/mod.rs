@@ -231,36 +231,33 @@ pub fn check_invariants(
 
     let catalog = default_shape_catalog();
 
-    let mut results = Vec::new();
-    results.push(predicates::check_p1_causal_monotonicity(
-        &scoped_relations,
-        &scope,
-        DEFAULT_SAMPLE_CAP,
-    ));
-    results.push(predicates::check_p2_type_shape_plausibility(
-        &scoped_entities,
-        &scoped_relations,
-        &scope,
-        catalog,
-        DEFAULT_SAMPLE_CAP,
-    ));
-    results.push(predicates::check_p3_identity_coherence(
-        &scoped_relations,
-        &scope,
-        Some(catalog),
-        DEFAULT_SAMPLE_CAP,
-    ));
-    results.push(predicates::check_p4_referential_closure(
-        &scoped_entities,
-        &scoped_relations,
-        &scope,
-        DEFAULT_SAMPLE_CAP,
-    ));
-    // P5 comes later; skipped with reason.
-    results.push(PredicateResult::skipped(
-        PredicateId::P5RaritySanity,
-        "pending: rarity vs degree regression (deferred)",
-    ));
+    let results = vec![
+        predicates::check_p1_causal_monotonicity(&scoped_relations, &scope, DEFAULT_SAMPLE_CAP),
+        predicates::check_p2_type_shape_plausibility(
+            &scoped_entities,
+            &scoped_relations,
+            &scope,
+            catalog,
+            DEFAULT_SAMPLE_CAP,
+        ),
+        predicates::check_p3_identity_coherence(
+            &scoped_relations,
+            &scope,
+            Some(catalog),
+            DEFAULT_SAMPLE_CAP,
+        ),
+        predicates::check_p4_referential_closure(
+            &scoped_entities,
+            &scoped_relations,
+            &scope,
+            DEFAULT_SAMPLE_CAP,
+        ),
+        // P5 comes later; skipped with reason.
+        PredicateResult::skipped(
+            PredicateId::P5RaritySanity,
+            "pending: rarity vs degree regression (deferred)",
+        ),
+    ];
 
     let tw = estimate_treewidth(&scoped_entities, &scoped_relations);
 

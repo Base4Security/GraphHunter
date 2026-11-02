@@ -160,10 +160,10 @@ pub(super) fn build_snapshot_with_dir(user_dir: Option<&std::path::Path>) -> Cat
 /// Returns `None` when neither is set — we don't try to create the
 /// directory just to look inside it.
 fn resolve_user_catalog_dir() -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var("GRAPHHUNTER_CATALOG_DIR") {
-        if !explicit.trim().is_empty() {
-            return Some(PathBuf::from(explicit));
-        }
+    if let Ok(explicit) = std::env::var("GRAPHHUNTER_CATALOG_DIR")
+        && !explicit.trim().is_empty()
+    {
+        return Some(PathBuf::from(explicit));
     }
     let home = if cfg!(windows) {
         std::env::var("USERPROFILE").ok()

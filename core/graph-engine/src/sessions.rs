@@ -427,7 +427,6 @@ mod tests {
     #[test]
     fn the_ceiling_holds_across_separate_ingests() {
         use crate::generic::GenericParser;
-        use crate::parser::LogParser;
 
         // SAFETY: restored before the test returns.
         unsafe { std::env::set_var("GRAPHHUNTER_MAX_SESSION_ENTITIES", "3") };
@@ -464,7 +463,6 @@ mod tests {
     #[test]
     fn an_ingest_under_the_ceiling_refuses_nothing() {
         use crate::generic::GenericParser;
-        use crate::parser::LogParser;
 
         let mut g = GraphHunter::new();
         let log = r#"[{"timestamp":"2026-07-24T19:42:51Z","username":"a","sessionId":"s1","ipAddress":"10.0.0.1"}]"#;

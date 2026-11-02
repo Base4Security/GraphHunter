@@ -285,7 +285,7 @@ fn reference_k4s(g: &GraphHunter, tw: Option<(i64, i64)>) -> BTreeSet<Vec<String
 #[test]
 fn operator_matches_an_independent_reference_across_random_graphs() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut state: u64 = 0x2026_08_16_04;
+    let mut state: u64 = 0x0020_2608_1604;
     let mut next = move || {
         state ^= state << 13;
         state ^= state >> 7;

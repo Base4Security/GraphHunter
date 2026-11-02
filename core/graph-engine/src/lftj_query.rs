@@ -96,7 +96,7 @@ impl MinTimestampMap {
         // would cost 24 bytes of header per distinct pair, which on a
         // multi-million-pair trie dwarfs the payload.
         let mut counts = vec![0u32; n_slots];
-        let visit = |ai: usize, mut f: &mut dyn FnMut(usize, i64)| {
+        let visit = |ai: usize, f: &mut dyn FnMut(usize, i64)| {
             let a_sid = StrId::from_raw(trie.src_keys[ai]);
             let off = trie.dst_offsets[ai] as usize;
             let end = trie.dst_offsets[ai + 1] as usize;
@@ -1853,133 +1853,130 @@ pub fn enumerate_6cycles_lftj_simd_par(
     use rayon::prelude::*;
     let mut all: Vec<HuntResult> = (0..forward.src_keys.len())
         .into_par_iter()
-        .map_init(
-            || Vec::<u32>::new(),
-            |ef_isect, ai| {
-                let mut local: Vec<HuntResult> = Vec::new();
-                let a = forward.src_keys[ai];
-                let a_sid = StrId::from_raw(a);
-                let pred_a = reverse.neighbors_of(a);
-                if pred_a.is_empty() {
-                    return local;
+        .map_init(Vec::<u32>::new, |ef_isect, ai| {
+            let mut local: Vec<HuntResult> = Vec::new();
+            let a = forward.src_keys[ai];
+            let a_sid = StrId::from_raw(a);
+            let pred_a = reverse.neighbors_of(a);
+            if pred_a.is_empty() {
+                return local;
+            }
+            let a_dsts = &forward.dst_keys
+                [forward.dst_offsets[ai] as usize..forward.dst_offsets[ai + 1] as usize];
+            'a_loop: for &b in a_dsts {
+                if b == a {
+                    continue;
                 }
-                let a_dsts = &forward.dst_keys
-                    [forward.dst_offsets[ai] as usize..forward.dst_offsets[ai + 1] as usize];
-                'a_loop: for &b in a_dsts {
-                    if b == a {
+                let b_sid = StrId::from_raw(b);
+                let bi = match forward.src_keys.binary_search(&b) {
+                    Ok(i) => i,
+                    Err(_) => continue,
+                };
+                let t_ab = match ts_map.get(forward, ai, b) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                // Inclusive upper bound, matching the DFS.
+                if t_ab < t_lo || t_ab > t_hi {
+                    continue;
+                }
+                let b_dsts = forward.neighbors_of(b);
+                for &c in b_dsts {
+                    if c == a || c == b {
                         continue;
                     }
-                    let b_sid = StrId::from_raw(b);
-                    let bi = match forward.src_keys.binary_search(&b) {
+                    let c_sid = StrId::from_raw(c);
+                    let ci = match forward.src_keys.binary_search(&c) {
                         Ok(i) => i,
                         Err(_) => continue,
                     };
-                    let t_ab = match ts_map.get(forward, ai, b) {
+                    let t_bc = match ts_map.get(forward, bi, c) {
                         Some(t) => t,
                         None => continue,
                     };
-                    // Inclusive upper bound, matching the DFS.
-                    if t_ab < t_lo || t_ab > t_hi {
+                    if t_bc <= t_ab {
                         continue;
                     }
-                    let b_dsts = forward.neighbors_of(b);
-                    for &c in b_dsts {
-                        if c == a || c == b {
+                    let c_dsts = forward.neighbors_of(c);
+                    for &d in c_dsts {
+                        if d == a || d == b || d == c {
                             continue;
                         }
-                        let c_sid = StrId::from_raw(c);
-                        let ci = match forward.src_keys.binary_search(&c) {
+                        let d_sid = StrId::from_raw(d);
+                        let di = match forward.src_keys.binary_search(&d) {
                             Ok(i) => i,
                             Err(_) => continue,
                         };
-                        let t_bc = match ts_map.get(forward, bi, c) {
+                        let t_cd = match ts_map.get(forward, ci, d) {
                             Some(t) => t,
                             None => continue,
                         };
-                        if t_bc <= t_ab {
+                        if t_cd <= t_bc {
                             continue;
                         }
-                        let c_dsts = forward.neighbors_of(c);
-                        for &d in c_dsts {
-                            if d == a || d == b || d == c {
+                        let d_dsts = forward.neighbors_of(d);
+                        for &e in d_dsts {
+                            if e == a || e == b || e == c || e == d {
                                 continue;
                             }
-                            let d_sid = StrId::from_raw(d);
-                            let di = match forward.src_keys.binary_search(&d) {
+                            let e_sid = StrId::from_raw(e);
+                            let ei = match forward.src_keys.binary_search(&e) {
                                 Ok(i) => i,
                                 Err(_) => continue,
                             };
-                            let t_cd = match ts_map.get(forward, ci, d) {
+                            let t_de = match ts_map.get(forward, di, e) {
                                 Some(t) => t,
                                 None => continue,
                             };
-                            if t_cd <= t_bc {
+                            if t_de <= t_cd {
                                 continue;
                             }
-                            let d_dsts = forward.neighbors_of(d);
-                            for &e in d_dsts {
-                                if e == a || e == b || e == c || e == d {
+                            let e_dsts = forward.neighbors_of(e);
+                            ef_isect.clear();
+                            crate::simd_rust::intersect_sorted_u32_collect(
+                                e_dsts, pred_a, ef_isect,
+                            );
+                            for &f in ef_isect.iter() {
+                                if f == a || f == b || f == c || f == d || f == e {
                                     continue;
                                 }
-                                let e_sid = StrId::from_raw(e);
-                                let ei = match forward.src_keys.binary_search(&e) {
+                                let fi = match forward.src_keys.binary_search(&f) {
                                     Ok(i) => i,
                                     Err(_) => continue,
                                 };
-                                let t_de = match ts_map.get(forward, di, e) {
+                                let t_ef = match ts_map.get(forward, ei, f) {
                                     Some(t) => t,
                                     None => continue,
                                 };
-                                if t_de <= t_cd {
+                                if t_ef <= t_de {
                                     continue;
                                 }
-                                let e_dsts = forward.neighbors_of(e);
-                                ef_isect.clear();
-                                crate::simd_rust::intersect_sorted_u32_collect(
-                                    e_dsts, pred_a, ef_isect,
-                                );
-                                for &f in ef_isect.iter() {
-                                    if f == a || f == b || f == c || f == d || f == e {
-                                        continue;
-                                    }
-                                    let fi = match forward.src_keys.binary_search(&f) {
-                                        Ok(i) => i,
-                                        Err(_) => continue,
-                                    };
-                                    let t_ef = match ts_map.get(forward, ei, f) {
-                                        Some(t) => t,
-                                        None => continue,
-                                    };
-                                    if t_ef <= t_de {
-                                        continue;
-                                    }
-                                    let t_fa = match ts_map.get(forward, fi, a) {
-                                        Some(t) => t,
-                                        None => continue,
-                                    };
-                                    if t_fa <= t_ef {
-                                        continue;
-                                    }
-                                    let f_sid = StrId::from_raw(f);
-                                    local.push(vec![
-                                        graph.interner.resolve_arc(a_sid),
-                                        graph.interner.resolve_arc(b_sid),
-                                        graph.interner.resolve_arc(c_sid),
-                                        graph.interner.resolve_arc(d_sid),
-                                        graph.interner.resolve_arc(e_sid),
-                                        graph.interner.resolve_arc(f_sid),
-                                    ]);
-                                    if local.len() >= max_results {
-                                        break 'a_loop;
-                                    }
+                                let t_fa = match ts_map.get(forward, fi, a) {
+                                    Some(t) => t,
+                                    None => continue,
+                                };
+                                if t_fa <= t_ef {
+                                    continue;
+                                }
+                                let f_sid = StrId::from_raw(f);
+                                local.push(vec![
+                                    graph.interner.resolve_arc(a_sid),
+                                    graph.interner.resolve_arc(b_sid),
+                                    graph.interner.resolve_arc(c_sid),
+                                    graph.interner.resolve_arc(d_sid),
+                                    graph.interner.resolve_arc(e_sid),
+                                    graph.interner.resolve_arc(f_sid),
+                                ]);
+                                if local.len() >= max_results {
+                                    break 'a_loop;
                                 }
                             }
                         }
                     }
                 }
-                local
-            },
-        )
+            }
+            local
+        })
         .reduce(Vec::new, |mut a, b| {
             a.extend(b);
             a

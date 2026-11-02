@@ -827,7 +827,7 @@ mod tests {
         // Star: 200 hosts all pointing at the same IP, plus a Process node that
         // will be wired in post-finalize.
         for i in 0..200 {
-            g.add_entity(Entity::new(&format!("h{i}"), EntityType::Host))
+            g.add_entity(Entity::new(format!("h{i}"), EntityType::Host))
                 .unwrap();
         }
         g.add_entity(Entity::new("ip1", EntityType::IP)).unwrap();
@@ -835,7 +835,7 @@ mod tests {
             .unwrap();
         for i in 0..200 {
             g.add_relation(Relation::new(
-                &format!("h{i}"),
+                format!("h{i}"),
                 "ip1",
                 RelationType::Connect,
                 100 + i,

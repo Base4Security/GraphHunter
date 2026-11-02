@@ -94,10 +94,10 @@ impl DriftStore {
     /// Open a store at `path`, creating the file (and parent dir) if
     /// needed. Idempotent against an existing schema.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, DriftStoreError> {
-        if let Some(parent) = path.as_ref().parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.as_ref().parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(user.null, 1);
         assert_eq!(user.non_null, 1);
         assert_eq!(user.type_histogram.get("string"), Some(&1));
-        assert!(user.type_histogram.get("null").is_none());
+        assert!(!user.type_histogram.contains_key("null"));
     }
 
     #[test]

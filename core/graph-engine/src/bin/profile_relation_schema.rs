@@ -15,7 +15,6 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use graph_hunter_core::entity::Entity;
@@ -54,9 +53,9 @@ fn build_graph() -> GraphHunter {
         let target = format!("ip{}", e % N_IPS);
         let ts = base_ts + (e as i64 % 86_400);
         let mut rel = Relation::new("host0".to_string(), target, RelationType::Connect, ts);
-        for k in 0..META_KV_PER_EDGE {
+        for (k, key) in keys.iter().enumerate().take(META_KV_PER_EDGE) {
             rel.metadata
-                .insert(keys[k].to_string(), format!("v{}_{}", e, k));
+                .insert(key.to_string(), format!("v{}_{}", e, k));
         }
         g.add_relation(rel).unwrap();
     }
@@ -64,9 +63,9 @@ fn build_graph() -> GraphHunter {
         let target = format!("url{}", e % N_URLS);
         let ts = base_ts + (e as i64 % 86_400);
         let mut rel = Relation::new("host0".to_string(), target, RelationType::DNS, ts);
-        for k in 0..META_KV_PER_EDGE {
+        for (k, key) in keys.iter().enumerate().take(META_KV_PER_EDGE) {
             rel.metadata
-                .insert(keys[k].to_string(), format!("v{}_{}", e, k));
+                .insert(key.to_string(), format!("v{}_{}", e, k));
         }
         g.add_relation(rel).unwrap();
     }
@@ -106,10 +105,10 @@ fn main() {
     let t = Instant::now();
     let mut seen_types: usize = 0;
     g.streaming.for_each_edge(|src_sid, edge| {
-        if g.entities.get(&src_sid).is_some() {
+        if g.entities.contains_key(&src_sid) {
             seen_types += 1;
         }
-        if g.entities.get(&edge.dest_sid).is_some() {
+        if g.entities.contains_key(&edge.dest_sid) {
             seen_types += 1;
         }
     });

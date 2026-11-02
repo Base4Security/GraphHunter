@@ -1004,7 +1004,7 @@ mod tests {
             .get("hosts")
             .and_then(|h| h.as_array())
             .expect("hosts array");
-        assert!(hosts.len() >= 1, "calibration must list at least one host");
+        assert!(!hosts.is_empty(), "calibration must list at least one host");
     }
 
     #[test]

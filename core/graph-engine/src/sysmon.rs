@@ -9,7 +9,7 @@ use crate::types::{EntityType, RelationType};
 
 /// Typed Sysmon event row used by the direct-typed fast path
 /// (`SysmonJsonParser::try_parse_typed_with_scratch`). Every field is `Option`
-/// + `borrow`ed from the input scratch buffer for zero-copy
+/// and `borrow`ed from the input scratch buffer for zero-copy
 /// deserialization through `simd_json::serde::from_slice`. The
 /// fields cover the union of what every implemented EventID needs
 /// — fields not relevant to the active EventID stay `None` and
@@ -271,14 +271,13 @@ impl SysmonJsonParser {
                 merged.insert(k.clone(), v.clone());
             }
             // Propagate hostname variants
-            if !merged.contains_key("Computer") {
-                if let Some(host) = event
+            if !merged.contains_key("Computer")
+                && let Some(host) = event
                     .get("computer_name")
                     .or_else(|| event.get("Hostname"))
                     .or_else(|| event.get("host_name"))
-                {
-                    merged.insert("Computer".to_string(), host.clone());
-                }
+            {
+                merged.insert("Computer".to_string(), host.clone());
             }
             Some((event_id, std::borrow::Cow::Owned(Value::Object(merged))))
         } else {
@@ -794,10 +793,10 @@ impl SysmonJsonParser {
             }
             let _ = logon_type; // used above
         }
-        if let Some(ip) = Self::extract_str(event, "IpAddress") {
-            if ip != "-" {
-                rel.metadata.insert("ip_address".into(), ip.into());
-            }
+        if let Some(ip) = Self::extract_str(event, "IpAddress")
+            && ip != "-"
+        {
+            rel.metadata.insert("ip_address".into(), ip.into());
         }
         if event_id == 4625 {
             rel.metadata.insert("success".into(), "false".into());
@@ -1207,13 +1206,13 @@ impl SysmonJsonParser {
         Some(triples)
     }
 
-    /// Raw-event variants for the long-tail Sysmon EventIDs. Each
-    /// mirrors its `typed_*` legacy counterpart but emits
-    /// `RawIngestEvent`s without the Entity/Relation struct
-    /// allocations. Where a handler emits multiple triples sharing a
-    /// dst entity, the metadata is moved into the first event and
-    /// later emissions carry empty `dst_metadata` — the writer's
-    /// `merge_metadata` already dedupes by entity id.
+    // Raw-event variants for the long-tail Sysmon EventIDs. Each
+    // mirrors its `typed_*` legacy counterpart but emits
+    // `RawIngestEvent`s without the Entity/Relation struct
+    // allocations. Where a handler emits multiple triples sharing a
+    // dst entity, the metadata is moved into the first event and
+    // later emissions carry empty `dst_metadata` — the writer's
+    // `merge_metadata` already dedupes by entity id.
 
     #[inline]
     fn typed_network_connection_raw(
@@ -1664,12 +1663,12 @@ impl SysmonJsonParser {
         }
     }
 
-    /// Raw-event variants for Windows Security + PowerShell EventIDs.
-    /// Same shape as the Sysmon long-tail raw migrations: skip
-    /// `Entity`/`Relation` struct allocs, build metadata HashMaps
-    /// only on the side that actually owns metadata, and apply the
-    /// dst-metadata-skip-on-second-emission trick when a handler
-    /// emits multiple triples that share a dst (4688 child process).
+    // Raw-event variants for Windows Security + PowerShell EventIDs.
+    // Same shape as the Sysmon long-tail raw migrations: skip
+    // `Entity`/`Relation` struct allocs, build metadata HashMaps
+    // only on the side that actually owns metadata, and apply the
+    // dst-metadata-skip-on-second-emission trick when a handler
+    // emits multiple triples that share a dst (4688 child process).
 
     #[inline]
     fn typed_security_logon_raw(
@@ -1689,10 +1688,10 @@ impl SysmonJsonParser {
                 rel_meta.insert("logon_type".into(), s);
             }
         }
-        if let Some(ip) = event.ip_address {
-            if ip != "-" {
-                rel_meta.insert("ip_address".into(), ip.into());
-            }
+        if let Some(ip) = event.ip_address
+            && ip != "-"
+        {
+            rel_meta.insert("ip_address".into(), ip.into());
         }
         if event_id == 4625 {
             rel_meta.insert("success".into(), "false".into());
@@ -1941,10 +1940,10 @@ impl SysmonJsonParser {
                 rel.metadata.insert("logon_type".into(), s);
             }
         }
-        if let Some(ip) = event.ip_address {
-            if ip != "-" {
-                rel.metadata.insert("ip_address".into(), ip.into());
-            }
+        if let Some(ip) = event.ip_address
+            && ip != "-"
+        {
+            rel.metadata.insert("ip_address".into(), ip.into());
         }
         if event_id == 4625 {
             rel.metadata.insert("success".into(), "false".into());
@@ -2129,10 +2128,7 @@ impl LogParser for SysmonJsonParser {
         if trimmed.starts_with('[') {
             let mut buf = trimmed.as_bytes().to_vec();
             if let Ok(events) = simd_json::serde::from_slice::<Vec<Value>>(&mut buf) {
-                return events
-                    .par_iter()
-                    .flat_map(|event| Self::parse_event(event))
-                    .collect();
+                return events.par_iter().flat_map(Self::parse_event).collect();
             }
         }
 
@@ -2166,7 +2162,7 @@ impl LogParser for SysmonJsonParser {
 
     fn parse_with_stats(&self, data: &str) -> (Vec<ParsedTriple>, crate::parser::ParseStats) {
         let events = Self::collect_events(data);
-        crate::generic::parse_events_with_stats(&events, |ev| Self::parse_event(ev))
+        crate::generic::parse_events_with_stats(&events, Self::parse_event)
     }
 
     /// Raw-event override: NDJSON-only fast path that emits
@@ -2232,7 +2228,7 @@ impl LogParser for SysmonJsonParser {
     /// those should call `parse_with_stats` instead.
     ///
     /// JSON-array inputs delegate to the legacy `parse_with_stats`
-    /// + lift path to keep full stat fidelity (those inputs are
+    /// plus lift path to keep full stat fidelity (those inputs are
     /// rare for ingest and going through the stats path is fine).
     fn parse_raw_with_stats(
         &self,
@@ -2319,18 +2315,20 @@ impl LogParser for SysmonJsonParser {
             )
             .collect();
 
-        let mut stats = crate::parser::ParseStats::default();
-        stats.rows_seen = per_line.len();
+        let mut stats = crate::parser::ParseStats {
+            rows_seen: per_line.len(),
+            ..Default::default()
+        };
         let mut all_events: Vec<crate::parser::RawIngestEvent> = Vec::new();
         for (events, produced, skip) in per_line {
             if produced {
                 stats.rows_with_triples += 1;
             } else {
                 stats.rows_skipped += 1;
-                if let Some(sample) = skip {
-                    if stats.skipped_samples.len() < crate::parser::SKIP_SAMPLE_CAP {
-                        stats.skipped_samples.push(sample);
-                    }
+                if let Some(sample) = skip
+                    && stats.skipped_samples.len() < crate::parser::SKIP_SAMPLE_CAP
+                {
+                    stats.skipped_samples.push(sample);
                 }
             }
             all_events.extend(events);

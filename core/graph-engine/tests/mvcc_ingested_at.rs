@@ -27,7 +27,7 @@
 
 use graph_hunter_core::parser::RawIngestEvent;
 use graph_hunter_core::relation::{INGEST_EPOCH_BASE, encode_ingested_at};
-use graph_hunter_core::{Entity, EntityType, GraphHunter, GraphRead, Relation, RelationType};
+use graph_hunter_core::{Entity, EntityType, GraphHunter, Relation, RelationType};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 

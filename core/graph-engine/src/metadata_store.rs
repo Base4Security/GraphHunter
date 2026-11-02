@@ -127,10 +127,11 @@ impl MetadataStore {
 
     /// Stores an encoded record, sharing an identical earlier one if found.
     fn place(&mut self, rec: &[u8]) -> u64 {
-        if let Some((off, len)) = self.last {
-            if len == rec.len() && self.record_bytes(off, len) == Some(rec) {
-                return off;
-            }
+        if let Some((off, len)) = self.last
+            && len == rec.len()
+            && self.record_bytes(off, len) == Some(rec)
+        {
+            return off;
         }
         if let Some(&off) = self.dedup.get(rec) {
             self.last = Some((off, rec.len()));

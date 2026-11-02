@@ -356,12 +356,10 @@ impl SourcePoller {
                     // advanced. A stream that echoes the input wm
                     // (e.g., the LA impl when it has nothing new to
                     // say) is a no-op.
-                    if new_wm != current_wm {
-                        if self.watermarks.set(&key, &new_wm).await.is_ok() {
-                            self.metrics
-                                .watermark_advances
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
+                    if new_wm != current_wm && self.watermarks.set(&key, &new_wm).await.is_ok() {
+                        self.metrics
+                            .watermark_advances
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 Err(err) => {

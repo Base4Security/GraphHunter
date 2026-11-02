@@ -128,12 +128,12 @@ pub fn is_trivial(hypothesis: &Hypothesis) -> bool {
     if hypothesis.steps.len() < 2 {
         return true;
     }
-    let all_any = hypothesis.steps.iter().all(|s| {
+
+    hypothesis.steps.iter().all(|s| {
         matches!(s.origin_type, EntityType::Any)
             && matches!(s.dest_type, EntityType::Any)
             && matches!(s.relation_type, RelationType::Any)
-    });
-    all_any
+    })
 }
 
 /// Run the bidirectional semi-join, refining `cands` in place. Returns
