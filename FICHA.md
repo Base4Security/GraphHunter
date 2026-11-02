@@ -11,7 +11,7 @@
 | **Dueño** (persona nombrada) | `PENDIENTE:` — *Lucas Sotomayor, a confirmar* |
 | Suplente / contacto ante incidente | `PENDIENTE:` |
 | ¿Un único desarrollador? | Sí (propuesta) — aplica RA-1 de la política 01, sección 10 |
-| Repositorio | `lsotomayorb4/Graph-Hunter` (privado, cuenta personal) y `Base4Security/GraphHunter` (público) |
+| Repositorio | `lsotomayorb4/Graph-Hunter` (privado, cuenta personal: versión de desarrollo, se migra a la organización) y `Base4Security/GraphHunter` (público, repo de la organización) |
 | Última revisión de esta ficha | 2026-11-02 |
 
 ## Clasificación
@@ -113,10 +113,10 @@
 
 | Brecha | Acción | Responsable | Fecha objetivo |
 |---|---|---|---|
-| Datos reales del corpus de fraude (CUIL, nombres, domicilios, CVU, IDs de operación) y datos de clientes (IPs, dominios, políticas de firewall) en tests y docs, ya en `origin` | Reemplazados por sintéticos en el árbol actual. Falta decidir si se reescribe el historial de `origin` | Dueño | `PENDIENTE:` |
-| Repo privado en cuenta personal, sin protección de rama posible (plan Free) | Mover a la organización (ADR-0002) | Dueño + célula | `PENDIENTE:` |
-| `main` sin protección en `Base4Security/GraphHunter` | Ruleset: sin push directo, PR obligatorio, checks requeridos (`Secret scanning`, `audit`, `frontend`, `mcp`, `python`, tests de `rust-ci`), regla de code scanning | Admin de la org | `PENDIENTE:` |
-| `rust-ci.yml` filtra por rutas: en un PR sin Rust sus checks no corren y no pueden ser requeridos | Job agregador único (patrón `baseline-ok` de la propuesta v2 del baseline) o quitar el filtro | Dueño | `PENDIENTE:` |
+| Datos reales del corpus de fraude (CUIL, nombres, domicilios, CVU, IDs de operación), emails personales y de empleados, e IPs de clientes e investigaciones en tests y docs de `origin` | Hecho 2026-11-02: reemplazados por sintéticos en el árbol y en todo el historial (`git filter-repo --replace-text`, push forzado de las 21 ramas y el tag de `origin`). Verificado: 0 valores originales, 0 CUIL reales, gitleaks limpio. `Base4Security/GraphHunter` no los tenía. Queda: GitHub conserva los commits viejos en `refs/pull/*` (163 PR) y en caché; se eliminan solo pidiéndolo a GitHub Support o borrando el repo personal tras la migración | Dueño | `PENDIENTE:` pedido a GitHub Support o borrado del repo personal |
+| Repo privado en cuenta personal, sin protección de rama posible (plan Free) | Es la versión de desarrollo; el dueño la migra a la organización (ADR-0002) | Dueño | En curso |
+| `main` sin protección en `Base4Security/GraphHunter` | Ruleset: sin push directo, PR obligatorio, checks requeridos (`Secret scanning`, `audit`, `frontend`, `mcp`, `python`, `rust-ci-ok`), regla de code scanning | Admin de la org | `PENDIENTE:` |
+| `rust-ci.yml` filtraba por rutas: en un PR sin Rust sus checks no corrían y no podían ser requeridos | Hecho: filtro movido al job `changes` y job agregador `rust-ci-ok`, que siempre termina y es el que se marca como requerido | Dueño | Hecho 2026-11-02 |
 | Clippy no bloqueante (199 advertencias en graph-engine, 161 en api, 25 en tauri y parsers…) | Corregir por crate y quitar `continue-on-error` | Dueño | `PENDIENTE:` |
 | cargo-deny no bloqueante: unmaintained, unsound, licencias sin declarar, un crate rechazado en tauri. Además el paso nunca había corrido (argumentos en orden incorrecto) | Triage por crate; excepciones con fecha en `deny.toml` | Dueño | `PENDIENTE:` |
 | MCP: `zod` 3 tiene una vulnerabilidad alta (GHSA-mrhx-c7xc-m3w5); se corrige en 4.x | Migrar a zod 4 y subir el umbral de `npm audit` a `high` | Dueño | `PENDIENTE:` |
