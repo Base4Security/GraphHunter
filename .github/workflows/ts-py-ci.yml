@@ -66,10 +66,8 @@ jobs:
         run: npm run build
       - name: Tests de contrato
         run: npm run test:contract
-      # Bloquea solo críticas mientras se migra zod 3 → 4 (GHSA-mrhx-c7xc-m3w5,
-      # alta). Ver plan de adecuación en FICHA.md; al cerrarlo, pasar a high.
       - name: Vulnerabilidades en dependencias
-        run: npm audit --omit=dev --audit-level=critical
+        run: npm audit --omit=dev --audit-level=high
 
   python:
     name: python
@@ -90,9 +88,4 @@ jobs:
         run: |
           uvx pip-audit --disable-pip --no-deps -r sidecar/tpcsa-certify/requirements.txt
           uvx pip-audit --disable-pip --no-deps -r training/requirements.txt
-
-      # transformers <5 tiene advisories que se corrigen recién en 5.x. Es código
-      # de entrenamiento offline; queda como reporte hasta migrar (FICHA.md).
-      - name: Vulnerabilidades en dependencias (field_role_classifier, soft)
-        continue-on-error: true
-        run: uvx pip-audit --disable-pip --no-deps -r training/field_role_classifier/requirements.txt
+          uvx pip-audit --disable-pip --no-deps -r training/field_role_classifier/requirements.txt

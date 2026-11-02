@@ -93,8 +93,8 @@
 | Secret scanning (gitleaks, historial completo) | `baseline.yml` | Sí | por PR | 2026-11-02, local: 1015 commits, 0 hallazgos |
 | Vulnerabilidades en dependencias Rust (cargo-audit) | `rust-ci.yml` | Sí | por PR | 2026-11-02, local: 0 en 15 crates |
 | Licencias, crates vetados, unmaintained/unsound (cargo-deny) | `rust-ci.yml` | **No** — hallazgos abiertos | por PR | |
-| Vulnerabilidades npm | `ts-py-ci.yml` | App: altas y críticas. MCP: solo críticas | por PR | 2026-11-02, local: app 0, MCP 1 alta |
-| Vulnerabilidades Python (pip-audit) | `ts-py-ci.yml` | Sí, salvo `field_role_classifier` | por PR | 2026-11-02, local: 4 en transformers |
+| Vulnerabilidades npm | `ts-py-ci.yml` | Sí, altas y críticas (app y MCP) | por PR | 2026-11-02, local: app 0, MCP 0 |
+| Vulnerabilidades Python (pip-audit) | `ts-py-ci.yml` | Sí | por PR | 2026-11-02, local: 0 |
 | Lockfiles al día (`--locked`) | `rust-ci.yml` | Sí | por PR | |
 | Actualización de dependencias | Dependabot | — | semanal | |
 | SAST (CodeQL: Rust, TS, Python, Actions) | `sast.yml` | Solo con la regla de code scanning del ruleset | por PR + semanal | Pendiente de primera corrida |
@@ -119,7 +119,7 @@
 | `rust-ci.yml` filtraba por rutas: en un PR sin Rust sus checks no corrían y no podían ser requeridos | Hecho: filtro movido al job `changes` y job agregador `rust-ci-ok`, que siempre termina y es el que se marca como requerido | Dueño | Hecho 2026-11-02 |
 | Clippy no bloqueante (199 advertencias en graph-engine, 161 en api, 25 en tauri y parsers…) | Corregir por crate y quitar `continue-on-error` | Dueño | `PENDIENTE:` |
 | cargo-deny no bloqueante: unmaintained, unsound, licencias sin declarar, un crate rechazado en tauri. Además el paso nunca había corrido (argumentos en orden incorrecto) | Triage por crate; excepciones con fecha en `deny.toml` | Dueño | `PENDIENTE:` |
-| MCP: `zod` 3 tiene una vulnerabilidad alta (GHSA-mrhx-c7xc-m3w5); se corrige en 4.x | Migrar a zod 4 y subir el umbral de `npm audit` a `high` | Dueño | `PENDIENTE:` |
-| `transformers` <5 en `training/field_role_classifier` con 4 advisories | Migrar a 5.x o aceptar formalmente (código de entrenamiento offline) | Dueño | `PENDIENTE:` |
+| MCP: `zod` 3 tenía una vulnerabilidad alta (GHSA-mrhx-c7xc-m3w5) | Hecho: zod 4.6.7, `npm audit` en 0 y el CI bloquea desde `high`. Los JSON schema publicados ya no llevan `additionalProperties: false` (las claves desconocidas se siguen descartando en runtime) | Dueño | Hecho 2026-11-02 |
+| `transformers` <5 en `training/field_role_classifier` con 4 advisories | Hecho: transformers 5.22.1 (piso 5.10, que cubre PYSEC-2026-4174), `pip-audit` limpio y bloqueante | Dueño | Hecho 2026-11-02 |
 | Sin modelado de amenazas (N3) | Modelar API local, MCP, parsers y carga de sesiones | Dueño + rol de seguridad | `PENDIENTE:` |
 | Sin análisis de vulnerabilidades periódico del binario distribuido | Definir con la célula (el baseline no cubre software distribuido) | Dueño + célula | `PENDIENTE:` |
