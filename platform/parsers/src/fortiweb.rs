@@ -134,7 +134,11 @@ pub fn looks_like_fortiweb(contents: &str) -> bool {
     let probe = if contents.len() > 8192 {
         // Cut on a char boundary: `contents` is a &str and slicing mid
         // UTF-8 sequence would panic on logs carrying non-ASCII payloads.
-        match contents.char_indices().take_while(|(i, _)| *i <= 8192).last() {
+        match contents
+            .char_indices()
+            .take_while(|(i, _)| *i <= 8192)
+            .last()
+        {
             Some((i, c)) => &contents[..i + c.len_utf8()],
             None => contents,
         }
@@ -293,7 +297,11 @@ fn derive_timestamp(kv: &HashMap<String, String>) -> i64 {
     }
     if let (Some(d), Some(t)) = (kv.get("date"), kv.get("time")) {
         let combined = format!("{d} {t}");
-        for fmt in &["%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
+        for fmt in &[
+            "%Y-%m-%d %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+        ] {
             if let Ok(dt) = NaiveDateTime::parse_from_str(&combined, fmt) {
                 return dt.and_utc().timestamp();
             }
@@ -375,7 +383,9 @@ fn parse_admin_record(kv: &HashMap<String, String>) -> Vec<ParsedTriple> {
     let mut rel = Relation::new(user, device, rel_type, timestamp);
     rel.metadata = meta;
     let mut appliance = other(device, "Appliance");
-    appliance.metadata.insert("vendor".into(), "fortiweb".into());
+    appliance
+        .metadata
+        .insert("vendor".into(), "fortiweb".into());
     vec![(Entity::new(user, EntityType::User), rel, appliance)]
 }
 
@@ -402,11 +412,7 @@ fn parse_record(record: &str) -> Vec<ParsedTriple> {
     if let Some(dst) = kv.get("dst").filter(|v| !is_placeholder(v)) {
         let mut rel = Relation::new(&src, dst, RelationType::Connect, timestamp);
         rel.metadata = meta.clone();
-        triples.push((
-            src_entity.clone(),
-            rel,
-            Entity::new(dst, EntityType::IP),
-        ));
+        triples.push((src_entity.clone(), rel, Entity::new(dst, EntityType::IP)));
     }
 
     // 2. src -[Triggered]-> Signature
@@ -573,7 +579,10 @@ mod tests {
     #[test]
     fn attack_record_emits_five_triples() {
         let triples = FortiWebParser::new().parse(ATTACK);
-        let rels: Vec<String> = triples.iter().map(|(_, r, _)| r.rel_type.to_string()).collect();
+        let rels: Vec<String> = triples
+            .iter()
+            .map(|(_, r, _)| r.rel_type.to_string())
+            .collect();
         assert!(rels.contains(&"Connect".to_string()), "{rels:?}");
         assert!(rels.contains(&"Triggered".to_string()), "{rels:?}");
         assert!(rels.contains(&"Request".to_string()), "{rels:?}");
@@ -602,10 +611,11 @@ mod tests {
         assert!(!ids.iter().any(|i| i.eq_ignore_ascii_case("n/a")));
         assert!(!ids.iter().any(|i| i.eq_ignore_ascii_case("none")));
         // signature_cve_id="N/A" must not have become an edge either.
-        assert!(!triples.iter().any(|(_, r, _)| r
-            .metadata
-            .get("signature_cve_id")
-            .is_some()));
+        assert!(
+            !triples
+                .iter()
+                .any(|(_, r, _)| r.metadata.get("signature_cve_id").is_some())
+        );
     }
 
     /// The appliance's own daemon housekeeping — 97 % of a real `elog` —
@@ -664,7 +674,12 @@ mod tests {
     fn multiline_payload_stays_one_record() {
         let multiline = "v015xxxxdate=2026-08-02,time=00:03:09,log_id=20000008,device_id=FWB1,eventtime=1785639789477787277,type=attack,severity_level=High,action=Alert,src=198.51.100.99,dst=10.0.9.10,http_method=post,http_url=\"/_search?pretty\",http_host=\"24onboarding.example.com.ar\",signature_id=\"090030001\",msg=\"Parameter({\n  \\\"size\\\": 1,\n  \\\"query\\\": { }\n})\"\n";
         let records = split_records(multiline);
-        assert_eq!(records.len(), 1, "payload was shredded into {} records", records.len());
+        assert_eq!(
+            records.len(),
+            1,
+            "payload was shredded into {} records",
+            records.len()
+        );
 
         let triples = FortiWebParser::new().parse(multiline);
         // Connect + Triggered + Request + Targets = 4 (no policy field).

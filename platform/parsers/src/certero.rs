@@ -5,9 +5,9 @@
 //! Tab-separated, one **person** per row, keyed by CUIL:
 //!
 //! ```text
-//! CUIL         NOMBRE                      DOMICILIO                                       SITUACION LABORAL   FECHA DE NACIMIENTO   (sin nombre)
-//! 20000000021  PERSONA EJEMPLO SIETE     CALLE UNO 885, LOCALIDAD UNO, BUENOS AIRES   Sin registro        2001-01-01
-//! 20000000022  Persona Ejemplo Ocho  CALLE DOS 2090, LOCALIDAD DOS, BUENOS AIRES  EMPLEADOR EJEMPLO SA   1980-01-01            ELABORACION DE PRODUCTOS DE PANADERIA N.C.P.
+//! CUIL         NOMBRE                  DOMICILIO                                  SITUACION LABORAL      FECHA DE NACIMIENTO   (sin nombre)
+//! 20000000021  PERSONA EJEMPLO SIETE   CALLE UNO 885, LOCALIDAD UNO, BUENOS AIRES   Sin registro           2001-01-01
+//! 20000000022  Persona Ejemplo Ocho    CALLE DOS 2090, LOCALIDAD DOS, BUENOS AIRES     EMPLEADOR EJEMPLO SA   1980-01-01            ELABORACION DE PRODUCTOS DE PANADERIA N.C.P.
 //! ```
 //!
 //! (Shown space-aligned for legibility; the real separator is a single
@@ -361,7 +361,8 @@ impl LogParser for CerteroParser {
 mod tests {
     use super::*;
 
-    /// Verbatim rows from the case corpus (the trailing tab on the header
+    /// Rows with the exact shape of the case corpus, synthetic values
+    /// throughout (the trailing tab on the header
     /// and on the unemployed rows is load-bearing — it is the unnamed
     /// activity column).
     const SAMPLE: &str = "CUIL\tNOMBRE\tDOMICILIO\tSITUACION LABORAL\tFECHA DE NACIMIENTO\t

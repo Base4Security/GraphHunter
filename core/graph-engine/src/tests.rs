@@ -1,4 +1,4 @@
-﻿use super::*;
+use super::*;
 
 /// Test helper â€” convert a `HuntResult` (Vec<Arc<str>>) into Vec<&str>
 /// for `assert_eq!(..., vec!["literal", ...])`. The DFS hot path emits
@@ -129,8 +129,10 @@ fn one_gap_chain() -> GraphHunter {
     for id in ["A", "X", "B"] {
         g.add_entity(Entity::new(id, EntityType::IP)).unwrap();
     }
-    g.add_relation(Relation::new("A", "X", RelationType::Connect, 100)).unwrap();
-    g.add_relation(Relation::new("X", "B", RelationType::Connect, 110)).unwrap();
+    g.add_relation(Relation::new("A", "X", RelationType::Connect, 100))
+        .unwrap();
+    g.add_relation(Relation::new("X", "B", RelationType::Connect, 110))
+        .unwrap();
     g.sort_edges_by_timestamp().unwrap();
     g
 }
@@ -152,7 +154,11 @@ fn no_gap_misses_a_bridged_chain() {
     let graph = one_gap_chain();
     let h = a_to_b_connect().with_max_gap(0);
     let (paths, _) = graph.search_temporal_pattern(&h, None, None).unwrap();
-    assert!(!paths.iter().any(|p| &*p[0] == "A" && &*p[p.len() - 1] == "B"));
+    assert!(
+        !paths
+            .iter()
+            .any(|p| &*p[0] == "A" && &*p[p.len() - 1] == "B")
+    );
 }
 
 /// g = 1 bridges the single missing hop and recovers A→B.
@@ -161,8 +167,15 @@ fn one_gap_bridges_one_missing_hop() {
     let graph = one_gap_chain();
     let h = a_to_b_connect().with_max_gap(1);
     let (paths, _) = graph.search_temporal_pattern(&h, None, None).unwrap();
-    let hit: Vec<_> = paths.iter().filter(|p| &*p[0] == "A" && &*p[1] == "B").collect();
-    assert_eq!(hit.len(), 1, "g=1 must bridge A→X→B into A→B, got {paths:?}");
+    let hit: Vec<_> = paths
+        .iter()
+        .filter(|p| &*p[0] == "A" && &*p[1] == "B")
+        .collect();
+    assert_eq!(
+        hit.len(),
+        1,
+        "g=1 must bridge A→X→B into A→B, got {paths:?}"
+    );
 }
 
 /// The bridging vertex X is a match relaxation, not output: the path is
@@ -178,8 +191,15 @@ fn gap_fill_vertices_are_not_in_the_path() {
         .iter()
         .find(|p| &*p[0] == "A" && &*p[p.len() - 1] == "B")
         .expect("the A→B bridged match");
-    assert_eq!(bridged.len(), 2, "anchors only: A, B — not X. got {bridged:?}");
-    assert!(!bridged.iter().any(|n| &**n == "X"), "X must not appear: {bridged:?}");
+    assert_eq!(
+        bridged.len(),
+        2,
+        "anchors only: A, B — not X. got {bridged:?}"
+    );
+    assert!(
+        !bridged.iter().any(|n| &**n == "X"),
+        "X must not appear: {bridged:?}"
+    );
 }
 
 /// g is a bound: a two-hop hole needs g ≥ 2, and g = 1 must still miss it.
@@ -189,17 +209,32 @@ fn gap_bound_is_enforced() {
     for id in ["A", "X", "Y", "B"] {
         graph.add_entity(Entity::new(id, EntityType::IP)).unwrap();
     }
-    graph.add_relation(Relation::new("A", "X", RelationType::Connect, 100)).unwrap();
-    graph.add_relation(Relation::new("X", "Y", RelationType::Connect, 110)).unwrap();
-    graph.add_relation(Relation::new("Y", "B", RelationType::Connect, 120)).unwrap();
+    graph
+        .add_relation(Relation::new("A", "X", RelationType::Connect, 100))
+        .unwrap();
+    graph
+        .add_relation(Relation::new("X", "Y", RelationType::Connect, 110))
+        .unwrap();
+    graph
+        .add_relation(Relation::new("Y", "B", RelationType::Connect, 120))
+        .unwrap();
     graph.sort_edges_by_timestamp().unwrap();
 
-    let (p1, _) = graph.search_temporal_pattern(&a_to_b_connect().with_max_gap(1), None, None).unwrap();
-    assert!(!p1.iter().any(|p| &*p[0] == "A" && &*p[p.len()-1] == "B"),
-        "a 2-hop hole must not be bridged by g=1, got {p1:?}");
-    let (p2, _) = graph.search_temporal_pattern(&a_to_b_connect().with_max_gap(2), None, None).unwrap();
-    assert!(p2.iter().any(|p| p.len() == 2 && &*p[0] == "A" && &*p[1] == "B"),
-        "g=2 must bridge a 2-hop hole, got {p2:?}");
+    let (p1, _) = graph
+        .search_temporal_pattern(&a_to_b_connect().with_max_gap(1), None, None)
+        .unwrap();
+    assert!(
+        !p1.iter().any(|p| &*p[0] == "A" && &*p[p.len() - 1] == "B"),
+        "a 2-hop hole must not be bridged by g=1, got {p1:?}"
+    );
+    let (p2, _) = graph
+        .search_temporal_pattern(&a_to_b_connect().with_max_gap(2), None, None)
+        .unwrap();
+    assert!(
+        p2.iter()
+            .any(|p| p.len() == 2 && &*p[0] == "A" && &*p[1] == "B"),
+        "g=2 must bridge a 2-hop hole, got {p2:?}"
+    );
 }
 
 /// The bridge must be temporally monotone: if the middle edge runs
@@ -211,14 +246,22 @@ fn gap_bridge_respects_temporal_order() {
         graph.add_entity(Entity::new(id, EntityType::IP)).unwrap();
     }
     // A→X at t=100, X→B at t=50 — B happened before the bridge. Strict.
-    graph.add_relation(Relation::new("A", "X", RelationType::Connect, 100)).unwrap();
-    graph.add_relation(Relation::new("X", "B", RelationType::Connect, 50)).unwrap();
+    graph
+        .add_relation(Relation::new("A", "X", RelationType::Connect, 100))
+        .unwrap();
+    graph
+        .add_relation(Relation::new("X", "B", RelationType::Connect, 50))
+        .unwrap();
     graph.sort_edges_by_timestamp().unwrap();
 
     let h = a_to_b_connect().with_max_gap(1);
     let (paths, _) = graph.search_temporal_pattern(&h, None, None).unwrap();
-    assert!(!paths.iter().any(|p| &*p[0] == "A" && &*p[p.len()-1] == "B"),
-        "a backward bridge edge must not connect, got {paths:?}");
+    assert!(
+        !paths
+            .iter()
+            .any(|p| &*p[0] == "A" && &*p[p.len() - 1] == "B"),
+        "a backward bridge edge must not connect, got {paths:?}"
+    );
 }
 
 // The env-var fallback for `g` is covered in the DSL crate's
@@ -289,7 +332,10 @@ fn skew_tolerance_narrower_than_the_gap_still_rejects() {
     let g = skewed_two_hop(5);
     let h = two_hop_connect().with_skew_tolerance(4);
     let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
-    assert!(paths.is_empty(), "δ=4 must not admit a 5s skew, got {paths:?}");
+    assert!(
+        paths.is_empty(),
+        "δ=4 must not admit a 5s skew, got {paths:?}"
+    );
 }
 
 /// The tolerance is per-hop, not cumulative. Three hops that each fall 5s
@@ -303,15 +349,30 @@ fn skew_tolerance_is_per_hop_not_cumulative() {
         g.add_entity(Entity::new(id, EntityType::IP)).unwrap();
     }
     // 100 → 95 → 90: each hop 5s before the last, 10s total drift.
-    g.add_relation(Relation::new("A", "B", RelationType::Connect, 100)).unwrap();
-    g.add_relation(Relation::new("B", "C", RelationType::Connect, 95)).unwrap();
-    g.add_relation(Relation::new("C", "D", RelationType::Connect, 90)).unwrap();
+    g.add_relation(Relation::new("A", "B", RelationType::Connect, 100))
+        .unwrap();
+    g.add_relation(Relation::new("B", "C", RelationType::Connect, 95))
+        .unwrap();
+    g.add_relation(Relation::new("C", "D", RelationType::Connect, 90))
+        .unwrap();
     g.sort_edges_by_timestamp().unwrap();
 
     let h = Hypothesis::new("three-hop")
-        .add_step(HypothesisStep::new(EntityType::IP, RelationType::Connect, EntityType::IP))
-        .add_step(HypothesisStep::new(EntityType::IP, RelationType::Connect, EntityType::IP))
-        .add_step(HypothesisStep::new(EntityType::IP, RelationType::Connect, EntityType::IP))
+        .add_step(HypothesisStep::new(
+            EntityType::IP,
+            RelationType::Connect,
+            EntityType::IP,
+        ))
+        .add_step(HypothesisStep::new(
+            EntityType::IP,
+            RelationType::Connect,
+            EntityType::IP,
+        ))
+        .add_step(HypothesisStep::new(
+            EntityType::IP,
+            RelationType::Connect,
+            EntityType::IP,
+        ))
         .with_skew_tolerance(5);
     let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
     assert_eq!(
@@ -326,11 +387,18 @@ fn skew_tolerance_is_per_hop_not_cumulative() {
     for id in ["A", "B", "C"] {
         g2.add_entity(Entity::new(id, EntityType::IP)).unwrap();
     }
-    g2.add_relation(Relation::new("A", "B", RelationType::Connect, 100)).unwrap();
-    g2.add_relation(Relation::new("B", "C", RelationType::Connect, 94)).unwrap();
+    g2.add_relation(Relation::new("A", "B", RelationType::Connect, 100))
+        .unwrap();
+    g2.add_relation(Relation::new("B", "C", RelationType::Connect, 94))
+        .unwrap();
     g2.sort_edges_by_timestamp().unwrap();
-    let (paths2, _) = g2.search_temporal_pattern(&two_hop_connect().with_skew_tolerance(5), None, None).unwrap();
-    assert!(paths2.is_empty(), "a single 6s backward hop exceeds δ=5, got {paths2:?}");
+    let (paths2, _) = g2
+        .search_temporal_pattern(&two_hop_connect().with_skew_tolerance(5), None, None)
+        .unwrap();
+    assert!(
+        paths2.is_empty(),
+        "a single 6s backward hop exceeds δ=5, got {paths2:?}"
+    );
 }
 
 // The env-var fallback for δ is covered in the DSL crate's `resolve_*`
@@ -1312,7 +1380,10 @@ fn sysmon_long_tail_raw_path_parity_with_legacy() {
     );
     for (sid, legacy_ent) in g_legacy.entities.iter() {
         let raw_ent = g_raw.entities.get(sid).unwrap_or_else(|| {
-            panic!("raw graph missing entity present in legacy: {}", legacy_ent.id)
+            panic!(
+                "raw graph missing entity present in legacy: {}",
+                legacy_ent.id
+            )
         });
         assert_eq!(legacy_ent.id, raw_ent.id);
         assert_eq!(legacy_ent.entity_type, raw_ent.entity_type);
@@ -1358,7 +1429,10 @@ fn sysmon_winsec_raw_path_parity_with_legacy() {
     );
     for (sid, legacy_ent) in g_legacy.entities.iter() {
         let raw_ent = g_raw.entities.get(sid).unwrap_or_else(|| {
-            panic!("raw graph missing entity present in legacy: {}", legacy_ent.id)
+            panic!(
+                "raw graph missing entity present in legacy: {}",
+                legacy_ent.id
+            )
         });
         assert_eq!(legacy_ent.id, raw_ent.id);
         assert_eq!(legacy_ent.entity_type, raw_ent.entity_type);
@@ -2820,12 +2894,33 @@ fn get_node_details_includes_post_finalize_tail_edges() {
 
     // Pre-finalize "dataset 1" (mimics IPS): 3 edges src -> 3 distinct hosts.
     g.add_entity(Entity::new("src-ip", EntityType::IP)).unwrap();
-    g.add_entity(Entity::new("host-a", EntityType::Host)).unwrap();
-    g.add_entity(Entity::new("host-b", EntityType::Host)).unwrap();
-    g.add_entity(Entity::new("host-c", EntityType::Host)).unwrap();
-    g.add_relation(Relation::new("src-ip", "host-a", RelationType::Connect, 100)).unwrap();
-    g.add_relation(Relation::new("src-ip", "host-b", RelationType::Connect, 110)).unwrap();
-    g.add_relation(Relation::new("src-ip", "host-c", RelationType::Connect, 120)).unwrap();
+    g.add_entity(Entity::new("host-a", EntityType::Host))
+        .unwrap();
+    g.add_entity(Entity::new("host-b", EntityType::Host))
+        .unwrap();
+    g.add_entity(Entity::new("host-c", EntityType::Host))
+        .unwrap();
+    g.add_relation(Relation::new(
+        "src-ip",
+        "host-a",
+        RelationType::Connect,
+        100,
+    ))
+    .unwrap();
+    g.add_relation(Relation::new(
+        "src-ip",
+        "host-b",
+        RelationType::Connect,
+        110,
+    ))
+    .unwrap();
+    g.add_relation(Relation::new(
+        "src-ip",
+        "host-c",
+        RelationType::Connect,
+        120,
+    ))
+    .unwrap();
 
     // Finalize: sorts base, arms the tail buffer for any subsequent appends.
     g.sort_edges_by_timestamp().unwrap();
@@ -2838,11 +2933,19 @@ fn get_node_details_includes_post_finalize_tail_edges() {
     // Post-finalize "dataset 2" (mimics traffic batch): 5 more edges
     // src-ip -> host-a (already a neighbor) + 1 new entity. These all
     // land in the tail buffer because streaming is finalized.
-    g.add_entity(Entity::new("host-d", EntityType::Host)).unwrap();
+    g.add_entity(Entity::new("host-d", EntityType::Host))
+        .unwrap();
     for ts in 200..205 {
-        g.add_relation(Relation::new("src-ip", "host-a", RelationType::Connect, ts)).unwrap();
+        g.add_relation(Relation::new("src-ip", "host-a", RelationType::Connect, ts))
+            .unwrap();
     }
-    g.add_relation(Relation::new("src-ip", "host-d", RelationType::Connect, 210)).unwrap();
+    g.add_relation(Relation::new(
+        "src-ip",
+        "host-d",
+        RelationType::Connect,
+        210,
+    ))
+    .unwrap();
 
     let details = g.get_node_details("src-ip").unwrap();
 
@@ -2908,14 +3011,21 @@ fn finalize_makes_post_finalize_appends_visible_to_neighborhood_readers() {
     // base â€” this test pins that as the fix graph_build relies on.
     let mut g = GraphHunter::new();
     g.add_entity(Entity::new("src-ip", EntityType::IP)).unwrap();
-    g.add_entity(Entity::new("host-a", EntityType::Host)).unwrap();
-    g.add_relation(Relation::new("src-ip", "host-a", RelationType::Connect, 100))
+    g.add_entity(Entity::new("host-a", EntityType::Host))
         .unwrap();
+    g.add_relation(Relation::new(
+        "src-ip",
+        "host-a",
+        RelationType::Connect,
+        100,
+    ))
+    .unwrap();
 
     // Finalize (mimics a restored/prior-built session), then append.
     g.sort_edges_by_timestamp().unwrap();
     assert!(g.streaming_is_finalized());
-    g.add_entity(Entity::new("host-b", EntityType::Host)).unwrap();
+    g.add_entity(Entity::new("host-b", EntityType::Host))
+        .unwrap();
     for ts in 200..205 {
         g.add_relation(Relation::new("src-ip", "host-b", RelationType::Connect, ts))
             .unwrap();
@@ -4512,9 +4622,8 @@ fn benchmark_empirical_data_for_paper() {
         // CompactRelation references.
         let mut all_edges: Vec<relation::CompactRelation> = Vec::new();
         g.streaming.for_each_edge(|_src, edge| {
-            let compact: relation::CompactRelation = unsafe {
-                std::ptr::read(edge as *const _ as *const relation::CompactRelation)
-            };
+            let compact: relation::CompactRelation =
+                unsafe { std::ptr::read(edge as *const _ as *const relation::CompactRelation) };
             all_edges.push(compact);
         });
         let mut by_source: std::collections::HashMap<usize, Vec<&relation::CompactRelation>> =
@@ -4718,7 +4827,9 @@ fn benchmark_empirical_data_for_paper() {
     println!(
         "\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
     );
-    println!("â•‘                     EMPIRICAL BENCHMARK RESULTS                                â•‘");
+    println!(
+        "â•‘                     EMPIRICAL BENCHMARK RESULTS                                â•‘"
+    );
     println!(
         "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n"
     );
@@ -4988,9 +5099,13 @@ fn benchmark_naive_vs_pruned() {
             EntityType::Process,
         ));
 
-    println!("\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—");
+    println!(
+        "\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
+    );
     println!("â•‘             NAIVE vs PRUNED DFS COMPARISON                      â•‘");
-    println!("â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+    println!(
+        "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+    );
     println!("  Graph: n={}, m={}\n", n, m);
 
     for (label, h) in [("L=2", &h2), ("L=3", &h3)] {
@@ -6657,9 +6772,13 @@ fn benchmark_ablation_time_window() {
 #[ignore = "paper benchmark: >1h in debug, run explicitly with --ignored"]
 fn benchmark_full_report() {
     // Generate the complete benchmark table for the paper
-    println!("\nâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+    println!(
+        "\nâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+    );
     println!("  EMPIRICAL EVALUATION â€” Full Benchmark Report");
-    println!("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n");
+    println!(
+        "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n"
+    );
 
     let configs: Vec<(&str, GraphHunter)> = vec![
         (
@@ -6757,9 +6876,13 @@ fn benchmark_full_report() {
 #[test]
 fn benchmark_real_datasets() {
     // Benchmark on actual demo datasets for the paper
-    println!("\nâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•");
+    println!(
+        "\nâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+    );
     println!("  REAL DATASET BENCHMARKS");
-    println!("â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n");
+    println!(
+        "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n"
+    );
 
     // APT Simulation
     if let Ok(data) = std::fs::read_to_string("../../demo_data/apt_attack_simulation.json") {
@@ -7489,12 +7612,15 @@ fn amac_parity_two_hop() {
         ));
 
     let (regular, _) = g.search_temporal_pattern(&h, None, Some(10_000)).unwrap();
-    let (amac, _) = g.search_temporal_pattern_amac(&h, None, Some(10_000)).unwrap();
+    let (amac, _) = g
+        .search_temporal_pattern_amac(&h, None, Some(10_000))
+        .unwrap();
 
     let regular_set = paths_as_set(&regular);
     let amac_set = paths_as_set(&amac);
     assert_eq!(
-        regular_set, amac_set,
+        regular_set,
+        amac_set,
         "AMAC/DFS divergence on 2-hop\n  only_dfs:  {:?}\n  only_amac: {:?}",
         regular_set.difference(&amac_set).collect::<Vec<_>>(),
         amac_set.difference(&regular_set).collect::<Vec<_>>(),
@@ -7511,7 +7637,9 @@ fn amac_parity_one_hop_with_wildcard() {
     ));
 
     let (regular, _) = g.search_temporal_pattern(&h, None, Some(10_000)).unwrap();
-    let (amac, _) = g.search_temporal_pattern_amac(&h, None, Some(10_000)).unwrap();
+    let (amac, _) = g
+        .search_temporal_pattern_amac(&h, None, Some(10_000))
+        .unwrap();
 
     assert_eq!(paths_as_set(&regular), paths_as_set(&amac));
 }
@@ -7552,7 +7680,9 @@ fn amac_parity_palindromic_chain() {
         ));
 
     let (regular, _) = g.search_temporal_pattern(&h, None, Some(10_000)).unwrap();
-    let (amac, _) = g.search_temporal_pattern_amac(&h, None, Some(10_000)).unwrap();
+    let (amac, _) = g
+        .search_temporal_pattern_amac(&h, None, Some(10_000))
+        .unwrap();
 
     assert_eq!(paths_as_set(&regular), paths_as_set(&amac));
 }

@@ -93,20 +93,26 @@ fn provenance_mapping_hash_is_frozen_and_distinguishes_configs() {
     let cfg_b = config_with_host_type("Service");
 
     let result_a = api
-        .load_data_with_config(LoadDataWithConfigRequest {
-            session: None,
-            path: path_a,
-            config: cfg_a,
-        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
+        .load_data_with_config(
+            LoadDataWithConfigRequest {
+                session: None,
+                path: path_a,
+                config: cfg_a,
+            },
+            &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+        )
         .expect("load_data_with_config A");
     assert!(result_a.new_relations > 0, "dataset A must produce edges");
 
     let result_b = api
-        .load_data_with_config(LoadDataWithConfigRequest {
-            session: None,
-            path: path_b,
-            config: cfg_b,
-        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
+        .load_data_with_config(
+            LoadDataWithConfigRequest {
+                session: None,
+                path: path_b,
+                config: cfg_b,
+            },
+            &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+        )
         .expect("load_data_with_config B");
     assert!(result_b.new_relations > 0, "dataset B must produce edges");
 
@@ -215,13 +221,19 @@ fn mapping_edit_after_ingest_does_not_contaminate_already_exported_provenance() 
     let cfg_b = config_with_host_type("Service");
 
     let result = api
-        .load_data_with_config(LoadDataWithConfigRequest {
-            session: None,
-            path,
-            config: cfg_a.clone(),
-        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
+        .load_data_with_config(
+            LoadDataWithConfigRequest {
+                session: None,
+                path,
+                config: cfg_a.clone(),
+            },
+            &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+        )
         .expect("load_data_with_config (configA)");
-    assert!(result.new_relations > 0, "ingest under configA must produce edges");
+    assert!(
+        result.new_relations > 0,
+        "ingest under configA must produce edges"
+    );
 
     let export_once = |api: &GraphHunterApi| {
         api.export_ocsf(ExportOcsfRequest {
@@ -238,7 +250,11 @@ fn mapping_edit_after_ingest_does_not_contaminate_already_exported_provenance() 
     // configA's content hash.
     let out1 = export_once(&api);
     let by_dataset_1 = mapping_hashes_by_dataset(&out1);
-    assert_eq!(by_dataset_1.len(), 1, "expected exactly 1 dataset before the edit");
+    assert_eq!(
+        by_dataset_1.len(),
+        1,
+        "expected exactly 1 dataset before the edit"
+    );
     let hashes_1 = by_dataset_1.values().next().expect("dataset's hashes");
     let hash_before = hashes_1.first().expect("at least one edge").clone();
     let expected_a =
@@ -270,7 +286,11 @@ fn mapping_edit_after_ingest_does_not_contaminate_already_exported_provenance() 
     // edges' provenance with a mapping they were never processed under.
     let out2 = export_once(&api);
     let by_dataset_2 = mapping_hashes_by_dataset(&out2);
-    assert_eq!(by_dataset_2.len(), 1, "expected exactly 1 dataset after the edit");
+    assert_eq!(
+        by_dataset_2.len(),
+        1,
+        "expected exactly 1 dataset after the edit"
+    );
     let hashes_2 = by_dataset_2.values().next().expect("dataset's hashes");
     let hash_after = hashes_2.first().expect("at least one edge").clone();
 
@@ -307,13 +327,19 @@ fn builtin_parser_dataset_gets_real_parser_identity_not_unknown() {
     std::fs::write(&path, line).expect("write fortigate log");
 
     let result = api
-        .load_data(LoadDataRequest {
-            session: None,
-            path: path.to_string_lossy().to_string(),
-            format: "fortigate".into(),
-        }, &graph_hunter_api::paths::PathPolicy::LocalTrusted)
+        .load_data(
+            LoadDataRequest {
+                session: None,
+                path: path.to_string_lossy().to_string(),
+                format: "fortigate".into(),
+            },
+            &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+        )
         .expect("load_data fortigate");
-    assert!(result.new_relations > 0, "fortigate line must produce edges");
+    assert!(
+        result.new_relations > 0,
+        "fortigate line must produce edges"
+    );
 
     let out = api
         .export_ocsf(ExportOcsfRequest {

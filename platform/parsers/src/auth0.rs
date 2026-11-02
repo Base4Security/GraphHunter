@@ -388,7 +388,7 @@ mod tests {
         user_name: &str,
     ) -> String {
         format!(
-            "\"{ts}\",abc,auth0.logs,{ty},\"Wrong email or password.\",app-mobile,nbch,{ip},\"Linux; U; Android 14\",f79b6bad,Argentina,{email},{cuit},{user_id},{user_name},-,-,-,-,-,-,\"forwarded, auth0-logstream\""
+            "\"{ts}\",abc,auth0.logs,{ty},\"Wrong email or password.\",app-mobile,tenant-ejemplo,{ip},\"Linux; U; Android 14\",f79b6bad,Argentina,{email},{cuit},{user_id},{user_name},-,-,-,-,-,-,\"forwarded, auth0-logstream\""
         )
     }
 
@@ -468,7 +468,10 @@ mod tests {
             .iter()
             .find(|(_, r, _)| r.rel_type == RelationType::Other("TieneCuentaAuth0".into()))
             .expect("no CUIT bridge edge");
-        assert_eq!(bridge.0.id, "20000000031", "Person id must be the bare CUIT");
+        assert_eq!(
+            bridge.0.id, "20000000031",
+            "Person id must be the bare CUIT"
+        );
         assert_eq!(bridge.0.entity_type, EntityType::Other("Person".into()));
         assert_eq!(bridge.2.id, "auth0|66d5daa3");
 
@@ -529,7 +532,10 @@ mod tests {
             "a",
         )]);
         let t = Auth0CsvParser::new().parse(&d);
-        assert_eq!(t[0].1.metadata.get("outcome").map(String::as_str), Some("failure"));
+        assert_eq!(
+            t[0].1.metadata.get("outcome").map(String::as_str),
+            Some("failure")
+        );
         assert_eq!(
             t[0].1.metadata.get("event_type").map(String::as_str),
             Some("fp")
@@ -540,7 +546,10 @@ mod tests {
     fn parses_the_elastic_display_timestamp() {
         // Sep 3 2026 10:01:06 UTC
         assert_eq!(parse_timestamp("Sep 3, 2026 @ 10:01:06.343"), 1_788_429_666);
-        assert_eq!(parse_timestamp("Sep 03, 2026 @ 10:01:06.343"), 1_788_429_666);
+        assert_eq!(
+            parse_timestamp("Sep 03, 2026 @ 10:01:06.343"),
+            1_788_429_666
+        );
         assert_eq!(parse_timestamp("-"), 0);
         assert_eq!(parse_timestamp("not a date"), 0);
     }

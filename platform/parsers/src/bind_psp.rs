@@ -183,7 +183,7 @@ fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// Reads a field that may be encoded as a number *or* a string — the
-/// upstream API is inconsistent (`"cuentaId"${1}1000001` but
+/// upstream API is inconsistent (`"cuentaId":1000001` but
 /// `"cuitContraparte":"27000000011"`).
 fn num_or_str(v: &Value, key: &str) -> Option<String> {
     match v.get(key)? {
@@ -357,7 +357,7 @@ fn split_call(line: &str) -> Option<Call<'_>> {
     })
 }
 
-/// The last path segment, when it is all digits (`…/${1}1000004`).
+/// The last path segment, when it is all digits (`…/Cuenta/1000004`).
 fn trailing_id(path: &str) -> Option<&str> {
     let seg = path.rsplit('/').next()?;
     (!seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())).then_some(seg)
@@ -733,26 +733,27 @@ impl LogParser for BindPspParser {
 mod tests {
     use super::*;
 
-    /// Verbatim lines from the case corpus, one per shape the parser
-    /// handles, plus the webhook duplicate that must be skipped.
-    const WEBHOOK_ENTRANTE: &str = r#"{"labels":{},"line":"2026-09-03 00:00:00,105 [http-nio-8080-exec-11] INFO  [sId:F0000000000000000000000000000007] c.p.b.p.c.c.s.i.CollectionServiceImpl - saveNewOperationNotification - REQUEST: {\"mensajeId\":\"00000000-0000-4000-8000-000000000001\",\"evento\":\"TRANSFERENCIA_ENTRANTE\",\"operacionId\":900000002,\"operacionTipo\":\"TransferenciaEntrante\",\"operacionEstado\":\"Aprobada\",\"cuentaId\"${1}1000001,\"importe\":31600.00,\"nombreContraparte\":\"Persona Ejemplo Uno\",\"bancoContraparte\":\"0003\",\"referencia\":null,\"cuitContraparte\":\"27000000011\",\"cvuCbuContraparte\":\"0000003100000000000001\",\"aliasContraparte\":null,\"coelsaId\":\"COELSA0000000000000001\",\"idExterno\":null,\"motivoRechazo\":null,\"comprobanteId\":900000101,\"comprobanteDevolucionId\":null,\"fechaCreacion\":\"2026-09-02T23:59:57.3648729+00:00\",\"fechaActualizacion\":\"2026-09-02T23:59:57.3648729+00:00\"}","timestamp":"2026-09-03T00:00:00.106293372Z"}"#;
+    /// Lines with the exact shape of the case corpus, one per shape the
+    /// parser handles, plus the webhook duplicate that must be skipped.
+    /// Every personal or account identifier is synthetic.
+    const WEBHOOK_ENTRANTE: &str = r#"{"labels":{},"line":"2026-09-03 00:00:00,105 [http-nio-8080-exec-11] INFO  [sId:F0000000000000000000000000000007] c.p.b.p.c.c.s.i.CollectionServiceImpl - saveNewOperationNotification - REQUEST: {\"mensajeId\":\"00000000-0000-4000-8000-000000000001\",\"evento\":\"TRANSFERENCIA_ENTRANTE\",\"operacionId\":900000002,\"operacionTipo\":\"TransferenciaEntrante\",\"operacionEstado\":\"Aprobada\",\"cuentaId\":1000001,\"importe\":31600.00,\"nombreContraparte\":\"Persona Ejemplo Uno\",\"bancoContraparte\":\"0003\",\"referencia\":null,\"cuitContraparte\":\"27000000011\",\"cvuCbuContraparte\":\"0000003100000000000001\",\"aliasContraparte\":null,\"coelsaId\":\"COELSA0000000000000001\",\"idExterno\":null,\"motivoRechazo\":null,\"comprobanteId\":900000101,\"comprobanteDevolucionId\":null,\"fechaCreacion\":\"2026-09-02T23:59:57.3648729+00:00\",\"fechaActualizacion\":\"2026-09-02T23:59:57.3648729+00:00\"}","timestamp":"2026-09-03T00:00:00.106293372Z"}"#;
 
     /// The duplicate of the line above, as the connector also logs it.
-    const WEBHOOK_DUPLICATE: &str = r#"{"labels":{},"line":"2026-09-03 00:00:00,105 [http-nio-8080-exec-11] INFO  [sId:F0000000000000000000000000000007] c.p.b.p.c.c.s.i.BindPspServiceImpl - REQUEST: [POST] [/webhook/newOperationNotification] [{\"mensajeId\":\"00000000-0000-4000-8000-000000000001\",\"evento\":\"TRANSFERENCIA_ENTRANTE\",\"operacionId\":900000002,\"importe\":31600.00,\"cuentaId\"${1}1000001,\"cuitContraparte\":\"27000000011\",\"cvuCbuContraparte\":\"0000003100000000000001\"}] - time_elapsed: [1 ms] - RESPONSE: [200] [{}]","timestamp":"2026-09-03T00:00:00.106181911Z"}"#;
+    const WEBHOOK_DUPLICATE: &str = r#"{"labels":{},"line":"2026-09-03 00:00:00,105 [http-nio-8080-exec-11] INFO  [sId:F0000000000000000000000000000007] c.p.b.p.c.c.s.i.BindPspServiceImpl - REQUEST: [POST] [/webhook/newOperationNotification] [{\"mensajeId\":\"00000000-0000-4000-8000-000000000001\",\"evento\":\"TRANSFERENCIA_ENTRANTE\",\"operacionId\":900000002,\"importe\":31600.00,\"cuentaId\":1000001,\"cuitContraparte\":\"27000000011\",\"cvuCbuContraparte\":\"0000003100000000000001\"}] - time_elapsed: [1 ms] - RESPONSE: [200] [{}]","timestamp":"2026-09-03T00:00:00.106181911Z"}"#;
 
-    const WEBHOOK_SALIENTE: &str = r#"{"labels":{},"line":"2026-09-03 00:00:00,200 [http-nio-8080-exec-9] INFO  [sId:AAAA] c.p.b.p.c.c.s.i.CollectionServiceImpl - saveNewOperationNotification - REQUEST: {\"mensajeId\":\"00000000-0000-4000-8000-000000000003\",\"evento\":\"TRANSFERENCIA_SALIENTE\",\"operacionId\":900000001,\"operacionTipo\":\"TransferenciaSaliente\",\"operacionEstado\":\"Aprobada\",\"cuentaId\"${1}1000002,\"importe\":3300.0,\"nombreContraparte\":\"Persona Ejemplo Dos\",\"bancoContraparte\":\"0003\",\"referencia\":\"Varios\",\"cuitContraparte\":\"20000000012\",\"cvuCbuContraparte\":\"0000003100000000000002\",\"aliasContraparte\":null,\"coelsaId\":\"ABC123\",\"fechaCreacion\":\"2026-09-02T23:59:40+00:00\"}","timestamp":"2026-09-03T00:00:00.200000000Z"}"#;
+    const WEBHOOK_SALIENTE: &str = r#"{"labels":{},"line":"2026-09-03 00:00:00,200 [http-nio-8080-exec-9] INFO  [sId:AAAA] c.p.b.p.c.c.s.i.CollectionServiceImpl - saveNewOperationNotification - REQUEST: {\"mensajeId\":\"00000000-0000-4000-8000-000000000003\",\"evento\":\"TRANSFERENCIA_SALIENTE\",\"operacionId\":900000001,\"operacionTipo\":\"TransferenciaSaliente\",\"operacionEstado\":\"Aprobada\",\"cuentaId\":1000002,\"importe\":3300.0,\"nombreContraparte\":\"Persona Ejemplo Dos\",\"bancoContraparte\":\"0003\",\"referencia\":\"Varios\",\"cuitContraparte\":\"20000000012\",\"cvuCbuContraparte\":\"0000003100000000000002\",\"aliasContraparte\":null,\"coelsaId\":\"ABC123\",\"fechaCreacion\":\"2026-09-02T23:59:40+00:00\"}","timestamp":"2026-09-03T00:00:00.200000000Z"}"#;
 
-    const TRANSFER_OK: &str = r#"{"labels":{},"line":"2026-09-03 00:00:17,183 [http-nio-8080-exec-39] INFO  [sId:F0000000000000000000000000000001] c.p.b.p.c.c.c.BindPspFeignLogger - REQUEST: [POST] [https://api.bindpagos.com.ar/walletentidad-operaciones/v1/api/v1.201/transferir] [{\"cvu_origen\":\"0000184300000000000003\",\"cbu_cvu_destino\":\"0000003100000000000004\",\"cuit_destino\":\"23000000013\",\"alias_destino\":\"alias.ejemplo3\",\"importe\":11400,\"referencia\":\"Varios\",\"concepto\":\"VAR\",\"emails\":[],\"idExterno\":null}] - time_elapsed: [8880 ms] - RESPONSE: [200] [{\"operacionId\":900000003,\"estadoExterno\":\"COMPLETED\",\"origenCuentaId\"${1}1000003,\"coelsaId\":\"COELSA0000000000000002\",\"fechaInicio\":\"2026-09-02T23:59:42+00:00\",\"importe\":11400.0,\"cvuOrigen\":\"0000184300000000000003\",\"cvuCbuContraparte\":\"0000003100000000000004\",\"nombreContraparte\":\"Persona Ejemplo Tres\",\"cuitCuilContraparte\":\"23000000013\",\"esTransferenciaInterna\":false}]","timestamp":"2026-09-03T00:00:17.185Z"}"#;
+    const TRANSFER_OK: &str = r#"{"labels":{},"line":"2026-09-03 00:00:17,183 [http-nio-8080-exec-39] INFO  [sId:F0000000000000000000000000000001] c.p.b.p.c.c.c.BindPspFeignLogger - REQUEST: [POST] [https://api.bindpagos.com.ar/walletentidad-operaciones/v1/api/v1.201/transferir] [{\"cvu_origen\":\"0000184300000000000003\",\"cbu_cvu_destino\":\"0000003100000000000004\",\"cuit_destino\":\"23000000013\",\"alias_destino\":\"alias.ejemplo3\",\"importe\":11400,\"referencia\":\"Varios\",\"concepto\":\"VAR\",\"emails\":[],\"idExterno\":null}] - time_elapsed: [8880 ms] - RESPONSE: [200] [{\"operacionId\":900000003,\"estadoExterno\":\"COMPLETED\",\"origenCuentaId\":1000003,\"coelsaId\":\"COELSA0000000000000002\",\"fechaInicio\":\"2026-09-02T23:59:42+00:00\",\"importe\":11400.0,\"cvuOrigen\":\"0000184300000000000003\",\"cvuCbuContraparte\":\"0000003100000000000004\",\"nombreContraparte\":\"Persona Ejemplo Tres\",\"cuitCuilContraparte\":\"23000000013\",\"esTransferenciaInterna\":false}]","timestamp":"2026-09-03T00:00:17.185Z"}"#;
 
     const TRANSFER_ARDID: &str = r#"{"labels":{},"line":"2026-09-03 00:00:15,306 [http-nio-8080-exec-28] INFO  [sId:F0000000000000000000000000000002] c.p.b.p.c.c.c.BindPspFeignLogger - REQUEST: [POST] [https://api.bindpagos.com.ar/walletentidad-operaciones/v1/api/v1.201/transferir] [{\"cvu_origen\":\"0000184300000000000005\",\"cbu_cvu_destino\":\"0000003100000000000006\",\"cuit_destino\":\"27000000014\",\"alias_destino\":\"alias.ejemplo4\",\"importe\":100000,\"referencia\":\"Varios\",\"concepto\":\"VAR\",\"emails\":[],\"idExterno\":null}] - time_elapsed: [584 ms] - RESPONSE: [409] [{\"eventId\":\"3257\",\"detalle\":\"No se han superado las validaciones en ARDID.\",\"correlationId\":\"00000000-0000-4000-8000-000000000002\",\"errores\":[{\"codigo\":\"3257\",\"titulo\":\"Rechazada ARDID\",\"detalle\":\"No se han superado las validaciones en ARDID.\"}]}]","timestamp":"2026-09-03T00:00:15.309049335Z"}"#;
 
-    const CUENTA: &str = r#"{"labels":{},"line":"2026-09-03 00:00:00,225 [http-nio-8080-exec-40] INFO  [sId:F0000000000000000000000000000003] c.p.b.p.c.c.c.BindPspFeignLogger - REQUEST: [GET] [https://api.bindpagos.com.ar/walletentidad-cuenta/v1/api/v1.201/${1}1000004?IncluirDeshabilitadas=true] [] - time_elapsed: [168 ms] - RESPONSE: [200] [{\"id\"${1}1000004,\"cuitCuil\":\"23000000015\",\"nombre\":\"PERSONA EJEMPLO\",\"apellido\":\"BENITEZ\",\"razonSocial\":\"PERSONA EJEMPLO SEIS\",\"email\":\"persona.seis@example.com\",\"celular\":\"3620000000\",\"habilitado\":true,\"cvu\":\"0000184300000000000007\",\"alias\":\"alias.ejemplo6\",\"domicilio\":{\"calle\":\"Calle Ficticia\",\"numero\":\"2030\",\"piso\":\"1\",\"localidadNombre\":\"RESISTENCIA\",\"provinciaNombre\":\"CHACO\"},\"esPep\":false,\"esUif\":false,\"fechaNacimiento\":\"1970-01-01T00:00:00\",\"ocupacion\":\"AMA DE CASA\",\"estadoCivil\":\"CASADO\"}]","timestamp":"2026-09-03T00:00:00.226Z"}"#;
+    const CUENTA: &str = r#"{"labels":{},"line":"2026-09-03 00:00:00,225 [http-nio-8080-exec-40] INFO  [sId:F0000000000000000000000000000003] c.p.b.p.c.c.c.BindPspFeignLogger - REQUEST: [GET] [https://api.bindpagos.com.ar/walletentidad-cuenta/v1/api/v1.201/Cuenta/1000004?IncluirDeshabilitadas=true] [] - time_elapsed: [168 ms] - RESPONSE: [200] [{\"id\":1000004,\"cuitCuil\":\"23000000015\",\"nombre\":\"PERSONA EJEMPLO\",\"apellido\":\"SEIS\",\"razonSocial\":\"PERSONA EJEMPLO SEIS\",\"email\":\"persona.seis@example.com\",\"celular\":\"3620000000\",\"habilitado\":true,\"cvu\":\"0000184300000000000007\",\"alias\":\"alias.ejemplo6\",\"domicilio\":{\"calle\":\"Calle Ficticia\",\"numero\":\"123\",\"piso\":\"1\",\"localidadNombre\":\"RESISTENCIA\",\"provinciaNombre\":\"CHACO\"},\"esPep\":false,\"esUif\":false,\"fechaNacimiento\":\"1970-01-01T00:00:00\",\"ocupacion\":\"AMA DE CASA\",\"estadoCivil\":\"CASADO\"}]","timestamp":"2026-09-03T00:00:00.226Z"}"#;
 
     const CVU_LOOKUP: &str = r#"{"labels":{},"line":"2026-09-03 00:00:03,874 [http-nio-8080-exec-35] INFO  [sId:F0000000000000000000000000000005] c.p.b.p.c.c.c.BindPspFeignLogger - REQUEST: [GET] [https://api.bindpagos.com.ar/walletentidad-cuenta/v1/api/v1.201/CuentaCVUByCbuCvuOrAlias?cbuOrCvu=0000003100000000000006] [] - time_elapsed: [888 ms] - RESPONSE: [200] [{\"cuentaId\":null,\"cbucvu\":\"0000003100000000000006\",\"alias\":\"alias.ejemplo4\",\"cuitCuil\":\"27000000014\",\"nombre\":\"Persona Ejemplo Cuatro\",\"bancoNombre\":\"CITIBANK N.A.\",\"activo\":true,\"nombreCVU\":\"Persona Ejemplo Cuatro\",\"entidad\":\"MERCADO LIBRE SRL\",\"moneda\":\"ARS\",\"tipoCuenta\":\"VIRTUAL\",\"cotitulares\":[{\"cuitCuil\":\"27000000014\",\"nombre\":\"Persona Ejemplo Cuatro\"},{\"cuitCuil\":\"20000000016\",\"nombre\":\"PERSONA EJEMPLO CINCO\"}]}]","timestamp":"2026-09-03T00:00:03.876428968Z"}"#;
 
     const CUIT_404: &str = r#"{"labels":{},"line":"2026-09-03 00:00:04,421 [http-nio-8080-exec-10] INFO  [sId:F0000000000000000000000000000004] c.p.b.p.c.c.c.BindPspFeignLogger - REQUEST: [GET] [https://api.bindpagos.com.ar/walletentidad-cuenta/v1/api/v1.201/CuentaByCuit?cuit=20000000017] [] - time_elapsed: [132 ms] - RESPONSE: [404] [{\"eventId\":\"11058\",\"detalle\":\"La cuenta no existe\",\"correlationId\":\"00000000-0000-4000-8000-000000000004\",\"errores\":[{\"codigo\":\"11058\",\"titulo\":\"Cuenta no encontrada.\"}]}]","timestamp":"2026-09-03T00:00:04.422432366Z"}"#;
 
-    const SALDO: &str = r#"{"labels":{},"line":"2026-09-03 00:00:00,097 [http-nio-8080-exec-44] INFO  [sId:F0000000000000000000000000000006] c.p.b.p.c.c.c.BindPspFeignLogger - REQUEST: [GET] [https://api.bindpagos.com.ar/walletentidad-cuenta/v1/api/v1.201/SaldoActualBy${1}1000005] [] - time_elapsed: [132 ms] - RESPONSE: [200] [{\"saldo\":29060.00}]","timestamp":"2026-09-03T00:00:00.101251562Z"}"#;
+    const SALDO: &str = r#"{"labels":{},"line":"2026-09-03 00:00:00,097 [http-nio-8080-exec-44] INFO  [sId:F0000000000000000000000000000006] c.p.b.p.c.c.c.BindPspFeignLogger - REQUEST: [GET] [https://api.bindpagos.com.ar/walletentidad-cuenta/v1/api/v1.201/SaldoActualByIdCuenta/1000005] [] - time_elapsed: [132 ms] - RESPONSE: [200] [{\"saldo\":29060.00}]","timestamp":"2026-09-03T00:00:00.101251562Z"}"#;
 
     /// A bare service marker — the majority of the corpus. Carries no data.
     const MARKER: &str = r#"{"labels":{},"line":"2026-09-03 00:00:00,049 [http-nio-8080-exec-40] INFO  [sId:F0000000000000000000000000000003] c.p.b.p.c.c.s.i.BindPspServiceImpl - ***** getAccount","timestamp":"2026-09-03T00:00:00.056932647Z"}"#;
@@ -819,12 +820,12 @@ mod tests {
         let t = BindPspParser.parse(WEBHOOK_ENTRANTE);
         let (src, rel, dst) = find(&t, "Transfer").unwrap();
         assert_eq!(src.id, "0000003100000000000001", "counterparty pays in");
-        assert_eq!(dst.id, "${1}1000001", "…into the wallet account");
+        assert_eq!(dst.id, "acct:1000001", "…into the wallet account");
         assert_eq!(rel.metadata["evento"], "TRANSFERENCIA_ENTRANTE");
 
         let t = BindPspParser.parse(WEBHOOK_SALIENTE);
         let (src, _, dst) = find(&t, "Transfer").unwrap();
-        assert_eq!(src.id, "${1}1000002", "wallet account pays out");
+        assert_eq!(src.id, "acct:1000002", "wallet account pays out");
         assert_eq!(dst.id, "0000003100000000000002");
     }
 
@@ -902,7 +903,7 @@ mod tests {
     fn account_profile_bridges_the_two_id_spaces() {
         let e = edges(CUENTA);
         assert!(e.contains(&(
-            "${1}1000004".into(),
+            "acct:1000004".into(),
             "MismaCuenta".into(),
             "0000184300000000000007".into()
         )));
@@ -913,7 +914,7 @@ mod tests {
         )));
         // The transfer response carries the same bridge.
         assert!(edges(TRANSFER_OK).contains(&(
-            "${1}1000003".into(),
+            "acct:1000003".into(),
             "MismaCuenta".into(),
             "0000184300000000000003".into()
         )));
@@ -926,7 +927,7 @@ mod tests {
         assert!(edges(CUENTA).contains(&(
             "23000000015".into(),
             "Reside".into(),
-            "CALLE FICTICIA 123, LOCALIDAD, PROVINCIA".into()
+            "CALLE FICTICIA 123, RESISTENCIA, CHACO".into()
         )));
     }
 

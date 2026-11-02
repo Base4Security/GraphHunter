@@ -14,9 +14,9 @@ use graph_hunter_core::{
 use graph_hunter_parsers::{
     Auth0CsvParser, BindPspParser, CdmParser, CerteroParser, CognitoParser, EtwNodlinkParser,
     FortiAnalyzerXmlParser, FortiGateParser, FortiWebParser, HaproxyParser, IisW3cParser,
-    looks_like_auth0, looks_like_bind_psp, looks_like_cdm, looks_like_certero,
-    looks_like_cognito, looks_like_etw_nodlink, looks_like_fortigate, looks_like_fortiweb,
-    looks_like_haproxy, looks_like_iis_w3c,
+    looks_like_auth0, looks_like_bind_psp, looks_like_cdm, looks_like_certero, looks_like_cognito,
+    looks_like_etw_nodlink, looks_like_fortigate, looks_like_fortiweb, looks_like_haproxy,
+    looks_like_iis_w3c,
 };
 use serde_json::Value;
 
@@ -97,7 +97,9 @@ pub fn stream_mode_for(format_name: &str, peek: &str) -> StreamMode {
 /// True when `format_name` carries a first-line column header that every
 /// streamed batch must repeat.
 pub fn format_is_headed(format_name: &str) -> bool {
-    find_descriptor(format_name).map(|d| d.headed).unwrap_or(false)
+    find_descriptor(format_name)
+        .map(|d| d.headed)
+        .unwrap_or(false)
 }
 
 fn detect_sysmon(contents: &str) -> bool {
@@ -749,11 +751,22 @@ mod tests {
     /// rejected outright.
     #[test]
     fn csv_is_streamable() {
-        assert!(stream_mode_for("csv", "a,b,c
+        assert!(
+            stream_mode_for(
+                "csv",
+                "a,b,c
 1,2,3
-").is_streamable());
-        assert_eq!(stream_mode_for("csv", "a,b
-"), StreamMode::Quoted);
+"
+            )
+            .is_streamable()
+        );
+        assert_eq!(
+            stream_mode_for(
+                "csv", "a,b
+"
+            ),
+            StreamMode::Quoted
+        );
     }
 
     /// Every tabular format is headed and quote-aware, or a big file of
@@ -781,9 +794,18 @@ mod tests {
     /// Bimodal JSON: an array cannot be split, JSONL can.
     #[test]
     fn json_array_keeps_the_size_guard_but_jsonl_streams() {
-        assert_eq!(stream_mode_for("generic", "[{\"a\":1}]"), StreamMode::WholeFile);
-        assert_eq!(stream_mode_for("generic", "{\"a\":1}
-"), StreamMode::Lines);
+        assert_eq!(
+            stream_mode_for("generic", "[{\"a\":1}]"),
+            StreamMode::WholeFile
+        );
+        assert_eq!(
+            stream_mode_for(
+                "generic",
+                "{\"a\":1}
+"
+            ),
+            StreamMode::Lines
+        );
         assert_eq!(stream_mode_for("sysmon", "  [ {"), StreamMode::WholeFile);
     }
 
@@ -804,7 +826,11 @@ mod tests {
             // A headed format must be able to stream, otherwise the
             // header machinery is dead code hiding a size-guard reject.
             if d.headed {
-                assert!(mode.is_streamable(), "{} is headed but not streamable", d.name);
+                assert!(
+                    mode.is_streamable(),
+                    "{} is headed but not streamable",
+                    d.name
+                );
             }
         }
     }
@@ -854,8 +880,10 @@ mod tests {
             if in_batch >= 2 {
                 let body = String::from_utf8_lossy(&raw[batch_start..pos + 1]);
                 let chunk = if batch_start > 0 {
-                    format!("{header}
-{body}")
+                    format!(
+                        "{header}
+{body}"
+                    )
                 } else {
                     body.into_owned()
                 };
@@ -866,12 +894,18 @@ mod tests {
         }
         if batch_start < raw.len() {
             let body = String::from_utf8_lossy(&raw[batch_start..]);
-            let chunk = format!("{header}
-{body}");
+            let chunk = format!(
+                "{header}
+{body}"
+            );
             batched.extend(parser.parse(&chunk));
         }
 
-        let key = |ts: &[(graph_hunter_core::entity::Entity, graph_hunter_core::relation::Relation, graph_hunter_core::entity::Entity)]| {
+        let key = |ts: &[(
+            graph_hunter_core::entity::Entity,
+            graph_hunter_core::relation::Relation,
+            graph_hunter_core::entity::Entity,
+        )]| {
             let mut v: Vec<String> = ts
                 .iter()
                 .map(|(s, r, d)| format!("{}|{}|{}", s.id, r.rel_type, d.id))
@@ -895,7 +929,7 @@ mod tests {
 ";
 
     const AUTH0_CSV: &str = "@timestamp,_id,data_stream.dataset,json.data.type,json.data.ip,json.data.user_id,json.data.client_name,json.data.details.response.body.user_metadata.cuit,json.data.user_name,json.data.connection,json.data.user_agent,json.data.security_context.ja3,tags
-\"Sep 3, 2026 @ 10:01:06.343\",abc,auth0.logs,fp,203.0.113.40,auth0|67ffe529,app-mobile,-,usuario_ejemplo,nbch,Android,f79b,-
+\"Sep 3, 2026 @ 10:01:06.343\",abc,auth0.logs,fp,203.0.113.40,auth0|67ffe529,app-mobile,-,usuario_ejemplo,tenant-ejemplo,Android,f79b,-
 ";
 
     /// A FortiWeb export named `.csv` must reach its own parser, not the
@@ -934,9 +968,15 @@ mod tests {
         assert_ne!(resolve_format(FORTIGATE_VPN, "auto"), "fortiweb");
         assert_ne!(resolve_format(AUTH0_CSV, "auto"), "csv");
         // And none of them swallows an ordinary CSV.
-        assert_eq!(resolve_format("name,age
+        assert_eq!(
+            resolve_format(
+                "name,age
 ana,3
-", "auto"), "csv");
+",
+                "auto"
+            ),
+            "csv"
+        );
     }
 
     /// End of the reported bug: none of the four large files in the
@@ -1011,7 +1051,7 @@ ana,3
     );
 
     const BIND_PSP_SAMPLE: &str = concat!(
-        r#"{"labels":{},"line":"2026-09-03 00:00:00,097 [http-nio-8080-exec-44] INFO  [sId:C7F6] c.p.b.p.c.c.c.BindPspFeignLogger - REQUEST: [GET] [https://api.bindpagos.com.ar/walletentidad-cuenta/v1/api/v1.201/SaldoActualBy${1}1000005] [] - time_elapsed: [132 ms] - RESPONSE: [200] [{\"saldo\":29060.00}]","timestamp":"2026-09-03T00:00:00.101251562Z"}"#,
+        r#"{"labels":{},"line":"2026-09-03 00:00:00,097 [http-nio-8080-exec-44] INFO  [sId:C7F6] c.p.b.p.c.c.c.BindPspFeignLogger - REQUEST: [GET] [https://api.bindpagos.com.ar/walletentidad-cuenta/v1/api/v1.201/SaldoActualByIdCuenta/1000005] [] - time_elapsed: [132 ms] - RESPONSE: [200] [{\"saldo\":29060.00}]","timestamp":"2026-09-03T00:00:00.101251562Z"}"#,
         "
 ",
         r#"{"labels":{},"line":"2026-09-03 00:00:00,101 [http-nio-8080-exec-44] INFO  [sId:C7F6] c.p.b.p.c.c.s.i.BindPspServiceImpl - ***** Success --> getBalance","timestamp":"2026-09-03T00:00:00.101728533Z"}"#,
