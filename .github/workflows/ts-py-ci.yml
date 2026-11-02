@@ -1,0 +1,98 @@
+# Tests, chequeo de tipos y auditoría de dependencias del código que no es Rust:
+# frontend de la app (apps/tauri), servidor MCP (platform/mcp) y Python
+# (sidecar/tpcsa-certify, training/).
+
+name: ts-py-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ts-py-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  frontend:
+    name: frontend (apps/tauri)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/tauri
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/tauri/package-lock.json
+
+      - run: npm ci
+      - name: Chequeo de tipos
+        run: npx tsc --noEmit
+      - name: Tests
+        run: npm test
+      - name: Vulnerabilidades en dependencias
+        run: npm audit --omit=dev --audit-level=high
+
+  mcp:
+    name: mcp (platform/mcp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: platform/mcp
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: platform/mcp/package-lock.json
+
+      - run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Tests de contrato
+        run: npm run test:contract
+      # Bloquea solo críticas mientras se migra zod 3 → 4 (GHSA-mrhx-c7xc-m3w5,
+      # alta). Ver plan de adecuación en FICHA.md; al cerrarlo, pasar a high.
+      - name: Vulnerabilidades en dependencias
+        run: npm audit --omit=dev --audit-level=critical
+
+  python:
+    name: python
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+
+      - name: Tests del sidecar
+        working-directory: sidecar/tpcsa-certify
+        run: uv run --python 3.12 --with-requirements requirements.txt pytest -q
+
+      - name: Vulnerabilidades en dependencias
+        run: |
+          uvx pip-audit --disable-pip --no-deps -r sidecar/tpcsa-certify/requirements.txt
+          uvx pip-audit --disable-pip --no-deps -r training/requirements.txt
+
+      # transformers <5 tiene advisories que se corrigen recién en 5.x. Es código
+      # de entrenamiento offline; queda como reporte hasta migrar (FICHA.md).
+      - name: Vulnerabilidades en dependencias (field_role_classifier, soft)
+        continue-on-error: true
+        run: uvx pip-audit --disable-pip --no-deps -r training/field_role_classifier/requirements.txt

@@ -25,7 +25,12 @@
 - [ ] Tests pasan (`cargo test` para Rust, `npm test` para Tauri/MCP)
 - [ ] CHANGELOG.md actualizado si aplica
 - [ ] Docs actualizadas (README, CONTRIBUTING)
-- [ ] Sin secrets en el diff (corrí `gitleaks detect --staged`)
+- [ ] Sin secrets en el diff (corrí `gitleaks git --staged`)
+- [ ] Sin datos reales en tests, fixtures ni docs: ni de clientes ni de personas (CUIL, nombres, domicilios, cuentas, IPs públicas)
+- [ ] Puedo explicar cada línea del diff, la haya escrito yo o la IA
+- [ ] Si toca autenticación, credenciales de SIEM, parsers o carga de sesiones: lo revisé línea por línea
+- [ ] Si agrega o actualiza una dependencia: lockfile actualizado y sin vulnerabilidades conocidas
+- [ ] Si cambia el consumo de IA (más llamadas, modelo, contexto): impacto estimado en la descripción
 - [ ] PR linkea issue o spec si aplica
 
 ## Cómo probarlo

@@ -20,6 +20,7 @@ permissions:
 jobs:
   test:
     name: test (${{ matrix.os }} / ${{ matrix.manifest }})
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -30,6 +31,7 @@ jobs:
           - core/gnn/Cargo.toml
           - core/graph-engine/Cargo.toml
           - core/matcher-ffi/Cargo.toml
+          - core/tpcsa-core/Cargo.toml
           - platform/api/Cargo.toml
           - platform/canonical/Cargo.toml
           - platform/constrained-decode/Cargo.toml
@@ -41,10 +43,12 @@ jobs:
           - platform/vrl/Cargo.toml
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
 
@@ -53,51 +57,67 @@ jobs:
         shell: bash
         run: echo "dir=$(dirname '${{ matrix.manifest }}')" >> "$GITHUB_OUTPUT"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: ${{ steps.crate.outputs.dir }}
 
+      # Barato y bloqueante: va primero para fallar rápido.
+      - name: Fmt check
+        run: cargo fmt --manifest-path ${{ matrix.manifest }} --all -- --check
+
+      # --locked: el build usa exactamente el Cargo.lock commiteado. Si
+      # Cargo.toml cambió sin actualizar el lock, falla en vez de resolver
+      # versiones nuevas en silencio.
       - name: Build (release)
-        run: cargo build --release --manifest-path ${{ matrix.manifest }}
+        run: cargo build --locked --release --manifest-path ${{ matrix.manifest }}
 
       - name: Test
-        run: cargo test --manifest-path ${{ matrix.manifest }}
+        run: cargo test --locked --manifest-path ${{ matrix.manifest }}
 
+      # Todavía no bloquea: hay advertencias acumuladas (plan de adecuación en
+      # FICHA.md). Se vuelve bloqueante crate por crate a medida que quede limpio.
       - name: Clippy (soft)
-        run: cargo clippy --manifest-path ${{ matrix.manifest }} -- -D warnings
-        continue-on-error: true
-
-      - name: Fmt check (soft)
-        run: cargo fmt --manifest-path ${{ matrix.manifest }} --all -- --check
+        run: cargo clippy --locked --manifest-path ${{ matrix.manifest }} -- -D warnings
         continue-on-error: true
 
   audit:
-    name: audit (deny + audit, soft)
+    name: audit (dependencias)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Install cargo-deny + cargo-audit
         run: cargo install cargo-deny cargo-audit --locked
 
-      - name: cargo deny (soft for now)
-        continue-on-error: true
+      # Bloqueante: falla con cualquier vulnerabilidad conocida. Una excepción se
+      # documenta en FICHA.md con fecha de vencimiento y se agrega a deny.toml /
+      # .cargo/audit.toml con el mismo id; no se silencia acá.
+      - name: cargo audit
+        shell: bash
         run: |
-          set +e
-          while IFS= read -r manifest; do
-            echo "::group::deny ${manifest}"
-            cargo deny check --manifest-path "${manifest}" || echo "::warning::deny failed for ${manifest}"
-            echo "::endgroup::"
-          done < <(find . -name Cargo.toml -not -path '*/target/*' -not -path '*/_archive/*')
-
-      - name: cargo audit (soft for now)
-        continue-on-error: true
-        run: |
-          set +e
+          status=0
           while IFS= read -r lockfile; do
             echo "::group::audit ${lockfile}"
-            cargo audit --file "${lockfile}" || echo "::warning::audit failed for ${lockfile}"
+            cargo audit --file "${lockfile}" || status=1
             echo "::endgroup::"
-          done < <(find . -name Cargo.lock -not -path '*/target/*' -not -path '*/_archive/*')
+          done < <(git ls-files '*Cargo.lock')
+          exit "${status}"
+
+      # Licencias, crates vetados, fuentes y advisories de mantenimiento
+      # (unmaintained, unsound). Todavía no bloquea: hay hallazgos abiertos.
+      - name: cargo deny (soft)
+        continue-on-error: true
+        shell: bash
+        run: |
+          status=0
+          while IFS= read -r manifest; do
+            echo "::group::deny ${manifest}"
+            cargo deny --manifest-path "${manifest}" check || status=1
+            echo "::endgroup::"
+          done < <(git ls-files '*Cargo.toml')
+          exit "${status}"
