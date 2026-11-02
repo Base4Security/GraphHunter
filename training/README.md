@@ -20,6 +20,8 @@ source .venv/bin/activate
 
 # Instalar dependencias
 pip install -r requirements.txt
+# versiones exactas; se regenera desde requirements.in con:
+# uv pip compile requirements.in --universal --python-version 3.12 -o requirements.txt
 ```
 
 Espacio en disco necesario:

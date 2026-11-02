@@ -50,7 +50,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 dotenvy = "0.15"
 axum = { version = "0.7", features = ["json"] }
 tower-http = { version = "0.5", features = ["cors"] }
-evtx = { version = "0.11", default-features = false }
+evtx = { version = "0.15", default-features = false }
 memchr = "2"
 rayon = "1"
 rand = "0.8"

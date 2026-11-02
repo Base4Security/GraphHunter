@@ -16,4 +16,4 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 # FortiAnalyzer XML report parser (raw event-based Reader API, no
 # serialize feature needed).
-quick-xml = "0.38"
+quick-xml = "0.42"

@@ -10,6 +10,8 @@ Graph Hunter muestra tal cual. Nunca corre por defecto.
 cd sidecar/tpcsa-certify
 python -m venv .venv && .venv/Scripts/activate   # o source .venv/bin/activate
 pip install -r requirements.txt
+# versiones exactas; se regenera desde requirements.in con:
+# uv pip compile requirements.in --universal --python-version 3.12 -o requirements.txt
 python server.py --port 37892 --max-arcs 50000
 ```
 

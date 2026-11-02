@@ -792,15 +792,14 @@ impl LogParser for FortiAnalyzerXmlParser {
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
-                    let tag_bytes = e.name().into_inner().to_vec();
-                    let tag_name = String::from_utf8_lossy(&tag_bytes).into_owned();
+                    let tag_name = e.name().into_inner().to_string();
 
                     match tag_name.as_str() {
                         "FortiAnalyzer_Report" => {
-                            report_name = attr(&e, b"name");
+                            report_name = attr(&e, "name");
                         }
                         "chart" | "table" => {
-                            if let Some(name) = attr(&e, b"name") {
+                            if let Some(name) = attr(&e, "name") {
                                 let kind = if tag_name == "chart" {
                                     SectionKind::Chart
                                 } else {
@@ -830,14 +829,11 @@ impl LogParser for FortiAnalyzerXmlParser {
                 }
                 Ok(Event::Text(t)) => {
                     if current_field.is_some() {
-                        if let Ok(text) = t.decode() {
-                            current_text.push_str(text.as_ref());
-                        }
+                        current_text.push_str(&t);
                     }
                 }
                 Ok(Event::End(e)) => {
-                    let tag_bytes = e.name().into_inner().to_vec();
-                    let tag_name = String::from_utf8_lossy(&tag_bytes).into_owned();
+                    let tag_name = e.name().into_inner().to_string();
 
                     if let Some(ref field) = current_field {
                         if &tag_name == field {
@@ -922,11 +918,11 @@ impl LogParser for FortiAnalyzerXmlParser {
 // ---------------------------------------------------------------------------
 
 /// Extracts an attribute value by name from an XML start tag.
-fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
+fn attr(e: &quick_xml::events::BytesStart, key: &str) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| a.key.into_inner() == key)
-        .and_then(|a| std::str::from_utf8(&a.value).ok().map(|s| s.to_string()))
+        .map(|a| a.value.into_owned())
 }
 
 /// Builds the `ReportContext` anchor from the report name + first

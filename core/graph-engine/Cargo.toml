@@ -82,7 +82,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Already present transitively via `plist` → `tauri`, so this is a
 # zero-compile-cost promotion to a direct dependency. Uses the raw
 # event-based Reader API — no `serialize` feature needed.
-quick-xml = "0.38"
+quick-xml = "0.42"
 # MaxMind GeoLite2 offline GeoIP/ASN lookup. Optional: only pulled when the
 # `geoip` feature is enabled. The reader is ~50KB compiled, no network deps.
 maxminddb = { version = "0.28", optional = true }

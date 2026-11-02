@@ -45,9 +45,9 @@ graph_hunter_siem = { path = "../siem" }
 graph_hunter_local_llm = { path = "../local-llm" }
 # Randomness for the sentinel connector's jittered backoff.
 rand = "0.8"
-# Windows Event Log binary parser. Tauri already pulls evtx 0.11 with
+# Windows Event Log binary parser. Tauri already pulls evtx 0.15 with
 # default features disabled; mirror those settings so the link unifies.
-evtx = { version = "0.11", default-features = false }
+evtx = { version = "0.15", default-features = false }
 # PCAP / PCAPNG framing — pure-Rust, sans-io. We deliberately avoid
 # `pcap` / `pnet`, which would force a libpcap (or Npcap on Windows)
 # native link. PR1 only uses this for sampling preview metadata
