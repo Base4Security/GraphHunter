@@ -65,8 +65,11 @@ export const ingestLoad = defineTool({
 
 const loadWithConfigInput = z.object({
   path: z.string().min(1).max(4096).describe("Path to the log file on the GraphHunter host."),
+  // zod 3 left a z.unknown() key implicitly optional; zod 4 does not.
+  // Spelled out so the published tool contract survives the migration.
   config: z
     .unknown()
+    .optional()
     .describe(
       "A FieldConfig object: { mappings: [{ raw_name, role: 'Node'|'Metadata'|'Ignore', entity_type?, timestamp_format?, locale? }] }. Get a starting point from ingest_preview or ingest_negotiate.",
     ),
