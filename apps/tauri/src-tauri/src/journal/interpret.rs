@@ -81,28 +81,28 @@ fn extract_touched_path(resp: &Value) -> Option<Touched> {
     let paths_arr = paths_arr.as_array()?;
 
     // For simplicity, if there's at least one path, extract its hops
-    if let Some(first_path) = paths_arr.first() {
-        if let Some(hops) = first_path.get("hops").and_then(|h| h.as_array()) {
-            let mut nodes = Vec::new();
-            let mut edges = Vec::new();
+    if let Some(first_path) = paths_arr.first()
+        && let Some(hops) = first_path.get("hops").and_then(|h| h.as_array())
+    {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
 
-            for hop in hops {
-                // Extract node
-                if let Some(node) = hop.get("node") {
-                    nodes.push(node.clone());
-                }
-                // Extract edge if present
-                if let Some(edge) = hop.get("edge").and_then(|e| e.as_str()) {
-                    edges.push(edge.to_string());
-                }
+        for hop in hops {
+            // Extract node
+            if let Some(node) = hop.get("node") {
+                nodes.push(node.clone());
             }
-
-            return Some(Touched {
-                nodes: nodes.clone(),
-                edges,
-                path: Some(nodes),
-            });
+            // Extract edge if present
+            if let Some(edge) = hop.get("edge").and_then(|e| e.as_str()) {
+                edges.push(edge.to_string());
+            }
         }
+
+        return Some(Touched {
+            nodes: nodes.clone(),
+            edges,
+            path: Some(nodes),
+        });
     }
 
     None

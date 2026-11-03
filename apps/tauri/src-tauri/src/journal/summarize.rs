@@ -435,10 +435,10 @@ fn trim_row(row: &Value, priority: &[&str]) -> Value {
         if selection.len() >= MAX_PROJECTED_KEYS {
             break;
         }
-        if let Some(key) = trimmed.keys().find(|k| k.to_lowercase() == *p) {
-            if !selection.iter().any(|s| s == key) {
-                selection.push(key.clone());
-            }
+        if let Some(key) = trimmed.keys().find(|k| k.to_lowercase() == *p)
+            && !selection.iter().any(|s| s == key)
+        {
+            selection.push(key.clone());
         }
     }
 
@@ -680,7 +680,7 @@ mod tests {
             "TimeGenerated": format!("2026-07-14T12:{:02}:00Z", i % 60),
             "UserPrincipalName": format!("user{i}@contoso.com"),
             "IPAddress": format!("10.0.{}.{}", i % 256, (i * 7) % 256),
-            "ResultType": if i % 3 == 0 { "50126" } else { "0" },
+            "ResultType": if i.is_multiple_of(3) { "50126" } else { "0" },
             "AppDisplayName": "Azure Portal",
             "Location": "US",
             "ClientAppUsed": "Browser",
@@ -1020,7 +1020,7 @@ mod tests {
         );
         map.insert(
             "ResultType".to_string(),
-            json!(if i % 3 == 0 { "50126" } else { "0" }),
+            json!(if i.is_multiple_of(3) { "50126" } else { "0" }),
         );
         map.insert("AppDisplayName".to_string(), json!("Azure Portal"));
         map.insert("Location".to_string(), json!("US"));
@@ -1210,7 +1210,7 @@ mod tests {
             "UserIdentityAccountId": "123456789012",
             "SourceIpAddress": format!("10.0.{}.{}", i % 256, (i * 7) % 256),
             "AwsRegion": "us-east-1",
-            "ErrorCode": if i % 3 == 0 { "AccessDenied" } else { "" },
+            "ErrorCode": if i.is_multiple_of(3) { "AccessDenied" } else { "" },
             "UserAgent": "aws-cli/2.15.0",
             "TenantId": "11111111-2222-3333-4444-555555555555",
             "ResourceId": "/subscriptions/x/resourceGroups/y",

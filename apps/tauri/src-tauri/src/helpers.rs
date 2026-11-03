@@ -39,34 +39,29 @@ pub fn extract_json_keys(contents: &str) -> Vec<String> {
         return vec![];
     }
     // Try array first
-    if trimmed.starts_with('[') {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(arr) = v.as_array() {
-                if let Some(first) = arr.first() {
-                    if let Some(obj) = first.as_object() {
-                        return obj.keys().cloned().collect();
-                    }
-                }
-            }
-        }
+    if trimmed.starts_with('[')
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Some(arr) = v.as_array()
+        && let Some(first) = arr.first()
+        && let Some(obj) = first.as_object()
+    {
+        return obj.keys().cloned().collect();
     }
     // Single object
-    if trimmed.starts_with('{') {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            if let Some(obj) = v.as_object() {
-                return obj.keys().cloned().collect();
-            }
-        }
+    if trimmed.starts_with('{')
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Some(obj) = v.as_object()
+    {
+        return obj.keys().cloned().collect();
     }
     // NDJSON: first line
     if let Some(first_line) = trimmed.lines().next() {
         let line = first_line.trim();
-        if line.starts_with('{') {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                if let Some(obj) = v.as_object() {
-                    return obj.keys().cloned().collect();
-                }
-            }
+        if line.starts_with('{')
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+            && let Some(obj) = v.as_object()
+        {
+            return obj.keys().cloned().collect();
         }
     }
     vec![]

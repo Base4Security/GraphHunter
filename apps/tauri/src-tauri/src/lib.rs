@@ -36,12 +36,10 @@ pub fn run() {
         let mut loaded = false;
         while let Some(d) = dir {
             let candidate = d.join(".env");
-            if candidate.is_file() {
-                if dotenvy::from_path(&candidate).is_ok() {
-                    tracing::info!(".env loaded from {}", candidate.display());
-                    loaded = true;
-                    break;
-                }
+            if candidate.is_file() && dotenvy::from_path(&candidate).is_ok() {
+                tracing::info!(".env loaded from {}", candidate.display());
+                loaded = true;
+                break;
             }
             dir = d.parent().map(|p| p.to_path_buf());
         }

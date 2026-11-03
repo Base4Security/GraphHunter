@@ -55,6 +55,9 @@ where
     }
 }
 
+// The Err is an axum `Response` handed straight back by the handler;
+// boxing it would only add an unwrap at every call site.
+#[allow(clippy::result_large_err)]
 fn policy_or_err() -> Result<PathPolicy, Response> {
     PathPolicy::from_env().map_err(api_err_response)
 }

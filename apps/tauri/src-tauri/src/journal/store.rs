@@ -311,8 +311,7 @@ impl JournalStore {
     /// path so a filesystem fault is logged and dropped rather than
     /// panicking under the store's lock.
     fn try_write_meta(dir: &Path, meta: &HuntMeta) -> std::io::Result<()> {
-        let data = serde_json::to_string_pretty(meta)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let data = serde_json::to_string_pretty(meta).map_err(std::io::Error::other)?;
         fs::write(Self::meta_path(dir), data)
     }
 
@@ -334,7 +333,7 @@ impl JournalStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::event::HuntEvent;
+    use crate::journal::event::{EventResult, HuntEvent};
 
     fn tmp() -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("ghj-{}", uuid_like()));
@@ -353,11 +352,16 @@ mod tests {
     fn append_and_read_round_trip_under_current_hunt() {
         let store = JournalStore::new(tmp());
         let id = store.start_hunt(Some("cycle-A".into()));
-        let mut ev = HuntEvent::default();
-        ev.seq = 0;
-        ev.kind = "query".into();
-        ev.endpoint = "/kql".into();
-        ev.result.est_tokens = 42;
+        let ev = HuntEvent {
+            seq: 0,
+            kind: "query".into(),
+            endpoint: "/kql".into(),
+            result: EventResult {
+                est_tokens: 42,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         store.append(ev.clone());
         let (meta, events) = store.read(&id).expect("hunt exists");
         assert_eq!(meta.label.as_deref(), Some("cycle-A"));
@@ -372,17 +376,25 @@ mod tests {
         let store = JournalStore::new(tmp());
         let id = store.start_hunt(Some("cycle-B".into()));
 
-        let mut ev1 = HuntEvent::default();
-        ev1.kind = "query".into();
-        ev1.endpoint = "/kql".into();
-        ev1.result.est_tokens = 42;
-        store.append(ev1);
+        store.append(HuntEvent {
+            kind: "query".into(),
+            endpoint: "/kql".into(),
+            result: EventResult {
+                est_tokens: 42,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
 
-        let mut ev2 = HuntEvent::default();
-        ev2.kind = "traverse".into();
-        ev2.endpoint = "/graph/neighbors".into();
-        ev2.result.est_tokens = 17;
-        store.append(ev2);
+        store.append(HuntEvent {
+            kind: "traverse".into(),
+            endpoint: "/graph/neighbors".into(),
+            result: EventResult {
+                est_tokens: 17,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
 
         let (meta, _) = store.read(&id).expect("hunt exists");
         assert_eq!(meta.cumulative_est_tokens, 42 + 17);
@@ -425,9 +437,10 @@ mod tests {
     #[test]
     fn append_without_start_lazily_creates_current_hunt() {
         let store = JournalStore::new(tmp());
-        let mut ev = HuntEvent::default();
-        ev.endpoint = "/graph/neighbors".into();
-        store.append(ev);
+        store.append(HuntEvent {
+            endpoint: "/graph/neighbors".into(),
+            ..Default::default()
+        });
         assert_eq!(store.list().len(), 1); // one lazily-created hunt
     }
 
@@ -445,9 +458,10 @@ mod tests {
         assert_eq!(store.close_hunt(), None);
 
         // The next append lazily starts a brand-new hunt, not id1.
-        let mut ev = HuntEvent::default();
-        ev.endpoint = "/search".into();
-        store.append(ev);
+        store.append(HuntEvent {
+            endpoint: "/search".into(),
+            ..Default::default()
+        });
         let id2 = store.current_hunt_id();
         assert_ne!(id2, id1);
         let (meta2, events2) = store.read(&id2).expect("hunt exists");

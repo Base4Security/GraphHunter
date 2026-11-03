@@ -15,10 +15,10 @@ use tauri::Emitter;
 
 /// Notify frontend that notes changed (e.g. after MCP create_note) so the UI refreshes the notes list.
 pub(super) fn emit_notes_changed(state: &AppState) {
-    if let Ok(handle_guard) = state.app_handle.read() {
-        if let Some(handle) = handle_guard.as_ref() {
-            let _ = handle.emit("notes-changed", ());
-        }
+    if let Ok(handle_guard) = state.app_handle.read()
+        && let Some(handle) = handle_guard.as_ref()
+    {
+        let _ = handle.emit("notes-changed", ());
     }
 }
 
@@ -27,10 +27,10 @@ pub(super) fn mcp_emit_view(state: &AppState, subgraph: Subgraph) {
     if let Ok(mut guard) = state.last_mcp_subgraph.write() {
         *guard = Some(subgraph.clone());
     }
-    if let Ok(handle_guard) = state.app_handle.read() {
-        if let Some(handle) = handle_guard.as_ref() {
-            let _ = handle.emit("mcp-view-update", &subgraph);
-        }
+    if let Ok(handle_guard) = state.app_handle.read()
+        && let Some(handle) = handle_guard.as_ref()
+    {
+        let _ = handle.emit("mcp-view-update", &subgraph);
     }
 }
 

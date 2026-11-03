@@ -18,6 +18,9 @@ pub use graph_hunter_api::operations::sentinel_publish::{
     AzureCreds, build_watchlist_payload, build_watchlist_url, to_watchlist_alias,
 };
 
+// Each argument is a named field of the IPC call from the frontend;
+// the signature is the command's contract.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn cmd_publish_iocs_to_sentinel(
     _state: State<'_, Arc<AppState>>,

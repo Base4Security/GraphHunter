@@ -94,7 +94,7 @@ async fn auth_middleware(
 
     match auth_header {
         Some(val) if val.starts_with("Bearer ") && {
-            let token = val[7..].as_bytes();
+            let token = &val.as_bytes()[7..];
             let expect = expected.as_bytes();
             token.len() == expect.len() && token.ct_eq(expect).into()
         } => {

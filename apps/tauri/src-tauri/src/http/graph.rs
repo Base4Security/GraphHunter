@@ -81,10 +81,10 @@ pub(super) async fn handler_search(
     }) {
         Ok(v) => {
             let node_ids: Vec<String> = v.iter().map(|r| r.id.clone()).collect();
-            if !node_ids.is_empty() {
-                if let Ok(sg) = build_subgraph_for_ids(api.as_ref(), &node_ids) {
-                    mcp_emit_view(state.as_ref(), sg);
-                }
+            if !node_ids.is_empty()
+                && let Ok(sg) = build_subgraph_for_ids(api.as_ref(), &node_ids)
+            {
+                mcp_emit_view(state.as_ref(), sg);
             }
             ok_json(v)
         }

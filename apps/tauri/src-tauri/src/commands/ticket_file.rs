@@ -16,6 +16,9 @@ use crate::state::AppState;
 /// crate keeps compiling.
 pub use graph_hunter_api::operations::ticket::{build_jira_payload, build_servicenow_payload};
 
+// Each argument is a named field of the IPC call from the frontend;
+// the signature is the command's contract.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn cmd_file_ticket(
     _state: State<'_, Arc<AppState>>,

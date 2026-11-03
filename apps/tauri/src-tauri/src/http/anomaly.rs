@@ -111,7 +111,7 @@ pub(super) async fn handler_compute_scores(State(api): State<Arc<GraphHunterApi>
             api_clone
                 .compute_scores(graph_hunter_api::dto::graph_ops::ComputeScoresRequest::default())
                 .map(|()| serde_json::json!({ "computed": true }))
-                .map_err(|e| crate::error::CommandError::from(e))
+                .map_err(crate::error::CommandError::from)
         }),
     )
     .await;

@@ -360,9 +360,11 @@ mod tests {
     // must survive the core->http projection and appear on the wire.
     #[test]
     fn coverage_survives_core_to_http_projection() {
-        let mut cov = AnswerCoverage::default();
-        cov.possibly_incomplete = true;
-        cov.missing_sources = vec!["sentinel".to_string()];
+        let mut cov = AnswerCoverage {
+            possibly_incomplete: true,
+            missing_sources: vec!["sentinel".to_string()],
+            ..Default::default()
+        };
         cov.source_watermarks.insert("elastic".to_string(), 42);
 
         let core = graph_hunter_api::dto::hunt::RunHuntResponse {
