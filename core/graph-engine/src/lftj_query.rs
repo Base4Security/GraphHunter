@@ -293,7 +293,12 @@ pub fn enumerate_triangles_lftj(
             while !r2.at_end() && !r3.at_end() {
                 let c2 = r2.key();
                 let c3 = r3.key();
-                if c2 == c3 {
+                // Three distinct vertices: self-loops would otherwise yield
+                // (a, b, b), (a, a, c) and the like.
+                if c2 == c3 && (c2 == kb || c2 == ka || kb == ka) {
+                    r2.next();
+                    r3.next();
+                } else if c2 == c3 {
                     let c_u32 = c2 as u32;
                     // `successor` = non-strict + multi-edge aware; see the
                     // note in `enumerate_triangles_lftj_simd`.
@@ -369,6 +374,11 @@ pub fn enumerate_triangles_lftj_simd(
         let a_end = trie.dst_offsets[ai + 1] as usize;
         let a_dsts = &trie.dst_keys[a_off..a_end];
         for &b in a_dsts {
+            // A self-loop a->a would make `b == a`; a triangle needs three
+            // distinct vertices, as the K4 enumerators already require.
+            if b == a {
+                continue;
+            }
             let b_sid = StrId::from_raw(b);
             let bi = match trie.src_keys.binary_search(&b) {
                 Ok(i) => i,
@@ -386,6 +396,9 @@ pub fn enumerate_triangles_lftj_simd(
             crate::simd_rust::intersect_sorted_u32_collect(a_dsts, b_dsts, &mut intersect_buf);
 
             for &c in intersect_buf.iter() {
+                if c == a || c == b {
+                    continue;
+                }
                 // `successor` is non-strict (≥ the floor, matching the DFS
                 // floor, which keeps edges whose timestamp EQUALS the
                 // previous hop's) and searches every parallel edge rather
@@ -432,6 +445,11 @@ pub fn enumerate_triangles_naive(
         let a_dsts =
             &trie.dst_keys[trie.dst_offsets[ai] as usize..trie.dst_offsets[ai + 1] as usize];
         for &b in a_dsts {
+            // A self-loop a->a would make `b == a`; a triangle needs three
+            // distinct vertices, as the K4 enumerators already require.
+            if b == a {
+                continue;
+            }
             let b_sid = StrId::from_raw(b);
             let bi = match trie.src_keys.binary_search(&b) {
                 Ok(i) => i,
@@ -444,6 +462,9 @@ pub fn enumerate_triangles_naive(
             let b_dsts =
                 &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             for &c in b_dsts {
+                if c == a || c == b {
+                    continue;
+                }
                 if a_dsts.binary_search(&c).is_err() {
                     continue;
                 }
@@ -515,6 +536,11 @@ pub fn enumerate_triangles_lftj_simd_window(
         let a_end = trie.dst_offsets[ai + 1] as usize;
         let a_dsts = &trie.dst_keys[a_off..a_end];
         for &b in a_dsts {
+            // A self-loop a->a would make `b == a`; a triangle needs three
+            // distinct vertices, as the K4 enumerators already require.
+            if b == a {
+                continue;
+            }
             let b_sid = StrId::from_raw(b);
             let bi = match trie.src_keys.binary_search(&b) {
                 Ok(i) => i,
@@ -540,6 +566,9 @@ pub fn enumerate_triangles_lftj_simd_window(
             crate::simd_rust::intersect_sorted_u32_collect(a_dsts, b_dsts, &mut intersect_buf);
 
             for &c in intersect_buf.iter() {
+                if c == a || c == b {
+                    continue;
+                }
                 // `successor` carries both corrections at once: it is
                 // non-strict (≥ the floor, matching the DFS, which keeps
                 // edges whose timestamp EQUALS the previous hop's), and it

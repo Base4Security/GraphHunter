@@ -30,10 +30,11 @@ use crate::interner::StrId;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SymmetryHint {
     /// The pattern is palindromic: types + relation types read the same
-    /// forward and backward. Implies that for any matched path
-    /// `[v0, v1, ..., vn]`, the reverse `[vn, ..., v0]` is also a valid
-    /// match. The DFS breaks this symmetry by requiring
-    /// `path[0].index() < path[len-1].index()` at emission time.
+    /// forward and backward. Only over an undirected graph does that make
+    /// the reverse `[vn, ..., v0]` of a match a match too, so only there is
+    /// `path[0].index() < path[len-1].index()` a lossless tiebreak. The
+    /// matcher's edges are directed and timestamped, so the DFS does not
+    /// apply it (see `GraphHunter::search_temporal_pattern`).
     pub palindromic: bool,
 }
 

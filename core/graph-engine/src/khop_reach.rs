@@ -460,7 +460,7 @@ impl KHopReach {
     /// M2 — time-aware predicate. Returns `true` iff `sid` can reach
     /// every label in `required_mask` *and*, when a `time_window` is
     /// provided, at least one structural path's first edge could plausibly
-    /// fall inside `[lo, hi)`. When `time_window` is `None` this reduces
+    /// fall inside `[lo, hi]`. When `time_window` is `None` this reduces
     /// to `can_reach`. Out-of-range `sid` conservatively passes; vertices
     /// with no rank (no outgoing edges) also pass — they have no
     /// temporal info to refute the predicate.
@@ -502,7 +502,8 @@ impl KHopReach {
                 if l >= NLF_TYPE_COUNT {
                     continue;
                 }
-                if mins[l] >= hi || maxs[l] < lo {
+                // Inclusive on both ends, like the DFS's window.
+                if mins[l] > hi || maxs[l] < lo {
                     return false;
                 }
             }
@@ -529,10 +530,13 @@ pub fn end_type_mask(hypothesis: &Hypothesis) -> u16 {
 }
 
 /// Skip the prune pass when the requirement is trivial (zero mask, or
-/// hypothesis is single-step — NLF B2 already handles 1-hop).
+/// hypothesis is single-step — NLF B2 already handles 1-hop) or when
+/// the hypothesis is deeper than `MAX_DEPTH`: the bitmap only covers
+/// types reachable within `MAX_DEPTH` hops, so a final type first
+/// reachable further out would be pruned wrongly.
 #[inline]
 pub fn is_trivial(mask: u16, hypothesis: &Hypothesis) -> bool {
-    mask == 0 || hypothesis.steps.len() <= 1
+    mask == 0 || hypothesis.steps.len() <= 1 || hypothesis.steps.len() > MAX_DEPTH
 }
 
 #[cfg(test)]

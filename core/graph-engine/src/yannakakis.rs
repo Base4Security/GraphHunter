@@ -571,7 +571,7 @@ pub fn materialize_bag(graph: &GraphHunter, step: &HypothesisStep, t_lo: i64, t_
 /// whose `origin` does not appear as `dest` in `bag[i-1]`.
 ///
 /// After both passes every surviving row participates in at least
-/// one structural full join. Temporal strictness (`t_i < t_{i+1}`)
+/// one structural full join. Temporal order (`t_i <= t_{i+1}`)
 /// is *not* enforced here — that's a per-row constraint applied
 /// during enumeration. Conservative: we keep rows that the temporal
 /// filter might still drop, but never drop rows that could survive.
@@ -598,12 +598,12 @@ pub fn semijoin_reduce_chain(bags: &mut [Bag]) {
 }
 
 /// Enumerate every full path through the (already-reduced) chain
-/// of bags, respecting strict temporal ordering and `k_simplicity`.
+/// of bags, respecting non-strict temporal ordering and `k_simplicity`.
 /// Returns up to `cap` paths as resolved `HuntResult` (one
 /// `Arc<str>` per visited vertex, length = `n_steps + 1`).
 ///
 /// Algorithm: for each row in `bag[0]`, walk the chain looking for
-/// `bag[i+1]` rows where `origin == prev.dest` and `timestamp >
+/// `bag[i+1]` rows where `origin == prev.dest` and `timestamp >=
 /// prev.timestamp`. Standard depth-first chain enumeration; the
 /// reducer's pruning means we never expand a row that has no live
 /// continuation.
@@ -619,7 +619,7 @@ pub fn enumerate_chain(
 /// L2 stage 3b — resumable chain enumerator. Caller can pass a
 /// `starting` slice of partial paths (each pair: full
 /// `Vec<StrId>` of vertices visited so far + the timestamp of
-/// the most recent edge, so the strictly-increasing temporal
+/// the most recent edge, so the non-decreasing temporal
 /// constraint holds across the resume boundary) and a
 /// `start_depth` denoting which step to walk next. When
 /// `start_depth == 0` and `starting.is_empty()` the function
@@ -703,7 +703,8 @@ pub fn enumerate_chain_from_prefix(
             None => return,
         };
         for row in candidates {
-            if row.timestamp <= last_ts {
+            // Non-strict, like the DFS: same-second steps match.
+            if row.timestamp < last_ts {
                 continue;
             }
             if !k_simplicity_ok(path_sids, row.dest, k_simplicity) {
@@ -857,7 +858,8 @@ pub fn compute_prefix_snapshot(
             None => return,
         };
         for row in candidates {
-            if row.timestamp <= last_ts {
+            // Non-strict, like the DFS: same-second steps match.
+            if row.timestamp < last_ts {
                 continue;
             }
             if !k_ok(path_sids, row.dest, k) {

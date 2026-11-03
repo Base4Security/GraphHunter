@@ -1252,11 +1252,13 @@ impl GraphHunter {
             crate::semijoin::filter_starts(&mut start_sids, &cands.candidates[0]);
         }
 
-        // B9 — symmetry analysis. Computed once at query entry, applied
-        // per-emission inside the DFS. For palindromic chains, halves
-        // the result set by enforcing a canonical direction; no-op for
-        // asymmetric chains (the common ATT&CK case).
-        let symmetry_hint = crate::symmetry::analyze(hypothesis);
+        // B9 — symmetry breaking is OFF for the DFS. A palindromic chain
+        // only has a reverse automorphism over an undirected graph; here
+        // every edge is directed and timestamped, so the reverse of a
+        // match is usually not a match, and keeping only
+        // `path[0] < path[last]` drops matches with no mirror
+        // (tests/semantic_gaps.rs).
+        let symmetry_hint = crate::symmetry::SymmetryHint::default();
 
         let k = hypothesis.k_simplicity.max(1);
         // Resolve δ once, here, not inside the match loop: it may read an
@@ -2421,7 +2423,8 @@ impl GraphHunter {
             let reach = self.ensure_khop_reach();
             start_sids.retain(|&sid| reach.can_reach_in_window(sid, khop_mask, time_window));
         }
-        let symmetry_hint = crate::symmetry::analyze(hypothesis);
+        // Same as the sequential DFS: no symmetry breaking on directed edges.
+        let symmetry_hint = crate::symmetry::SymmetryHint::default();
         let k = hypothesis.k_simplicity.max(1);
         let skew_delta = hypothesis.resolve_skew_delta();
         let result_count = AtomicUsize::new(0);
@@ -3276,6 +3279,8 @@ impl GraphHunter {
         }
         let truncated = results.len() >= cap;
         results.truncate(cap);
+        // WITHIN / HAVING are post-filters on the matcher output, gap or not.
+        let results = self.apply_aggregation(results, hypothesis);
         Ok((results, truncated))
     }
 
