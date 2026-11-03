@@ -3,6 +3,8 @@ name = "graph_hunter_cli"
 version = "1.0.0"
 edition = "2024"
 description = "Long-running CLI process for Graph Hunter — stdin/stdout JSON protocol"
+license = "GPL-3.0-only"
+publish = false
 
 [lib]
 name = "graph_hunter_cli"

@@ -3,7 +3,8 @@ name = "graph_hunter_local_llm"
 version = "0.1.0"
 edition = "2024"
 description = "Local-only LLM seam for the agentic slow lane: LocalLlm trait, PromptSpec/PromptTemplate, MockBackend default, Candle-backed Phi-3-mini-Q4 behind the `candle` feature."
-license = "GPL-3.0"
+license = "GPL-3.0-only"
+publish = false
 
 [lib]
 name = "graph_hunter_local_llm"

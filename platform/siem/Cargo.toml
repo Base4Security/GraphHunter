@@ -3,7 +3,8 @@ name = "graph_hunter_siem"
 version = "0.1.0"
 edition = "2024"
 description = "SIEM query runners and async streaming primitives for Azure Sentinel and Elasticsearch. Extracted from graph_hunter_cli so both the CLI process and the canonical API can consume the same transport layer without the api->cli edge forbidden by ADR-001."
-license = "GPL-3.0"
+license = "GPL-3.0-only"
+publish = false
 
 [lib]
 name = "graph_hunter_siem"

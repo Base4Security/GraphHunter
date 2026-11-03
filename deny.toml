@@ -69,11 +69,26 @@ feature-depth = 1
 #db-urls = ["https://github.com/rustsec/advisory-db"]
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
+#
+# Only `unmaintained` advisories with no fixed release are ignored here; none
+# of them is a vulnerability. Anything with a fix gets upgraded instead.
+# Review this list whenever one of the parent crates is bumped.
+# The config is shared by 15 independent crates, so most of them do not
+# hit every entry; do not warn about ignores a given crate never sees.
+unused-ignored-advisory = "allow"
 ignore = [
-    #"RUSTSEC-0000-0000",
-    #{ id = "RUSTSEC-0000-0000", reason = "you can specify a reason the advisory is ignored" },
-    #"a-crate-that-is-yanked@0.1.1", # you can also ignore yanked crate versions if you wish
-    #{ crate = "a-crate-that-is-yanked@0.1.1", reason = "you can specify why you are ignoring the yanked crate" },
+    # --- Direct dependencies of our crates ---
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.x is unmaintained (no fixed release). It encodes the binary session format in platform/api; replacing it changes the on-disk format and needs a body_format_version bump plus a compatibility test, tracked separately." },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained (no fixed release), pulled by serde_yaml 0.9 in core/graph-engine. It parses hunt-catalog YAML (built-in files embedded with include_str! plus the analyst's local catalog dir) and the built-in shape rules, never ingested logs. No known vulnerability; migrating to a maintained fork is a separate change." },
+    # --- Transitive only, no direct way to replace ---
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained (no fixed release). Proc-macro only (no runtime code), pulled by gemm/candle-core and tokenizers for the local LLM." },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained (no fixed release). Proc-macro only, pulled by glib-macros via gtk/webkit2gtk (Tauri Linux backend)." },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained (no fixed release). Pulled by selectors <- kuchikiki <- tauri-utils; waits on Tauri." },
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range is unmaintained (no fixed release). Pulled by urlpattern <- tauri-utils; waits on Tauri." },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common is unmaintained (no fixed release). Pulled by urlpattern <- tauri-utils; waits on Tauri." },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property is unmaintained (no fixed release). Pulled by urlpattern <- tauri-utils; waits on Tauri." },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version is unmaintained (no fixed release). Pulled by urlpattern <- tauri-utils; waits on Tauri." },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident is unmaintained (no fixed release). Pulled by urlpattern <- tauri-utils; waits on Tauri." },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
@@ -97,13 +112,10 @@ ignore = [
 # icu_properties — all transitively pulled in via idna -> url -> reqwest).
 # It is OSI-approved and GPL-compatible.
 #
-# `GPL-3.0` (deprecated SPDX identifier; modern is `GPL-3.0-only`) is the
-# license of our own workspace crates. Cargo-deny still flags the
-# deprecation, but the identifier is unambiguous and we allow it here so
-# the workspace itself passes the scan. A follow-up cleanup can migrate
-# every per-crate Cargo.toml to `GPL-3.0-only`.
+# `GPL-3.0-only` is the license of our own crates (every Cargo.toml in the
+# repo declares it, matching LICENSE).
 allow = [
-    "GPL-3.0",
+    "GPL-3.0-only",
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -123,12 +135,17 @@ allow = [
 # canonical license text of a valid SPDX license file.
 # [possible values: any between 0.0 and 1.0].
 confidence-threshold = 0.93
+# Same reason as `unused-ignored-advisory`: shared across 15 crates.
+unused-license-exception = "allow"
 # Allow 1 or more licenses on a per-crate basis, so that particular licenses
 # aren't accepted for every possible crate as with the normal allow list
 exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
     # list
     #{ allow = ["Zlib"], crate = "adler32" },
+    # Mozilla's root CA bundle as data, under a permissive data license.
+    # Build-time only: ureq <- ort-sys (downloads ONNX Runtime) in core/gnn.
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,

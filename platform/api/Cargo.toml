@@ -3,7 +3,8 @@ name = "graph_hunter_api"
 version = "1.0.0"
 edition = "2024"
 description = "Canonical API layer for Graph Hunter: owns session/service state and exposes a transport-agnostic surface that Tauri, HTTP, and MCP serialize against."
-license = "GPL-3.0"
+license = "GPL-3.0-only"
+publish = false
 
 [lib]
 name = "graph_hunter_api"

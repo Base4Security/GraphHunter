@@ -3,7 +3,8 @@ name = "graph_hunter_tpcsa"
 version = "0.1.0"
 edition = "2024"
 description = "Temporal Prize-Collecting Steiner Arborescence (TPCSA): temporal pruning, time-expanded DAG, greedy time-respecting forest, verification and ranking. Pure graph code, no engine dependency."
-license = "GPL-3.0"
+license = "GPL-3.0-only"
+publish = false
 
 [lib]
 name = "graph_hunter_tpcsa"
