@@ -84,30 +84,30 @@ impl GraphHunterApi {
             })
             .collect();
 
-        if let Ok(dir) = session_data_dir() {
-            if let Ok(entries) = fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                        continue;
-                    }
-                    // Format-aware: handles BOTH the binary GHS1 format
-                    // (current) and the legacy JSON format. A previous
-                    // version of this scan only parsed JSON prefixes, so
-                    // binary sessions were silently skipped — they existed
-                    // on disk but never showed up in the picker, appearing
-                    // "lost" after a save+reopen.
-                    if let Some(info) = read_session_info(&path) {
-                        if !seen.contains(&info.id) {
-                            seen.insert(info.id.clone());
-                            list.push(info);
-                        }
-                    }
+        if let Ok(dir) = session_data_dir()
+            && let Ok(entries) = fs::read_dir(&dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                // Format-aware: handles BOTH the binary GHS1 format
+                // (current) and the legacy JSON format. A previous
+                // version of this scan only parsed JSON prefixes, so
+                // binary sessions were silently skipped — they existed
+                // on disk but never showed up in the picker, appearing
+                // "lost" after a save+reopen.
+                if let Some(info) = read_session_info(&path)
+                    && !seen.contains(&info.id)
+                {
+                    seen.insert(info.id.clone());
+                    list.push(info);
                 }
             }
         }
 
-        list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        list.sort_by_key(|a| a.created_at);
         Ok(list)
     }
 
@@ -259,7 +259,7 @@ impl GraphHunterApi {
         let id = req
             .session_id
             .or_else(|| self.sessions().current_id())
-            .ok_or_else(|| ApiError::NoCurrentSession)?;
+            .ok_or(ApiError::NoCurrentSession)?;
         let path = session_file_path(&id).map_err(ApiError::Io)?;
         let session = self
             .sessions()
@@ -494,7 +494,7 @@ fn load_binary_into_graph<R: std::io::Read>(
     })? {
         let _ = graph.add_entity(entity);
         i += 1;
-        if i % entity_stride == 0 {
+        if i.is_multiple_of(entity_stride) {
             emitter.emit(
                 event_names::SESSION_LOAD_PROGRESS,
                 json_progress("entities", i, entity_count),
@@ -534,7 +534,7 @@ fn load_binary_into_graph<R: std::io::Read>(
         // receive time to the reload instant.
         let _ = graph.add_relation_preserving_ingested_at(rel);
         i += 1;
-        if i % relation_stride == 0 {
+        if i.is_multiple_of(relation_stride) {
             emitter.emit(
                 event_names::SESSION_LOAD_PROGRESS,
                 json_progress("relations", i, relation_count),
@@ -821,7 +821,7 @@ mod tests {
         let mut buf = Vec::new();
         write_header(&mut buf, &header).unwrap();
         write_entities(&mut buf, entities.len() as u64, &entities).unwrap();
-        write_relations(&mut buf, 1, vec![rel].into_iter()).unwrap();
+        write_relations(&mut buf, 1, vec![rel]).unwrap();
 
         let mut cur = std::io::Cursor::new(buf);
         let (graph, _file, _entity_count, relation_count) =

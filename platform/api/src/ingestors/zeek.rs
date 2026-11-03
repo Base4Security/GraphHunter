@@ -107,10 +107,7 @@ impl StreamingIngestor for ZeekIngestor {
     ///   formats (PCAP/EVTX = 255) but above any future fallback.
     /// - `None` otherwise.
     fn sniff(&self, path: &Path, _magic: &[u8]) -> Option<u8> {
-        let peek = match read_first_line(path) {
-            Some(s) => s,
-            None => return None,
-        };
+        let peek = read_first_line(path)?;
         let v = serde_json::from_str::<serde_json::Value>(&peek).ok()?;
         let obj = v.as_object()?;
         // Zeek's defining keys: `uid` (Connection UID, format `CXXXX`)

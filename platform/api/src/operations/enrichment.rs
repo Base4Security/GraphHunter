@@ -61,13 +61,12 @@ impl GraphHunterApi {
                 let mut service_counts: HashMap<String, usize> = HashMap::new();
 
                 for ip_str in &ips {
-                    if let Some(entity) = graph.get_entity(ip_str) {
-                        if let Some(b) = entity.metadata.get("bytes") {
-                            if let Ok(n) = parse_bytes_str(b) {
-                                total_bytes += n;
-                                has_bytes = true;
-                            }
-                        }
+                    if let Some(entity) = graph.get_entity(ip_str)
+                        && let Some(b) = entity.metadata.get("bytes")
+                        && let Ok(n) = parse_bytes_str(b)
+                    {
+                        total_bytes += n;
+                        has_bytes = true;
                     }
                     // Outgoing relations from this IP (rare for
                     // Sentinel; common when the IP itself acts as the
@@ -98,7 +97,7 @@ impl GraphHunterApi {
                 }
 
                 let mut top: Vec<(String, usize)> = service_counts.into_iter().collect();
-                top.sort_by(|a, b| b.1.cmp(&a.1));
+                top.sort_by_key(|x| std::cmp::Reverse(x.1));
                 // Cap at 10 to keep the per-subnet payload bounded —
                 // the long-tail ports are noise once the top
                 // categories are visible.
@@ -115,7 +114,7 @@ impl GraphHunterApi {
                 });
             }
 
-            result.sort_by(|a, b| b.ip_count.cmp(&a.ip_count));
+            result.sort_by_key(|x| std::cmp::Reverse(x.ip_count));
             Ok(result)
         })
     }
@@ -196,17 +195,17 @@ fn parse_bytes_str(s: &str) -> Result<u64, ()> {
         return Ok(n);
     }
     let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() == 2 {
-        if let Ok(n) = parts[0].parse::<f64>() {
-            let multiplier = match parts[1].to_uppercase().as_str() {
-                "KB" => 1024.0_f64,
-                "MB" => 1024.0_f64 * 1024.0,
-                "GB" => 1024.0_f64 * 1024.0 * 1024.0,
-                "TB" => 1024.0_f64 * 1024.0 * 1024.0 * 1024.0,
-                _ => return Err(()),
-            };
-            return Ok((n * multiplier) as u64);
-        }
+    if parts.len() == 2
+        && let Ok(n) = parts[0].parse::<f64>()
+    {
+        let multiplier = match parts[1].to_uppercase().as_str() {
+            "KB" => 1024.0_f64,
+            "MB" => 1024.0_f64 * 1024.0,
+            "GB" => 1024.0_f64 * 1024.0 * 1024.0,
+            "TB" => 1024.0_f64 * 1024.0 * 1024.0 * 1024.0,
+            _ => return Err(()),
+        };
+        return Ok((n * multiplier) as u64);
     }
     Err(())
 }

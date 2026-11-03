@@ -230,8 +230,8 @@ fn apply_events_in_memory(
     }
 }
 
-/// The certificate: a real, heterogeneous-source dataset (Sysmon + Sentinel
-/// + FortiAnalyzer), applied to an in-memory incremental graph via
+/// The certificate: a real, heterogeneous-source dataset (Sysmon + Sentinel +
+/// FortiAnalyzer), applied to an in-memory incremental graph via
 /// `GraphDelta`/`apply_delta` (with a crash-replay of one source's batch)
 /// and, INDEPENDENTLY, journaled to disk and rebuilt from scratch by
 /// `check_incremental_equivalence` — must report full observable equality on

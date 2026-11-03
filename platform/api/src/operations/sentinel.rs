@@ -703,13 +703,13 @@ impl GraphHunterApi {
         );
         if let Some((ws, auth)) = creds {
             for p in &mut proposals {
-                if let Some(probe_kql) = estimate_probe_kql(p) {
-                    if let Ok((rows, stats)) = run_kql_rows(&ws, probe_kql, auth.clone()).await {
-                        cost.add(&stats);
-                        if let Some(row) = rows.first() {
-                            p.estimated_relations = row.get("Rows").and_then(|v| v.as_u64());
-                            p.estimated_entities = row.get("Entities").and_then(|v| v.as_u64());
-                        }
+                if let Some(probe_kql) = estimate_probe_kql(p)
+                    && let Ok((rows, stats)) = run_kql_rows(&ws, probe_kql, auth.clone()).await
+                {
+                    cost.add(&stats);
+                    if let Some(row) = rows.first() {
+                        p.estimated_relations = row.get("Rows").and_then(|v| v.as_u64());
+                        p.estimated_entities = row.get("Entities").and_then(|v| v.as_u64());
                     }
                 }
             }
@@ -842,7 +842,7 @@ impl GraphHunterApi {
             let (ec, rc) = graph
                 .insert_triples(mapped.triples, Some(dataset_id.as_str()))
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            run_scoring_adaptive(&mut graph);
+            let _ = run_scoring_adaptive(&mut graph);
             (ec + standalone_count, rc)
         };
 
@@ -876,7 +876,7 @@ impl GraphHunterApi {
         let want = |name: &str| {
             req.enrich
                 .as_ref()
-                .map_or(true, |e| e.iter().any(|x| x.eq_ignore_ascii_case(name)))
+                .is_none_or(|e| e.iter().any(|x| x.eq_ignore_ascii_case(name)))
         };
         let mut enrichment_applied = EnrichmentApplied::default();
         if want("geoip") || want("asn") {
@@ -1128,10 +1128,10 @@ impl GraphHunterApi {
             }
         }
 
-        if new_e > 0 || new_r > 0 {
-            if let Ok(mut graph) = session.graph.write() {
-                run_scoring_incremental(&mut graph);
-            }
+        if (new_e > 0 || new_r > 0)
+            && let Ok(mut graph) = session.graph.write()
+        {
+            run_scoring_incremental(&mut graph);
         }
 
         Ok(HydrationOutcome {
@@ -1519,8 +1519,7 @@ fn apply_time_window_sugar(kql: &str, window: Option<&TimeWindow>) -> String {
 /// `take` stages and the last one is the actual ceiling.
 fn extract_take_limit(kql: &str) -> Option<u32> {
     let mut last: Option<u32> = None;
-    let mut iter = kql.char_indices().peekable();
-    while let Some((i, _)) = iter.next() {
+    for (i, _) in kql.char_indices() {
         let rest = &kql[i..];
         let stripped = rest.trim_start();
         if let Some(after_take) = stripped.strip_prefix("take ") {
@@ -2323,6 +2322,10 @@ mod cap_kql_rows_tests {
 /// `crate::kql_flags::ENV_LOCK` (shared with `kql_flags`'s own flag-reader
 /// tests) to avoid cross-test races under the default multi-threaded runner.
 #[cfg(test)]
+// Tests hold the process-wide `ENV_LOCK` (std Mutex) across awaits on purpose:
+// it serializes env-var mutation for the whole test body. `#[tokio::test]`
+// runs on a current-thread runtime, so nothing else contends for it there.
+#[allow(clippy::await_holding_lock)]
 mod hunting_template_gate_tests {
     use super::*;
     use crate::kql_flags::ENV_LOCK;
@@ -2390,11 +2393,8 @@ mod hunting_template_gate_tests {
         // Default-on: the gate does not fire, so the request proceeds to
         // `run_kql` and fails downstream (dummy creds, no real transport) —
         // anything other than FeatureDisabled proves the gate didn't trip.
-        match err {
-            ApiError::FeatureDisabled { .. } => {
-                panic!("gate must not fire when flag is default-enabled")
-            }
-            _ => {}
+        if let ApiError::FeatureDisabled { .. } = err {
+            panic!("gate must not fire when flag is default-enabled")
         }
     }
 }
@@ -2527,6 +2527,10 @@ mod sugar_tests {
 }
 
 #[cfg(test)]
+// Tests hold the process-wide `ENV_LOCK` (std Mutex) across awaits on purpose:
+// it serializes env-var mutation for the whole test body. `#[tokio::test]`
+// runs on a current-thread runtime, so nothing else contends for it there.
+#[allow(clippy::await_holding_lock)]
 mod fallback_gate_tests {
     use super::*;
 
@@ -3166,6 +3170,10 @@ mod hydrate_tests {
 }
 
 #[cfg(test)]
+// Tests hold the process-wide `ENV_LOCK` (std Mutex) across awaits on purpose:
+// it serializes env-var mutation for the whole test body. `#[tokio::test]`
+// runs on a current-thread runtime, so nothing else contends for it there.
+#[allow(clippy::await_holding_lock)]
 mod seed_tests {
     use super::*;
     use crate::dto::session::CreateSessionRequest;

@@ -201,13 +201,14 @@ pub fn negotiate_field_config(
     // Sentinel, clean CSV) have 5+ recognized fields, so requiring
     // `>= 2` Nodes / `>= 3` total mappings still keeps them on the
     // fast path.
-    if let Some(cfg) = &heuristic_cfg {
-        if node_count >= 2 && total_count >= 3 {
-            return NegotiationOutcome::HeuristicOk {
-                config: cfg.clone(),
-                confidence: HEURISTIC_TRUST_THRESHOLD,
-            };
-        }
+    if let Some(cfg) = &heuristic_cfg
+        && node_count >= 2
+        && total_count >= 3
+    {
+        return NegotiationOutcome::HeuristicOk {
+            config: cfg.clone(),
+            confidence: HEURISTIC_TRUST_THRESHOLD,
+        };
     }
 
     // Heuristic was weak (zero Nodes or `None`). Ask the LLM for a refinement.

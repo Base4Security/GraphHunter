@@ -58,13 +58,13 @@ impl ExportOpts {
                 "epsilon_ms must be >= 0, got {epsilon_ms}"
             )));
         }
-        if let Some(w) = req.window {
-            if w.from > w.to {
-                return Err(ApiError::InvalidInput(format!(
-                    "window.from ({}) > window.to ({})",
-                    w.from, w.to
-                )));
-            }
+        if let Some(w) = req.window
+            && w.from > w.to
+        {
+            return Err(ApiError::InvalidInput(format!(
+                "window.from ({}) > window.to ({})",
+                w.from, w.to
+            )));
         }
         for s in &req.seeds {
             if !(s.prize.is_finite() && s.prize >= 0.0) {
@@ -182,11 +182,11 @@ pub fn build_instance(
     let empty: HashMap<String, String> = HashMap::new();
 
     graph.streaming.for_each_edge(|src_sid, e| {
-        if let Some((lo, hi)) = opts.window {
-            if e.timestamp < lo || e.timestamp > hi {
-                skipped += 1;
-                return;
-            }
+        if let Some((lo, hi)) = opts.window
+            && (e.timestamp < lo || e.timestamp > hi)
+        {
+            skipped += 1;
+            return;
         }
         let (Some(src), Some(dst)) = (
             graph.entities.get(&src_sid),
@@ -238,13 +238,13 @@ pub fn build_instance(
             .then_with(|| a.etype.cmp(&b.etype))
     });
 
-    if let Some(max) = opts.max_arcs {
-        if raw.len() > max {
-            return Err(ApiError::PayloadTooLarge(format!(
-                "{} arcs in the window exceed max_arcs = {max}; narrow the window or raise the cap",
-                raw.len()
-            )));
-        }
+    if let Some(max) = opts.max_arcs
+        && raw.len() > max
+    {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "{} arcs in the window exceed max_arcs = {max}; narrow the window or raise the cap",
+            raw.len()
+        )));
     }
 
     let costs = rarity_costs(&counts, opts.kappa);

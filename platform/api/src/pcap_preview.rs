@@ -384,13 +384,13 @@ impl PreviewState {
                 bytes,
             })
             .collect();
-        protocol_mix.sort_by(|a, b| b.packets.cmp(&a.packets));
+        protocol_mix.sort_by_key(|x| std::cmp::Reverse(x.packets));
 
         let top_src_ips = topn_ip(self.src_ips);
         let top_dst_ips = topn_ip(self.dst_ips);
 
         let mut port_pairs: Vec<((u16, &'static str), u64)> = self.dst_ports.into_iter().collect();
-        port_pairs.sort_by(|a, b| b.1.cmp(&a.1));
+        port_pairs.sort_by_key(|x| std::cmp::Reverse(x.1));
         let top_dst_ports: Vec<PortCount> = port_pairs
             .into_iter()
             .take(TOP_N)
@@ -419,7 +419,7 @@ impl PreviewState {
 
 fn topn_ip(m: HashMap<String, (u64, u64)>) -> Vec<IpCount> {
     let mut v: Vec<(String, (u64, u64))> = m.into_iter().collect();
-    v.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+    v.sort_by_key(|x| std::cmp::Reverse(x.1.0));
     v.into_iter()
         .take(TOP_N)
         .map(|(ip, (pkts, bytes))| IpCount {

@@ -451,7 +451,7 @@ impl GraphHunterApi {
         const PREFIX_CACHE_CAP: usize = 50_000;
         let mut prefix_cache: std::collections::HashMap<
             String,
-            std::sync::Arc<Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>>,
+            std::sync::Arc<crate::state::session::PrefixSnapshot>,
         > = std::collections::HashMap::new();
         let mut last_prefix_resume_depth: usize = 0;
         let mut prefix_cache_hits: usize = 0;
@@ -621,7 +621,7 @@ impl GraphHunterApi {
                 } else {
                     let trie = graph.build_lftj_trie_for(&hypothesis);
                     let ts_map =
-                        graph_hunter_core::lftj_query::MinTimestampMap::build(&*graph, &trie);
+                        graph_hunter_core::lftj_query::MinTimestampMap::build(&graph, &trie);
                     let entry = crate::state::session::LftjTypedTrie {
                         forward: std::sync::Arc::new(trie),
                         ts_map: std::sync::Arc::new(ts_map),
@@ -674,7 +674,7 @@ impl GraphHunterApi {
                 let raw = match lftj_plan {
                     graph_hunter_core::planner::DispatchPlan::TriangleLftj => {
                         graph_hunter_core::lftj_query::enumerate_triangles_lftj_simd_window(
-                            &*graph,
+                            &graph,
                             &trie,
                             &ts_map,
                             t_lo_window,
@@ -684,7 +684,7 @@ impl GraphHunterApi {
                     }
                     graph_hunter_core::planner::DispatchPlan::K4Lftj => {
                         graph_hunter_core::lftj_query::enumerate_4cliques_lftj_simd_par(
-                            &*graph,
+                            &graph,
                             &trie,
                             &ts_map,
                             t_lo_window,
@@ -694,7 +694,7 @@ impl GraphHunterApi {
                     }
                     graph_hunter_core::planner::DispatchPlan::K5Lftj => {
                         graph_hunter_core::lftj_query::enumerate_5cliques_lftj_simd_par(
-                            &*graph,
+                            &graph,
                             &trie,
                             &ts_map,
                             t_lo_window,
@@ -705,7 +705,7 @@ impl GraphHunterApi {
                     graph_hunter_core::planner::DispatchPlan::C6Lftj => {
                         let rev = reverse.expect("C6 path built reverse above");
                         graph_hunter_core::lftj_query::enumerate_6cycles_lftj_simd_par(
-                            &*graph,
+                            &graph,
                             &trie,
                             &rev,
                             &ts_map,
@@ -719,12 +719,11 @@ impl GraphHunterApi {
                 let raw_paths = std::sync::Arc::new(raw);
 
                 // Insert into the persistent canonical cache.
-                if let Ok(mut cache_lock) = session_for_lftj.lftj_cache.write() {
-                    if let Some(cache) = cache_lock.as_mut() {
-                        if cache.version == live_version {
-                            cache.insert_canonical(canonical_key, raw_paths.clone());
-                        }
-                    }
+                if let Ok(mut cache_lock) = session_for_lftj.lftj_cache.write()
+                    && let Some(cache) = cache_lock.as_mut()
+                    && cache.version == live_version
+                {
+                    cache.insert_canonical(canonical_key, raw_paths.clone());
                 }
                 let truncated = raw_paths.len() >= cap;
                 // Apply per-hypothesis aggregation (HAVING / WITHIN)
@@ -876,9 +875,8 @@ impl GraphHunterApi {
                 // the tree-walk enumerator which doesn't have a
                 // chain-prefix concept yet.
                 let mut resume_depth = 0usize;
-                let mut resume_starting: std::sync::Arc<
-                    Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>,
-                > = std::sync::Arc::new(Vec::new());
+                let mut resume_starting: std::sync::Arc<crate::state::session::PrefixSnapshot> =
+                    std::sync::Arc::new(Vec::new());
                 if matches!(
                     hypothesis.shape,
                     graph_hunter_core::hypothesis::HypothesisShape::Chain

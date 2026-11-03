@@ -239,8 +239,7 @@ impl GraphHunterApi {
         let page_size = req
             .page_size
             .unwrap_or(DEFAULT_PAGE_SIZE)
-            .min(MAX_PAGE_SIZE)
-            .max(1);
+            .clamp(1, MAX_PAGE_SIZE);
         let offset = req.offset.unwrap_or(0);
 
         self.with_graph_read(req.session.as_ref(), |graph| {

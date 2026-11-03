@@ -176,7 +176,7 @@ pub fn pcap_ingest_streaming(
                 }
                 reader.consume(offset);
 
-                if packets_seen > 0 && packets_seen % IDLE_SWEEP_EVERY_N_PACKETS == 0 {
+                if packets_seen > 0 && packets_seen.is_multiple_of(IDLE_SWEEP_EVERY_N_PACKETS) {
                     aggregator.sweep_idle();
                 }
                 if aggregator.pending_emit.len() >= BATCH_FLUSH_SIZE {
@@ -545,11 +545,11 @@ impl FlowAggregator {
                         state.icmp_code = pkt_icmp_code;
                     }
                     // UDP/88 Kerberos: same first-wins policy.
-                    if state.l7_kerberos_user.is_none() {
-                        if let Some(p) = pkt_kerberos.as_ref() {
-                            state.l7_kerberos_user = Some(p.cname.clone());
-                            state.l7_kerberos_kind = Some(p.kind);
-                        }
+                    if state.l7_kerberos_user.is_none()
+                        && let Some(p) = pkt_kerberos.as_ref()
+                    {
+                        state.l7_kerberos_user = Some(p.cname.clone());
+                        state.l7_kerberos_kind = Some(p.kind);
                     }
                     state.fin_seen || state.rst_seen
                 };
@@ -589,10 +589,10 @@ impl FlowAggregator {
             }
         };
 
-        if let Some(key) = close_now {
-            if let Some(state) = self.active.remove(&key) {
-                self.emit(key, state, true);
-            }
+        if let Some(key) = close_now
+            && let Some(state) = self.active.remove(&key)
+        {
+            self.emit(key, state, true);
         }
         true
     }
@@ -951,77 +951,82 @@ fn dns_edge(querier_ip: String, qname: String, timestamp: i64, pcap_file: &str) 
 /// still empty, so per-packet cost is one byte compare per slot after
 /// the first hit. Returns as soon as any decoder claims the payload.
 fn peek_tcp_l7(state: &mut FlowState, payload: &[u8]) {
-    if state.l7_sni.is_none() && !state.l7_ech_seen {
-        if let Some(info) = extract_tls_client_hello(payload) {
-            apply_tls_info(state, info);
-            return;
-        }
+    if state.l7_sni.is_none()
+        && !state.l7_ech_seen
+        && let Some(info) = extract_tls_client_hello(payload)
+    {
+        apply_tls_info(state, info);
+        return;
     }
-    if state.l7_http_host.is_none() {
-        if let Some(host) = extract_http_host(payload) {
-            state.l7_http_host = Some(host);
-            return;
-        }
+    if state.l7_http_host.is_none()
+        && let Some(host) = extract_http_host(payload)
+    {
+        state.l7_http_host = Some(host);
+        return;
     }
-    if state.l7_ssh_banner.is_none() {
-        if let Some(banner) = extract_ssh_banner(payload) {
-            state.l7_ssh_banner = Some(banner);
-            return;
-        }
+    if state.l7_ssh_banner.is_none()
+        && let Some(banner) = extract_ssh_banner(payload)
+    {
+        state.l7_ssh_banner = Some(banner);
+        return;
     }
-    if state.l7_ftp_user.is_none() {
-        if let Some(user) = extract_ftp_user(payload) {
-            state.l7_ftp_user = Some(user);
-            return;
-        }
+    if state.l7_ftp_user.is_none()
+        && let Some(user) = extract_ftp_user(payload)
+    {
+        state.l7_ftp_user = Some(user);
+        return;
     }
-    if state.l7_smb2_command.is_none() {
-        if let Some(cmd) = detect_smb2_command(payload) {
-            state.l7_smb2_command = Some(cmd);
-            // SESSION_SETUP carries the NTLMSSP blob — scan the
-            // rest of the payload for a Type 3 message and harvest
-            // the username if found. Other SMB2 commands don't
-            // carry auth material so we skip them.
-            if cmd == 0x0001 && state.l7_ntlm_user.is_none() {
-                if let Some(info) = extract_ntlm_type3(payload) {
-                    state.l7_ntlm_user = Some(info.user);
-                    if !info.domain.is_empty() {
-                        state.l7_ntlm_domain = Some(info.domain);
-                    }
-                }
+    if state.l7_smb2_command.is_none()
+        && let Some(cmd) = detect_smb2_command(payload)
+    {
+        state.l7_smb2_command = Some(cmd);
+        // SESSION_SETUP carries the NTLMSSP blob — scan the
+        // rest of the payload for a Type 3 message and harvest
+        // the username if found. Other SMB2 commands don't
+        // carry auth material so we skip them.
+        if cmd == 0x0001
+            && state.l7_ntlm_user.is_none()
+            && let Some(info) = extract_ntlm_type3(payload)
+        {
+            state.l7_ntlm_user = Some(info.user);
+            if !info.domain.is_empty() {
+                state.l7_ntlm_domain = Some(info.domain);
             }
-            return;
         }
+        return;
     }
     // Kerberos AS-REQ / TGS-REQ on TCP/88 (or anywhere — the byte
     // prefix is unambiguous). Cheap prefix check: 0x6a or 0x6c
     // before any walking.
-    if state.l7_kerberos_user.is_none() && krb_byte_prefix_plausible(payload) {
-        if let Some(p) = extract_kerberos_principal(payload) {
-            state.l7_kerberos_user = Some(p.cname);
-            state.l7_kerberos_kind = Some(p.kind);
-            return;
-        }
+    if state.l7_kerberos_user.is_none()
+        && krb_byte_prefix_plausible(payload)
+        && let Some(p) = extract_kerberos_principal(payload)
+    {
+        state.l7_kerberos_user = Some(p.cname);
+        state.l7_kerberos_kind = Some(p.kind);
+        return;
     }
     // LDAP bindRequest on TCP/389 (3268 GC). The outer SEQUENCE
     // tag `0x30` is universal enough that we run the full parser
     // and rely on its fast-fail.
-    if state.l7_ldap_user.is_none() && payload.starts_with(&[0x30]) {
-        if let Some(dn) = extract_ldap_bind_dn(payload) {
-            state.l7_ldap_user = Some(dn);
-            return;
-        }
+    if state.l7_ldap_user.is_none()
+        && payload.starts_with(&[0x30])
+        && let Some(dn) = extract_ldap_bind_dn(payload)
+    {
+        state.l7_ldap_user = Some(dn);
+        return;
     }
     // Stand-alone NTLM Type 3 (HTTP-NTLM-Auth, raw SMB without
     // SMB2 header, …). Only run when the cheap signature byte
     // search hits — the search itself is O(n) per packet and we
     // don't want to pay that for non-NTLM traffic.
-    if state.l7_ntlm_user.is_none() && payload_contains_ntlmssp(payload) {
-        if let Some(info) = extract_ntlm_type3(payload) {
-            state.l7_ntlm_user = Some(info.user);
-            if !info.domain.is_empty() {
-                state.l7_ntlm_domain = Some(info.domain);
-            }
+    if state.l7_ntlm_user.is_none()
+        && payload_contains_ntlmssp(payload)
+        && let Some(info) = extract_ntlm_type3(payload)
+    {
+        state.l7_ntlm_user = Some(info.user);
+        if !info.domain.is_empty() {
+            state.l7_ntlm_domain = Some(info.domain);
         }
     }
 }

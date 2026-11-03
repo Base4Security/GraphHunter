@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn auto_picks_netflow_over_generic_formats() {
         let mut buf = vec![0u8, 9u8]; // version 9
-        buf.extend(std::iter::repeat(0u8).take(64));
+        buf.extend(std::iter::repeat_n(0u8, 64));
         let p = std::env::temp_dir().join("graphhunter_precedence_netflow.bin");
         std::fs::write(&p, &buf).unwrap();
         assert_eq!(

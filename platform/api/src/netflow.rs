@@ -624,8 +624,10 @@ mod tests {
 
     // ── NetFlow v5 ───────────────────────────────────────────────
 
-    fn build_v5_packet(records: &[(u32, u32, u16, u16, u8, u32, u32, u8)]) -> Vec<u8> {
-        // record tuple: (src, dst, sport, dport, proto, packets, bytes, tcp_flags)
+    /// (src, dst, sport, dport, proto, packets, bytes, tcp_flags)
+    type V5Record = (u32, u32, u16, u16, u8, u32, u32, u8);
+
+    fn build_v5_packet(records: &[V5Record]) -> Vec<u8> {
         let mut p = Vec::new();
         p.extend_from_slice(&5u16.to_be_bytes()); // version
         p.extend_from_slice(&(records.len() as u16).to_be_bytes()); // count

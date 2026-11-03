@@ -9,15 +9,15 @@
 //!
 //! Three timings per fixture:
 //!   * `cold`   — first batch on a fresh API instance. Pays trie
-//!                build + per-template enumerate.
+//!     build + per-template enumerate.
 //!   * `warm`   — second batch on the same Session, no graph
-//!                mutation. Both the typed-trie map (D3 stage 4)
-//!                and the persistent canonical raw-result cache
-//!                (D3 stage 4) are warm. Should be near-zero
-//!                enumerate cost; only `apply_aggregation` runs.
+//!     mutation. Both the typed-trie map (D3 stage 4)
+//!     and the persistent canonical raw-result cache
+//!     (D3 stage 4) are warm. Should be near-zero
+//!     enumerate cost; only `apply_aggregation` runs.
 //!   * `cold-after-mutation` — second batch after a single
-//!                add_entity bumps the `mutation_version`. Both
-//!                caches invalidate; should mirror the cold time.
+//!     add_entity bumps the `mutation_version`. Both
+//!     caches invalidate; should mirror the cold time.
 //!
 //! Run:
 //!   cargo bench --bench batch_csh_cold_vs_warm \

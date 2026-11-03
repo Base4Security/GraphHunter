@@ -846,7 +846,6 @@ mod tests {
     #[test]
     fn batched_csv_parse_matches_whole_file_parse() {
         use crate::record_scan::RecordScanner;
-        use graph_hunter_core::LogParser;
 
         let csv = "src_ip,dst_ip,user
                    10.0.0.1,10.0.0.2,ana

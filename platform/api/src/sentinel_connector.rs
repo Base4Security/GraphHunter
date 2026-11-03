@@ -547,16 +547,14 @@ pub async fn polling_loop<T: SentinelTransport>(
                                 // stop draining this table this poll, and
                                 // record coverage as missing.
                                 consecutive_errors += 1;
-                                if coverage_on {
-                                    if let Ok(mut sc) = session.source_coverage.write() {
-                                        crate::coverage::record_siem_outcome(
-                                            &mut sc,
-                                            &coverage_source_id(table),
-                                            false,
-                                            crate::util::now_secs(),
-                                            COVERAGE_MAX_FAILURES,
-                                        );
-                                    }
+                                if coverage_on && let Ok(mut sc) = session.source_coverage.write() {
+                                    crate::coverage::record_siem_outcome(
+                                        &mut sc,
+                                        &coverage_source_id(table),
+                                        false,
+                                        crate::util::now_secs(),
+                                        COVERAGE_MAX_FAILURES,
+                                    );
                                 }
                                 break;
                             }
@@ -625,16 +623,14 @@ pub async fn polling_loop<T: SentinelTransport>(
                                 consecutive_errors,
                                 true,
                             );
-                            if coverage_on {
-                                if let Ok(mut sc) = session.source_coverage.write() {
-                                    crate::coverage::record_siem_outcome(
-                                        &mut sc,
-                                        &coverage_source_id(table),
-                                        false,
-                                        crate::util::now_secs(),
-                                        COVERAGE_MAX_FAILURES,
-                                    );
-                                }
+                            if coverage_on && let Ok(mut sc) = session.source_coverage.write() {
+                                crate::coverage::record_siem_outcome(
+                                    &mut sc,
+                                    &coverage_source_id(table),
+                                    false,
+                                    crate::util::now_secs(),
+                                    COVERAGE_MAX_FAILURES,
+                                );
                             }
                             // Don't spin on a broken response for this table.
                             break;
@@ -649,16 +645,14 @@ pub async fn polling_loop<T: SentinelTransport>(
                             consecutive_errors,
                             true,
                         );
-                        if coverage_on {
-                            if let Ok(mut sc) = session.source_coverage.write() {
-                                crate::coverage::record_siem_outcome(
-                                    &mut sc,
-                                    &coverage_source_id(table),
-                                    false,
-                                    crate::util::now_secs(),
-                                    COVERAGE_MAX_FAILURES,
-                                );
-                            }
+                        if coverage_on && let Ok(mut sc) = session.source_coverage.write() {
+                            crate::coverage::record_siem_outcome(
+                                &mut sc,
+                                &coverage_source_id(table),
+                                false,
+                                crate::util::now_secs(),
+                                COVERAGE_MAX_FAILURES,
+                            );
                         }
                         // Don't spin on a broken transport for this table.
                         break;
@@ -695,11 +689,11 @@ pub async fn polling_loop<T: SentinelTransport>(
             // Bookkeeping is per-dataset_id, NOT total graph counts:
             // a session may have other datasets we mustn't double-
             // count.
-            if let Ok(mut datasets) = session.datasets.write() {
-                if let Some(ds) = datasets.iter_mut().find(|d| d.id == dataset_id) {
-                    ds.entity_count = ds.entity_count.saturating_add(total_new_entities);
-                    ds.relation_count = ds.relation_count.saturating_add(total_new_relations);
-                }
+            if let Ok(mut datasets) = session.datasets.write()
+                && let Some(ds) = datasets.iter_mut().find(|d| d.id == dataset_id)
+            {
+                ds.entity_count = ds.entity_count.saturating_add(total_new_entities);
+                ds.relation_count = ds.relation_count.saturating_add(total_new_relations);
             }
             emitter.emit(
                 event_names::SENTINEL_DATA,
@@ -756,6 +750,11 @@ pub fn default_tables() -> Vec<String> {
 }
 
 #[cfg(test)]
+// Tests hold the process-wide `ENV_LOCK` (std Mutex, via `lock_env()`) across
+// awaits on purpose: it serializes env-var mutation for the whole test body.
+// `#[tokio::test]` runs on a current-thread runtime, so nothing else
+// contends for it there.
+#[allow(clippy::await_holding_lock)]
 mod pause_tests {
     use super::*;
     use crate::dto::session::CreateSessionRequest;
@@ -1327,6 +1326,11 @@ mod pause_tests {
 // `failing_table_query_marks_source_missing_when_coverage_enabled` above
 // (a transport error, not an insert error, but the same call shape).
 #[cfg(test)]
+// Tests hold the process-wide `ENV_LOCK` (std Mutex, via `lock_env()`) across
+// awaits on purpose: it serializes env-var mutation for the whole test body.
+// `#[tokio::test]` runs on a current-thread runtime, so nothing else
+// contends for it there.
+#[allow(clippy::await_holding_lock)]
 mod fix_wave_tests {
     use super::*;
     use crate::dto::session::CreateSessionRequest;
@@ -1812,11 +1816,13 @@ mod fix_wave_tests {
             "all-same-tick fallback must ingest every row rather than emptying the batch: got {relations}"
         );
 
-        let msgs = warnings.lock().unwrap();
-        assert!(
-            msgs.iter().any(|m| m.contains("batch_size")),
-            "expected a warning to raise batch_size for this table, got {msgs:?}"
-        );
+        {
+            let msgs = warnings.lock().unwrap();
+            assert!(
+                msgs.iter().any(|m| m.contains("batch_size")),
+                "expected a warning to raise batch_size for this table, got {msgs:?}"
+            );
+        }
 
         cancel.cancel();
         let _ = loop_handle.await;

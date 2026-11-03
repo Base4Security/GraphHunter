@@ -448,13 +448,13 @@ pub fn compute_ingest_warnings(graph: &GraphHunter) -> Vec<String> {
         let user_id = entity.id.as_str();
         for compact in graph.get_compact_relations(user_id) {
             let dest_str = graph.interner.resolve(compact.dest_sid);
-            if let Some(dest_entity) = graph.get_entity(dest_str) {
-                if matches!(dest_entity.entity_type, EntityType::IP) {
-                    ip_to_users
-                        .entry(dest_entity.id.as_str())
-                        .or_default()
-                        .insert(user_id);
-                }
+            if let Some(dest_entity) = graph.get_entity(dest_str)
+                && matches!(dest_entity.entity_type, EntityType::IP)
+            {
+                ip_to_users
+                    .entry(dest_entity.id.as_str())
+                    .or_default()
+                    .insert(user_id);
             }
         }
     }
@@ -768,10 +768,10 @@ impl GraphHunterApi {
             } else {
                 Some(stats)
             };
-            if let Some(s) = stats.as_ref() {
-                if let Some(d) = s.drift.as_ref() {
-                    self.record_drift(dataset_id.as_str(), d);
-                }
+            if let Some(s) = stats.as_ref()
+                && let Some(d) = s.drift.as_ref()
+            {
+                self.record_drift(dataset_id.as_str(), d);
             }
             (ne, nr, stats, used_auto)
         };
@@ -1209,10 +1209,10 @@ impl GraphHunterApi {
             }
         }
 
-        if let Some(s) = ingest_stats.as_ref() {
-            if let Some(d) = s.drift.as_ref() {
-                self.record_drift(dataset_id.as_str(), d);
-            }
+        if let Some(s) = ingest_stats.as_ref()
+            && let Some(d) = s.drift.as_ref()
+        {
+            self.record_drift(dataset_id.as_str(), d);
         }
 
         let (total_entities, total_relations, warnings) = {
@@ -1397,8 +1397,6 @@ impl GraphHunterApi {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 bg_session.set_phase(SessionPhase::Loading);
 
-                const MAX_INGEST_LINES: usize = usize::MAX;
-
                 // Date-range filter for line-based formats (IIS, CSV). Lines
                 // whose first 10 bytes parse as an ISO date outside
                 // `[date_from, date_to]` are skipped before parsing. Byte
@@ -1430,10 +1428,10 @@ impl GraphHunterApi {
                     // export instead of e.g. `builtin:evtx`. Mirrors the
                     // `ds.parser = Some(resolved.clone())` patch below for
                     // the tabular path.
-                    if let Ok(mut datasets) = bg_session.datasets.write() {
-                        if let Some(ds) = datasets.iter_mut().find(|d| d.id == bg_dataset_id) {
-                            ds.parser = Some(ingestor.name().to_string());
-                        }
+                    if let Ok(mut datasets) = bg_session.datasets.write()
+                        && let Some(ds) = datasets.iter_mut().find(|d| d.id == bg_dataset_id)
+                    {
+                        ds.parser = Some(ingestor.name().to_string());
                     }
                     let result = ingestor.ingest(crate::ingestors::IngestContext {
                         path: &bg_path,
@@ -1627,18 +1625,18 @@ impl GraphHunterApi {
                 // known (it wasn't yet at the synchronous push above) —
                 // export's builtin-parser provenance identity reads this
                 // for datasets that end up with no `field_config`.
-                if let Ok(mut datasets) = bg_session.datasets.write() {
-                    if let Some(ds) = datasets.iter_mut().find(|d| d.id == bg_dataset_id) {
-                        if let Some(cfg) = &auto_config {
-                            ds.field_config = Some(cfg.clone());
-                            // FROZEN mapping identity, set once here
-                            // (still before any event is parsed under this
-                            // dataset — see `DatasetInfo::mapping_hash`)
-                            // and never touched again after this point.
-                            ds.mapping_hash = Some(ProvenanceCtx::mapping_hash_for_config(cfg));
-                        }
-                        ds.parser = Some(resolved.clone());
+                if let Ok(mut datasets) = bg_session.datasets.write()
+                    && let Some(ds) = datasets.iter_mut().find(|d| d.id == bg_dataset_id)
+                {
+                    if let Some(cfg) = &auto_config {
+                        ds.field_config = Some(cfg.clone());
+                        // FROZEN mapping identity, set once here
+                        // (still before any event is parsed under this
+                        // dataset — see `DatasetInfo::mapping_hash`)
+                        // and never touched again after this point.
+                        ds.mapping_hash = Some(ProvenanceCtx::mapping_hash_for_config(cfg));
                     }
+                    ds.parser = Some(resolved.clone());
                 }
 
                 // Pre-allocate graph capacity based on file-size heuristics.
@@ -1658,8 +1656,10 @@ impl GraphHunterApi {
                     is_line_based,
                     bytes_total
                 );
-                let ingest_result: Result<(usize, usize, Option<DriftSnapshot>, Option<(u64, u64, u64)>), String> =
-                    (|| -> Result<(usize, usize, Option<DriftSnapshot>, Option<(u64, u64, u64)>), String> {
+                // (new entities, new relations, drift, truncation as (byte offset, avail MB, growth MB)).
+                type IngestOutcome = (usize, usize, Option<DriftSnapshot>, Option<(u64, u64, u64)>);
+                let ingest_result: Result<IngestOutcome, String> =
+                    (|| -> Result<IngestOutcome, String> {
                         if is_line_based {
                             // ── Line-based streaming path (NDJSON / IIS / CSV): mmap + line-batch parsing ──
                             bg_emitter.emit(
@@ -1694,8 +1694,9 @@ impl GraphHunterApi {
                             // Baseline for the self-growth half of the OOM
                             // guard: only growth *since this ingest started*
                             // can be attributed to it.
-                            let commit_baseline_mb =
-                                memory_snapshot_mb().map(|(_, commit, _)| commit).unwrap_or(0);
+                            let commit_baseline_mb = memory_snapshot_mb()
+                                .map(|(_, commit, _)| commit)
+                                .unwrap_or(0);
                             // Set when the guard fires, so the truncation can
                             // be reported instead of inferred from a bool.
                             let mut truncated_at: Option<(usize, u64, u64)> = None;
@@ -1742,23 +1743,11 @@ impl GraphHunterApi {
                             // value does not end a record, so a multi-line
                             // FortiWeb attack payload stays one record
                             // instead of being shredded into fragments.
-                            let mut scanner =
-                                crate::record_scan::RecordScanner::new(stream_mode);
+                            let mut scanner = crate::record_scan::RecordScanner::new(stream_mode);
 
-                            let mut total_lines = 0usize;
                             let mut search_offset = header_end;
                             while let Some(pos) = scanner.next_record_end(raw, search_offset) {
                                 search_offset = pos + 1;
-
-                                total_lines += 1;
-                                if total_lines > MAX_INGEST_LINES {
-                                    tracing::warn!(
-                                        "INGEST: reached max ingest limit of {} lines, stopping",
-                                        MAX_INGEST_LINES
-                                    );
-                                    stopped_early = true;
-                                    break;
-                                }
 
                                 if date_from_bytes.is_some() || date_to_bytes.is_some() {
                                     let line_start = if pos > 0 && batch_start < pos {
@@ -1791,15 +1780,15 @@ impl GraphHunterApi {
                                     };
 
                                     if let Some(ref d) = line_date {
-                                        if let Some(ref from) = date_from_bytes {
-                                            if d.as_slice() < from.as_slice() {
-                                                continue;
-                                            }
+                                        if let Some(ref from) = date_from_bytes
+                                            && d.as_slice() < from.as_slice()
+                                        {
+                                            continue;
                                         }
-                                        if let Some(ref to) = date_to_bytes {
-                                            if d.as_slice() > to.as_slice() {
-                                                continue;
-                                            }
+                                        if let Some(ref to) = date_to_bytes
+                                            && d.as_slice() > to.as_slice()
+                                        {
+                                            continue;
                                         }
                                     }
                                 }
@@ -1835,20 +1824,20 @@ impl GraphHunterApi {
                                     // a `#Fields:` directive that can recur
                                     // mid-file, a headed tabular format
                                     // repeats its first row.
-                                    let header_for_batch: Option<&str> =
-                                        if let Some(ref hdr) = last_fields_header {
-                                            if memchr::memmem::find(batch_bytes, b"#Fields:")
-                                                .is_none()
-                                            {
-                                                Some(hdr.as_str())
-                                            } else {
-                                                None
-                                            }
-                                        } else if batch_start > 0 {
-                                            table_header.as_deref()
+                                    let header_for_batch: Option<&str> = if let Some(ref hdr) =
+                                        last_fields_header
+                                    {
+                                        if memchr::memmem::find(batch_bytes, b"#Fields:").is_none()
+                                        {
+                                            Some(hdr.as_str())
                                         } else {
                                             None
-                                        };
+                                        }
+                                    } else if batch_start > 0 {
+                                        table_header.as_deref()
+                                    } else {
+                                        None
+                                    };
 
                                     // Sub-chunks are cut at record
                                     // boundaries, not at every newline: the
@@ -1867,7 +1856,9 @@ impl GraphHunterApi {
                                     let num_chunks = rayon::current_num_threads().max(1);
                                     let sub_chunks: Vec<std::borrow::Cow<'_, str>> =
                                         crate::record_scan::split_records(
-                                            &batch_str, stream_mode, num_chunks,
+                                            &batch_str,
+                                            stream_mode,
+                                            num_chunks,
                                         )
                                         .into_iter()
                                         .map(|c| match header_for_batch {
@@ -1916,8 +1907,11 @@ impl GraphHunterApi {
                                                     let remaining =
                                                         graph_hunter_core::parser::SKIP_SAMPLE_CAP
                                                             - skipped_accum.len();
-                                                    skipped_accum
-                                                        .extend(s.skipped_samples.into_iter().take(remaining));
+                                                    skipped_accum.extend(
+                                                        s.skipped_samples
+                                                            .into_iter()
+                                                            .take(remaining),
+                                                    );
                                                 }
                                             }
                                             flattened
@@ -1930,8 +1924,9 @@ impl GraphHunterApi {
                                                     .merge(&d);
                                             }
                                             skipped_accum = s.skipped_samples;
-                                            skipped_accum
-                                                .truncate(graph_hunter_core::parser::SKIP_SAMPLE_CAP);
+                                            skipped_accum.truncate(
+                                                graph_hunter_core::parser::SKIP_SAMPLE_CAP,
+                                            );
                                             e
                                         };
                                     // Journal step: must run BEFORE the graph
@@ -1957,8 +1952,13 @@ impl GraphHunterApi {
                                             .graph
                                             .write()
                                             .map_err(|e| format!("Lock poisoned: {}", e))?;
-                                        insert_journaled(&mut graph, events, journal_keys, Some(&bg_dataset_id))
-                                            .map_err(|e| e.to_string())?
+                                        insert_journaled(
+                                            &mut graph,
+                                            events,
+                                            journal_keys,
+                                            Some(&bg_dataset_id),
+                                        )
+                                        .map_err(|e| e.to_string())?
                                     };
                                     note_post_finalize_appends(&bg_session, nr);
                                     total_new_entities += ne;
@@ -1981,27 +1981,27 @@ impl GraphHunterApi {
                                     // machine is critically low AND this ingest is what
                                     // filled it — see `SELF_GROWTH_CRITICAL_MB` for why
                                     // availability alone is the wrong test.
-                                    if total_new_relations % (BATCH_LINES * 20) < BATCH_LINES {
-                                        if let Some((avail_mb, commit_mb, total_mb)) =
+                                    if total_new_relations % (BATCH_LINES * 20) < BATCH_LINES
+                                        && let Some((avail_mb, commit_mb, total_mb)) =
                                             memory_snapshot_mb()
+                                    {
+                                        let self_growth_mb =
+                                            commit_mb.saturating_sub(commit_baseline_mb);
+                                        if avail_mb < CRITICAL_MEMORY_MB
+                                            && self_growth_mb
+                                                > total_mb / SELF_GROWTH_CRITICAL_FRACTION
                                         {
-                                            let self_growth_mb =
-                                                commit_mb.saturating_sub(commit_baseline_mb);
-                                            if avail_mb < CRITICAL_MEMORY_MB
-                                                && self_growth_mb
-                                                    > total_mb / SELF_GROWTH_CRITICAL_FRACTION
-                                            {
-                                                tracing::warn!(
-                                                    "INGEST: stopping at byte {} of {} — {} MB free and this ingest grew {} MB",
-                                                    pos + 1,
-                                                    bytes_total,
-                                                    avail_mb,
-                                                    self_growth_mb
-                                                );
-                                                truncated_at = Some((pos + 1, avail_mb, self_growth_mb));
-                                                stopped_early = true;
-                                                break;
-                                            }
+                                            tracing::warn!(
+                                                "INGEST: stopping at byte {} of {} — {} MB free and this ingest grew {} MB",
+                                                pos + 1,
+                                                bytes_total,
+                                                avail_mb,
+                                                self_growth_mb
+                                            );
+                                            truncated_at =
+                                                Some((pos + 1, avail_mb, self_growth_mb));
+                                            stopped_early = true;
+                                            break;
                                         }
                                     }
 
@@ -2067,8 +2067,13 @@ impl GraphHunterApi {
                                             .graph
                                             .write()
                                             .map_err(|e| format!("Lock poisoned: {}", e))?;
-                                        insert_journaled(&mut graph, events, journal_keys, Some(&bg_dataset_id))
-                                            .map_err(|e| e.to_string())?
+                                        insert_journaled(
+                                            &mut graph,
+                                            events,
+                                            journal_keys,
+                                            Some(&bg_dataset_id),
+                                        )
+                                        .map_err(|e| e.to_string())?
                                     };
                                     note_post_finalize_appends(&bg_session, nr);
                                     total_new_entities += ne;
@@ -2195,8 +2200,13 @@ impl GraphHunterApi {
                                     .graph
                                     .write()
                                     .map_err(|e| format!("Lock poisoned: {}", e))?;
-                                insert_journaled(&mut graph, events, journal_keys, Some(&bg_dataset_id))
-                                    .map_err(|e| e.to_string())?
+                                insert_journaled(
+                                    &mut graph,
+                                    events,
+                                    journal_keys,
+                                    Some(&bg_dataset_id),
+                                )
+                                .map_err(|e| e.to_string())?
                             };
                             // Guard dropped above before noting appends —
                             // note_post_finalize_appends re-locks graph.read()
@@ -2271,11 +2281,11 @@ impl GraphHunterApi {
                             }
                         }
 
-                        if let Ok(mut datasets) = bg_session.datasets.write() {
-                            if let Some(ds) = datasets.iter_mut().find(|d| d.id == bg_dataset_id) {
-                                ds.entity_count = new_entities;
-                                ds.relation_count = new_relations;
-                            }
+                        if let Ok(mut datasets) = bg_session.datasets.write()
+                            && let Some(ds) = datasets.iter_mut().find(|d| d.id == bg_dataset_id)
+                        {
+                            ds.entity_count = new_entities;
+                            ds.relation_count = new_relations;
                         }
 
                         let (total_entities, total_relations, mut warnings) = bg_session

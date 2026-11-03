@@ -273,7 +273,7 @@ async fn seed_from_ioc_appends_to_recent_pivots() {
         .iter()
         .find(|p| p.entity == unique)
         .expect("seeded entity must appear in recent_pivots");
-    assert_eq!(pivot.expanded, false, "fresh seed must be unexpanded");
+    assert!(!pivot.expanded, "fresh seed must be unexpanded");
     assert_eq!(pivot.kind, "IP");
 }
 

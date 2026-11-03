@@ -113,6 +113,7 @@ fn parse_failures_from_load_data_with_config_land_in_dlq() {
 ///   1. the response reports every submitted id as reingested,
 ///   2. the DLQ is drained afterwards,
 ///   3. entities actually appeared in the session graph.
+///
 /// This closes the "bad mapping → fix → retry" workflow the UI exposes
 /// through the dead-letter drawer.
 #[test]

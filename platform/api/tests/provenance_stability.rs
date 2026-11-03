@@ -10,6 +10,7 @@
 //!   2. two datasets with different mappings get different hashes
 //!      (distinguishable),
 //!   3. re-exporting the same session yields the SAME hash (frozen).
+//!
 //! Datasets ingested through a hand-written (non-FieldConfig) parser must
 //! get a real `builtin:{parser}` identity, not the useless `builtin:unknown`.
 
@@ -138,7 +139,7 @@ fn provenance_mapping_hash_is_frozen_and_distinguishes_configs() {
 
     let mut hash_a: Option<String> = None;
     let mut hash_b: Option<String> = None;
-    for (_dataset_id, hashes) in &by_dataset_1 {
+    for hashes in by_dataset_1.values() {
         let first = hashes.first().expect("at least one event").clone();
         assert!(
             hashes.iter().all(|h| *h == first),

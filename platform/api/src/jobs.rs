@@ -96,11 +96,11 @@ impl IngestJobStore {
     }
 
     fn with_job<F: FnOnce(&mut IngestJobSnapshot)>(&self, job_id: &str, f: F) {
-        if let Ok(mut jobs) = self.inner.write() {
-            if let Some(j) = jobs.get_mut(job_id) {
-                f(j);
-                j.updated_at = now_secs();
-            }
+        if let Ok(mut jobs) = self.inner.write()
+            && let Some(j) = jobs.get_mut(job_id)
+        {
+            f(j);
+            j.updated_at = now_secs();
         }
     }
 
@@ -163,7 +163,7 @@ impl IngestJobStore {
             return Vec::new();
         };
         let mut all: Vec<IngestJobSnapshot> = jobs.values().cloned().collect();
-        all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        all.sort_by_key(|x| std::cmp::Reverse(x.updated_at));
         all.truncate(limit);
         all
     }

@@ -7,22 +7,22 @@
 //! Task 2 (real data): wires in:
 //! - `active_datasets` — from the current session's `DatasetInfo` list.
 //! - `active_hunts`    — from the shared hunt cache (`Vec<Vec<Arc<str>>>`).
-//!                       The cache holds raw path lists with no per-hunt
-//!                       metadata (params, timestamp, TTL); those are Task 3+
-//!                       concerns. A non-empty cache is surfaced as one
-//!                       `ActiveHunt` entry whose `result_size` is the path
-//!                       count. All metadata fields default to placeholder
-//!                       values until a richer cache structure is introduced.
+//!   The cache holds raw path lists with no per-hunt
+//!   metadata (params, timestamp, TTL); those are Task 3+
+//!   concerns. A non-empty cache is surfaced as one
+//!   `ActiveHunt` entry whose `result_size` is the path
+//!   count. All metadata fields default to placeholder
+//!   values until a richer cache structure is introduced.
 //! - `sources`         — the registered log format names (sysmon, sentinel,
-//!                       cognito, fortigate, iis, haproxy, fortianalyzer,
-//!                       generic, csv). Per-source ingest timestamps and row
-//!                       counts require session-level tracking not yet built;
-//!                       `last_ingest` and `rows_lifetime` default to their
-//!                       zero/None values (Task 3).
+//!   cognito, fortigate, iis, haproxy, fortianalyzer,
+//!   generic, csv). Per-source ingest timestamps and row
+//!   counts require session-level tracking not yet built;
+//!   `last_ingest` and `rows_lifetime` default to their
+//!   zero/None values (Task 3).
 //! - `totals`          — node + edge counts from the session graph's
-//!                       `entity_count()` / `relation_count()` /
-//!                       `entity_type_counts()`. Zero when no session is
-//!                       loaded (graceful degradation).
+//!   `entity_count()` / `relation_count()` /
+//!   `entity_type_counts()`. Zero when no session is
+//!   loaded (graceful degradation).
 //!
 //! Task 4: 30s TTL cache on `get_graph_meta_summary`. The public method is
 //! now a cache-or-compute facade; the computation lives in the private
@@ -203,10 +203,10 @@ impl GraphHunterApi {
         // ── Consult cache ───────────────────────────────────────────────
         {
             let guard = SUMMARY_CACHE.lock().unwrap();
-            if let Some((t, cached)) = guard.as_ref() {
-                if t.elapsed() < SUMMARY_TTL {
-                    return Ok(cached.clone());
-                }
+            if let Some((t, cached)) = guard.as_ref()
+                && t.elapsed() < SUMMARY_TTL
+            {
+                return Ok(cached.clone());
             }
         }
         // ── Cache miss: compute and store ───────────────────────────────

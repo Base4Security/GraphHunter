@@ -19,6 +19,7 @@
 //! binary format. The load path peeks the first 4 bytes of the file:
 //!   * `b"GHS1"`  → binary loader (this module).
 //!   * anything else (legacy JSON) → existing JSON loader.
+//!
 //! Existing on-disk JSON sessions stay loadable; the next save
 //! migrates them to binary transparently. No user configuration.
 //!
@@ -208,7 +209,7 @@ fn read_u64<R: Read>(r: &mut R) -> Result<u64, BinaryError> {
 /// Returns Ok if a body declaring `version` can be read by this build,
 /// else an `IncompatibleBody` error carrying the actionable bounds.
 pub fn check_body_compatible(version: u32) -> Result<(), BinaryError> {
-    if version > BODY_FORMAT_VERSION || version < MIN_SUPPORTED_BODY_VERSION {
+    if !(MIN_SUPPORTED_BODY_VERSION..=BODY_FORMAT_VERSION).contains(&version) {
         return Err(BinaryError::IncompatibleBody {
             found: version,
             min: MIN_SUPPORTED_BODY_VERSION,
@@ -315,6 +316,9 @@ impl<'a, R: Read> EntityReader<'a, R> {
 
     /// Read the next entity, or `Ok(None)` when the stream is
     /// exhausted. Errors propagate.
+    // Not `Iterator::next`: each read is fallible, so it returns
+    // `Result<Option<_>>`; keeping the name avoids churning the callers.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Entity>, BinaryError> {
         if self.remaining == 0 {
             return Ok(None);
@@ -357,6 +361,9 @@ impl<'a, R: Read> RelationReader<'a, R> {
         self.remaining
     }
 
+    // Not `Iterator::next`: each read is fallible, so it returns
+    // `Result<Option<_>>`; keeping the name avoids churning the callers.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Relation>, BinaryError> {
         if self.remaining == 0 {
             return Ok(None);
@@ -429,7 +436,7 @@ mod tests {
         // defaults happen to match on both ends.
         let mut rel = Relation::new("a", "b", RelationType::Auth, 100);
         rel.ingested_at = graph_hunter_core::relation::INGEST_EPOCH_BASE + 12_345;
-        let relations = vec![rel];
+        let relations = [rel];
 
         let mut buf = Vec::new();
         write_header(&mut buf, &header).unwrap();

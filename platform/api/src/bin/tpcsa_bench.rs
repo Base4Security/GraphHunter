@@ -320,7 +320,7 @@ fn run_session(args: &Args) -> Result<(), String> {
             *kinds.entry(e.entity_type.to_string()).or_default() += 1;
         }
         let mut kinds: Vec<_> = kinds.into_iter().collect();
-        kinds.sort_by(|a, b| b.1.cmp(&a.1));
+        kinds.sort_by_key(|x| std::cmp::Reverse(x.1));
         println!("  entity types: {:?}", kinds);
         let mut rels: HashMap<(String, String, String, String), usize> = HashMap::new();
         let mut meta_keys: HashMap<String, usize> = HashMap::new();
@@ -347,14 +347,14 @@ fn run_session(args: &Args) -> Result<(), String> {
             range.1 = range.1.max(e.timestamp);
         });
         let mut rels: Vec<_> = rels.into_iter().collect();
-        rels.sort_by(|a, b| b.1.cmp(&a.1));
+        rels.sort_by_key(|x| std::cmp::Reverse(x.1));
         println!("  timestamp range: {} .. {}", range.0, range.1);
         println!("  relations (rel_type, event_type, tail kind -> head kind): count");
         for ((rel, et, tk, hk), c) in rels.iter().take(40) {
             println!("    {rel:<12} {et:<28} {tk} -> {hk}: {c}");
         }
         let mut mk: Vec<_> = meta_keys.into_iter().collect();
-        mk.sort_by(|a, b| b.1.cmp(&a.1));
+        mk.sort_by_key(|x| std::cmp::Reverse(x.1));
         println!(
             "  edge metadata keys: {:?}",
             mk.iter().take(20).collect::<Vec<_>>()

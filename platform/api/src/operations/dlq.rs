@@ -375,15 +375,15 @@ fn matches_filter(
     dataset_id: Option<&str>,
     failure_kind: Option<FailureKind>,
 ) -> bool {
-    if let Some(ds) = dataset_id {
-        if e.dataset_id.as_deref() != Some(ds) {
-            return false;
-        }
+    if let Some(ds) = dataset_id
+        && e.dataset_id.as_deref() != Some(ds)
+    {
+        return false;
     }
-    if let Some(kind) = failure_kind {
-        if e.failure_kind != kind {
-            return false;
-        }
+    if let Some(kind) = failure_kind
+        && e.failure_kind != kind
+    {
+        return false;
     }
     true
 }
@@ -513,7 +513,7 @@ mod tests {
     fn reingest_flags_missing_dataset_as_failed() {
         let tmp = TempDir::new().unwrap();
         let api = api_with_dlq(&tmp);
-        let _ = api.record_dead_letter(mk_entry("row", Some("ds-gone"), FailureKind::ParseFailure));
+        api.record_dead_letter(mk_entry("row", Some("ds-gone"), FailureKind::ParseFailure));
         // No dataset in the session — reingest must fail gracefully.
         let list = api
             .list_dead_letters(ListDeadLettersRequest {

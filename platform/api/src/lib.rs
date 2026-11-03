@@ -238,10 +238,10 @@ impl GraphHunterApi {
     /// looked identical to a working one.
     pub fn bootstrap_geoip(&self, bundled: Option<std::path::PathBuf>) -> (bool, bool) {
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-        if let Ok(dir) = std::env::var("GRAPHHUNTER_GEOIP_DIR") {
-            if !dir.trim().is_empty() {
-                candidates.push(std::path::PathBuf::from(dir));
-            }
+        if let Ok(dir) = std::env::var("GRAPHHUNTER_GEOIP_DIR")
+            && !dir.trim().is_empty()
+        {
+            candidates.push(std::path::PathBuf::from(dir));
         }
         if let Some(dir) = bundled {
             candidates.push(dir);

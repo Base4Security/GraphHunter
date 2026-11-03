@@ -71,7 +71,7 @@ fn write_source_file(prefix: &str, contents: &str) -> String {
 //   - Host WORKSTATION-01 links Sentinel DeviceNetworkEvents DeviceName <-> SecurityEvent Computer <-> Sysmon Computer
 //   - User alice          links SecurityEvent TargetUserName <-> Sysmon User (bare, not DOMAIN\alice)
 
-/// 1. FortiGate firewall (format "fortigate"): external IP hits the
+/// (1) FortiGate firewall (format "fortigate"): external IP hits the
 /// internal host's IP. `derive_timestamp` reads `eventtime=` (epoch
 /// seconds) — 2024-01-15T14:28:00Z, one minute before the beacon.
 const FORTIGATE_LOG: &str = concat!(
@@ -79,7 +79,7 @@ const FORTIGATE_LOG: &str = concat!(
     "\n"
 );
 
-/// 2. Sentinel DeviceNetworkEvents (format "sentinel"): the host
+/// (2) Sentinel DeviceNetworkEvents (format "sentinel"): the host
 /// beaconing to that IP. VERIFIED against
 /// `core/graph-engine/src/sentinel.rs::parse_device_network_events`
 /// (~line 440): the host field is `DeviceName`, NOT `Computer` — using
@@ -110,7 +110,7 @@ const FORTIGATE_LOG: &str = concat!(
 /// on.
 const SENTINEL_NETWORK_LOG: &str = r#"[{"Type":"DeviceNetworkEvents","TimeGenerated":"2024-01-15T14:30:00Z","DeviceName":"WORKSTATION-01","RemoteIP":"10.0.0.42"}]"#;
 
-/// 3. Sentinel SecurityEvent 4624 (format "sentinel"): alice logs onto
+/// (3) Sentinel SecurityEvent 4624 (format "sentinel"): alice logs onto
 /// the host. VERIFIED against `parse_security_event_auth` (~line 223):
 /// `TargetUserName` + `Computer` + `IpAddress` + `LogonType`, emitting
 /// `User -[Auth]-> Host`. Timestamped 14:29:00Z — BEFORE the beacon
@@ -118,7 +118,7 @@ const SENTINEL_NETWORK_LOG: &str = r#"[{"Type":"DeviceNetworkEvents","TimeGenera
 /// chain (see note on `SENTINEL_NETWORK_LOG`).
 const SENTINEL_AUTH_LOG: &str = r#"[{"Type":"SecurityEvent","TimeGenerated":"2024-01-15T14:29:00Z","EventID":4624,"TargetUserName":"alice","Computer":"WORKSTATION-01","IpAddress":"10.0.0.42","LogonType":3}]"#;
 
-/// 4. Sysmon EventID 1 (format "sysmon"): alice spawns powershell on
+/// (4) Sysmon EventID 1 (format "sysmon"): alice spawns powershell on
 /// the host. `"User":"alice"` bare (not `DOMAIN\alice`) so it links to
 /// the same `User(alice)` node the Sentinel SecurityEvent produced.
 const SYSMON_PROCESS_LOG: &str = r#"[{"EventID":1,"UtcTime":"2024-01-15 14:31:00.000","Image":"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe","ProcessId":4444,"CommandLine":"powershell -enc ...","User":"alice","Computer":"WORKSTATION-01"}]"#;

@@ -237,6 +237,10 @@ pub const MAX_BAG_BYTES: usize = 256 * 1024 * 1024;
 /// enumerator pays bag cost first and prefix cost second.
 pub const MAX_PREFIX_BYTES: usize = 128 * 1024 * 1024;
 
+/// Prefix snapshot cached per chain prefix: one `(visited path, timestamp)`
+/// row per partial match.
+pub type PrefixSnapshot = Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>;
+
 /// D3 stage 5 — Session-level Yannakakis cache. Persists `Bag`
 /// materializations and prefix snapshots across `run_hunt_batch`
 /// calls. Each cache FIFO-evicts on its own total byte budget
@@ -250,7 +254,7 @@ pub struct YannakakisSessionCache {
     pub bags: HashMap<String, Arc<graph_hunter_core::yannakakis::Bag>>,
     pub bags_order: std::collections::VecDeque<String>,
     pub bags_bytes: usize,
-    pub prefixes: HashMap<String, Arc<Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>>>,
+    pub prefixes: HashMap<String, Arc<PrefixSnapshot>>,
     pub prefixes_order: std::collections::VecDeque<String>,
     pub prefixes_bytes: usize,
 }
@@ -281,7 +285,7 @@ impl YannakakisSessionCache {
     /// captured from the first entry — prefix snapshots at a fixed
     /// depth all have equal-length inner vecs, so the first row is
     /// representative.
-    fn prefix_bytes(snapshot: &Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>) -> usize {
+    fn prefix_bytes(snapshot: &[(Vec<graph_hunter_core::interner::StrId>, i64)]) -> usize {
         let depth_bytes = snapshot
             .first()
             .map(|(v, _)| v.len() * std::mem::size_of::<graph_hunter_core::interner::StrId>())
@@ -318,11 +322,7 @@ impl YannakakisSessionCache {
 
     /// Insert a prefix snapshot with the same FIFO + byte-budget
     /// semantics as `insert`. Returns `true` on a new key.
-    pub fn insert_prefix(
-        &mut self,
-        key: String,
-        snapshot: Arc<Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>>,
-    ) -> bool {
+    pub fn insert_prefix(&mut self, key: String, snapshot: Arc<PrefixSnapshot>) -> bool {
         let new_bytes = Self::prefix_bytes(&snapshot);
         let is_new = !self.prefixes.contains_key(&key);
         if is_new {
@@ -444,10 +444,10 @@ impl LftjSessionCache {
     ) -> bool {
         let is_new = !self.canonical_results.contains_key(&key);
         if is_new {
-            if self.canonical_results.len() >= MAX_CANONICAL_ENTRIES {
-                if let Some(evict_key) = self.canonical_results_order.pop_front() {
-                    self.canonical_results.remove(&evict_key);
-                }
+            if self.canonical_results.len() >= MAX_CANONICAL_ENTRIES
+                && let Some(evict_key) = self.canonical_results_order.pop_front()
+            {
+                self.canonical_results.remove(&evict_key);
             }
             self.canonical_results_order.push_back(key);
         }

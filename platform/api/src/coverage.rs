@@ -224,6 +224,7 @@ impl SourceCoverage {
 ///     resets the failure counter, closes the breaker if it was open).
 ///   * `success == false` -> `record_failure` (may open the breaker) then
 ///     `record_missing` (marks this window blind for the answer surface).
+///
 /// `is_open`/`missing` remain purely a *reporting* signal surfaced on
 /// answers — recoverable on the very next successful call.
 pub fn record_siem_outcome(

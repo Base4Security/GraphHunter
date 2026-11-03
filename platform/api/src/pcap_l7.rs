@@ -346,7 +346,7 @@ fn read_qname(payload: &[u8], mut p: usize) -> Option<(String, usize)> {
     }
 }
 
-fn read_qname_no_compression<'a>(payload: &'a [u8], mut p: usize) -> Option<Vec<&'a [u8]>> {
+fn read_qname_no_compression(payload: &[u8], mut p: usize) -> Option<Vec<&[u8]>> {
     let mut out: Vec<&[u8]> = Vec::new();
     let mut total = 0usize;
     loop {
@@ -419,16 +419,16 @@ pub fn extract_http_host(payload: &[u8]) -> Option<String> {
     let headers = &payload[..headers_end];
     let s = std::str::from_utf8(headers).ok()?;
     for line in s.split("\r\n").skip(1) {
-        if let Some((key, value)) = line.split_once(':') {
-            if key.trim().eq_ignore_ascii_case("host") {
-                let host = value.trim();
-                // Strip optional :port.
-                let host_no_port = host.rsplit_once(':').map(|(a, _)| a).unwrap_or(host);
-                if looks_like_domain(host_no_port) || is_ip_literal(host_no_port) {
-                    return Some(host_no_port.to_string());
-                }
-                return None;
+        if let Some((key, value)) = line.split_once(':')
+            && key.trim().eq_ignore_ascii_case("host")
+        {
+            let host = value.trim();
+            // Strip optional :port.
+            let host_no_port = host.rsplit_once(':').map(|(a, _)| a).unwrap_or(host);
+            if looks_like_domain(host_no_port) || is_ip_literal(host_no_port) {
+                return Some(host_no_port.to_string());
             }
+            return None;
         }
     }
     None
@@ -459,7 +459,7 @@ pub fn extract_ssh_banner(payload: &[u8]) -> Option<String> {
         .iter()
         .position(|&b| b == b'\r' || b == b'\n')
         .unwrap_or(max);
-    if end < 6 || end > 96 {
+    if !(6..=96).contains(&end) {
         // < 6 means "SSH-" with not enough version info; > 96 means
         // an over-long line that's almost certainly not a banner.
         return None;
@@ -816,7 +816,7 @@ mod tests {
         // 200 ASCII printable bytes with no terminator — clearly not
         // a real banner, must not be accepted.
         let mut payload = b"SSH-2.0-".to_vec();
-        payload.extend(std::iter::repeat(b'X').take(200));
+        payload.extend(std::iter::repeat_n(b'X', 200));
         assert!(extract_ssh_banner(&payload).is_none());
     }
 
