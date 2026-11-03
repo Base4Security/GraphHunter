@@ -35,6 +35,7 @@ ALL_CRATES := \
 	core/graph-engine \
 	core/gnn \
 	core/matcher-ffi \
+	core/tpcsa-core \
 	platform/api \
 	platform/canonical \
 	platform/constrained-decode \
@@ -58,16 +59,14 @@ help:
 	@echo "  check-all   - cargo check --tests on every crate."
 	@echo "  test        - cargo test on hot crates (skips long-running benchmark_*)."
 	@echo "  test-bench  - Run the in-tree paper-table benchmark_* tests on demand."
-	@echo "  clippy      - cargo clippy -D warnings on hot crates."
-	@echo "  fmt-check   - Verify rustfmt would not change anything (hot crates)."
+	@echo "  clippy      - cargo clippy --all-targets -D warnings on all crates (as CI)."
+	@echo "  fmt-check   - Verify rustfmt would not change anything (all crates)."
 	@echo "  layering    - Run scripts/check-layering.sh."
 	@echo "  smoke-bench - Tiny ingest bench (1K only) to catch catastrophic regressions."
 
-# `pre-merge` intentionally excludes fmt-check and clippy: the codebase has
-# pre-existing fmt drift and clippy warnings that we are not addressing in
-# this safety-net PR. Run `make fmt-check` and `make clippy` opt-in when
-# touching code you want to keep clean.
-pre-merge: layering check test
+# `pre-merge` runs the same gates CI blocks on (fmt, clippy) plus layering
+# and the hot-crate tests.
+pre-merge: layering fmt-check clippy check test
 	@echo ""
 	@echo "pre-merge OK - safe to push."
 
@@ -98,13 +97,13 @@ test-bench:
 	@$(CARGO) test --manifest-path core/graph-engine/Cargo.toml --release benchmark_ -- --nocapture --test-threads=1
 
 clippy:
-	@for c in $(HOT_CRATES); do \
-		echo ">>> cargo clippy --tests --manifest-path $$c/Cargo.toml -- -D warnings"; \
-		$(CARGO) clippy --tests --manifest-path $$c/Cargo.toml -- -D warnings; \
+	@for c in $(ALL_CRATES); do \
+		echo ">>> cargo clippy --locked --all-targets --manifest-path $$c/Cargo.toml -- -D warnings"; \
+		$(CARGO) clippy --locked --all-targets --manifest-path $$c/Cargo.toml -- -D warnings; \
 	done
 
 fmt-check:
-	@for c in $(HOT_CRATES); do \
+	@for c in $(ALL_CRATES); do \
 		echo ">>> cargo fmt --manifest-path $$c/Cargo.toml -- --check"; \
 		$(CARGO) fmt --manifest-path $$c/Cargo.toml -- --check; \
 	done

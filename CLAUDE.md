@@ -38,7 +38,7 @@ cargo test --manifest-path platform/api/Cargo.toml
 # Gate antes de mergear: chequeo de capas + tests
 make pre-merge
 
-# Linter y formato (fmt bloquea en CI; clippy todavía no)
+# Linter y formato (los dos bloquean en CI; pre-merge ya los incluye)
 make clippy
 make fmt-check
 

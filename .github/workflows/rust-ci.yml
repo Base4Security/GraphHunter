@@ -110,11 +110,9 @@ jobs:
       - name: Test
         run: cargo test --locked --manifest-path ${{ matrix.manifest }}
 
-      # Todavía no bloquea: hay advertencias acumuladas (plan de adecuación en
-      # FICHA.md). Se vuelve bloqueante crate por crate a medida que quede limpio.
-      - name: Clippy (soft)
-        run: cargo clippy --locked --manifest-path ${{ matrix.manifest }} -- -D warnings
-        continue-on-error: true
+      # Bloqueante. --all-targets incluye tests, benches y examples.
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --manifest-path ${{ matrix.manifest }} -- -D warnings
 
   audit:
     name: audit (dependencias)

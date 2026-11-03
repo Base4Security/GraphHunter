@@ -89,7 +89,7 @@
 | Tests y tipos TypeScript (app y MCP) | `ts-py-ci.yml` | Sí | por PR | 2026-11-02, local: vitest 15, MCP 40 |
 | Tests Python (sidecar) | `ts-py-ci.yml` | Sí | por PR | 2026-11-02, local: 5 |
 | Formato (rustfmt) | `rust-ci.yml` | Sí | por PR | 2026-11-02 |
-| Linter (clippy) | `rust-ci.yml` | **No** — advertencias acumuladas | por PR | |
+| Linter (clippy, `--all-targets`) | `rust-ci.yml`, `make clippy` | Sí | por PR | 2026-11-03, local: 13 de 15 crates en 0; graph-engine y api fallan solo por archivos con trabajo en curso |
 | Secret scanning (gitleaks, historial completo) | `baseline.yml` | Sí | por PR | 2026-11-02, local: 1015 commits, 0 hallazgos |
 | Vulnerabilidades en dependencias Rust (cargo-audit) | `rust-ci.yml` | Sí | por PR | 2026-11-02, local: 0 en 15 crates |
 | Licencias, crates vetados, unmaintained/unsound (cargo-deny) | `rust-ci.yml` + `deny.toml` | Sí | por PR | 2026-11-03, local: 15 crates ok |
@@ -117,7 +117,7 @@
 | Repo privado en cuenta personal, sin protección de rama posible (plan Free) | Es la versión de desarrollo; el dueño la migra a la organización (ADR-0002) | Dueño | En curso |
 | `main` sin protección en `Base4Security/GraphHunter` | Ruleset: sin push directo, PR obligatorio, checks requeridos (`Secret scanning`, `audit`, `frontend`, `mcp`, `python`, `rust-ci-ok`), regla de code scanning | Admin de la org | `PENDIENTE:` |
 | `rust-ci.yml` filtraba por rutas: en un PR sin Rust sus checks no corrían y no podían ser requeridos | Hecho: filtro movido al job `changes` y job agregador `rust-ci-ok`, que siempre termina y es el que se marca como requerido | Dueño | Hecho 2026-11-02 |
-| Clippy no bloqueante (199 advertencias en graph-engine, 161 en api, 25 en tauri y parsers…) | Corregir por crate y quitar `continue-on-error` | Dueño | `PENDIENTE:` |
+| Clippy no bloqueante (≈450 advertencias entre todos los crates) | Hecho: corregidas en 13 crates; clippy bloquea en CI y en `make pre-merge`. Quedan 18 en `core/graph-engine` (`generic.rs`, `field_preview.rs`) y 12 en `platform/api` (`journal.rs`, `operations/export.rs`, `operations/agentic_drift.rs`), los mismos archivos que tampoco pasan `cargo fmt`: tienen trabajo en curso sin commitear y se corrigen al commitearlo | Dueño | `PENDIENTE:` al commitear ese trabajo |
 | cargo-deny no bloqueante y con hallazgos (además el paso nunca había corrido) | Hecho: `deny.toml` único en la raíz, licencias declaradas (`GPL-3.0-only`), parches de advisories unsound y 11 excepciones `unmaintained` sin versión corregida, cada una con su motivo. Pendiente propio: reemplazar bincode 1 (formato de sesión, requiere bump de `body_format_version`) y serde_yaml 0.9 | Dueño | Hecho 2026-11-03 |
 | MCP: `zod` 3 tenía una vulnerabilidad alta (GHSA-mrhx-c7xc-m3w5) | Hecho: zod 4.6.7, `npm audit` en 0 y el CI bloquea desde `high`. Los JSON schema publicados ya no llevan `additionalProperties: false` (las claves desconocidas se siguen descartando en runtime) | Dueño | Hecho 2026-11-02 |
 | `transformers` <5 en `training/field_role_classifier` con 4 advisories | Hecho: transformers 5.22.1 (piso 5.10, que cubre PYSEC-2026-4174), `pip-audit` limpio y bloqueante | Dueño | Hecho 2026-11-02 |
