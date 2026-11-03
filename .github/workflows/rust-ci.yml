@@ -99,7 +99,9 @@ jobs:
 
       # Barato y bloqueante: va primero para fallar rápido.
       - name: Fmt check
-        run: cargo fmt --manifest-path ${{ matrix.manifest }} --all -- --check
+        # Sin --all: con --all también revisa las dependencias por ruta, y una
+        # falla en graph-engine se repetiría en cada crate que lo usa.
+        run: cargo fmt --manifest-path ${{ matrix.manifest }} -- --check
 
       # --locked: el build usa exactamente el Cargo.lock commiteado. Si
       # Cargo.toml cambió sin actualizar el lock, falla en vez de resolver
