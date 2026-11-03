@@ -40,7 +40,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rayon = "1"
 ahash = "0.8"
 ordered-float = "4"
-lru = "0.12"
+lru = "0.19"
 tempfile = "3"
 memmap2 = "0.9"
 fs4 = "0.8"
