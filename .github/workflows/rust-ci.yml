@@ -147,9 +147,9 @@ jobs:
           exit "${status}"
 
       # Licencias, crates vetados, fuentes y advisories de mantenimiento
-      # (unmaintained, unsound). Todavía no bloquea: hay hallazgos abiertos.
-      - name: cargo deny (soft)
-        continue-on-error: true
+      # (unmaintained, unsound). Bloqueante; las excepciones viven en deny.toml,
+      # cada una con su motivo.
+      - name: cargo deny
         shell: bash
         run: |
           status=0

@@ -92,7 +92,7 @@
 | Linter (clippy) | `rust-ci.yml` | **No** — advertencias acumuladas | por PR | |
 | Secret scanning (gitleaks, historial completo) | `baseline.yml` | Sí | por PR | 2026-11-02, local: 1015 commits, 0 hallazgos |
 | Vulnerabilidades en dependencias Rust (cargo-audit) | `rust-ci.yml` | Sí | por PR | 2026-11-02, local: 0 en 15 crates |
-| Licencias, crates vetados, unmaintained/unsound (cargo-deny) | `rust-ci.yml` | **No** — hallazgos abiertos | por PR | |
+| Licencias, crates vetados, unmaintained/unsound (cargo-deny) | `rust-ci.yml` + `deny.toml` | Sí | por PR | 2026-11-03, local: 15 crates ok |
 | Vulnerabilidades npm | `ts-py-ci.yml` | Sí, altas y críticas (app y MCP) | por PR | 2026-11-02, local: app 0, MCP 0 |
 | Vulnerabilidades Python (pip-audit) | `ts-py-ci.yml` | Sí | por PR | 2026-11-02, local: 0 |
 | Lockfiles al día (`--locked`) | `rust-ci.yml` | Sí | por PR | |
@@ -118,8 +118,8 @@
 | `main` sin protección en `Base4Security/GraphHunter` | Ruleset: sin push directo, PR obligatorio, checks requeridos (`Secret scanning`, `audit`, `frontend`, `mcp`, `python`, `rust-ci-ok`), regla de code scanning | Admin de la org | `PENDIENTE:` |
 | `rust-ci.yml` filtraba por rutas: en un PR sin Rust sus checks no corrían y no podían ser requeridos | Hecho: filtro movido al job `changes` y job agregador `rust-ci-ok`, que siempre termina y es el que se marca como requerido | Dueño | Hecho 2026-11-02 |
 | Clippy no bloqueante (199 advertencias en graph-engine, 161 en api, 25 en tauri y parsers…) | Corregir por crate y quitar `continue-on-error` | Dueño | `PENDIENTE:` |
-| cargo-deny no bloqueante: unmaintained, unsound, licencias sin declarar, un crate rechazado en tauri. Además el paso nunca había corrido (argumentos en orden incorrecto) | Triage por crate; excepciones con fecha en `deny.toml` | Dueño | `PENDIENTE:` |
+| cargo-deny no bloqueante y con hallazgos (además el paso nunca había corrido) | Hecho: `deny.toml` único en la raíz, licencias declaradas (`GPL-3.0-only`), parches de advisories unsound y 11 excepciones `unmaintained` sin versión corregida, cada una con su motivo. Pendiente propio: reemplazar bincode 1 (formato de sesión, requiere bump de `body_format_version`) y serde_yaml 0.9 | Dueño | Hecho 2026-11-03 |
 | MCP: `zod` 3 tenía una vulnerabilidad alta (GHSA-mrhx-c7xc-m3w5) | Hecho: zod 4.6.7, `npm audit` en 0 y el CI bloquea desde `high`. Los JSON schema publicados ya no llevan `additionalProperties: false` (las claves desconocidas se siguen descartando en runtime) | Dueño | Hecho 2026-11-02 |
 | `transformers` <5 en `training/field_role_classifier` con 4 advisories | Hecho: transformers 5.22.1 (piso 5.10, que cubre PYSEC-2026-4174), `pip-audit` limpio y bloqueante | Dueño | Hecho 2026-11-02 |
-| Sin modelado de amenazas (N3) | Modelar API local, MCP, parsers y carga de sesiones | Dueño + rol de seguridad | `PENDIENTE:` |
+| Modelado de amenazas (N3) | Hecho: [docs/seguridad/modelo-de-amenazas.md](docs/seguridad/modelo-de-amenazas.md), con 14 amenazas y 11 acciones. T1 (path traversal del journal) corregido. Altas abiertas: A2 prompt injection vía MCP, A3 KQL escape hatch por defecto, A11 firma de binarios | Dueño + rol de seguridad | `PENDIENTE:` revisión por el rol de seguridad y acciones A2–A11 |
 | Sin análisis de vulnerabilidades periódico del binario distribuido | Definir con la célula (el baseline no cubre software distribuido) | Dueño + célula | `PENDIENTE:` |
