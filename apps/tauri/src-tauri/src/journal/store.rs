@@ -72,6 +72,18 @@ fn new_hunt_id() -> String {
     format!("hunt-{}-{}", now_millis(), n)
 }
 
+/// Hunt ids arrive from HTTP (`/journal/:id`, `/journal/export`) and are
+/// joined onto `base`, so `../x` or an absolute path would escape it.
+/// Same rule as `validate_session_id`: `[A-Za-z0-9_-]`, 1..=128 chars,
+/// which every `new_hunt_id` satisfies.
+fn is_valid_hunt_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 impl JournalStore {
     pub fn new(base: PathBuf) -> Self {
         JournalStore(Arc::new(Mutex::new(Inner {
@@ -253,6 +265,9 @@ impl JournalStore {
 
     /// Reads a hunt's meta + full event log. `None` if the hunt is unknown.
     pub fn read(&self, id: &str) -> Option<(HuntMeta, Vec<HuntEvent>)> {
+        if !is_valid_hunt_id(id) {
+            return None;
+        }
         let inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let dir = inner.base.join(id);
         let meta = Self::read_meta(&dir)?;
@@ -385,6 +400,26 @@ mod tests {
     fn stats_returns_none_for_unknown_hunt() {
         let store = JournalStore::new(tmp());
         assert!(store.stats("no-such-hunt").is_none());
+    }
+
+    #[test]
+    fn read_rejects_ids_that_escape_the_base_dir() {
+        // A real hunt dir next to the store's base: reachable only via `..`.
+        let root = tmp();
+        let base = root.join("journals");
+        std::fs::create_dir_all(&base).unwrap();
+        let outside = JournalStore::new(root.clone());
+        let outside_id = outside.start_hunt(None);
+        let store = JournalStore::new(base);
+
+        assert!(store.read(&format!("../{outside_id}")).is_none());
+        assert!(
+            store
+                .read(root.join(&outside_id).to_str().unwrap())
+                .is_none()
+        );
+        assert!(store.read("").is_none());
+        assert!(outside.read(&outside_id).is_some());
     }
 
     #[test]
