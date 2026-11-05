@@ -1,0 +1,5 @@
+# Dependencias de research/ (las mismas versiones con que detcover produjo sus resultados).
+numpy==2.5.3
+scipy==1.18.1
+networkx==3.7
+pytest

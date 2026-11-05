@@ -15,6 +15,11 @@ el núcleo del grafo de ataque dinámico (G_t) descrito en `docs/unificacion/`.
   los lleva al oráculo con los mismos nombres de nodo que usa la proyección.
 - `gtdin/bench_ad.py`: oráculo sobre GOADv2 (`--goad`) o sobre el sintético
   con hubs de grupos (`--adgen N`), medido por tipo de cambio.
+- `detcover/` y `tests_detcover/`: detcover (commit 70b6a13) traído para la
+  fusión con PERIPLO; ver `detcover/ORIGEN.md`.
+- `gtdin/trampas.py`: trampas de PERIPLO como reglas de detcover (partición de
+  nodos), así todos los solvers de detcover deciden reglas y trampas juntos.
+- `gtdin/exp_trampas_goad.py`: reglas solas frente a reglas + trampas en GOADv2.
 - `datos/goad/`: colección BloodHound de GOADv2 (laboratorio público, Unlicense).
 - `gtdin/test_conformidad.py`: corre los casos de
   `docs/unificacion/conformidad/proyeccion.json`; la implementación en Rust
@@ -25,4 +30,6 @@ python -m unittest discover -s research -t research -v
 (cd research && python -m gtdin.bench_oraculo)
 ```
 
-Requiere Python ≥ 3.10. Sin dependencias externas.
+Requiere Python ≥ 3.10. `gtdin` base no tiene dependencias; `detcover` y la
+fusión usan numpy, scipy y networkx (`pip install -r research/requirements.txt`).
+Todo corre con `python -m pytest research`.
