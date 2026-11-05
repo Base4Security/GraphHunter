@@ -2294,6 +2294,7 @@ fn sysmon_parse_security_4624_logon() {
     assert_eq!(rel.metadata.get("logon_type").unwrap(), "10");
     assert_eq!(rel.metadata.get("ip_address").unwrap(), "192.168.1.100");
     assert!(!rel.metadata.contains_key("success")); // 4624 = success, no explicit flag
+    assert_eq!(rel.metadata.get("status").unwrap(), "Success");
 }
 
 #[test]
@@ -2314,6 +2315,7 @@ fn sysmon_parse_security_4625_logon_failure() {
 
     let (_, rel, _) = &triples[0];
     assert_eq!(rel.metadata.get("success").unwrap(), "false");
+    assert_eq!(rel.metadata.get("status").unwrap(), "Failure");
 }
 
 #[test]
