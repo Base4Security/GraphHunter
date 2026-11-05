@@ -16,8 +16,8 @@ cambio se repara localmente, al estilo Ramalingam–Reps:
   cuyo camino a t pasaba por ella), se lo siembra desde la frontera no
   afectada y se corre Dijkstra solo adentro.
 
-Si el subárbol afectado supera `umbral_recomputo` × |V|, se recalcula de cero:
-con hubs (p. ej. `Domain Users`) la reparación local no gana.
+Si las aristas que tocan el subárbol afectado superan `umbral_recomputo` × |E|,
+se recalcula de cero: con hubs (p. ej. `Domain Users`) la reparación local no gana.
 
 Todo resultado se puede contrastar con `recomputar()` (Dijkstra completo).
 """
@@ -33,7 +33,7 @@ INF = math.inf
 
 
 class Oraculo:
-    def __init__(self, terminales: list[str], umbral_recomputo: float = 0.25):
+    def __init__(self, terminales: list[str], umbral_recomputo: float = 0.1):
         self.terminales = list(dict.fromkeys(terminales))
         self.umbral = umbral_recomputo
         self.salida: dict[str, dict[str, float]] = defaultdict(dict)  # u → {v: w}
@@ -41,6 +41,7 @@ class Oraculo:
         self.nodos: set[str] = set(self.terminales)
         self.d: dict[str, dict[str, float]] = {t: {t: 0.0} for t in self.terminales}
         self.sig: dict[str, dict[str, str | None]] = {t: {t: None} for t in self.terminales}
+        self.m = 0  # cantidad de aristas
         self.stats = {"tocados": 0, "recomputos": 0, "cambios": 0}
 
     # ── Consultas ──────────────────────────────────────────────────────
@@ -74,7 +75,9 @@ class Oraculo:
         if w is None:
             self.salida[u].pop(v, None)
             self.entrada[v].pop(u, None)
+            self.m -= viejo is not None
         else:
+            self.m += viejo is None
             self.salida[u][v] = w
             self.entrada[v][u] = w
         for t in self.terminales:
@@ -118,17 +121,23 @@ class Oraculo:
 
     def _subida(self, t: str, u: str) -> None:
         d, sig = self.d[t], self.sig[t]
+        # El costo de reparar es proporcional a las aristas que tocan el
+        # subárbol, no a sus nodos: con hubs de grupos, pocos nodos pueden
+        # arrastrar cientos de miles de aristas. Se corta apenas se pasa.
+        limite = self.umbral * max(self.m, 1)
         afectados = {u}
+        trabajo = len(self.entrada[u]) + len(self.salida[u])
         pila = [u]
         while pila:
             x = pila.pop()
             for p in self.entrada[x]:
                 if p not in afectados and sig.get(p) == x:
                     afectados.add(p)
+                    trabajo += len(self.entrada[p]) + len(self.salida[p])
+                    if trabajo > limite:
+                        self._dijkstra(t)
+                        return
                     pila.append(p)
-        if len(afectados) > self.umbral * max(len(self.nodos), 1):
-            self._dijkstra(t)
-            return
         for x in afectados:
             d.pop(x, None)
             sig.pop(x, None)

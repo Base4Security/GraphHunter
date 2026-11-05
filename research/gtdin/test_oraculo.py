@@ -24,7 +24,7 @@ def verificar(tc: unittest.TestCase, o: Oraculo, msg: str = "") -> None:
                 tc.assertTrue(math.isclose(costo, a, rel_tol=1e-9, abs_tol=1e-9), f"{msg} camino {camino}")
 
 
-def grafo_aleatorio(rng: random.Random, n: int, m: int, umbral: float = 0.25) -> Oraculo:
+def grafo_aleatorio(rng: random.Random, n: int, m: int, umbral: float = 0.1) -> Oraculo:
     nodos = [f"n{i}" for i in range(n)]
     o = Oraculo(rng.sample(nodos, 3), umbral_recomputo=umbral)
     for _ in range(m):
@@ -37,7 +37,7 @@ class Incremental(unittest.TestCase):
     def test_secuencias_aleatorias(self):
         for semilla in range(40):
             rng = random.Random(semilla)
-            for umbral in (0.25, 1.01):  # con y sin recomputo de respaldo
+            for umbral in (0.1, 10.0):  # con y sin recomputo de respaldo
                 o = grafo_aleatorio(rng, n=30, m=80, umbral=umbral)
                 verificar(self, o, f"semilla {semilla} inicial")
                 for paso in range(60):
