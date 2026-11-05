@@ -100,16 +100,14 @@ fn journal_batch_best_effort(
     if !crate::journal::journal_enabled() {
         return None;
     }
-    let store = match dirs::data_dir() {
-        Some(d) => {
-            match crate::journal::JournalStore::open(d.join("GraphHunter").join("journal")) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    tracing::warn!(target: "journal", error = %e, "journal open failed; continuing");
-                    None
-                }
+    let store = match crate::journal::ingest_journal_dir() {
+        Some(d) => match crate::journal::JournalStore::open(d) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(target: "journal", error = %e, "journal open failed; continuing");
+                None
             }
-        }
+        },
         None => {
             tracing::warn!(
                 target: "journal",
