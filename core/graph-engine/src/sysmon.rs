@@ -801,6 +801,18 @@ impl SysmonJsonParser {
         if event_id == 4625 {
             rel.metadata.insert("success".into(), "false".into());
         }
+        // Same values as the Sentinel parser: the OCSF projection reads
+        // `status`, and without it a 4625 would look like a logon of
+        // unknown outcome.
+        rel.metadata.insert(
+            "status".into(),
+            if event_id == 4625 {
+                "Failure"
+            } else {
+                "Success"
+            }
+            .into(),
+        );
         vec![(user, rel, host)]
     }
 
@@ -1696,6 +1708,18 @@ impl SysmonJsonParser {
         if event_id == 4625 {
             rel_meta.insert("success".into(), "false".into());
         }
+        // Same values as the Sentinel parser: the OCSF projection reads
+        // `status`, and without it a 4625 would look like a logon of
+        // unknown outcome.
+        rel_meta.insert(
+            "status".into(),
+            if event_id == 4625 {
+                "Failure"
+            } else {
+                "Success"
+            }
+            .into(),
+        );
         Some(vec![RawIngestEvent {
             src_id: user_id,
             src_type: EntityType::User,
@@ -1948,6 +1972,18 @@ impl SysmonJsonParser {
         if event_id == 4625 {
             rel.metadata.insert("success".into(), "false".into());
         }
+        // Same values as the Sentinel parser: the OCSF projection reads
+        // `status`, and without it a 4625 would look like a logon of
+        // unknown outcome.
+        rel.metadata.insert(
+            "status".into(),
+            if event_id == 4625 {
+                "Failure"
+            } else {
+                "Success"
+            }
+            .into(),
+        );
         Some(vec![(user, rel, host)])
     }
 

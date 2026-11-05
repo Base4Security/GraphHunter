@@ -41,7 +41,8 @@ pub fn triple_to_ocsf(
             actor_user: Some(user_ref(source)),
             dst_endpoint: Some(endpoint_ref(dest, None)),
             auth_protocol: relation.metadata.get("auth_protocol").cloned(),
-            status: relation.metadata.get("status").cloned(),
+            status: auth_status(relation),
+            logon_type_id: logon_type_id(relation),
             provenance,
         }),
 
@@ -152,6 +153,28 @@ pub fn triple_to_ocsf(
             provenance,
         }),
     }
+}
+
+/// Outcome of an `Auth` relation. Sentinel and the IdP parsers write
+/// `status`; the Sysmon/Security parser historically flagged only
+/// failures with `success = "false"`. `status` wins when both exist.
+fn auth_status(relation: &Relation) -> Option<String> {
+    if let Some(status) = relation.metadata.get("status") {
+        return Some(status.clone());
+    }
+    match relation.metadata.get("success").map(String::as_str) {
+        Some("false") => Some("Failure".to_string()),
+        Some("true") => Some("Success".to_string()),
+        _ => None,
+    }
+}
+
+/// Windows `LogonType` values 2–5 and 7–13 share their number with OCSF
+/// `logon_type_id`. Anything else (0, 6, text, garbage) is left out
+/// rather than guessed.
+fn logon_type_id(relation: &Relation) -> Option<u32> {
+    let n: u32 = relation.metadata.get("logon_type")?.trim().parse().ok()?;
+    matches!(n, 2..=5 | 7..=13).then_some(n)
 }
 
 /// Projects a canonical OCSF event back into a graph triple. Returns
@@ -578,6 +601,55 @@ mod tests {
                 assert_eq!(e.status.as_deref(), Some("failure"));
                 assert_eq!(e.auth_protocol.as_deref(), Some("Kerberos"));
             }
+            _ => panic!("expected Authentication"),
+        }
+    }
+
+    #[test]
+    fn authentication_carries_logon_type_id() {
+        let src = Entity::new("alice", EntityType::User);
+        let dst = Entity::new("ws-01", EntityType::Host);
+        let mut rel = Relation::new("alice", "ws-01", RelationType::Auth, 0);
+        rel.metadata
+            .insert("logon_type".to_string(), "10".to_string());
+        match triple_to_ocsf(&src, &rel, &dst, &prov()) {
+            OcsfEvent::Authentication(e) => assert_eq!(e.logon_type_id, Some(10)),
+            _ => panic!("expected Authentication"),
+        }
+    }
+
+    #[test]
+    fn authentication_drops_unmapped_logon_type() {
+        let src = Entity::new("alice", EntityType::User);
+        let dst = Entity::new("ws-01", EntityType::Host);
+        for raw in ["0", "6", "14", "Interactive", ""] {
+            let mut rel = Relation::new("alice", "ws-01", RelationType::Auth, 0);
+            rel.metadata
+                .insert("logon_type".to_string(), raw.to_string());
+            match triple_to_ocsf(&src, &rel, &dst, &prov()) {
+                OcsfEvent::Authentication(e) => assert_eq!(e.logon_type_id, None, "{raw}"),
+                _ => panic!("expected Authentication"),
+            }
+        }
+    }
+
+    #[test]
+    fn authentication_status_falls_back_to_success_flag() {
+        let src = Entity::new("alice", EntityType::User);
+        let dst = Entity::new("ws-01", EntityType::Host);
+        let mut rel = Relation::new("alice", "ws-01", RelationType::Auth, 0);
+        rel.metadata
+            .insert("success".to_string(), "false".to_string());
+        match triple_to_ocsf(&src, &rel, &dst, &prov()) {
+            OcsfEvent::Authentication(e) => assert_eq!(e.status.as_deref(), Some("Failure")),
+            _ => panic!("expected Authentication"),
+        }
+
+        // An explicit status wins over the legacy flag.
+        rel.metadata
+            .insert("status".to_string(), "Success".to_string());
+        match triple_to_ocsf(&src, &rel, &dst, &prov()) {
+            OcsfEvent::Authentication(e) => assert_eq!(e.status.as_deref(), Some("Success")),
             _ => panic!("expected Authentication"),
         }
     }
