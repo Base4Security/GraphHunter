@@ -777,7 +777,7 @@ impl SysmonJsonParser {
             .unwrap_or("unknown-host");
 
         let (rel_type, user_meta) =
-            Self::logon_family(event_id, Self::extract_str(event, "TargetUserSid"), domain);
+            logon_family(event_id, Self::extract_str(event, "TargetUserSid"), domain);
         let mut user = Entity::new(&user_id, EntityType::User);
         user.metadata.extend(user_meta);
         let host = Entity::new(host_name, EntityType::Host);
@@ -1686,31 +1686,6 @@ impl SysmonJsonParser {
         }
     }
 
-    /// Logon-family metadata shared by the three 4624/4625/4634/4647 paths.
-    /// User side: the SID (the only exact identity, used by the attack-graph
-    /// projection) and the domain. Relation side: a logoff (4634/4647) is
-    /// not an `Auth` — hunting patterns on `Auth` must not match it — so it
-    /// travels as `Other("Logoff")`; logons keep `Auth` with their outcome.
-    fn logon_family(
-        event_id: u64,
-        sid: Option<&str>,
-        domain: Option<&str>,
-    ) -> (RelationType, std::collections::HashMap<String, String>) {
-        let mut user_meta = std::collections::HashMap::new();
-        if let Some(sid) = sid.filter(|s| !s.is_empty() && *s != "-" && *s != "S-1-0-0") {
-            user_meta.insert("uid".into(), sid.into());
-        }
-        if let Some(d) = domain.filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case("-")) {
-            user_meta.insert("domain".into(), d.into());
-        }
-        let rel = if matches!(event_id, 4634 | 4647) {
-            RelationType::Other("Logoff".into())
-        } else {
-            RelationType::Auth
-        };
-        (rel, user_meta)
-    }
-
     // Raw-event variants for Windows Security + PowerShell EventIDs.
     // Same shape as the Sysmon long-tail raw migrations: skip
     // `Entity`/`Relation` struct allocs, build metadata HashMaps
@@ -1730,7 +1705,7 @@ impl SysmonJsonParser {
         let user_id = Self::build_user_id(user_name, event.target_domain_name);
         let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         let (rel_type, user_meta) =
-            Self::logon_family(event_id, event.target_user_sid, event.target_domain_name);
+            logon_family(event_id, event.target_user_sid, event.target_domain_name);
         let mut rel_meta: HashMap<String, String> = HashMap::new();
         if let Some(lt) = &event.logon_type {
             let s = lt.as_string();
@@ -1996,7 +1971,7 @@ impl SysmonJsonParser {
         let user_id = Self::build_user_id(user_name, event.target_domain_name);
         let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         let (rel_type, user_meta) =
-            Self::logon_family(event_id, event.target_user_sid, event.target_domain_name);
+            logon_family(event_id, event.target_user_sid, event.target_domain_name);
         let mut user = Entity::new(&user_id, EntityType::User);
         user.metadata.extend(user_meta);
         let host = Entity::new(host_name, EntityType::Host);
@@ -2419,4 +2394,30 @@ impl LogParser for SysmonJsonParser {
         // above (bounded reservoir, closes the S4 gap).
         (all_events, stats)
     }
+}
+
+/// Logon-family metadata shared by the Windows Security paths (4624, 4625,
+/// 4634, 4647) of the Sysmon/Security and Sentinel parsers.
+/// User side: the SID (the only exact identity, used by the attack-graph
+/// projection) and the domain. Relation side: a logoff (4634/4647) is
+/// not an `Auth` — hunting patterns on `Auth` must not match it — so it
+/// travels as `Other("Logoff")`; logons keep `Auth` with their outcome.
+pub(crate) fn logon_family(
+    event_id: u64,
+    sid: Option<&str>,
+    domain: Option<&str>,
+) -> (RelationType, std::collections::HashMap<String, String>) {
+    let mut user_meta = std::collections::HashMap::new();
+    if let Some(sid) = sid.filter(|s| !s.is_empty() && *s != "-" && *s != "S-1-0-0") {
+        user_meta.insert("uid".into(), sid.into());
+    }
+    if let Some(d) = domain.filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case("-")) {
+        user_meta.insert("domain".into(), d.into());
+    }
+    let rel = if matches!(event_id, 4634 | 4647) {
+        RelationType::Other("Logoff".into())
+    } else {
+        RelationType::Auth
+    };
+    (rel, user_meta)
 }

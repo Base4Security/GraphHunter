@@ -136,8 +136,8 @@ Reglas:
 ## 7. Prerrequisitos en el código actual
 
 Detectados al leer el código el 2026-11-04. Estado al 2026-11-05: P1 y P2
-resueltos en el PR #164; P3, P5 y P6 resueltos para el parser Sysmon/Security
-(el de Sentinel sigue pendiente); P4 sigue abierto.
+resueltos en el PR #164; P3 y P5 resueltos para los parsers Sysmon/Security y
+Sentinel, P6 en la proyección canónica; P4 sigue abierto.
 
 | # | Problema | Dónde | Efecto en la proyección |
 |---|---|---|---|

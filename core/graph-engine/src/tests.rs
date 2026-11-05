@@ -2333,13 +2333,19 @@ fn sysmon_security_logon_carries_sid_and_domain() {
     assert_eq!(triples.len(), 1);
     let (src, rel, _) = &triples[0];
     assert_eq!(rel.rel_type, RelationType::Auth);
-    assert_eq!(src.metadata.get("uid").unwrap(), "S-1-5-21-1000-2000-3000-1104");
+    assert_eq!(
+        src.metadata.get("uid").unwrap(),
+        "S-1-5-21-1000-2000-3000-1104"
+    );
     assert_eq!(src.metadata.get("domain").unwrap(), "CORP");
 
     // The raw-event path (journal) carries the same user metadata.
     let raw = SysmonJsonParser.parse_raw(json);
     assert_eq!(raw.len(), 1);
-    assert_eq!(raw[0].src_metadata.get("uid").unwrap(), "S-1-5-21-1000-2000-3000-1104");
+    assert_eq!(
+        raw[0].src_metadata.get("uid").unwrap(),
+        "S-1-5-21-1000-2000-3000-1104"
+    );
     assert_eq!(raw[0].rel_type, RelationType::Auth);
 }
 
@@ -2362,8 +2368,15 @@ fn sysmon_security_logoff_is_not_auth() {
         let triples = SysmonJsonParser.parse(&json);
         assert_eq!(triples.len(), 1, "event {eid}");
         let (_, rel, _) = &triples[0];
-        assert_eq!(rel.rel_type, RelationType::Other("Logoff".into()), "event {eid}");
-        assert!(!rel.metadata.contains_key("status"), "a logoff has no outcome");
+        assert_eq!(
+            rel.rel_type,
+            RelationType::Other("Logoff".into()),
+            "event {eid}"
+        );
+        assert!(
+            !rel.metadata.contains_key("status"),
+            "a logoff has no outcome"
+        );
         let raw = SysmonJsonParser.parse_raw(&json);
         assert_eq!(raw[0].rel_type, RelationType::Other("Logoff".into()));
     }
@@ -7833,4 +7846,32 @@ fn semijoin_drops_decoy_starts() {
 
     assert_eq!(paths_as_set(&baseline), paths_as_set(&with_sj));
     assert_eq!(with_sj.len(), 1);
+}
+
+#[test]
+fn sentinel_security_logon_carries_sid_domain_and_logoff() {
+    let logon = r#"[{"Type": "SecurityEvent", "TimeGenerated": "2026-01-01T10:00:00Z", "EventID": 4624,
+        "Computer": "ws-01.corp.example", "TargetUserName": "alice", "TargetDomainName": "CORP",
+        "TargetUserSid": "S-1-5-21-1000-2000-3000-1104", "LogonType": 10}]"#;
+    let triples = SentinelJsonParser.parse(logon);
+    assert_eq!(triples.len(), 1);
+    let (src, rel, _) = &triples[0];
+    assert_eq!(rel.rel_type, RelationType::Auth);
+    assert_eq!(src.id, "alice", "entity ids do not change");
+    assert_eq!(
+        src.metadata.get("uid").unwrap(),
+        "S-1-5-21-1000-2000-3000-1104"
+    );
+    assert_eq!(src.metadata.get("domain").unwrap(), "CORP");
+    let raw = SentinelJsonParser.parse_raw(logon);
+    assert_eq!(raw[0].src_metadata.get("domain").unwrap(), "CORP");
+
+    let logoff = logon.replace("4624", "4634");
+    let (_, rel, _) = &SentinelJsonParser.parse(&logoff)[0];
+    assert_eq!(rel.rel_type, RelationType::Other("Logoff".into()));
+    assert!(!rel.metadata.contains_key("status"));
+    assert_eq!(
+        SentinelJsonParser.parse_raw(&logoff)[0].rel_type,
+        RelationType::Other("Logoff".into())
+    );
 }
