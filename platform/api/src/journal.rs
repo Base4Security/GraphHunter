@@ -165,7 +165,10 @@ impl JournalStore {
         let mut line = serde_json::to_vec(env)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         line.push(b'\n');
-        let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         f.write_all(&line)?;
         Ok(())
     }
@@ -266,9 +269,10 @@ impl JournalStore {
             return Ok(0);
         }
         let f = File::open(path)?;
-        Ok(BufReader::new(f).lines().filter(|l| {
-            l.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false)
-        }).count())
+        Ok(BufReader::new(f)
+            .lines()
+            .filter(|l| l.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false))
+            .count())
     }
 
     /// Count spans the rotated segment + active file, same as `read_all`.
@@ -299,7 +303,10 @@ pub fn ingest_journal_dir() -> Option<std::path::PathBuf> {
 /// (Task 1).
 pub fn journal_enabled() -> bool {
     match std::env::var("GRAPHHUNTER_JOURNAL") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
         Err(_) => true,
     }
 }
@@ -375,12 +382,24 @@ pub(crate) fn canonical_raw_payload(ev: &RawIngestEvent) -> String {
     let canon = CanonicalRawIngestEvent {
         src_id: &ev.src_id,
         src_type: &ev.src_type,
-        src_metadata: ev.src_metadata.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
+        src_metadata: ev
+            .src_metadata
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect(),
         dst_id: &ev.dst_id,
         dst_type: &ev.dst_type,
-        dst_metadata: ev.dst_metadata.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
+        dst_metadata: ev
+            .dst_metadata
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect(),
         rel_type: &ev.rel_type,
-        rel_metadata: ev.rel_metadata.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect(),
+        rel_metadata: ev
+            .rel_metadata
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect(),
         timestamp: ev.timestamp,
     };
     serde_json::to_string(&canon).unwrap_or_default()
@@ -484,9 +503,7 @@ pub fn journal_batch(
 fn source_row_continuations(events: &[RawIngestEvent]) -> Vec<bool> {
     (0..events.len())
         .map(|i| {
-            i > 0
-                && events[i].raw_line.is_some()
-                && events[i].raw_line == events[i - 1].raw_line
+            i > 0 && events[i].raw_line.is_some() && events[i].raw_line == events[i - 1].raw_line
         })
         .collect()
 }
@@ -592,7 +609,11 @@ pub fn journal_batch_keyed(
                 if cont[i] {
                     strip_source_row(&mut env);
                 }
-                let line = if writing { envelope_line(&env) } else { Vec::new() };
+                let line = if writing {
+                    envelope_line(&env)
+                } else {
+                    Vec::new()
+                };
                 (key, line)
             })
             .collect();
@@ -646,7 +667,10 @@ fn envelope_line(env: &CanonicalEnvelope) -> Vec<u8> {
 /// applies come from the same in-memory batch the journal write journals.
 pub fn graphdelta_enabled() -> bool {
     match std::env::var("GRAPHHUNTER_GRAPHDELTA") {
-        Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
         Err(_) => true,
     }
 }
@@ -708,7 +732,11 @@ fn reconstruct_from_envelopes(all: Vec<CanonicalEnvelope>) -> JournalReconstruct
             _ => inserted.push(env), // Insert (Correction/Tombstone deferred to Fase C)
         }
     }
-    JournalReconstruction { inserted, skipped, total }
+    JournalReconstruction {
+        inserted,
+        skipped,
+        total,
+    }
 }
 
 /// Replay the whole journal and split records by change kind. Preserves append
@@ -731,7 +759,10 @@ pub fn envelope_to_delta(env: &CanonicalEnvelope) -> Option<GraphDelta> {
         return None;
     }
     let event: RawIngestEvent = serde_json::from_str(&env.raw_payload).ok()?;
-    let event_id = env.native_id.clone().unwrap_or_else(|| env.canonical_hash.clone());
+    let event_id = env
+        .native_id
+        .clone()
+        .unwrap_or_else(|| env.canonical_hash.clone());
     let dataset_id = Some(env.provenance.source_dataset_id.clone());
     Some(GraphDelta::new(event, event_id, dataset_id))
 }
@@ -929,7 +960,9 @@ fn compare_entities(
     let entity_metadata_result = if divergences.is_empty() {
         DimensionResult::Match
     } else {
-        DimensionResult::Diff { detail: divergences.join("; ") }
+        DimensionResult::Diff {
+            detail: divergences.join("; "),
+        }
     };
 
     (entities_result, entity_metadata_result)
@@ -943,11 +976,13 @@ fn compare_temporal_window(
     rebuilt: &graph_hunter_core::graph::GraphHunter,
 ) -> DimensionResult {
     match (live.edge_timestamp_range(), rebuilt.edge_timestamp_range()) {
-        (None, None) => {
-            DimensionResult::NotComparable { reason: "neither graph has any edges".to_string() }
-        }
+        (None, None) => DimensionResult::NotComparable {
+            reason: "neither graph has any edges".to_string(),
+        },
         (Some(l), Some(r)) if l == r => DimensionResult::Match,
-        (l, r) => DimensionResult::Diff { detail: format!("live range={l:?}, rebuilt range={r:?}") },
+        (l, r) => DimensionResult::Diff {
+            detail: format!("live range={l:?}, rebuilt range={r:?}"),
+        },
     }
 }
 
@@ -961,9 +996,7 @@ fn compare_temporal_window(
 /// rebuild), so the multiset — not the `Vec` — is what gets compared.
 /// `Arc<str>` is resolved to owned `String` because `Arc<str>` pointer
 /// identity is meaningless across two independently-built string interners.
-fn path_multiset(
-    paths: &[graph_hunter_core::graph::HuntResult],
-) -> BTreeMap<Vec<String>, usize> {
+fn path_multiset(paths: &[graph_hunter_core::graph::HuntResult]) -> BTreeMap<Vec<String>, usize> {
     let mut map: BTreeMap<Vec<String>, usize> = BTreeMap::new();
     for p in paths {
         let owned: Vec<String> = p.iter().map(|id| id.to_string()).collect();
@@ -1087,8 +1120,9 @@ pub fn compare_hypothesis_results(
         DimensionResult::Match
     } else {
         DimensionResult::NotComparable {
-            reason: "hypothesis battery produced no paths on either graph — no evidence of agreement"
-                .to_string(),
+            reason:
+                "hypothesis battery produced no paths on either graph — no evidence of agreement"
+                    .to_string(),
         }
     }
 }
@@ -1207,11 +1241,17 @@ impl EquivalenceReport {
 
 /// Render one dimension as a single readable line: `PASS`, `DIFF: <detail>`,
 /// or `NOT-COMPARABLE: <reason>`.
-fn fmt_dimension(f: &mut std::fmt::Formatter<'_>, name: &str, result: &DimensionResult) -> std::fmt::Result {
+fn fmt_dimension(
+    f: &mut std::fmt::Formatter<'_>,
+    name: &str,
+    result: &DimensionResult,
+) -> std::fmt::Result {
     match result {
         DimensionResult::Match => writeln!(f, "  {name}: PASS"),
         DimensionResult::Diff { detail } => writeln!(f, "  {name}: DIFF: {detail}"),
-        DimensionResult::NotComparable { reason } => writeln!(f, "  {name}: NOT-COMPARABLE: {reason}"),
+        DimensionResult::NotComparable { reason } => {
+            writeln!(f, "  {name}: NOT-COMPARABLE: {reason}")
+        }
     }
 }
 
@@ -1229,7 +1269,11 @@ impl std::fmt::Display for EquivalenceReport {
         if self.rebuild_faithful {
             writeln!(f, "  rebuild_faithful: true")?;
         } else {
-            writeln!(f, "  rebuild_faithful: false ({})", self.rebuild_caveats.join("; "))?;
+            writeln!(
+                f,
+                "  rebuild_faithful: false ({})",
+                self.rebuild_caveats.join("; ")
+            )?;
         }
         fmt_dimension(f, "entities", &self.entities)?;
         fmt_dimension(f, "entity_metadata", &self.entity_metadata)?;
@@ -1312,13 +1356,16 @@ pub fn compare_observable_equality(
 /// Exposed (not just inlined into `check_incremental_equivalence`) so the
 /// classification itself is directly testable, independent of the full
 /// rebuild-and-compare pipeline.
-fn classify_rebuild_faithfulness(
-    envelopes: &[CanonicalEnvelope],
-) -> (bool, Vec<String>) {
+fn classify_rebuild_faithfulness(envelopes: &[CanonicalEnvelope]) -> (bool, Vec<String>) {
     use graph_hunter_canonical::ChangeKind;
     let unfaithful = envelopes
         .iter()
-        .filter(|e| matches!(e.change_kind, ChangeKind::Correction | ChangeKind::Tombstone))
+        .filter(|e| {
+            matches!(
+                e.change_kind,
+                ChangeKind::Correction | ChangeKind::Tombstone
+            )
+        })
         .count();
     if unfaithful == 0 {
         (true, Vec::new())
@@ -1469,11 +1516,21 @@ mod tests {
     fn journal_rotates_at_cap_and_read_all_spans_segments() {
         let dir = tempfile::tempdir().unwrap();
         let j = JournalStore::open(dir.path()).unwrap();
-        for i in 0..20 { j.append_with_cap(&env(&format!("row-{i}"), i, i*10), TEST_JOURNAL_CAP).unwrap(); }
+        for i in 0..20 {
+            j.append_with_cap(&env(&format!("row-{i}"), i, i * 10), TEST_JOURNAL_CAP)
+                .unwrap();
+        }
         // A rotated segment exists AND read_all returns ALL 20 in order (spans .1 + active).
-        assert!(dir.path().join("journal.jsonl.1").exists(), "expected a rotated segment");
+        assert!(
+            dir.path().join("journal.jsonl.1").exists(),
+            "expected a rotated segment"
+        );
         let all = j.read_all().unwrap();
-        assert_eq!(all.len(), 20, "read_all must span the rotated segment + active file");
+        assert_eq!(
+            all.len(),
+            20,
+            "read_all must span the rotated segment + active file"
+        );
         assert_eq!(all[0].raw_payload, "row-0");
         assert_eq!(all[19].raw_payload, "row-19");
         assert_eq!(j.count().unwrap(), 20);
@@ -1486,12 +1543,21 @@ mod tests {
         // unbounded.
         let dir = tempfile::tempdir().unwrap();
         let j = JournalStore::open(dir.path()).unwrap();
-        for i in 0..200 { j.append_with_cap(&env(&format!("r{i}"), i, i), TEST_JOURNAL_CAP).unwrap(); }
+        for i in 0..200 {
+            j.append_with_cap(&env(&format!("r{i}"), i, i), TEST_JOURNAL_CAP)
+                .unwrap();
+        }
         // No .2 / older segments — retention keeps only active + .1.
         assert!(!dir.path().join("journal.jsonl.2").exists());
-        let bytes: u64 = std::fs::read_dir(dir.path()).unwrap()
-            .filter_map(|e| e.ok()).map(|e| e.metadata().unwrap().len()).sum();
-        assert!(bytes < TEST_JOURNAL_CAP * 3, "journal disk must stay bounded (~2x cap), got {bytes}");
+        let bytes: u64 = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.metadata().unwrap().len())
+            .sum();
+        assert!(
+            bytes < TEST_JOURNAL_CAP * 3,
+            "journal disk must stay bounded (~2x cap), got {bytes}"
+        );
     }
 
     // ── journal_max_bytes floor (fix M-2) ────────────────────────────
@@ -1529,7 +1595,8 @@ mod tests {
         {
             let path = dir.path().join("journal.jsonl");
             let mut f = OpenOptions::new().append(true).open(&path).unwrap();
-            f.write_all(b"{\"change_kind\":\"Insert\",\"raw_pay").unwrap();
+            f.write_all(b"{\"change_kind\":\"Insert\",\"raw_pay")
+                .unwrap();
         }
         let all = j.read_all().unwrap();
         assert_eq!(
@@ -1556,7 +1623,10 @@ mod tests {
             let path = dir.path().join("journal.jsonl");
             let contents = std::fs::read_to_string(&path).unwrap();
             let after_first_newline = contents.find('\n').map(|i| i + 1).unwrap_or(0);
-            let mangled = format!("not valid json at all\n{}", &contents[after_first_newline..]);
+            let mangled = format!(
+                "not valid json at all\n{}",
+                &contents[after_first_newline..]
+            );
             std::fs::write(&path, mangled).unwrap();
         }
         let result = j.read_all();
@@ -1656,7 +1726,9 @@ mod tests {
         // No corruption: read_all() must succeed (a corrupted/torn segment
         // from an unsynchronized rotate would surface as an Err here) and
         // must agree with count().
-        let all = store.read_all().expect("read_all must not error — no corruption");
+        let all = store
+            .read_all()
+            .expect("read_all must not error — no corruption");
         assert_eq!(
             all.len(),
             store.count().unwrap(),
@@ -1685,7 +1757,10 @@ mod tests {
                 .trim_start_matches("row-")
                 .parse()
                 .expect("every retained record must be one of this test's well-formed rows");
-            assert!(n < total, "retained record index {n} out of the {total} this test wrote");
+            assert!(
+                n < total,
+                "retained record index {n} out of the {total} this test wrote"
+            );
             assert!(seen_ns.insert(n), "duplicate record index {n} — corruption");
         }
     }
@@ -1765,7 +1840,10 @@ mod tests {
             serde_json::from_str(&envs[0].raw_payload).unwrap();
         assert_eq!(back.timestamp, 100);
         // and it still round-trips as an Insert.
-        assert_eq!(envs[0].change_kind, graph_hunter_canonical::ChangeKind::Insert);
+        assert_eq!(
+            envs[0].change_kind,
+            graph_hunter_canonical::ChangeKind::Insert
+        );
     }
 
     #[test]
@@ -1818,22 +1896,21 @@ mod tests {
             ("malformed-row-2".to_string(), "missing_field".to_string()),
         ];
         journal_batch(
-            &store,
-            "ds-1",
-            "file",
-            "ds-1",
-            "generic",
-            &events,
-            &skipped,
-            999_000,
+            &store, "ds-1", "file", "ds-1", "generic", &events, &skipped, 999_000,
         )
         .unwrap();
 
         let all = store.read_all().unwrap();
         assert_eq!(all.len(), 4);
 
-        let inserts: Vec<_> = all.iter().filter(|e| e.change_kind == ChangeKind::Insert).collect();
-        let skips: Vec<_> = all.iter().filter(|e| e.change_kind == ChangeKind::Skipped).collect();
+        let inserts: Vec<_> = all
+            .iter()
+            .filter(|e| e.change_kind == ChangeKind::Insert)
+            .collect();
+        let skips: Vec<_> = all
+            .iter()
+            .filter(|e| e.change_kind == ChangeKind::Skipped)
+            .collect();
         assert_eq!(inserts.len(), 2);
         assert_eq!(skips.len(), 2);
 
@@ -1842,8 +1919,10 @@ mod tests {
         // provenance is frozen into each record (non-empty mapping_hash).
         assert!(all.iter().all(|e| !e.provenance.mapping_hash.is_empty()));
         // skipped rows preserve their raw payload and reason.
-        assert!(skips.iter().any(|e| e.raw_payload == "malformed-row-1"
-            && e.skip_reason.as_deref() == Some("no_triple")));
+        assert!(
+            skips.iter().any(|e| e.raw_payload == "malformed-row-1"
+                && e.skip_reason.as_deref() == Some("no_triple"))
+        );
         assert!(skips.iter().any(|e| e.raw_payload == "malformed-row-2"
             && e.skip_reason.as_deref() == Some("missing_field")));
         // inserted events carry the event's own timestamp as event_time.
@@ -1870,7 +1949,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let j = JournalStore::open(dir.path()).unwrap();
         j.append(&env("ins-1", 1, 10)).unwrap();
-        j.append(&env("skip-1", 0, 11).as_skipped("no_triple".into())).unwrap();
+        j.append(&env("skip-1", 0, 11).as_skipped("no_triple".into()))
+            .unwrap();
         j.append(&env("ins-2", 2, 12)).unwrap();
         let r = rebuild_from_journal(&j).unwrap();
         assert_eq!(r.total, 3);
@@ -1879,8 +1959,12 @@ mod tests {
         assert_eq!(r.inserted[0].raw_payload, "ins-1");
         assert_eq!(r.skipped[0].skip_reason.as_deref(), Some("no_triple"));
         // Every raw row is recoverable — nothing was silently lost.
-        let payloads: Vec<_> = r.inserted.iter().chain(&r.skipped)
-            .map(|e| e.raw_payload.clone()).collect();
+        let payloads: Vec<_> = r
+            .inserted
+            .iter()
+            .chain(&r.skipped)
+            .map(|e| e.raw_payload.clone())
+            .collect();
         assert!(payloads.contains(&"skip-1".to_string()));
     }
 
@@ -1892,8 +1976,7 @@ mod tests {
         let ev = sample_event(100);
         let raw = serde_json::to_string(&ev).unwrap();
         let prov = ProvenanceCtx::for_builtin_parser("p", "ds", raw.as_bytes());
-        let env = CanonicalEnvelope::new_insert(
-            "s".into(), "la".into(), 100, 200, raw, prov);
+        let env = CanonicalEnvelope::new_insert("s".into(), "la".into(), 100, 200, raw, prov);
         let d = envelope_to_delta(&env).expect("insert envelope yields a delta");
         // native_id absent -> keyed on canonical_hash
         assert_eq!(d.event_id, env.canonical_hash);
@@ -1907,9 +1990,9 @@ mod tests {
     #[test]
     fn skipped_envelope_yields_no_delta() {
         let prov = ProvenanceCtx::for_builtin_parser("p", "ds", b"x");
-        let env = CanonicalEnvelope::new_insert(
-            "s".into(), "la".into(), 0, 5, "malformed".into(), prov)
-            .as_skipped("no_triple".into());
+        let env =
+            CanonicalEnvelope::new_insert("s".into(), "la".into(), 0, 5, "malformed".into(), prov)
+                .as_skipped("no_triple".into());
         assert!(envelope_to_delta(&env).is_none());
     }
 
@@ -1918,8 +2001,7 @@ mod tests {
         let ev = sample_event(100);
         let raw = serde_json::to_string(&ev).unwrap();
         let prov = ProvenanceCtx::for_builtin_parser("p", "ds", raw.as_bytes());
-        let mut env = CanonicalEnvelope::new_insert(
-            "s".into(), "la".into(), 100, 200, raw, prov);
+        let mut env = CanonicalEnvelope::new_insert("s".into(), "la".into(), 100, 200, raw, prov);
         env.native_id = Some("native-1".into());
         let d = envelope_to_delta(&env).expect("insert envelope yields a delta");
         assert_eq!(d.event_id, "native-1");
@@ -1928,8 +2010,8 @@ mod tests {
     #[test]
     fn insert_envelope_with_malformed_payload_yields_no_delta() {
         let prov = ProvenanceCtx::for_builtin_parser("p", "ds", b"not json");
-        let env = CanonicalEnvelope::new_insert(
-            "s".into(), "la".into(), 0, 5, "not json".into(), prov);
+        let env =
+            CanonicalEnvelope::new_insert("s".into(), "la".into(), 0, 5, "not json".into(), prov);
         assert!(envelope_to_delta(&env).is_none());
     }
 
@@ -1978,7 +2060,10 @@ mod tests {
         }
         for on in ["1", "true", "yes", "on", "anything"] {
             unsafe { std::env::set_var("GRAPHHUNTER_GRAPHDELTA", on) };
-            assert!(graphdelta_enabled(), "{on:?} should leave graphdelta enabled");
+            assert!(
+                graphdelta_enabled(),
+                "{on:?} should leave graphdelta enabled"
+            );
         }
         unsafe { std::env::remove_var("GRAPHHUNTER_GRAPHDELTA") };
     }
@@ -2184,9 +2269,21 @@ mod tests {
         let prov1 = ProvenanceCtx::for_builtin_parser("generic", "ds-1", raw1.as_bytes());
         let prov2 = ProvenanceCtx::for_builtin_parser("generic", "ds-1", raw2.as_bytes());
         let env1 = CanonicalEnvelope::new_insert(
-            "s".into(), "la".into(), ev1.timestamp, 1000, raw1, prov1);
+            "s".into(),
+            "la".into(),
+            ev1.timestamp,
+            1000,
+            raw1,
+            prov1,
+        );
         let env2 = CanonicalEnvelope::new_insert(
-            "s".into(), "la".into(), ev2.timestamp, 2000, raw2, prov2);
+            "s".into(),
+            "la".into(),
+            ev2.timestamp,
+            2000,
+            raw2,
+            prov2,
+        );
 
         let mut g = GraphHunter::new();
         let (applied, dup) = apply_batch_idempotent(&mut g, &[env1, env2]);
@@ -2216,7 +2313,9 @@ mod tests {
         for e in &inserts {
             store.append(e).unwrap();
         }
-        store.append(&env("skip-1", 0, 11).as_skipped("no_triple".into())).unwrap();
+        store
+            .append(&env("skip-1", 0, 11).as_skipped("no_triple".into()))
+            .unwrap();
         let mut live = GraphHunter::new();
         apply_batch_idempotent(&mut live, &inserts);
         apply_batch_idempotent(&mut live, &inserts); // crash replay: idempotent
@@ -2235,8 +2334,11 @@ mod tests {
     /// the rebuild_faithful guard test. The `TempDir` guard MUST be kept
     /// alive by the caller (its `Drop` deletes the directory `store` reads
     /// from) — `JournalStore` only holds a `PathBuf`, not the guard itself.
-    fn build_live_graph_and_its_journal(
-    ) -> (graph_hunter_core::graph::GraphHunter, JournalStore, tempfile::TempDir) {
+    fn build_live_graph_and_its_journal() -> (
+        graph_hunter_core::graph::GraphHunter,
+        JournalStore,
+        tempfile::TempDir,
+    ) {
         use graph_hunter_core::graph::GraphHunter;
         let dir = tempfile::tempdir().unwrap();
         let store = JournalStore::open(dir.path()).unwrap();
@@ -2248,7 +2350,9 @@ mod tests {
         for e in &inserts {
             store.append(e).unwrap();
         }
-        store.append(&env("skip-1", 0, 11).as_skipped("no_triple".into())).unwrap();
+        store
+            .append(&env("skip-1", 0, 11).as_skipped("no_triple".into()))
+            .unwrap();
         let mut live = GraphHunter::new();
         apply_batch_idempotent(&mut live, &inserts);
         apply_batch_idempotent(&mut live, &inserts); // crash replay: idempotent
@@ -2280,11 +2384,17 @@ mod tests {
             report.anomaly_scores
         );
         assert!(
-            matches!(report.mvcc_ingested_at, DimensionResult::NotComparable { .. }),
+            matches!(
+                report.mvcc_ingested_at,
+                DimensionResult::NotComparable { .. }
+            ),
             "mvcc_ingested_at: {:?}",
             report.mvcc_ingested_at
         );
-        assert!(report.rebuild_faithful, "journal has only Insert/Skipped -> faithful");
+        assert!(
+            report.rebuild_faithful,
+            "journal has only Insert/Skipped -> faithful"
+        );
         assert!(report.rebuild_caveats.is_empty());
 
         let rendered = format!("{}", report);
@@ -2324,7 +2434,12 @@ mod tests {
             !report.rebuild_faithful,
             "a Correction envelope in the journal must mark the rebuild unfaithful"
         );
-        assert_eq!(report.rebuild_caveats.len(), 1, "{:?}", report.rebuild_caveats);
+        assert_eq!(
+            report.rebuild_caveats.len(),
+            1,
+            "{:?}",
+            report.rebuild_caveats
+        );
         assert!(
             report.rebuild_caveats[0].contains('1'),
             "caveat should name the count of unfaithful envelopes: {}",
@@ -2361,7 +2476,9 @@ mod tests {
         for e in &inserts {
             store.append(e).unwrap();
         }
-        store.append(&env("skip-1", 0, 11).as_skipped("no_triple".into())).unwrap();
+        store
+            .append(&env("skip-1", 0, 11).as_skipped("no_triple".into()))
+            .unwrap();
 
         let mut live = GraphHunter::new();
         apply_batch_idempotent(&mut live, &inserts);
@@ -2380,7 +2497,11 @@ mod tests {
         let _guard = lock_env();
         let (live, rebuilt) = build_live_and_rebuilt_from_same_envelopes();
         let report = compare_observable_equality(&live, &rebuilt, DEFAULT_HYPOTHESIS_BATTERY);
-        assert!(matches!(report.entities, DimensionResult::Match), "entities: {:?}", report.entities);
+        assert!(
+            matches!(report.entities, DimensionResult::Match),
+            "entities: {:?}",
+            report.entities
+        );
         assert!(
             matches!(report.entity_metadata, DimensionResult::Match),
             "metadata: {:?}",
@@ -2576,7 +2697,11 @@ mod tests {
         // uses THOSE types, matching the actual fixture schema.
         let battery = ["IP -[Connect]-> Host"];
         let report = compare_hypothesis_results(&live, &rebuilt, &battery);
-        assert!(matches!(report, DimensionResult::Match), "hypothesis results: {:?}", report);
+        assert!(
+            matches!(report, DimensionResult::Match),
+            "hypothesis results: {:?}",
+            report
+        );
     }
 
     /// Negative control: a battery hypothesis whose path multiset diverges
@@ -2650,7 +2775,10 @@ mod tests {
                 other
             ),
         }
-        assert!(!report.is_match(), "an inert battery must never report Match");
+        assert!(
+            !report.is_match(),
+            "an inert battery must never report Match"
+        );
     }
 
     /// A battery DSL string that fails to parse must surface honestly as a
@@ -2694,7 +2822,10 @@ mod tests {
     fn source_row_is_written_once_per_row_and_read_back_on_every_event() {
         let _guard = lock_env();
         unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL_MAX_BYTES") };
-        let rows = ["{\"row\":\"alpha-unmapped\"}", "{\"row\":\"beta-unmapped\"}"];
+        let rows = [
+            "{\"row\":\"alpha-unmapped\"}",
+            "{\"row\":\"beta-unmapped\"}",
+        ];
         let events = fanout(&rows, 3);
         let dir = tempfile::tempdir().unwrap();
         let store = JournalStore::open(dir.path()).unwrap();
@@ -2756,7 +2887,10 @@ mod tests {
         journal_batch(&store, "s", "la", "ds", "p", &events, &[], 1000).unwrap();
         unsafe { std::env::remove_var("GRAPHHUNTER_JOURNAL_MAX_BYTES") };
 
-        assert!(dir.path().join(JOURNAL_ROTATED_FILE).exists(), "must have rotated");
+        assert!(
+            dir.path().join(JOURNAL_ROTATED_FILE).exists(),
+            "must have rotated"
+        );
         for seg in [JOURNAL_ROTATED_FILE, JOURNAL_FILE] {
             let envs = JournalStore::read_segment(&dir.path().join(seg)).unwrap();
             assert!(!envs.is_empty());

@@ -870,8 +870,7 @@ impl ConfigurableParser {
         // GenericParser's last-resort fallback: an event with a single
         // recognizable entity becomes that entity's self-loop, so it leaves
         // a trace. Only meaningful if nothing else below links the entity.
-        let canonical_is_fallback_loop =
-            triples.len() == 1 && triples[0].0.id == triples[0].2.id;
+        let canonical_is_fallback_loop = triples.len() == 1 && triples[0].0.id == triples[0].2.id;
 
         // But for the user-override loop below, iterate the ORIGINAL event's
         // keys. Otherwise fields we just stripped would be invisible to their
@@ -1136,7 +1135,10 @@ impl LogParser for ConfigurableParser {
     fn parse_raw_with_stats(
         &self,
         data: &str,
-    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+    ) -> (
+        Vec<crate::parser::RawIngestEvent>,
+        crate::parser::ParseStats,
+    ) {
         let events = Self::collect_events(data);
         let (each, stats) = crate::generic::parse_events_each_with_stats(&events, |event| {
             self.parse_event_with_config(event)
@@ -1285,7 +1287,13 @@ mod raw_line_tests {
     #[test]
     fn user_agent_columns_are_not_users() {
         let ua = vec!["Linux; U; Android 15; SM-A256E".to_string(); 6];
-        for name in ["user_agent", "userAgent", "User-Agent", "cs(User-Agent)", "http_user_agent"] {
+        for name in [
+            "user_agent",
+            "userAgent",
+            "User-Agent",
+            "cs(User-Agent)",
+            "http_user_agent",
+        ] {
             assert_eq!(suggest_entity_type(name, &ua), None, "{name}");
         }
         assert_eq!(
@@ -1335,7 +1343,15 @@ mod raw_line_tests {
             ],
         });
         let triples = parser.parse(data);
-        assert_eq!(triples.len(), 2, "{:?}", triples.iter().map(|t| (&t.0.id, &t.2.id)).collect::<Vec<_>>());
+        assert_eq!(
+            triples.len(),
+            2,
+            "{:?}",
+            triples
+                .iter()
+                .map(|t| (&t.0.id, &t.2.id))
+                .collect::<Vec<_>>()
+        );
         for (src, rel, dst) in &triples {
             assert_ne!(src.id, dst.id, "no self-loop alongside real edges");
             assert_eq!(rel.metadata.get("type").map(String::as_str), Some("sepft"));
