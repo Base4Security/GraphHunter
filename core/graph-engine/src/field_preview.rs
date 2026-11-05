@@ -191,17 +191,15 @@ pub fn preview_fields_from_events_with_classifier(
             // target AND the vote clears the confidence bar. The
             // canonical/heuristic path always wins on known names;
             // this only fills in opinion for unknown fields.
-            if canonical.is_none() {
-                if let Some(c) = classifier {
-                    if let Some(vote) = c.classify(&raw_name, &sample_values) {
-                        if vote.confidence >= CLASSIFIER_MIN_CONFIDENCE {
-                            current_role = vote.role.clone();
-                            if let Some(et) = vote.entity_type {
-                                suggested_entity_type = Some(et);
-                                suggestion_source = Some("classifier".to_string());
-                            }
-                        }
-                    }
+            if canonical.is_none()
+                && let Some(c) = classifier
+                && let Some(vote) = c.classify(&raw_name, &sample_values)
+                && vote.confidence >= CLASSIFIER_MIN_CONFIDENCE
+            {
+                current_role = vote.role.clone();
+                if let Some(et) = vote.entity_type {
+                    suggested_entity_type = Some(et);
+                    suggestion_source = Some("classifier".to_string());
                 }
             }
 
@@ -783,7 +781,7 @@ impl ConfigurableParser {
                 || matches!(m.role, FieldRole::Ignore)
                 || matches!(m.role, FieldRole::Node)
         });
-        if has_work == false {
+        if !has_work {
             return event.clone();
         }
         let mut obj = match event.as_object() {
@@ -803,13 +801,12 @@ impl ConfigurableParser {
             };
             if let Some(epoch) =
                 GenericParser::parse_timestamp_with_hint(&raw, fmt, m.locale.as_deref())
+                && let Some(dt) = chrono::DateTime::from_timestamp(epoch, 0)
             {
-                if let Some(dt) = chrono::DateTime::from_timestamp(epoch, 0) {
-                    obj.insert(
-                        m.raw_name.clone(),
-                        Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-                    );
-                }
+                obj.insert(
+                    m.raw_name.clone(),
+                    Value::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+                );
             }
         }
 
@@ -958,7 +955,7 @@ impl ConfigurableParser {
                             .entity_type
                             .as_deref()
                             .and_then(parse_entity_type)
-                            .or_else(|| suggest_entity_type(key, &[val_str.clone()]))
+                            .or_else(|| suggest_entity_type(key, std::slice::from_ref(&val_str)))
                             .unwrap_or(EntityType::Process);
 
                         // Canonical entity types carry globally identifying

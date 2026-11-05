@@ -157,10 +157,10 @@ impl JournalStore {
     /// function does not acquire it itself, so that both public entry points
     /// share one lock/critical-section, not two independently-locked ones.
     fn append_locked(&self, env: &CanonicalEnvelope, cap: u64) -> std::io::Result<()> {
-        if let Ok(meta) = std::fs::metadata(&self.path) {
-            if meta.len() >= cap {
-                self.rotate()?;
-            }
+        if let Ok(meta) = std::fs::metadata(&self.path)
+            && meta.len() >= cap
+        {
+            self.rotate()?;
         }
         let mut line = serde_json::to_vec(env)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -467,6 +467,7 @@ pub(crate) fn build_batch_envelopes(
 /// replayable. Pure w.r.t. the caller's state — the only side effect is
 /// `store.append` — so it's unit-testable without the API's session
 /// machinery.
+#[allow(clippy::too_many_arguments)]
 pub fn journal_batch(
     store: &JournalStore,
     source_id: &str,
@@ -624,10 +625,10 @@ pub fn journal_batch_keyed(
                 lines.push(line);
             }
         }
-        if let (true, Some(s)) = (writing, store) {
-            if let Err(e) = s.append_lines(&group_lines(lines, &cont[start..end])) {
-                write_err = Some(e);
-            }
+        if let (true, Some(s)) = (writing, store)
+            && let Err(e) = s.append_lines(&group_lines(lines, &cont[start..end]))
+        {
+            write_err = Some(e);
         }
         start = end;
     }
@@ -900,6 +901,7 @@ fn compare_edges(
 /// via `to_snapshot()` and IS stamped by the delta path (Fase C-1's
 /// dataset-id fix) — the edge comparison (`EdgeKey.dataset`) already covered
 /// it, but entities didn't.
+#[allow(clippy::type_complexity)]
 fn entity_map(
     entities: &[graph_hunter_core::Entity],
 ) -> BTreeMap<String, (EntityType, Option<String>, Vec<(String, String)>)> {
