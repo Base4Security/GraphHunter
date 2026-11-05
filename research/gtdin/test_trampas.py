@@ -9,7 +9,7 @@ import pytest
 
 from detcover.model import Edge, Instance, Rule
 from detcover.prob import evasion_distances, solve_prob_milp, theta_of
-from gtdin.trampas import con_trampas, evasion_con_trampas
+from gtdin.trampas import con_trampas, evasion_con_trampas, resolver_con_tope
 
 
 def instancia(semilla: int) -> Instance:
@@ -28,12 +28,12 @@ def instancia(semilla: int) -> Instance:
     return Instance(nodos, E, R, "s", {"t"})
 
 
-def fuerza_bruta(inst, candidatos, costo_trampa, delta):
+def fuerza_bruta(inst, candidatos, costo_trampa, delta, k=None):
     theta, mejor = theta_of(delta), (math.inf, None)
     R = range(len(inst.rules))
-    for k in range(len(inst.rules) + 1):
-        for reglas in itertools.combinations(R, k):
-            for j in range(len(candidatos) + 1):
+    for nr in range(len(inst.rules) + 1):
+        for reglas in itertools.combinations(R, nr):
+            for j in range((len(candidatos) if k is None else min(k, len(candidatos))) + 1):
                 for tr in itertools.combinations(candidatos, j):
                     costo = inst.rule_cost(reglas) + costo_trampa * len(tr)
                     if costo < mejor[0] and min(evasion_con_trampas(inst, reglas, tr).values()) >= theta * (1 - 1e-9):
@@ -79,3 +79,22 @@ def test_origen_y_terminal_no_se_parten():
         con_trampas(inst, ["t"], 1.0)
     with pytest.raises(ValueError):
         con_trampas(inst, ["s"], 1.0)
+
+
+@pytest.mark.parametrize("semilla", range(25))
+@pytest.mark.parametrize("k", [0, 1, 2])
+def test_tope_de_trampas_igual_a_fuerza_bruta(semilla, k):
+    inst = instancia(semilla)
+    rng = random.Random(200 + semilla)
+    candidatos = rng.sample([n for n in inst.nodes if n not in ("s", "t")], 4)
+    costo_trampa = rng.choice([0.5, 3.0])
+    delta = rng.choice([0.05, 0.2])
+    esperado, _ = fuerza_bruta(inst, candidatos, costo_trampa, delta, k=k)
+    partida, idx = con_trampas(inst, candidatos, costo_trampa)
+    sol = resolver_con_tope(partida, delta, idx, k)
+    if esperado == math.inf:
+        assert sol.status == "infeasible"
+    else:
+        assert sol.status == "optimal"
+        assert sol.cost == pytest.approx(esperado, rel=1e-6, abs=1e-9)
+        assert sum(1 for i in sol.rules if i in idx.values()) <= k

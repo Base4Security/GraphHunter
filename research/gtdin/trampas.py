@@ -86,3 +86,30 @@ def evasion_con_trampas(inst: Instance, reglas: Sequence[int], trampas: Iterable
                 d[v] = du + w
                 heapq.heappush(cola, (du + w, v))
     return {t: d.get(t, math.inf) for t in inst.targets}
+
+
+def resolver_con_tope(partida: Instance, delta: float, indice: Dict[str, int], k: int,
+                      time_limit: float | None = None):
+    """Óptimo exacto con a lo sumo k trampas (PERIPLO coloca k trampas; acá
+    además compiten por costo con las reglas). Es el MILP probabilístico de
+    detcover más la fila  Σ_{v} x_trampa(v) ≤ k."""
+    import time
+
+    import numpy as np
+    from scipy.optimize import Bounds, LinearConstraint, milp
+    from scipy.sparse import coo_matrix, vstack
+
+    from detcover.prob import ProbSolution, _build, theta_of
+
+    A, c, lb, ub, integ, R = _build(partida, theta_of(delta))
+    fila = coo_matrix(([1.0] * len(indice), ([0] * len(indice), list(indice.values()))), shape=(1, A.shape[1]))
+    restricciones = [LinearConstraint(A, -np.inf, 0.0), LinearConstraint(fila.tocsr(), -np.inf, float(k))]
+    opts = {"disp": False} | ({"time_limit": float(time_limit)} if time_limit is not None else {})
+    t0 = time.perf_counter()
+    res = milp(c, constraints=restricciones, integrality=integ, bounds=Bounds(lb, ub), options=opts)
+    dt = time.perf_counter() - t0
+    status = {0: "optimal", 1: "limit", 2: "infeasible"}.get(res.status, f"error{res.status}")
+    if res.x is None:
+        return ProbSolution(status, seconds=dt)
+    elegidas = [i for i in range(R) if res.x[i] > 0.5]
+    return ProbSolution(status, elegidas, partida.rule_cost(elegidas), dt)
