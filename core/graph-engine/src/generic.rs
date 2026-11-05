@@ -959,12 +959,11 @@ impl GenericParser {
     fn find_action_relation(event: &Value) -> Option<RelationType> {
         let obj = event.as_object()?;
         for (k, v) in obj {
-            if Self::canonical_field(k) == Some("action") {
-                if let Some(s) = v.as_str() {
-                    if let Some(rt) = crate::field_preview::infer_relation_from_action(s) {
-                        return Some(rt);
-                    }
-                }
+            if Self::canonical_field(k) == Some("action")
+                && let Some(s) = v.as_str()
+                && let Some(rt) = crate::field_preview::infer_relation_from_action(s)
+            {
+                return Some(rt);
             }
         }
         None
@@ -1074,19 +1073,19 @@ impl GenericParser {
 
         // Rule: source_host + source_process → Host -[Execute]-> Process
         // Captures EVTX events where a process/service/task runs on a host (TaskScheduler, OpenSSH, Firewall, etc.)
-        if let (Some(host), Some(proc)) = (&n.source_host, &n.source_process) {
-            if n.source_user.is_none() {
-                let src = Entity::new(host, EntityType::Host);
-                let dst = {
-                    let mut e = Entity::new(proc, EntityType::Process);
-                    if let Some(ref cmd) = n.command_line {
-                        e = e.with_metadata("cmdline", cmd);
-                    }
-                    e
-                };
-                let rel = Relation::new(host, proc, RelationType::Execute, n.timestamp);
-                triples.push((src, rel, dst));
-            }
+        if let (Some(host), Some(proc)) = (&n.source_host, &n.source_process)
+            && n.source_user.is_none()
+        {
+            let src = Entity::new(host, EntityType::Host);
+            let dst = {
+                let mut e = Entity::new(proc, EntityType::Process);
+                if let Some(ref cmd) = n.command_line {
+                    e = e.with_metadata("cmdline", cmd);
+                }
+                e
+            };
+            let rel = Relation::new(host, proc, RelationType::Execute, n.timestamp);
+            triples.push((src, rel, dst));
         }
 
         // Rule: source_user + source_host → User -[Auth]-> Host
@@ -1115,14 +1114,15 @@ impl GenericParser {
         }
 
         // Rule: target_user + source_host → User -[Auth]-> Host (e.g. EVTX 4624 TargetUserName + Computer)
-        if let (Some(user), Some(host)) = (&n.target_user, &n.source_host) {
-            if n.source_process.is_none() && n.source_user.is_none() {
-                let src = Entity::new(user, EntityType::User);
-                let dst = Entity::new(host, EntityType::Host);
-                let rt = action_rel.clone().unwrap_or(RelationType::Auth);
-                let rel = Relation::new(user, host, rt, n.timestamp);
-                triples.push((src, rel, dst));
-            }
+        if let (Some(user), Some(host)) = (&n.target_user, &n.source_host)
+            && n.source_process.is_none()
+            && n.source_user.is_none()
+        {
+            let src = Entity::new(user, EntityType::User);
+            let dst = Entity::new(host, EntityType::Host);
+            let rt = action_rel.clone().unwrap_or(RelationType::Auth);
+            let rel = Relation::new(user, host, rt, n.timestamp);
+            triples.push((src, rel, dst));
         }
 
         // Rule: source_process + target_file → Process -[Write]-> File
@@ -1161,27 +1161,30 @@ impl GenericParser {
         }
 
         // Rule: source_user + target_ip (no process) → User -[Auth]-> IP
-        if let (Some(user), Some(ip)) = (&n.source_user, &n.target_ip) {
-            if n.source_process.is_none() && n.source_host.is_none() {
-                let src = Entity::new(user, EntityType::User);
-                let dst = Entity::new(ip, EntityType::IP);
-                let rt = action_rel.clone().unwrap_or(RelationType::Auth);
-                let rel = Relation::new(user, ip, rt, n.timestamp);
-                triples.push((src, rel, dst));
-            }
+        if let (Some(user), Some(ip)) = (&n.source_user, &n.target_ip)
+            && n.source_process.is_none()
+            && n.source_host.is_none()
+        {
+            let src = Entity::new(user, EntityType::User);
+            let dst = Entity::new(ip, EntityType::IP);
+            let rt = action_rel.clone().unwrap_or(RelationType::Auth);
+            let rel = Relation::new(user, ip, rt, n.timestamp);
+            triples.push((src, rel, dst));
         }
 
         // Rule: source_user + source_ip (no target_ip, no process, no host) → User -[Auth]-> IP.
         // Covers audit/activity logs where the single IP_ADDRESS field is the
         // actor's originating endpoint (Zoho, SaaS audit exports, M365 UAL, etc.).
-        if let (Some(user), Some(ip)) = (&n.source_user, &n.source_ip) {
-            if n.target_ip.is_none() && n.source_process.is_none() && n.source_host.is_none() {
-                let src = Entity::new(user, EntityType::User);
-                let dst = Entity::new(ip, EntityType::IP);
-                let rt = action_rel.clone().unwrap_or(RelationType::Auth);
-                let rel = Relation::new(user, ip, rt, n.timestamp);
-                triples.push((src, rel, dst));
-            }
+        if let (Some(user), Some(ip)) = (&n.source_user, &n.source_ip)
+            && n.target_ip.is_none()
+            && n.source_process.is_none()
+            && n.source_host.is_none()
+        {
+            let src = Entity::new(user, EntityType::User);
+            let dst = Entity::new(ip, EntityType::IP);
+            let rt = action_rel.clone().unwrap_or(RelationType::Auth);
+            let rel = Relation::new(user, ip, rt, n.timestamp);
+            triples.push((src, rel, dst));
         }
 
         // Rule: correlation id → Session hub node.
@@ -1475,10 +1478,11 @@ impl GenericParser {
         ];
 
         for &(ecs_key, canonical) in ecs_mappings {
-            if flat.contains_key(ecs_key) && !flat.contains_key(canonical) {
-                if let Some(val) = flat.get(ecs_key).cloned() {
-                    flat.insert(canonical.to_string(), val);
-                }
+            if flat.contains_key(ecs_key)
+                && !flat.contains_key(canonical)
+                && let Some(val) = flat.get(ecs_key).cloned()
+            {
+                flat.insert(canonical.to_string(), val);
             }
         }
 
@@ -1595,15 +1599,12 @@ impl LogParser for GenericParser {
             return Vec::new();
         }
 
-        events
-            .par_iter()
-            .flat_map(|event| Self::parse_event(event))
-            .collect()
+        events.par_iter().flat_map(Self::parse_event).collect()
     }
 
     fn parse_with_stats(&self, data: &str) -> (Vec<ParsedTriple>, crate::parser::ParseStats) {
         let events = Self::parse_events(data);
-        parse_events_with_stats(&events, |event| Self::parse_event(event))
+        parse_events_with_stats(&events, Self::parse_event)
     }
 
     /// Native raw-event override for the generic/config path (Fase C-2
@@ -1653,7 +1654,7 @@ impl LogParser for GenericParser {
         crate::parser::ParseStats,
     ) {
         let events = Self::parse_events(data);
-        let (each, stats) = parse_events_each_with_stats(&events, |event| Self::parse_event(event));
+        let (each, stats) = parse_events_each_with_stats(&events, Self::parse_event);
         (raw_events_from_each(&events, each), stats)
     }
 
@@ -1717,8 +1718,10 @@ where
     use rayon::prelude::*;
     use std::collections::HashMap;
 
-    let mut stats = crate::parser::ParseStats::default();
-    stats.rows_seen = events.len();
+    let mut stats = crate::parser::ParseStats {
+        rows_seen: events.len(),
+        ..Default::default()
+    };
     if events.is_empty() {
         return (Vec::new(), stats);
     }
@@ -1728,7 +1731,7 @@ where
     // sequential and index-ordered: skipped_samples keep the first 20
     // skipped rows in input order and drift observation stays
     // deterministic, exactly as the pre-parallel implementation behaved.
-    let mut each: Vec<Vec<ParsedTriple>> = events.par_iter().map(|e| per_event(e)).collect();
+    let mut each: Vec<Vec<ParsedTriple>> = events.par_iter().map(&per_event).collect();
 
     // Session ceiling. Applied here, before the skip accounting below, so
     // an event whose only output was a session edge is correctly counted

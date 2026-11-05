@@ -476,10 +476,10 @@ fn dedupe_items(items: &[IocItem]) -> Vec<IocItem> {
         if !entry.0.iter().any(|t| t == tag) {
             entry.0.push(tag.clone());
         }
-        if let Some(r) = reason.as_ref().filter(|s| !s.trim().is_empty()) {
-            if !entry.1.iter().any(|x| x == r) {
-                entry.1.push(r.clone());
-            }
+        if let Some(r) = reason.as_ref().filter(|s| !s.trim().is_empty())
+            && !entry.1.iter().any(|x| x == r)
+        {
+            entry.1.push(r.clone());
         }
     }
     order
@@ -595,9 +595,9 @@ fn uuid_from_node(node_id: &str, tag: &str) -> String {
     format!(
         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
         (hash >> 32) as u32,
-        (hash >> 16) as u16 & 0xffff,
-        (hash as u16) & 0xffff,
-        (hash >> 48) as u16 & 0xffff,
+        (hash >> 16) as u16,
+        hash as u16,
+        (hash >> 48) as u16,
         hash & 0xffff_ffff_ffff,
     )
 }
@@ -793,9 +793,9 @@ fn sigma_rule_uuid(ips: &[&str], domains: &[&str]) -> String {
     format!(
         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
         (hash >> 32) as u32,
-        (hash >> 16) as u16 & 0xffff,
-        (hash as u16) & 0xffff,
-        (second >> 48) as u16 & 0xffff,
+        (hash >> 16) as u16,
+        hash as u16,
+        (second >> 48) as u16,
         second & 0xffff_ffff_ffff,
     )
 }

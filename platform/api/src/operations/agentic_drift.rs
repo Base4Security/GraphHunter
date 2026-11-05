@@ -152,9 +152,9 @@ impl GraphHunterApi {
     }
 
     /// `mapping_regression_tester` — replay the dataset's raw events
-    /// through a candidate VRL program and diff the resulting triple
-    /// + canonical sets against the active mapping. Pass / warn /
-    /// fail verdict feeds the review queue gate.
+    /// through a candidate VRL program and diff the resulting triple and
+    /// canonical sets against the active mapping. Pass / warn / fail
+    /// verdict feeds the review queue gate.
     pub fn mapping_regression_test(
         &self,
         req: MappingRegressionRequest,
