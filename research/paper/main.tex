@@ -1,0 +1,630 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,calc}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage[colorlinks,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+\usepackage[capitalise,noabbrev]{cleveref}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{definition}{Definition}
+\newcommand{\todo}[1]{\textcolor{red!70!black}{[\textbf{TODO:} #1]}}
+\newcommand{\Gt}{G_t}
+
+\title{Defending Attack Graphs That Move:\\
+Telemetry-Driven Exposure, Incremental Shortest Paths,\\
+and Joint Detection--Deception Placement\\[4pt]
+\large Internal draft v1 --- not for distribution}
+\author{Lucas Sotomayor\\BASE4 Security, R\&D+i}
+\date{November 4, 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Attack-graph defenses for Active Directory (AD) are computed on snapshots, yet the
+edges that matter most---interactive sessions, local-admin grants, ACL changes---appear
+and expire within hours. We treat the attack graph as a time-indexed state $\Gt$ maintained
+from security telemetry and build four components on it. (i)~A deterministic, idempotent
+\emph{projection rule} from OCSF provenance events to attack-graph edge changes, implemented
+in Python and in the production engine (Rust) against one 17-case conformance suite; writing
+it exposed two defects in a production parser. (ii)~An \emph{incremental oracle} for
+crown-jewel distances with a work-based fallback: on a synthetic AD graph with 4.6k nodes and
+354k edges, sessions and admin grants are repaired in 0.02--0.16\,ms on average against
+310\,ms for recomputation, and the worst case stays within 1.1$\times$ of recomputation.
+(iii)~A \emph{joint detection--deception} model, obtained by a node-splitting reduction that
+makes traps ordinary rules for an exact per-path-guarantee MILP; with two traps, 18 of 20
+synthetic instances admit a $\delta=0.05$ guarantee (6 with rules alone) at a median 11\% of the
+rules-only cost. (iv)~A \emph{combined defender} that minimises the value collected by a
+second attacker model, which gathers loot node by node, subject to the first model's
+guarantee. Cross-evaluating defenses against both attackers shows that each single-model
+optimum fails the other: loot-optimal traps give the path guarantee in 4 of 15
+(instance, budget) pairs, and guarantee-optimal traps leave about half the loot. The combined
+defender gives the guarantee in every feasible case at a median loot within 1\% of the
+loot-optimal placement for budgets of two and three traps. (v)~A \emph{joint defender} that chooses
+rules and traps together by outer approximation, exploiting that the attacker's value is convex in
+the rule choice; trading alert load against a loot cap, two traps reach half the undefended loot with
+no rules in all five instances, and a 10\% cap costs a median 23\% fewer false positives per day
+than rules alone. All results use synthetic
+detection content and synthetic or small AD graphs; every result is checked against brute
+force or full recomputation.
+\end{abstract}
+
+\section{Introduction}
+
+Defensive analyses of AD attack graphs, from BloodHound path queries~\cite{bloodhound}
+to edge blocking~\cite{guo2022practical,guo2023scalable} and honeypot
+placement~\cite{ngo2024catch}, take a collection snapshot as input. Two observations
+motivate this work. First, the edges that create short paths to Domain Admin are
+largely \emph{transient}: a privileged user logging on to a workstation creates a
+\texttt{HasSession} edge that lasts as long as the credentials stay in memory. A
+snapshot taken on Monday says little about Thursday. Second, the telemetry that
+reveals those edges is already collected by the SOC---Windows 4624/4688, Sentinel,
+EDR---but it lives in a different graph: a provenance graph of what happened, not an
+attack graph of what could happen.
+
+We connect the two. The attack graph becomes a state $\Gt$ updated by events, and
+every defensive question becomes a query or an optimisation over $\Gt$.
+
+\paragraph{Contributions.}
+\begin{itemize}
+\item A two-layer model of $\Gt$ and a \textbf{projection rule} from OCSF provenance
+events to attack-graph changes, with explicit edge support, idempotent deltas,
+watermark-based expiry and identity resolution that refuses to guess
+(\cref{sec:projection}). A reference implementation passes a 17-case conformance
+suite shared with the production engine.
+\item An \textbf{incremental distance oracle} for crown-jewel exposure in the style of
+Ramalingam--Reps~\cite{ramalingam1996incremental}, with a fallback triggered by the
+\emph{edge work} of the affected subtree rather than its size, which matters with group
+hubs (\cref{sec:oracle}).
+\item A \textbf{joint detection--deception} formulation: a reduction that turns node
+traps into edge rules, so that one exact MILP chooses detection rules and traps under a
+per-path guarantee, plus a trap budget (\cref{sec:joint}).
+\item A \textbf{combined defender} for two attacker models on the same graph: traps that
+minimise a value-collecting attacker's loot subject to the path guarantee, by column
+generation over a master that joins both sets of constraints (\cref{sec:combined}).
+\item A \textbf{joint defender} that also chooses the rules, by outer approximation with tangent
+cuts on a convex value function, and the resulting trade-off between alert load and loot
+(\cref{sec:jointrules}).
+\item An evaluation on GOADv2~\cite{goad,bhsample} and synthetic AD graphs, including a
+cross-evaluation of every defense against both attackers (\cref{sec:eval}), with every
+result verified against an independent reference (brute force or full Dijkstra).
+\end{itemize}
+
+\section{Background and related work}\label{sec:related}
+
+\paragraph{Attack graphs and hardening.} Attack graphs were formalised by Jha et
+al.~\cite{jha2002two}; minimum-cost hardening~\cite{wang2006hardening} and IDS sensor
+placement~\cite{noel2008sensor} are early optimisation uses. For AD, Guo et al.\ study
+edge blocking with fixed-parameter~\cite{guo2022practical} and scalable
+algorithms~\cite{guo2023scalable}, and Goel et al.\ combine a neural dynamic program
+with evolutionary search~\cite{goel2022defending}.
+
+\paragraph{Interdiction and security games.} Shortest-path network
+interdiction~\cite{israeli2002interdiction} and its stochastic variants~\cite{morton2007models}
+are the operations-research root of our defender. Double-oracle methods solve
+zero-sum security games on graphs~\cite{jain2011double}. Alert triage as a game is
+studied by Schlenker et al.~\cite{schlenker2017alerts}. Nguyen, Song and Smith combine arc
+removal with a simultaneous monitoring game against an evader~\cite{nguyen2023nisg}; in our
+setting monitoring is a shared rule that covers many edges at once, the objective is alert load
+under a per-path guarantee, and traps and a value-collecting attacker are added.
+
+\paragraph{Deception.} Honeypot allocation over attack graphs~\cite{anwar2020honeypot},
+the survey by Pawlick et al.~\cite{pawlick2019taxonomy}, and honeypot placement in
+dynamic AD graphs~\cite{ngo2024catch} are closest to our trap model. Ngo et al.\ also
+treat the graph as dynamic, but the dynamics are a model of the attacker's moves, not a
+stream of observed telemetry.
+
+\paragraph{Dynamic shortest paths.} Incremental single-source shortest paths go back
+to Ramalingam and Reps~\cite{ramalingam1996incremental}; LPA*~\cite{koenig2004lpa} is the
+planning variant; Demetrescu and Italiano~\cite{demetrescu2004apsp} give fully dynamic
+all-pairs bounds. We use the simplest of these ideas and show where it pays off on AD
+graphs and where it does not.
+
+\paragraph{Telemetry schemas.} OCSF~\cite{ocsf} is the event schema of the projection;
+detection content is mapped to ATT\&CK techniques, whose use in EDR products was
+measured by Virkud et al.~\cite{virkud2024edr}.
+
+\section{The state $\Gt$}\label{sec:model}
+
+\begin{definition}[Two-layer state]
+$\Gt=(V_t,\;E^{\mathrm{atk}}_t\cup E^{\mathrm{prov}}_t,\;w_t,\;q_t,\;r)$. Attack edges
+$(u,\kappa,v)\in E^{\mathrm{atk}}_t$ mean ``controlling $u$ lets the attacker acquire
+$v$'' with BloodHound semantics and directions~\cite{bloodhound}: \texttt{HasSession}
+goes from host to user, \texttt{AdminTo} and \texttt{CanRDP} from principal to host.
+Provenance edges are timestamped OCSF events. $q_t$ are detection probabilities on edges
+(rules) or nodes (traps), $w_t$ are attack-edge weights and $r$ node values.
+\end{definition}
+
+Each attack edge carries its \emph{origins} (\texttt{snapshot}, \texttt{observed}), its
+\emph{support} (the set of event ids sustaining it), first and last evidence times, an
+expiry time and a confidence (\texttt{confirmed} if an event shows it exercised,
+\texttt{inferred} if it is only enabled). An edge exists in $\Gt$ while it has the
+snapshot origin, or a non-empty support and an unexpired expiry. This keeps both
+sources of truth: the BloodHound collection and what telemetry has observed since.
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum width=7.4cm, minimum height=0.62cm, align=center, font=\small},
+  new/.style={box, fill=blue!8, draw=blue!60!black, thick},
+  small/.style={draw, rounded corners=2pt, minimum width=1.5cm, minimum height=0.62cm, align=center, font=\scriptsize},
+  >={Stealth[length=2mm]}, node distance=0.32cm]
+\node[small] (bh) {BloodHound\\snapshot};
+\node[small, right=0.25cm of bh] (tel) {Telemetry\\(parsers)};
+\node[small, right=0.25cm of tel] (sim) {Synthetic\\generator};
+\node[new, below=0.45cm of tel] (proj) {OCSF contract + projection rule (\S\ref{sec:projection})};
+\node[box, below=of proj] (state) {State $\Gt$: idempotent deltas, attack + provenance layers};
+\node[new, below=of state] (orc) {Incremental distance oracle (\S\ref{sec:oracle})};
+\node[small, below=0.45cm of orc, xshift=-2.5cm] (s1) {Rules +\\traps (\S\ref{sec:joint})};
+\node[small, right=0.15cm of s1] (s2) {Chain\\reconstr.};
+\node[small, right=0.15cm of s2] (s3) {Exposure\\monitor};
+\node[small, right=0.15cm of s3] (s4) {Certif.};
+\foreach \a in {bh,tel,sim} \draw[->] (\a) -- (\a |- proj.north);
+\draw[->] (proj) -- (state); \draw[->] (state) -- (orc);
+\foreach \a in {s1,s2,s3} \draw[->] (orc.south -| \a) -- (\a);
+\draw[->] (s3) -- (s4);
+\draw[->, dashed, blue!60!black] (s1.west) -- ++(-0.9,0) |- (state.west);
+\end{tikzpicture}}
+\caption{Architecture. Shaded components are new in this work. The dashed arrow is the
+feedback loop: what the defender deploys enters $\Gt$ as deltas.}
+\label{fig:arch}
+\end{figure}
+
+\section{Projection: provenance to attack edges}\label{sec:projection}
+
+The projection is a pure, deterministic function from an OCSF envelope and an identity
+table to a list of \texttt{AttackDelta}s: \textsc{Assert}(edge, event, confidence, ttl),
+\textsc{Retract}(edge, event), \textsc{Close}(edge, at) and \textsc{Unresolved}(reason).
+Deltas are keyed by event id, so replaying an envelope is a no-op; a tombstone retracts
+the support its event contributed; a correction is a retract followed by re-projection.
+
+\begin{table*}[t]
+\centering\small
+\caption{Projection rules v0. $lt$ is the OCSF \texttt{logon\_type\_id}, numbered as the
+Windows 4624 LogonType~\cite{mslogontype} for values 2--13.}
+\label{tab:rules}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Event & Condition & Output \\
+\midrule
+Auth.\ logon & success, $lt\in\{2,10,11,12\}$ & \texttt{HasSession}$(h{\to}u)$, confirmed \\
+Auth.\ logon & success, $lt=10$ & also \texttt{CanRDP}$(u{\to}h)$ \\
+Auth.\ logon & success, $lt\in\{4,5,9\}$ & \texttt{HasSession}, inferred \\
+Auth.\ logon & $lt\in\{3,8\}$, failure, no $lt$ & nothing \\
+Auth.\ logoff & session observed & \textsc{Close} with grace \\
+Process launch & user not system/machine & \texttt{HasSession}, inferred, short ttl \\
+Tombstone & --- & \textsc{Retract} its support \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\paragraph{Design choices.} Interactive, remote-interactive and cached logons leave
+reusable credentials on the host, so they are sessions in the BloodHound sense; network
+logons (type~3) normally do not, and become \texttt{AdminTo} evidence only together with
+privilege events that the engine does not parse yet. A logoff does not erase credentials
+from memory immediately, so it closes the session after a grace period rather than
+retracting it.
+
+\paragraph{Time.} The time of an edge is the event time. An out-of-order event can lower
+\emph{first seen} but never advances expiry, and expiry is driven by the stream watermark,
+not the wall clock: reprocessing a historical day yields the same state as processing it
+live.
+
+\paragraph{Identity resolution.} Parsers name users \texttt{NETBIOS\textbackslash user}
+and hosts by whatever the event carries; BloodHound uses UPN-like names, FQDNs and SIDs.
+The rule uses the SID when present, otherwise normalises against the snapshot's domain
+table and accepts a short host name only if exactly one FQDN matches. Otherwise it emits
+\textsc{Unresolved}: a session on the wrong host invents an attack path, which is worse
+than a missing one.
+
+\paragraph{Defects found.} Specifying the rule against the production engine exposed six
+prerequisites; two were defects. The OCSF projection dropped the logon type, and a failed
+4625 parsed by the Sysmon/Security parser reached OCSF without a status---indistinguishable
+from a successful logon---because that parser flagged failures with a field the projection
+did not read. Both are fixed upstream with tests; the other four (logoff, privilege and
+group-change events, SIDs, process host) are missing data, not errors.
+
+\section{Incremental distance oracle}\label{sec:oracle}
+
+For each terminal $t$ (a crown jewel), the oracle keeps $d_t(v)$, the shortest distance
+from $v$ to $t$ under non-negative weights, and the next hop $\sigma_t(v)$. One structure
+per terminal answers ``how close is any compromised node to $t$'', and distances between
+terminals give the matrix that routing-style solvers need.
+
+\begin{algorithm}[t]
+\caption{Repair after deleting or raising edge $(u,v)$ for terminal $t$}\label{alg:raise}
+\small
+\If{$\sigma_t(u)\neq v$}{\Return \tcp*{not a tree edge}}
+$A\gets\{u\}$; $W\gets\deg(u)$\;
+\ForEach{$x$ popped from a stack started at $u$}{
+  \ForEach{in-neighbour $p$ of $x$ with $\sigma_t(p)=x$, $p\notin A$}{
+    $A\gets A\cup\{p\}$; $W\gets W+\deg(p)$\;
+    \lIf{$W>\tau\,|E|$}{recompute $t$ from scratch; \Return}
+  }
+}
+\lForEach{$x\in A$}{$d_t(x)\gets\min_{(x,y),\,y\notin A} w(x,y)+d_t(y)$}
+run Dijkstra on the reverse graph restricted to $A$, seeded with those values\;
+\end{algorithm}
+
+Insertions and decreases propagate the improvement backwards with Dijkstra and touch
+only nodes that improve. Deletions and increases (\cref{alg:raise}) do nothing unless
+the edge is in the shortest-path tree; otherwise only the subtree $A$ of nodes whose path
+went through it is reset, seeded from the unaffected frontier, and repaired.
+
+\begin{proposition}
+After \cref{alg:raise}, $d_t$ equals the shortest distances in the updated graph.
+\end{proposition}
+\begin{proof}[Sketch]
+A node outside $A$ keeps a tree path to $t$ that avoids $(u,v)$; its length is unchanged
+and, since the update only removes options, no shorter path appeared. Nodes in $A$ are
+recomputed by Dijkstra from correct boundary values, which is exact because every
+shortest path from $x\in A$ leaves $A$ at its first node outside $A$.
+\end{proof}
+
+\paragraph{Work-based fallback.} The first version fell back to recomputation when $|A|$
+exceeded a fraction of $|V|$. On AD graphs with expanded groups this was the wrong
+measure: a few hundred nodes can carry hundreds of thousands of edges, and local repair
+became slower than recomputation. The fallback now counts the in- and out-degree of the
+nodes added to $A$ and stops as soon as it exceeds $\tau|E|$ ($\tau=0.1$).
+
+\paragraph{What-if.} \texttt{what\_if(changes)} applies a batch, yields, and restores the
+previous weights; selection loops that price one candidate rule or trap at a time use it.
+
+\section{Joint detection and deception}\label{sec:joint}
+
+\paragraph{Detection guarantee.} In the \emph{coverage model}~\cite{detcover}, a rule $r$ covers the edges whose
+ATT\&CK technique and telemetry scope it observes, fires with probability $q_r$ and costs
+$c_r$ expected false positives per day. Under independence, the probability that a path
+$P$ evades the active rules $x$ is $\prod_{e\in P}\prod_{r\ni e}(1-q_r)^{x_r}$, so
+requiring every source--terminal path to be detected with probability at least $1-\delta$
+is linear in $x$ through potentials:
+\begin{align*}
+\min\ & \textstyle\sum_r c_r x_r\\
+\text{s.t. } & \pi_v-\pi_u-\textstyle\sum_{r\ni e} w_r x_r\le 0 \quad \forall e=(u,v),\\
+& \pi_s=0,\ \pi_t\ge\theta,\ 0\le\pi\le\theta,\ x\in\{0,1\}^R,
+\end{align*}
+with $w_r=-\log(1-q_r)$ and $\theta=-\log\delta$. The same codebase solves a variant with
+edge blocking, a randomised triage defender against an informed attacker (Stackelberg),
+and a lazy constraint-generation version for large graphs.
+
+\paragraph{Traps as rules.} The \emph{collector model}~\cite{periplo} places traps on nodes: acquiring a trapped node is
+detected with certainty. We split every trap candidate $v$ (never the source or a
+terminal) into $v\to v^{\#}$, redirect $v$'s out-edges to leave from $v^{\#}$, and add a
+rule \texttt{trap:}$v$ with $q=1$ that covers only the new edge.
+
+\begin{proposition}
+For any choice of rules $R'$ and traps $T'$, the minimum evasion weight from $s$ to the
+terminals in the split instance with rules $R'\cup\{\texttt{trap:}v: v\in T'\}$ equals the
+one in the original instance with rules $R'$ on edges and traps $T'$ on nodes.
+\end{proposition}
+\begin{proof}[Sketch]
+Paths are in bijection: a path that continues from $v$ must traverse $v\to v^{\#}$, which
+carries exactly the trap weight when $v\in T'$ and zero otherwise; edge weights of
+redirected edges are unchanged because coverage depends only on technique and scope.
+Terminals are not split, and a path that ends at $v$ is not a source--terminal path.
+\end{proof}
+
+Consequently every coverage solver chooses rules and traps jointly without modification. A
+trap budget, as in the collector model, is one extra row $\sum_v x_{\texttt{trap:}v}\le k$.
+
+\paragraph{Scope of the equivalence.} The coverage attacker wants to reach a terminal, so a
+trap matters only on transit nodes. The collector gathers value per node under a time
+budget and a pivot-switch cost; a trap on a dead-end node matters to it and not to this
+reduction. Evaluating joint solutions against the collector is future work.
+
+\subsection{Two attackers, one defender}\label{sec:combined}
+
+The two attacker models answer different questions. The coverage attacker wants to reach a
+crown jewel; the defender guarantees that every path is detected with probability at least
+$1-\delta$. The collector acquires nodes in sequence under a time budget $T$, collects
+value $r_v$ for every acquisition that goes undetected, and stops when detected; the defender
+minimises the value it can collect. A defense chosen for one attacker need not be good against
+the other (\cref{sec:cross}). We therefore solve
+\begin{align*}
+\min_{B}\ & \textstyle\sum_{s} p_s \max_{\pi\in\Pi_s(T)} U_s(B,\pi)\\
+\text{s.t. } & |B|\le k,\\
+& \text{every foothold--terminal path detected w.p.}\ \ge 1-\delta,
+\end{align*}
+where $s$ ranges over footholds with prior $p_s$ and the attacker sees $B$ (the collector model's visible
+variant). Both constraints are linear in the trap indicators $b$: the guarantee through the
+potentials of \cref{sec:joint} on the split instance (with any fixed set of detection rules as a
+constant term), and the value through the collector's cuts, one per attacker sequence
+$\pi=(v_1,\dots,v_m)$ in a growing pool:
+\[
+\theta_s\ \ge\ \textstyle\sum_{j} c_j\bigl(1-\sum_{l\le j} b_{v_l}\bigr),\qquad
+c_j = r_{v_j}\prod_{l\le j}(1-q_{v_l}).
+\]
+A column-generation loop alternates the master (a MILP over $b$, $\theta$ and $\pi$) with
+the collector's exact best response for each foothold. The master value is a lower bound and the
+exact response to the incumbent is an upper bound; the loop stops when they meet or no new
+sequence appears.
+
+To evaluate a coverage defense against the collector we translate it conservatively: traps
+are kept, and rules raise the detection probability of acquiring $v$ through its
+\emph{least-watched} in-edge, $q'_v = 1-(1-q_v)\max_{e=(u,v)}\prod_{r\ni e}(1-q_r)$, because
+the attacker chooses where to come from.
+
+\subsection{Rules and traps together}\label{sec:jointrules}
+
+In \cref{sec:combined} detection rules enter only as a fixed set, because their effect on the
+value-collecting attacker is not linear. With the translation of \cref{sec:combined}, surviving
+the acquisition of $v$ under rules $x$ is
+\[
+s_v(x) = (1-q_v)\exp\Bigl(-\min_{e=(u,v)}\ \textstyle\sum_{r\ni e} w_r x_r\Bigr),
+\]
+and the value at position $j$ of a sequence is $c_j(x)=r_{v_j}\prod_{l\le j}s_{v_l}(x)$. The
+exponent is a maximum of linear functions, hence convex, so $c_j=\exp(\text{convex})$ is convex
+and every tangent is a valid lower bound:
+$c_j(x)\ge c_j(\hat x)\bigl(1+g_j^\top(x-\hat x)\bigr)$, with $g_j$ a subgradient of $\log c_j$ at
+$\hat x$ (the rules on each node's least-watched in-edge). Traps zero the suffix of a sequence;
+we combine both with one variable per position,
+\[
+y_j\ \ge\ c_j(\hat x)\bigl(1+g_j^\top(x-\hat x)\bigr) - M_j\textstyle\sum_{l\le j} b_{v_l},\quad
+y_j\ge0,\quad \theta_s\ge\textstyle\sum_j y_j,
+\]
+with $M_j=c_j(0)$. The master minimises $\lambda_V\sum_s p_s\theta_s+\lambda_A\sum_r c_r x_r$
+(loot and alert load), optionally with a loot cap $\sum_s p_s\theta_s\le L$, under the path
+guarantee and the trap budget. An outer-approximation loop adds, for every attacker sequence in
+the pool, the tangent at every visited $\hat x$, and the attacker's exact best response to the
+incumbent supplies new sequences and the upper bound. At a visited point the cuts are exact for
+any trap set (a trap in the prefix makes $y_j=0$, which is the true value because
+$c_j\le M_j$), so the loop terminates with matching bounds.
+
+\section{Evaluation}\label{sec:eval}
+
+Everything runs in Python on one core of a shared cloud VM; times are single runs and vary
+between runs by up to $\sim$1.5$\times$ for full recomputation. Code and data live in the
+Graph Hunter repository~\cite{graphhunter} under \texttt{research/} (private branch).
+
+\subsection{Projection}
+
+The Python reference and the Rust implementation in the engine pass the same 17
+conformance cases (all rules, idempotence, out-of-order arrival, tombstones, corrections,
+ambiguous hosts and unknown domains); breaking one rule on purpose makes the Rust suite fail. The parser and schema fix adds
+four tests; 57 tests of the canonical crate and 1{,}033 of the core engine pass.
+
+\subsection{Oracle}
+
+\paragraph{Correctness.} After every change, distances and paths are compared with a full
+Dijkstra: 4{,}800 random changes on 30-node graphs (with and without the fallback),
+5$\times$200 on GOADv2 and 150 on a synthetic AD graph with hubs. Disabling the repair of
+increases on purpose makes the tests fail.
+
+\begin{table}[t]
+\centering\small
+\caption{Oracle on a synthetic AD graph (\texttt{adgen}, scale 2000): 4{,}583 nodes,
+353{,}526 edges, 4 terminals. Full recomputation for the 4 terminals: 310\,ms. Each change
+is measured and then undone; ``fallbacks'' counts recomputations from scratch.}
+\label{tab:oracle}
+\footnotesize\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Change & mean (ms) & worst (ms) & fallbacks & speed-up \\
+\midrule
+New session & 0.025 & 0.36 & 0 & 12{,}557$\times$ \\
+Session expires & 0.161 & 2.27 & 0 & 1{,}924$\times$ \\
+AdminTo removed & 0.024 & 0.48 & 0 & 12{,}782$\times$ \\
+ACL removed & 2.31 & 226 & 3 & 134$\times$ \\
+Tree edge near $t$ & 20.2 & 346 & 21 & 15$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Cost.} \Cref{tab:oracle} reports the graph whose group expansion creates hubs.
+Frequent changes cost thousands of times less than recomputation because most of them do
+not touch any shortest-path tree. The adversarial case, removing a tree edge next to a
+terminal, averages 15$\times$ faster and its worst case (346\,ms) stays within
+1.1$\times$ of recomputation thanks to the work-based fallback; before the fallback was
+changed, local repair exceeded recomputation. On a sparser random AD-like graph (62{,}855
+nodes, 132{,}507 edges) the mean repair is 0.016\,ms against 199\,ms per terminal for
+recomputation. GOADv2 (46 nodes, 259 edges) is too small to say anything about scale; all
+its changes take under 0.14\,ms.
+
+\subsection{Joint detection and deception}
+
+\paragraph{Exactness.} On 25 random instances (9 nodes, 5 rules, 3 trap candidates) the
+MILP optimum on the split instance equals a brute force over rules and node traps that
+does not use the reduction; the cases include optima with traps (8), without (7), and
+infeasible instances (10). With a budget $k\in\{0,1,2\}$ the same holds on 75 more
+instances. For random choices of rules and traps, evasion distances coincide.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=\columnwidth, height=4.6cm, xlabel={trap budget $k$},
+  ylabel={median cost / rules-only}, xtick={0,1,2,3}, ymin=0, ymax=1.05,
+  legend style={font=\scriptsize, at={(0.98,0.98)}, anchor=north east}, tick label style={font=\small},
+  label style={font=\small}]
+\addplot+[mark=*] coordinates {(0,1.00) (1,0.53) (2,0.13) (3,0.12)};
+\addplot+[mark=square*] coordinates {(0,1.00) (1,0.61) (2,0.11) (3,0.10)};
+\addplot+[mark=triangle*] coordinates {(0,1.00) (1,0.45) (2,0.06) (3,0.06)};
+\legend{$\delta=0.1$, $\delta=0.05$, $\delta=0.01$}
+\end{axis}
+\end{tikzpicture}
+\caption{Cost of the guarantee with up to $k$ traps (trap cost 5 FP/day-equivalent),
+median over the instances feasible with rules only. 20 synthetic instances.}
+\label{fig:traps}
+\end{figure}
+
+\begin{table}[t]
+\centering\small
+\caption{Feasible instances out of 20 (trap cost 5).}
+\label{tab:feasible}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+$\delta$ & $k=0$ & $k=1$ & $k=2$ & $k=3$ \\
+\midrule
+0.10 & 12 & 17 & 18 & 18 \\
+0.05 & 6 & 14 & 18 & 18 \\
+0.01 & 1 & 7 & 12 & 17 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Synthetic sweep.} On 20 instances of the coverage model's generator (121 nodes, about
+340 edges, 25 rules with synthetic detection rates), the best evasion probability reachable
+with all rules active has median 0.076, so rules alone cannot guarantee $\delta=0.05$ in 14
+of 20 instances (\cref{tab:feasible}). Two traps restore feasibility in 18 of 20 and cut the
+median cost to 11\% of the rules-only optimum where both exist (\cref{fig:traps}); at a trap
+cost of 15 the reduction is to 25\%. Every MILP solves in under 0.2\,s.
+
+\paragraph{GOADv2.} Using as footholds the users the collector model classifies as unprivileged, the best
+evasion probability with every rule of the (synthetic) catalog is 0.12 in ESSOS, 0.33 in
+NORTH and 0.54 in SEVENKINGDOMS. One trap on a transit user or computer gives the
+$\delta=0.05$ guarantee in ESSOS and NORTH; in SEVENKINGDOMS the six admissible trap
+candidates do not suffice. With the coverage importer's default of 20 random footholds, GOAD's small
+domains include accounts that are already Domain Admins and every instance is infeasible.
+
+\subsection{Two attackers on the same graph}\label{sec:cross}
+
+\paragraph{Setup.} The collector model's synthetic AD generator (scale 60, medium path redundancy; 141
+nodes and 557--614 edges) with five footholds per instance and five instances. The coverage
+instance is built on the same graph: same nodes, the collector's footholds as entries, Domain
+Controllers and Domain Admins as terminals, BloodHound edge types mapped to ATT\&CK
+techniques and telemetry scopes, and a synthetic rule catalog. Traps are allowed on users and
+computers outside tier~0, never on footholds: a ``trap'' on a Domain Controller is monitoring
+of the crown jewel itself and dominates every other choice (on GOADv2 without ADCS edges, one
+such trap gives the guarantee and cuts the collector's loot from 59.4 to 0.58). The value-collecting
+attacker has time budget $T=12$ and no pivot cost; all its best responses are exact. We
+compare, for a budget of $k$ traps: $P_k$, the collector model's loot-minimising placement; $D_k$,
+the coverage model's cheapest rules plus at most $k$ traps meeting $\delta=0.05$; $DT_k$, the same with
+traps only; and $G_k$, the combined defender of \cref{sec:combined}.
+
+\begin{table}[t]
+\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\caption{Each defense against both attackers, 5 instances. ``Guar.'': instances where every
+foothold--terminal path is detected w.p.\ $\ge 0.95$. $V/V_0$: loot of the value-collecting
+attacker relative to no defense (median over instances where the defense exists).}
+\label{tab:cross}
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+$k$ & Defense & exists & guar. & $V/V_0$ & rules (FP/day) \\
+\midrule
+1 & $P_k$ (loot) & 5 & 0 & 0.68 & 0 \\
+  & $D_k$ (rules+traps) & 5 & 5 & 0.48 & 19.0 \\
+  & $G_k$ (combined) & 2 & 2 & 0.60 & 0 \\
+\midrule
+2 & $P_k$ & 5 & 3 & 0.25 & 0 \\
+  & $DT_k$ (guarantee) & 5 & 5 & 0.50 & 0 \\
+  & $G_k$ & 5 & 5 & 0.44 & 0 \\
+\midrule
+3 & $P_k$ & 5 & 1 & 0.17 & 0 \\
+  & $DT_k$ & 5 & 5 & 0.50 & 0 \\
+  & $G_k$ & 5 & 5 & 0.20 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Each single-model optimum fails the other attacker.} The collector model's loot-optimal traps
+give the path guarantee in only 4 of 15 (instance, budget) pairs, and not monotonically: with
+three traps the optimum gives it in one instance, with two in three (\cref{tab:cross}).
+Conversely, the coverage model places the fewest traps that meet the guarantee (1.6 on average for
+$k\ge2$) and leaves about half the loot, whatever the budget.
+
+\paragraph{The guarantee is cheap once traps can be combined.} $G_k$ gives the guarantee
+whenever it is feasible with traps alone and its loot is within a median 1.00$\times$ ($k=2$)
+and 1.01$\times$ ($k=3$) of the unconstrained loot optimum; the worst instances cost
+2.39$\times$ and 1.28$\times$. With a single trap the guarantee is infeasible with traps alone in
+three of five instances; there the coverage model adds rules (19 false positives/day on average), and in
+two instances one trap plus one or two rules leaves under 8\% of the loot, because rules raise the
+detection probability of many nodes at once.
+
+\paragraph{Cost.} $D_k$ and $DT_k$ take up to 57\,s per instance, $P_k$ up to 319\,s and $G_k$
+up to 291\,s, dominated by the exact best responses. Every $G_k$ solution is certified (lower and
+upper bounds meet). On 14 small instances (scale 20) with every detection rule fixed, $G_k$
+matches the enumeration of all trap sets of size at most $k$.
+
+\paragraph{A structural finding on GOADv2.} With ADCS edges, an unprivileged user in ESSOS
+holds an ESC edge straight to the domain. No trap can help (there is no transit node) and the
+whole rule catalog only reaches an evasion probability of 0.29: one-hop paths from footholds
+bound every defense that acts on nodes.
+
+\paragraph{Rules and traps together.} The joint defender of \cref{sec:jointrules} minimises the
+alert load ($\lambda_V=0$, $\lambda_A=1$) under the path guarantee $\delta=0.05$, a budget of $k$
+traps and a loot cap $L=\alpha V_0$, on the same five instances (\cref{tab:joint}). Every solution
+is certified; the slowest took 162\,s. On three small instances it matches the enumeration of all
+rule subsets and trap sets.
+
+\begin{table}[t]
+\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\caption{Alert load (median FP/day over the feasible instances, out of 5) needed to meet the path
+guarantee and keep the loot below $\alpha V_0$ with at most $k$ traps. Medians are taken over
+different sets when feasibility differs; per instance, the load never grows with $k$.}
+\label{tab:joint}
+\begin{tabular}{@{}rrrrrrr@{}}
+\toprule
+& \multicolumn{2}{c}{$k=0$} & \multicolumn{2}{c}{$k=1$} & \multicolumn{2}{c}{$k=2$}\\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(l){6-7}
+$\alpha$ & feas. & FP/day & feas. & FP/day & feas. & FP/day \\
+\midrule
+1.00 & 4 & 45.2 & 5 & 14.8 & 5 & 0.0 \\
+0.50 & 4 & 45.2 & 5 & 35.8 & 5 & 0.0 \\
+0.25 & 4 & 64.1 & 5 & 35.8 & 5 & 29.3 \\
+0.10 & 4 & 64.1 & 5 & 44.4 & 5 & 44.4 \\
+0.05 & 4 & 74.0 & 4 & 64.1 & 5 & 67.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two traps meet the guarantee and halve the loot with no rules in all five instances. Below
+$\alpha=0.25$ every solution needs rules, because two traps cannot cover every high-value node;
+at $\alpha=0.1$, two traps cut the alert load of the rules-only solution by 5--47\% (median 23\%)
+on the four instances where rules alone are feasible. The guarantee alone already bounds the loot
+in some instances: the cheapest rules-only defense leaves about 5\% of the loot in two instances and
+about half in two others, so whether a loot cap costs anything depends on where value sits relative
+to the monitored edges. Since the rules' effect on this attacker goes through the least-watched
+in-edge translation, these loads are upper bounds for an attacker who cannot pick its entry edge.
+
+\section{Discussion and limitations}\label{sec:limits}
+
+\begin{itemize}
+\item \textbf{Traps are perfect by assumption.} The reduction inherits the collector model's $q=1$; one
+trap then dominates any number of imperfect rules. A realistic trap model needs an
+interaction probability, which the reduction already supports through the rule's $q$.
+\item \textbf{Translation between models.} A coverage rule acts on edges and the
+collector sees per-node detection; we take the least-watched in-edge, which favours the attacker.
+A joint model where the value-collecting attacker also chooses edges would remove this step.
+\item \textbf{Synthetic detection content.} Catalogs and detection rates are synthetic;
+the coverage model already imports Sigma rules, which is the next step.
+\item \textbf{Independence.} The linear guarantee assumes independent firings; the coverage model
+quantifies the effect of common-cause correlation separately.
+\item \textbf{No large real AD.} GOADv2 is small; client collections cannot enter the
+repository. The worst case of the oracle on real hubs, and the cross-evaluation, are measured
+only on synthetic generators.
+\item \textbf{Projection parameters.} Session lifetimes and grace periods are uncalibrated
+defaults. Of four missing-data prerequisites, logoff, SIDs and the process host are now carried
+by the parsers (under review); privilege and group-change events remain open.
+\end{itemize}
+
+\section{Roadmap}
+
+(1)~Connect the Rust projection to the ingestion journal so that $\Gt$ is maintained live, and
+close the missing-data prerequisites. (2)~Remove the least-watched translation by letting the
+value-collecting attacker choose edges, so that the joint defender optimises against one attacker
+that both models agree on. (3)~Unify the certificate formats of the solvers.
+(4)~Calibrate edge weights and detection rates from attack chains reconstructed by the engine's
+Steiner-arborescence module and from emulation runs. (5)~Measure everything on a large real
+collection under the appropriate data agreements.
+
+\section*{Items to verify before submission}
+\begin{itemize}
+\item OCSF 1.4 \texttt{logon\_type\_id} values: checked against a LinkML mirror of OCSF and
+Microsoft's enumeration, not against the official schema site (not reachable from our environment).
+\item Page range of~\cite{jain2011double}: the two source bibliographies disagree
+(305--312 vs 327--334).
+\end{itemize}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+\end{document}

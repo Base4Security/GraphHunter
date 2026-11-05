@@ -157,7 +157,7 @@ obligatoria según `CLAUDE.md`).
 
 ## 9. Conformidad
 
-Implementación de referencia en Python: `research/gtdin/proyeccion.py`.
+Implementación de referencia en Python: `research/graphhunter_defensa/proyeccion.py`.
 Implementación del motor en Rust: crate `platform/attack-projection`
 (`cargo test --manifest-path platform/attack-projection/Cargo.toml`).
 

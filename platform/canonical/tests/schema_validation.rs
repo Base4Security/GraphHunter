@@ -196,3 +196,25 @@ fn reverse_projection_preserves_identity_on_every_typed_variant() {
         assert_eq!(back.1.rel_type, rel.rel_type);
     }
 }
+
+/// A Windows 4625 parsed by the Sysmon/Security parser must reach OCSF as a
+/// failed logon with its logon type, and still be schema-legal.
+#[test]
+fn security_4625_projects_as_failure_with_logon_type() {
+    use graph_hunter_core::SysmonJsonParser;
+    use graph_hunter_core::parser::LogParser;
+
+    let raw = r#"[{"EventID": 4625, "EventTime": "2026-01-01 00:00:00", "Computer": "ws-01.corp.example", "TargetUserName": "alice", "TargetDomainName": "CORP", "LogonType": "3", "IpAddress": "192.0.2.10"}]"#;
+    let triples = SysmonJsonParser.parse(raw);
+    assert_eq!(triples.len(), 1);
+    let (src, rel, dst) = &triples[0];
+    let ev = triple_to_ocsf(src, rel, dst, &prov());
+    validate(&compiled_schema(), &ev);
+    match ev {
+        OcsfEvent::Authentication(e) => {
+            assert_eq!(e.status.as_deref(), Some("Failure"));
+            assert_eq!(e.logon_type_id, Some(3));
+        }
+        _ => panic!("expected Authentication"),
+    }
+}

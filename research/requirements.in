@@ -1,0 +1,8 @@
+# Dependencias de research/ (las mismas versiones con que `cobertura` produjo sus resultados).
+numpy==2.5.3
+scipy==1.18.1
+networkx==3.7
+pytest
+# Juego del recolector (graphhunter_defensa/recolector/)
+pulp==2.9.0
+highspy==1.15.1
