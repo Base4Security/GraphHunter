@@ -674,6 +674,104 @@
           "confidence": "confirmed"
         }
       ]
+    },
+    {
+      "id": "R7-logoff-sin-sesion-no-emite",
+      "rule": "R7",
+      "note": "no hay sesion observada que cerrar",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e18",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 2,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success"
+            }
+          },
+          "expect": []
+        }
+      ]
+    },
+    {
+      "id": "correction-reproyecta",
+      "rule": "§3",
+      "note": "un logon corregido a tipo red retira la sesion y no proyecta nada nuevo",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e19",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e19",
+              "confidence": "confirmed",
+              "expires_at": 1793086400000
+            }
+          ]
+        },
+        {
+          "input": {
+            "event_id": "e19",
+            "change": "Correction",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 3
+            }
+          },
+          "expect": [
+            {
+              "op": "Retract",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e19"
+            }
+          ]
+        }
+      ]
     }
   ]
 }

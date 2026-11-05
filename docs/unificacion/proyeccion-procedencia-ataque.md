@@ -47,7 +47,7 @@ La proyección de un evento produce cero o más `AttackDelta`:
 |---|---|
 | `Assert(edge, event_id, confidence, ttl)` | agrega `observed` y `event_id` a `support`; actualiza `last_seen` y `expires_at` |
 | `Retract(edge, event_id)` | saca el soporte de las aristas que ese evento sostenía (lo usa un `Tombstone`) |
-| `Close(edge, at)` | fija `expires_at = at + grace` (fin de sesión) |
+| `Close(edge, at)` | fija `expires_at = at + grace` (fin de sesión); si no hay sesión observada, no emite nada |
 | `Unresolved(reason, event_id)` | el evento aplicaría pero no se pudo resolver una identidad (§6) |
 
 Cada `AttackDelta` se identifica por `(event_id, índice)`. Aplicar dos veces el
@@ -156,6 +156,9 @@ obligatoria según `CLAUDE.md`).
   esta regla.
 
 ## 9. Conformidad
+
+Implementación de referencia en Python: `research/gtdin/proyeccion.py`.
+
 
 `conformidad/proyeccion.json` lista casos de entrada (evento OCSF + tabla de
 identidades) y la salida esperada (`AttackDelta`). Toda implementación debe
