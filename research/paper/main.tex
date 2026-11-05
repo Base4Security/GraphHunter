@@ -150,7 +150,7 @@ Each attack edge carries its \emph{origins} (\texttt{snapshot}, \texttt{observed
 expiry time and a confidence (\texttt{confirmed} if an event shows it exercised,
 \texttt{inferred} if it is only enabled). An edge exists in $\Gt$ while it has the
 snapshot origin, or a non-empty support and an unexpired expiry. This keeps both
-sources of truth: the collector's snapshot and what telemetry has observed since.
+sources of truth: the BloodHound collection and what telemetry has observed since.
 
 \begin{figure}[t]
 \centering
@@ -283,7 +283,7 @@ previous weights; selection loops that price one candidate rule or trap at a tim
 
 \section{Joint detection and deception}\label{sec:joint}
 
-\paragraph{Detection guarantee.} Following detcover~\cite{detcover}, a rule $r$ covers the edges whose
+\paragraph{Detection guarantee.} In the \emph{coverage model}~\cite{detcover}, a rule $r$ covers the edges whose
 ATT\&CK technique and telemetry scope it observes, fires with probability $q_r$ and costs
 $c_r$ expected false positives per day. Under independence, the probability that a path
 $P$ evades the active rules $x$ is $\prod_{e\in P}\prod_{r\ni e}(1-q_r)^{x_r}$, so
@@ -298,7 +298,7 @@ with $w_r=-\log(1-q_r)$ and $\theta=-\log\delta$. The same codebase solves a var
 edge blocking, a randomised triage defender against an informed attacker (Stackelberg),
 and a lazy constraint-generation version for large graphs.
 
-\paragraph{Traps as rules.} PERIPLO~\cite{periplo} places traps on nodes: acquiring a trapped node is
+\paragraph{Traps as rules.} The \emph{collector model}~\cite{periplo} places traps on nodes: acquiring a trapped node is
 detected with certainty. We split every trap candidate $v$ (never the source or a
 terminal) into $v\to v^{\#}$, redirect $v$'s out-edges to leave from $v^{\#}$, and add a
 rule \texttt{trap:}$v$ with $q=1$ that covers only the new edge.
@@ -315,19 +315,19 @@ redirected edges are unchanged because coverage depends only on technique and sc
 Terminals are not split, and a path that ends at $v$ is not a source--terminal path.
 \end{proof}
 
-Consequently every detcover solver chooses rules and traps jointly without modification. A
-trap budget, as in PERIPLO, is one extra row $\sum_v x_{\texttt{trap:}v}\le k$.
+Consequently every coverage solver chooses rules and traps jointly without modification. A
+trap budget, as in the collector model, is one extra row $\sum_v x_{\texttt{trap:}v}\le k$.
 
-\paragraph{Scope of the equivalence.} detcover's attacker wants to reach a terminal, so a
-trap matters only on transit nodes. PERIPLO's attacker collects value per node under a time
+\paragraph{Scope of the equivalence.} The coverage attacker wants to reach a terminal, so a
+trap matters only on transit nodes. The collector gathers value per node under a time
 budget and a pivot-switch cost; a trap on a dead-end node matters to it and not to this
-reduction. Evaluating joint solutions against PERIPLO's attacker is future work.
+reduction. Evaluating joint solutions against the collector is future work.
 
 \subsection{Two attackers, one defender}\label{sec:combined}
 
-The two attacker models answer different questions. detcover's attacker wants to reach a
+The two attacker models answer different questions. The coverage attacker wants to reach a
 crown jewel; the defender guarantees that every path is detected with probability at least
-$1-\delta$. PERIPLO's attacker acquires nodes in sequence under a time budget $T$, collects
+$1-\delta$. The collector acquires nodes in sequence under a time budget $T$, collects
 value $r_v$ for every acquisition that goes undetected, and stops when detected; the defender
 minimises the value it can collect. A defense chosen for one attacker need not be good against
 the other (\cref{sec:cross}). We therefore solve
@@ -336,21 +336,21 @@ the other (\cref{sec:cross}). We therefore solve
 \text{s.t. } & |B|\le k,\\
 & \text{every foothold--terminal path detected w.p.}\ \ge 1-\delta,
 \end{align*}
-where $s$ ranges over footholds with prior $p_s$ and the attacker sees $B$ (PERIPLO's visible
+where $s$ ranges over footholds with prior $p_s$ and the attacker sees $B$ (the collector model's visible
 variant). Both constraints are linear in the trap indicators $b$: the guarantee through the
 potentials of \cref{sec:joint} on the split instance (with any fixed set of detection rules as a
-constant term), and the value through PERIPLO's cuts, one per attacker sequence
+constant term), and the value through the collector's cuts, one per attacker sequence
 $\pi=(v_1,\dots,v_m)$ in a growing pool:
 \[
 \theta_s\ \ge\ \textstyle\sum_{j} c_j\bigl(1-\sum_{l\le j} b_{v_l}\bigr),\qquad
 c_j = r_{v_j}\prod_{l\le j}(1-q_{v_l}).
 \]
 A column-generation loop alternates the master (a MILP over $b$, $\theta$ and $\pi$) with
-PERIPLO's exact best response for each foothold. The master value is a lower bound and the
+the collector's exact best response for each foothold. The master value is a lower bound and the
 exact response to the incumbent is an upper bound; the loop stops when they meet or no new
 sequence appears.
 
-To evaluate a detcover defense against PERIPLO's attacker we translate it conservatively: traps
+To evaluate a coverage defense against the collector we translate it conservatively: traps
 are kept, and rules raise the detection probability of acquiring $v$ through its
 \emph{least-watched} in-edge, $q'_v = 1-(1-q_v)\max_{e=(u,v)}\prod_{r\ni e}(1-q_r)$, because
 the attacker chooses where to come from.
@@ -472,33 +472,33 @@ $\delta$ & $k=0$ & $k=1$ & $k=2$ & $k=3$ \\
 \end{tabular}
 \end{table}
 
-\paragraph{Synthetic sweep.} On 20 instances of detcover's generator (121 nodes, about
+\paragraph{Synthetic sweep.} On 20 instances of the coverage model's generator (121 nodes, about
 340 edges, 25 rules with synthetic detection rates), the best evasion probability reachable
 with all rules active has median 0.076, so rules alone cannot guarantee $\delta=0.05$ in 14
 of 20 instances (\cref{tab:feasible}). Two traps restore feasibility in 18 of 20 and cut the
 median cost to 11\% of the rules-only optimum where both exist (\cref{fig:traps}); at a trap
 cost of 15 the reduction is to 25\%. Every MILP solves in under 0.2\,s.
 
-\paragraph{GOADv2.} Using as footholds the users PERIPLO classifies as unprivileged, the best
+\paragraph{GOADv2.} Using as footholds the users the collector model classifies as unprivileged, the best
 evasion probability with every rule of the (synthetic) catalog is 0.12 in ESSOS, 0.33 in
 NORTH and 0.54 in SEVENKINGDOMS. One trap on a transit user or computer gives the
 $\delta=0.05$ guarantee in ESSOS and NORTH; in SEVENKINGDOMS the six admissible trap
-candidates do not suffice. With detcover's default of 20 random footholds, GOAD's small
+candidates do not suffice. With the coverage importer's default of 20 random footholds, GOAD's small
 domains include accounts that are already Domain Admins and every instance is infeasible.
 
 \subsection{Two attackers on the same graph}\label{sec:cross}
 
-\paragraph{Setup.} PERIPLO's synthetic AD generator (scale 60, medium path redundancy; 141
-nodes and 557--614 edges) with five footholds per instance and five instances. The detcover
-instance is built on the same graph: same nodes, PERIPLO's footholds as entries, Domain
+\paragraph{Setup.} The collector model's synthetic AD generator (scale 60, medium path redundancy; 141
+nodes and 557--614 edges) with five footholds per instance and five instances. The coverage
+instance is built on the same graph: same nodes, the collector's footholds as entries, Domain
 Controllers and Domain Admins as terminals, BloodHound edge types mapped to ATT\&CK
 techniques and telemetry scopes, and a synthetic rule catalog. Traps are allowed on users and
 computers outside tier~0, never on footholds: a ``trap'' on a Domain Controller is monitoring
 of the crown jewel itself and dominates every other choice (on GOADv2 without ADCS edges, one
-such trap gives the guarantee and cuts PERIPLO's loot from 59.4 to 0.58). The value-collecting
+such trap gives the guarantee and cuts the collector's loot from 59.4 to 0.58). The value-collecting
 attacker has time budget $T=12$ and no pivot cost; all its best responses are exact. We
-compare, for a budget of $k$ traps: $P_k$, PERIPLO's loot-minimising placement; $D_k$,
-detcover's cheapest rules plus at most $k$ traps meeting $\delta=0.05$; $DT_k$, the same with
+compare, for a budget of $k$ traps: $P_k$, the collector model's loot-minimising placement; $D_k$,
+the coverage model's cheapest rules plus at most $k$ traps meeting $\delta=0.05$; $DT_k$, the same with
 traps only; and $G_k$, the combined defender of \cref{sec:combined}.
 
 \begin{table}[t]
@@ -526,17 +526,17 @@ $k$ & Defense & exists & guar. & $V/V_0$ & rules (FP/day) \\
 \end{tabular}
 \end{table}
 
-\paragraph{Each single-model optimum fails the other attacker.} PERIPLO's loot-optimal traps
+\paragraph{Each single-model optimum fails the other attacker.} The collector model's loot-optimal traps
 give the path guarantee in only 4 of 15 (instance, budget) pairs, and not monotonically: with
 three traps the optimum gives it in one instance, with two in three (\cref{tab:cross}).
-Conversely, detcover places the fewest traps that meet the guarantee (1.6 on average for
+Conversely, the coverage model places the fewest traps that meet the guarantee (1.6 on average for
 $k\ge2$) and leaves about half the loot, whatever the budget.
 
 \paragraph{The guarantee is cheap once traps can be combined.} $G_k$ gives the guarantee
 whenever it is feasible with traps alone and its loot is within a median 1.00$\times$ ($k=2$)
 and 1.01$\times$ ($k=3$) of the unconstrained loot optimum; the worst instances cost
 2.39$\times$ and 1.28$\times$. With a single trap the guarantee is infeasible with traps alone in
-three of five instances; there detcover adds rules (19 false positives/day on average), and in
+three of five instances; there the coverage model adds rules (19 false positives/day on average), and in
 two instances one trap plus one or two rules leaves under 8\% of the loot, because rules raise the
 detection probability of many nodes at once.
 
@@ -589,15 +589,15 @@ in-edge translation, these loads are upper bounds for an attacker who cannot pic
 \section{Discussion and limitations}\label{sec:limits}
 
 \begin{itemize}
-\item \textbf{Traps are perfect by assumption.} The reduction inherits PERIPLO's $q=1$; one
+\item \textbf{Traps are perfect by assumption.} The reduction inherits the collector model's $q=1$; one
 trap then dominates any number of imperfect rules. A realistic trap model needs an
 interaction probability, which the reduction already supports through the rule's $q$.
-\item \textbf{Translation between models.} A detcover rule acts on edges and PERIPLO's
-attacker sees per-node detection; we take the least-watched in-edge, which favours the attacker.
+\item \textbf{Translation between models.} A coverage rule acts on edges and the
+collector sees per-node detection; we take the least-watched in-edge, which favours the attacker.
 A joint model where the value-collecting attacker also chooses edges would remove this step.
 \item \textbf{Synthetic detection content.} Catalogs and detection rates are synthetic;
-detcover already imports Sigma rules, which is the next step.
-\item \textbf{Independence.} The linear guarantee assumes independent firings; detcover
+the coverage model already imports Sigma rules, which is the next step.
+\item \textbf{Independence.} The linear guarantee assumes independent firings; the coverage model
 quantifies the effect of common-cause correlation separately.
 \item \textbf{No large real AD.} GOADv2 is small; client collections cannot enter the
 repository. The worst case of the oracle on real hubs, and the cross-evaluation, are measured

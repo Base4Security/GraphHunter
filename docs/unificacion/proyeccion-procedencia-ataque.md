@@ -157,7 +157,7 @@ obligatoria según `CLAUDE.md`).
 
 ## 9. Conformidad
 
-Implementación de referencia en Python: `research/gtdin/proyeccion.py`.
+Implementación de referencia en Python: `research/graphhunter_defensa/proyeccion.py`.
 
 
 `conformidad/proyeccion.json` lista casos de entrada (evento OCSF + tabla de

@@ -1,1 +1,1 @@
-# Pone research/ en sys.path para que los tests importen `detcover` y `gtdin`.
+# Pone research/ en sys.path para que los tests importen `graphhunter_defensa`.

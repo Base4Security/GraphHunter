@@ -6,4 +6,4 @@ SEVENKINGDOMS), tomadas del repositorio `m4lwhere/Bloodhound-CE-Sample-Data`
 ficticios; no contiene datos de clientes.
 
 Se usa para verificar el oráculo dinámico sobre la estructura de un AD real
-(`gtdin/test_ad.py`, `gtdin/bench_ad.py`).
+(`graphhunter_defensa/test_ad.py`, `graphhunter_defensa/bench_ad.py`).
