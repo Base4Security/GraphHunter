@@ -1,7 +1,7 @@
 //! Temporal summary for session hub nodes.
 //!
 //! A session is the one entity in the graph that inherently *has a
-//! duration*: it opens, it is used, it ends. The distinction the AD-CAP
+//! duration*: it opens, it is used, it ends. The distinction the field-case
 //! investigation turned on — a sustained 87-minute session with 26 token
 //! renewals versus a 1,3-minute credential check — is a property of that
 //! span, and before this pass it had to be reconstructed by hand from
@@ -219,7 +219,7 @@ impl GraphHunter {
             // whole neighbour list again for every edge it contributed, so
             // a node with k edges into this session gets counted k² times.
             // Same shape as the `events_for_node` defect found during the
-            // AD-CAP hunt, caught here by the event count coming back as 4
+            // field-case hunt, caught here by the event count coming back as 4
             // for two edges.
             let mut seen: std::collections::HashSet<_> = std::collections::HashSet::new();
             for &pred_sid in self.get_reverse_source_sids(session_id) {
@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(g.summarize_sessions(), 0);
     }
 
-    /// The AD-CAP shape: one session id carrying two victim accounts,
+    /// The field-case shape: one session id carrying two victim accounts,
     /// both from the same hosting address. This is the row the real
     /// corpus produced -- one hit out of 60.145 sessions, joining the two
     /// confirmed takeovers.
@@ -490,9 +490,9 @@ mod tests {
 
         let log = r#"[
           {"timestamp":"2026-07-24T14:26:15Z","username":"victim@example.com",
-           "sessionId":"e6516095-aaaa","ipAddress":"103.50.33.107"},
+           "sessionId":"e6516095-aaaa","ipAddress":"203.0.113.107"},
           {"timestamp":"2026-07-24T14:26:49Z","username":"victim@example.com",
-           "sessionId":"e6516095-aaaa","ipAddress":"38.165.230.130"}
+           "sessionId":"e6516095-aaaa","ipAddress":"198.51.100.130"}
         ]"#;
 
         let mut g = GraphHunter::new();
@@ -516,7 +516,7 @@ mod tests {
             .collect();
         assert_eq!(
             ips,
-            ["103.50.33.107".to_string(), "38.165.230.130".to_string()]
+            ["203.0.113.107".to_string(), "198.51.100.130".to_string()]
                 .into_iter()
                 .collect()
         );

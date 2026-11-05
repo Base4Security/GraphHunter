@@ -280,7 +280,7 @@ mod tests {
     #[test]
     fn rejects_plain_json_and_other_logs() {
         assert!(!looks_like_cdm(r#"{"event":"login","user":"alice"}"#));
-        assert!(!looks_like_cdm("186.19.87.186:36696 [10/Jun/2026] GET /x"));
+        assert!(!looks_like_cdm("203.0.113.86:36696 [10/Jun/2026] GET /x"));
     }
 
     #[test]

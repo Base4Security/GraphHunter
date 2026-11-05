@@ -449,9 +449,9 @@ mod tests {
     /// quadruple-quote escaping. Mirrors the real export byte-for-byte.
     const KEYCLOAK_DOUBLE_ENCODED: &str = concat!(
         "time,type,realmId,clientId,userId,sessionId,ipAddress,error,details\n",
-        r#""1785553172951,LOGIN,realm1,cliente-externo,u-123,sess-1,181.9.227.140,,""{""""auth_method"""":""""openid-connect"""",""""username"""":""""ana@example.com"""",""""error"""":""""none""""}""""#,
+        r#""1785553172951,LOGIN,realm1,cliente-externo,u-123,sess-1,198.51.100.27,,""{""""auth_method"""":""""openid-connect"""",""""username"""":""""ana@example.com"""",""""error"""":""""none""""}""""#,
         "\n",
-        r#""1785553134347,LOGIN_ERROR,realm1,cliente-externo,u-456,sess-2,181.228.57.40,invalid_grant,""{""""username"""":""""bob@example.com""""}""""#,
+        r#""1785553134347,LOGIN_ERROR,realm1,cliente-externo,u-456,sess-2,198.51.100.57,invalid_grant,""{""""username"""":""""bob@example.com""""}""""#,
         "\n",
     );
 
@@ -460,7 +460,7 @@ mod tests {
         let events = CsvParser::sample_events(KEYCLOAK_DOUBLE_ENCODED, 10);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["type"], "LOGIN");
-        assert_eq!(events[0]["ipAddress"], "181.9.227.140");
+        assert_eq!(events[0]["ipAddress"], "198.51.100.27");
         assert_eq!(events[1]["error"], "invalid_grant");
     }
 
@@ -484,7 +484,7 @@ mod tests {
             src.entity_type == EntityType::User
                 && src.id.contains("ana@example.com")
                 && dst.entity_type == EntityType::IP
-                && dst.id == "181.9.227.140"
+                && dst.id == "198.51.100.27"
         });
         assert!(
             user_to_ip,

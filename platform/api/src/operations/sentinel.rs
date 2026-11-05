@@ -2692,7 +2692,7 @@ mod graph_propose_tests {
     fn account_upn_field_classifies_as_user_node_for_identity_correlation() {
         // Device tables carry the SAM account name (InitiatingProcessAccountName,
         // a short name) as the User node AND the UPN (InitiatingProcessAccountUpn,
-        // e.g. "jsalas@niubiz.com.pe") as an attribute. But the UPN is the key
+        // e.g. "jdoe@example.com") as an attribute. But the UPN is the key
         // that unifies endpoint activity with Azure AD SigninLogs (also UPN),
         // so a hunt can pivot identity -> endpoint on one User node. Selecting
         // the UPN field must therefore produce a User node, not an attribute.

@@ -1015,7 +1015,7 @@ impl ConfigurableParser {
         // the anchor to something: the entity is in the graph through those
         // edges, and the event's metadata is stamped onto them below. On an
         // Auth0 export it was one `IP -[Connect]-> IP` per row, a fifth of
-        // all edges. Events with nothing else keep it (AD-CAP rejections).
+        // all edges. Events with nothing else keep it (field-case rejections).
         if canonical_is_fallback_loop && triples.len() > 1 {
             triples.remove(0);
         }
@@ -1343,7 +1343,7 @@ mod raw_line_tests {
     }
 
     /// An event whose only entity is the IP keeps its self-loop — without it
-    /// the event leaves no trace (the AD-CAP `realm_disabled` rejections).
+    /// the event leaves no trace (the field-case `realm_disabled` rejections).
     #[test]
     fn fallback_self_loop_kept_when_it_is_the_only_edge() {
         let data = r#"[{"ip": "198.51.100.186", "type": "f"}]"#;

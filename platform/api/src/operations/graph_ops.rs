@@ -117,7 +117,7 @@ impl GraphHunterApi {
             // edge and silently dropped the rest: an account that emits
             // LOGIN, UPDATE_PASSWORD and VERIFY_EMAIL against the same IP
             // in one second showed up as a single arbitrary event. During
-            // the AD-CAP re-hunt that hid a password change behind an
+            // the field-case re-hunt that hid a password change behind an
             // unrelated event and caused a real indicator to be dismissed
             // — the analyst only caught it by querying from the other
             // endpoint. `get_events_paginated` never had the `break` and
@@ -1029,7 +1029,7 @@ mod graph_neighbors_tests {
     ///
     /// The incoming-edge walk used to `break` at the first match per
     /// source, so a neighbour with parallel edges contributed exactly one
-    /// arbitrary event. In the AD-CAP re-hunt that hid an UPDATE_PASSWORD
+    /// arbitrary event. In the field-case re-hunt that hid an UPDATE_PASSWORD
     /// behind a VERIFY_EMAIL and nearly cost a real indicator.
     #[test]
     fn returns_every_parallel_edge_from_one_neighbour() {

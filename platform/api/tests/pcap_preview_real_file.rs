@@ -3,7 +3,7 @@
 //! and other developers don't blow up when the file isn't present.
 //!
 //! Run with:
-//!   $env:GH_PCAP_FIXTURE = 'C:\Users\lsotomayor\Downloads\evo_telecarga_externa.pcap'
+//!   $env:GH_PCAP_FIXTURE = 'C:\ruta\a\captura.pcap'
 //!   cargo test --test pcap_preview_real_file -- --nocapture
 
 use graph_hunter_api::pcap_preview::pcap_preview_sample;

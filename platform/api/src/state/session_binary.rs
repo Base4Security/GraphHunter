@@ -564,7 +564,7 @@ mod tests {
         // Simulate a header written by a DIFFERENT struct version:
         // (a) it has an EXTRA unknown field, and (b) it omits `tags`.
         // A schema-tolerant reader must still recover id/name/created_at.
-        let future_json = br#"{"id":"sess-x","name":"niubiz","created_at":1780667944,"path_node_ids":[],"notes":[],"datasets":[],"future_field":{"whatever":true}}"#;
+        let future_json = br#"{"id":"sess-x","name":"demo","created_at":1780667944,"path_node_ids":[],"notes":[],"datasets":[],"future_field":{"whatever":true}}"#;
         let mut buf = Vec::new();
         buf.extend_from_slice(&MAGIC);
         buf.extend_from_slice(&2u32.to_le_bytes()); // version 2 = JSON header
@@ -575,7 +575,7 @@ mod tests {
         let mut cur = Cursor::new(&buf);
         let h = read_header(&mut cur).expect("v2 JSON header must parse despite drift");
         assert_eq!(h.id, "sess-x");
-        assert_eq!(h.name, "niubiz");
+        assert_eq!(h.name, "demo");
         assert_eq!(h.created_at, 1780667944);
         assert!(h.tags.is_empty(), "missing tags must default to empty");
     }

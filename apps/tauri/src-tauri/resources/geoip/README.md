@@ -8,7 +8,7 @@ the executable and picked up automatically at startup — see
 Without them, country/ASN enrichment is disabled: `graph_summary` reports
 `geoip:false, asn:false`, `enrich_ip` fails, and any analysis that depends on
 geography or hosting-provider attribution silently cannot run. A real hunt
-(AD-CAP, 2026-08-12) lost its entire intel-driven dimension to exactly this.
+(field-case, 2026-08-12) lost its entire intel-driven dimension to exactly this.
 
 ## Where the loader looks, in order
 

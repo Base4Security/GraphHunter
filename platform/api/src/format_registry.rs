@@ -995,7 +995,7 @@ ana,3
         }
     }
 
-    const HAPROXY_SAMPLE: &str = " 186.19.87.186:36696 [10/Jun/2026:00:00:27.428] https~ cluster_pps_wss/wss_pps_i10 0/0/0/1/1 200 659 - - --NI 619/611/1/0/0 0/0 \"OPTIONS https://www1.hospitalitaliano.org.ar/wssPortal/api/log/INICIO HTTP/2.0\"\n";
+    const HAPROXY_SAMPLE: &str = " 203.0.113.86:36696 [10/Jun/2026:00:00:27.428] https~ be_portal/portal_01 0/0/0/1/1 200 659 - - --NI 619/611/1/0/0 0/0 \"OPTIONS https://www1.example.org/portal/api/log/INICIO HTTP/2.0\"\n";
 
     /// Regression guard for the ingest OOM fix: a HAProxy log must resolve
     /// to the `haproxy` format under auto-detection. The streaming ingest
@@ -1045,7 +1045,7 @@ ana,3
     /// User/IP mappings get proposed instead of one garbage `time` blob.
     const KEYCLOAK_SAMPLE: &str = concat!(
         "time,type,realmId,clientId,userId,sessionId,ipAddress,error,details\n",
-        r#""1785553172951,LOGIN,realm1,cliente-externo,u-123,sess-1,181.9.227.140,,""{""""auth_method"""":""""openid-connect"""",""""username"""":""""ana@example.com""""}""""#,
+        r#""1785553172951,LOGIN,realm1,cliente-externo,u-123,sess-1,198.51.100.27,,""{""""auth_method"""":""""openid-connect"""",""""username"""":""""ana@example.com""""}""""#,
         "\n",
     );
 

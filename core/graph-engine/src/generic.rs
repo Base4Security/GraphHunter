@@ -1268,7 +1268,7 @@ impl GenericParser {
                 // went, became a node. Nothing principled distinguished
                 // the two; it was an omission.
                 //
-                // It cost real evidence: in the AD-CAP corpus 642 events
+                // It cost real evidence: in the field-case corpus 642 events
                 // carry an IP and no user (their `ipAddress` canonicalizes
                 // to `source_ip`), and 399 of those are the
                 // `realm_disabled` rejections from the incident's
@@ -1897,7 +1897,7 @@ const ENDPOINT_FIELDS: &[&str] = &[
 /// event is simply one-sided). Both landed in `no_triple_emitted`, so an
 /// analyst reading the skip report could not tell which they had.
 ///
-/// This is not hypothetical. In the AD-CAP Keycloak corpus, 642 events
+/// This is not hypothetical. In the field-case Keycloak corpus, 642 events
 /// carry an IP and no user, and 399 of them are the `realm_disabled`
 /// rejections from the incident's containment window — the single most
 /// important event of the investigation, silently pooled with parser
@@ -2122,7 +2122,7 @@ mod skip_reason_tests {
     use super::*;
     use serde_json::json;
 
-    /// The AD-CAP shape: an IP, no user. Nothing is wrong with the parser
+    /// The field-case shape: an IP, no user. Nothing is wrong with the parser
     /// — a relation needs two ends and this event names one.
     #[test]
     fn one_sided_row_is_single_endpoint_not_a_parser_failure() {
@@ -2130,7 +2130,7 @@ mod skip_reason_tests {
             "time": "1784921286240",
             "type": "REGISTER_ERROR",
             "userId": "",
-            "ipAddress": "191.84.42.164",
+            "ipAddress": "203.0.113.164",
             "error": "realm_disabled"
         });
         assert_eq!(classify_skip_reason(&event), "single_endpoint");
@@ -2196,8 +2196,8 @@ mod skip_reason_tests {
     #[test]
     fn one_sided_source_addresses_now_reach_the_graph() {
         let json = r#"[
-            {"timestamp":"2024-01-15T14:30:00Z","ipAddress":"191.84.42.164","error":"realm_disabled"},
-            {"timestamp":"2024-01-15T14:31:00Z","ipAddress":"191.84.42.165","error":"realm_disabled"}
+            {"timestamp":"2024-01-15T14:30:00Z","ipAddress":"203.0.113.164","error":"realm_disabled"},
+            {"timestamp":"2024-01-15T14:31:00Z","ipAddress":"203.0.113.165","error":"realm_disabled"}
         ]"#;
         let (triples, stats) = GenericParser.parse_with_stats(json);
         assert_eq!(stats.rows_seen, 2);

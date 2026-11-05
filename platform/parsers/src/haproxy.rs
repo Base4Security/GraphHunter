@@ -9,7 +9,7 @@ use graph_hunter_core::types::{EntityType, RelationType};
 ///
 /// A typical line looks like:
 /// ```text
-///  186.19.87.186:36696 [10/Jun/2026:00:00:27.428] https~ be_pool/srv_01 0/0/0/1/1 \
+///  203.0.113.86:36696 [10/Jun/2026:00:00:27.428] https~ be_pool/srv_01 0/0/0/1/1 \
 ///  200 659 - - --NI 619/611/1/0/0 0/0 "GET https://host.example/api/x HTTP/2.0"
 /// ```
 ///
@@ -502,8 +502,8 @@ pub fn looks_like_haproxy(contents: &str) -> bool {
 mod tests {
     use super::*;
 
-    const SAMPLE_LOG: &str = " 186.19.87.186:36696 [10/Jun/2026:00:00:27.428] https~ cluster_pps_wss/wss_pps_i10 0/0/0/1/1 200 659 - - --NI 619/611/1/0/0 0/0 \"OPTIONS https://www1.hospitalitaliano.org.ar/wssPortal/api/log/guardarNuevoLog/2507896/INICIO HTTP/2.0\"
- 102.128.167.58:42778 [10/Jun/2026:00:00:27.452] https~ be_confluence_prod/confluence_prod_01 0/0/0/4/4 200 1281 - - --VN 619/611/2/2/0 0/0 \"POST https://confluence.hospitalitaliano.org.ar/rest/wrm/2.0/resources?_=123 HTTP/2.0\"
+    const SAMPLE_LOG: &str = " 203.0.113.86:36696 [10/Jun/2026:00:00:27.428] https~ be_portal/portal_01 0/0/0/1/1 200 659 - - --NI 619/611/1/0/0 0/0 \"OPTIONS https://www1.example.org/portal/api/log/guardarNuevoLog/1000001/INICIO HTTP/2.0\"
+ 198.51.100.58:42778 [10/Jun/2026:00:00:27.452] https~ be_wiki/wiki_01 0/0/0/4/4 200 1281 - - --VN 619/611/2/2/0 0/0 \"POST https://wiki.example.org/rest/wrm/2.0/resources?_=123 HTTP/2.0\"
 ";
 
     #[test]
@@ -538,14 +538,14 @@ mod tests {
     fn parse_connect_to_domain_triple() {
         let triples = HaproxyParser.parse(SAMPLE_LOG);
         let (src, rel, dst) = &triples[0];
-        assert_eq!(src.id, "186.19.87.186");
+        assert_eq!(src.id, "203.0.113.86");
         assert_eq!(src.entity_type, EntityType::IP);
-        assert_eq!(dst.id, "www1.hospitalitaliano.org.ar");
+        assert_eq!(dst.id, "www1.example.org");
         assert_eq!(dst.entity_type, EntityType::Domain);
         assert_eq!(rel.rel_type, RelationType::Connect);
         assert_eq!(rel.metadata.get("method").unwrap(), "OPTIONS");
         assert_eq!(rel.metadata.get("status").unwrap(), "200");
-        assert_eq!(rel.metadata.get("backend").unwrap(), "cluster_pps_wss");
+        assert_eq!(rel.metadata.get("backend").unwrap(), "be_portal");
     }
 
     #[test]
@@ -553,8 +553,8 @@ mod tests {
         let triples = HaproxyParser.parse(SAMPLE_LOG);
         // triples[1] is line 1's URL edge (OPTIONS => Read).
         let (_, rel1, dst1) = &triples[1];
-        // `2507896` collapses: URL nodes name endpoints, not records.
-        assert_eq!(dst1.id, "/wssPortal/api/log/guardarNuevoLog/{id}/INICIO");
+        // `1000001` collapses: URL nodes name endpoints, not records.
+        assert_eq!(dst1.id, "/portal/api/log/guardarNuevoLog/{id}/INICIO");
         assert_eq!(dst1.entity_type, EntityType::URL);
         assert_eq!(rel1.rel_type, RelationType::Read);
 
@@ -568,9 +568,9 @@ mod tests {
     fn parse_domain_to_backend_server_triple() {
         let triples = HaproxyParser.parse(SAMPLE_LOG);
         let (src, rel, dst) = &triples[2];
-        assert_eq!(src.id, "www1.hospitalitaliano.org.ar");
+        assert_eq!(src.id, "www1.example.org");
         assert_eq!(src.entity_type, EntityType::Domain);
-        assert_eq!(dst.id, "wss_pps_i10");
+        assert_eq!(dst.id, "portal_01");
         assert_eq!(dst.entity_type, EntityType::Host);
         assert_eq!(rel.rel_type, RelationType::Connect);
     }
@@ -581,12 +581,12 @@ mod tests {
         // is in the path, not the query string, so stripping the query
         // bounded nothing.
         assert_eq!(
-            normalize_path_ids("/wssPortal/api/biografia/credencial/5982994"),
-            "/wssPortal/api/biografia/credencial/{id}"
+            normalize_path_ids("/portal/api/perfil/credencial/1000002"),
+            "/portal/api/perfil/credencial/{id}"
         );
         // Two requests for different records collapse to one node.
         assert_eq!(
-            normalize_path_ids("/api/medicos/6208652"),
+            normalize_path_ids("/api/medicos/1000003"),
             normalize_path_ids("/api/medicos/9999999")
         );
         assert_eq!(
@@ -616,7 +616,7 @@ mod tests {
     #[test]
     fn iso_date_normalizes_the_bracketed_accept_date() {
         // The real shape, leading space and all.
-        let line = b" 190.245.161.140:44164 [06/Aug/2026:00:00:09.930] https~ be/srv 0/0/1/1/1 200 1 - - --NI 0/0/0/0/0 0/0 \"GET /x HTTP/1.1\"";
+        let line = b" 198.51.100.140:44164 [06/Aug/2026:00:00:09.930] https~ be/srv 0/0/1/1/1 200 1 - - --NI 0/0/0/0/0 0/0 \"GET /x HTTP/1.1\"";
         assert_eq!(haproxy_iso_date(line).as_ref(), Some(b"2026-08-06"));
     }
 
@@ -652,7 +652,7 @@ mod tests {
 
     #[test]
     fn try_parse_flags_malformed_line() {
-        let data = "186.19.87.186:36696 [10/Jun/2026:00:00:27.428] https~ be/srv 0/0/0/1/1 200 659 - - --NI 0/0/0/0/0 0/0 \"GET https://h.example/a HTTP/2.0\"\nnot a haproxy line";
+        let data = "203.0.113.86:36696 [10/Jun/2026:00:00:27.428] https~ be/srv 0/0/0/1/1 200 659 - - --NI 0/0/0/0/0 0/0 \"GET https://h.example/a HTTP/2.0\"\nnot a haproxy line";
         let results = HaproxyParser.try_parse(data);
         assert!(results.iter().any(|r| r.is_err()));
         assert!(results.iter().any(|r| r.is_ok()));
