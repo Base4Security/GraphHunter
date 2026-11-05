@@ -49,6 +49,11 @@ pub struct AuthenticationEvent {
     pub dst_endpoint: Option<EndpointRef>,
     pub auth_protocol: Option<String>,
     pub status: Option<String>,
+    /// OCSF `logon_type_id`. For 2–13 it shares its number with the
+    /// Windows `LogonType` of events 4624/4625; it is what tells an
+    /// interactive logon (credentials left on the host) from a network one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logon_type_id: Option<u32>,
     pub provenance: ProvenanceCtx,
 }
 
