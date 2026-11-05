@@ -3,3 +3,6 @@ numpy==2.5.3
 scipy==1.18.1
 networkx==3.7
 pytest
+# Juego de PERIPLO (gtdin/ad/attacker.py, game.py)
+pulp==2.9.0
+highspy==1.15.1
