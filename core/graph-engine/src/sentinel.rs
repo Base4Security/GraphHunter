@@ -26,6 +26,7 @@ enum SentinelTable {
 /// | Table                  | Triples Produced                                           |
 /// |------------------------|------------------------------------------------------------|
 /// | SecurityEvent (4624/25)| User -[Auth]-> Host                                        |
+/// | SecurityEvent (4634/47)| User -[Logoff]-> Host (`RelationType::Other`)              |
 /// | SecurityEvent (4688)   | User -[Execute]-> Process, Parent -[Execute]-> Child       |
 /// | SecurityEvent (4663)   | Process -[Read]-> File                                     |
 /// | SigninLogs             | User -[Auth]-> IP                                          |
@@ -198,6 +199,7 @@ impl SentinelJsonParser {
     /// SecurityEvent table (Windows Security Event Log via Sentinel).
     ///
     /// - EventID 4624/4625: User -[Auth]-> Host (with IP in metadata)
+    /// - EventID 4634/4647: User -[Logoff]-> Host
     /// - EventID 4688: User -[Execute]-> Process + Parent -[Execute]-> Child
     /// - EventID 4663: Process -[Read]-> File
     fn parse_security_event(event: &Value) -> Vec<ParsedTriple> {
@@ -211,7 +213,9 @@ impl SentinelJsonParser {
         };
 
         match event_id {
-            4624 | 4625 => Self::parse_security_event_auth(event, timestamp, event_id),
+            4624 | 4625 | 4634 | 4647 => {
+                Self::parse_security_event_auth(event, timestamp, event_id)
+            }
             4688 => Self::parse_security_event_process(event, timestamp),
             4663 => Self::parse_security_event_file_access(event, timestamp),
             _ => Vec::new(),
@@ -234,7 +238,13 @@ impl SentinelJsonParser {
             _ => return Vec::new(),
         };
 
-        let user = Entity::new(account, EntityType::User);
+        let (rel_type, user_meta) = crate::sysmon::logon_family(
+            event_id,
+            Self::extract_str(event, "TargetUserSid"),
+            Self::extract_str(event, "TargetDomainName"),
+        );
+        let mut user = Entity::new(account, EntityType::User);
+        user.metadata.extend(user_meta);
         let mut host = Entity::new(computer, EntityType::Host);
 
         if let Some(ip) = Self::extract_str(event, "IpAddress") {
@@ -246,9 +256,11 @@ impl SentinelJsonParser {
         } else {
             "Failure"
         };
-        let mut rel = Relation::new(&user.id, &host.id, RelationType::Auth, timestamp);
+        let mut rel = Relation::new(&user.id, &host.id, rel_type, timestamp);
         rel.metadata.insert("event_id".into(), event_id.to_string());
-        rel.metadata.insert("status".into(), status.into());
+        if !matches!(event_id, 4634 | 4647) {
+            rel.metadata.insert("status".into(), status.into());
+        }
 
         if let Some(logon_type) = event.get("LogonType").and_then(|v| {
             v.as_u64()
@@ -594,7 +606,9 @@ impl SentinelJsonParser {
             None => return Vec::new(),
         };
         match event_id {
-            4624 | 4625 => Self::parse_security_event_auth_raw(event, timestamp, event_id),
+            4624 | 4625 | 4634 | 4647 => {
+                Self::parse_security_event_auth_raw(event, timestamp, event_id)
+            }
             4688 => Self::parse_security_event_process_raw(event, timestamp),
             4663 => Self::parse_security_event_file_access_raw(event, timestamp),
             _ => Vec::new(),
@@ -624,9 +638,16 @@ impl SentinelJsonParser {
         } else {
             "Failure"
         };
+        let (rel_type, user_meta) = crate::sysmon::logon_family(
+            event_id,
+            Self::extract_str(event, "TargetUserSid"),
+            Self::extract_str(event, "TargetDomainName"),
+        );
         let mut rel_meta: HashMap<String, String> = HashMap::new();
         rel_meta.insert("event_id".into(), event_id.to_string());
-        rel_meta.insert("status".into(), status.into());
+        if !matches!(event_id, 4634 | 4647) {
+            rel_meta.insert("status".into(), status.into());
+        }
         if let Some(logon_type) = event.get("LogonType").and_then(|v| {
             v.as_u64()
                 .map(|n| n.to_string())
@@ -637,11 +658,11 @@ impl SentinelJsonParser {
         vec![RawIngestEvent {
             src_id: account.into(),
             src_type: EntityType::User,
-            src_metadata: HashMap::new(),
+            src_metadata: user_meta,
             dst_id: computer.into(),
             dst_type: EntityType::Host,
             dst_metadata: host_meta,
-            rel_type: RelationType::Auth,
+            rel_type,
             rel_metadata: rel_meta,
             timestamp,
             raw_line: None,

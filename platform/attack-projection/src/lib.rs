@@ -14,6 +14,8 @@
 //! fields it needs (`logon_type_id`, `device.hostname`) are the ones the spec
 //! lists as prerequisites P1 and P6.
 
+pub mod ingest;
+
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -179,7 +181,9 @@ impl Identities {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_uppercase();
-        self.system_accounts.contains(&name) || name.ends_with(&self.machine_suffix)
+        // `NT AUTHORITY\SYSTEM`, `CORP\WS01$`: judge the account, not its domain.
+        let name = name.rsplit('\\').next().unwrap_or_default();
+        self.system_accounts.contains(name) || name.ends_with(&self.machine_suffix)
     }
 
     fn user(&self, user: Option<&Value>) -> Result<String, &'static str> {
@@ -196,11 +200,25 @@ impl Identities {
         {
             return Ok(uid.to_uppercase()); // SID: the only exact identity
         }
-        let name = user["name"]
+        let full = user["name"]
             .as_str()
             .unwrap_or_default()
             .trim()
             .to_lowercase();
+        let mut domain = user
+            .get("domain")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_uppercase();
+        // NETBIOS\user, the form the Windows parsers emit.
+        let name = match full.split_once('\\') {
+            Some((dom, local)) => {
+                domain = dom.to_uppercase();
+                local.to_string()
+            }
+            None => full,
+        };
         if let Some((local, dom)) = name.split_once('@') {
             return if self.dns.contains(dom) {
                 Ok(format!("{local}@{dom}"))
@@ -208,12 +226,6 @@ impl Identities {
                 Err("domain_unknown")
             };
         }
-        let domain = user
-            .get("domain")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_uppercase();
         if domain.is_empty() {
             return Err("domain_missing");
         }

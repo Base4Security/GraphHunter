@@ -67,6 +67,10 @@ pub struct ProcessActivityEvent {
     pub actor_user: Option<UserRef>,
     pub parent_process: Option<ProcessRef>,
     pub process: ProcessRef,
+    /// Host the process runs on (OCSF `device`). Without it a process event
+    /// cannot say where the actor's token lives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<EndpointRef>,
     pub provenance: ProvenanceCtx,
 }
 

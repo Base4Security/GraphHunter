@@ -13,3 +13,6 @@ path = "src/lib.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Only for `ingest`: turning journal envelopes into projection input.
+graph_hunter_canonical = { path = "../canonical" }
+graph_hunter_core = { path = "../../core/graph-engine" }
