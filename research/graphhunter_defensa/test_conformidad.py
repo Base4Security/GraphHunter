@@ -7,7 +7,7 @@ import json
 import unittest
 from pathlib import Path
 
-from gtdin.proyeccion import Arista, Proyector
+from graphhunter_defensa.proyeccion import Arista, Proyector
 
 CASOS = Path(__file__).resolve().parents[2] / "docs/unificacion/conformidad/proyeccion.json"
 
