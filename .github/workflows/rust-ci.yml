@@ -69,6 +69,7 @@ jobs:
           - core/matcher-ffi/Cargo.toml
           - core/tpcsa-core/Cargo.toml
           - platform/api/Cargo.toml
+          - platform/attack-projection/Cargo.toml
           - platform/canonical/Cargo.toml
           - platform/constrained-decode/Cargo.toml
           - platform/dsl/Cargo.toml
