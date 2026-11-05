@@ -50,7 +50,11 @@ guarantee. Cross-evaluating defenses against both attackers shows that each sing
 optimum fails the other: loot-optimal traps give the path guarantee in 4 of 15
 (instance, budget) pairs, and guarantee-optimal traps leave about half the loot. The combined
 defender gives the guarantee in every feasible case at a median loot within 1\% of the
-loot-optimal placement for budgets of two and three traps. All results use synthetic
+loot-optimal placement for budgets of two and three traps. (v)~A \emph{joint defender} that chooses
+rules and traps together by outer approximation, exploiting that the attacker's value is convex in
+the rule choice; trading alert load against a loot cap, two traps reach half the undefended loot with
+no rules in all five instances, and a 10\% cap costs a median 23\% fewer false positives per day
+than rules alone. All results use synthetic
 detection content and synthetic or small AD graphs; every result is checked against brute
 force or full recomputation.
 \end{abstract}
@@ -88,6 +92,9 @@ per-path guarantee, plus a trap budget (\cref{sec:joint}).
 \item A \textbf{combined defender} for two attacker models on the same graph: traps that
 minimise a value-collecting attacker's loot subject to the path guarantee, by column
 generation over a master that joins both sets of constraints (\cref{sec:combined}).
+\item A \textbf{joint defender} that also chooses the rules, by outer approximation with tangent
+cuts on a convex value function, and the resulting trade-off between alert load and loot
+(\cref{sec:jointrules}).
 \item An evaluation on GOADv2~\cite{goad,bhsample} and synthetic AD graphs, including a
 cross-evaluation of every defense against both attackers (\cref{sec:eval}), with every
 result verified against an independent reference (brute force or full Dijkstra).
@@ -348,6 +355,32 @@ are kept, and rules raise the detection probability of acquiring $v$ through its
 \emph{least-watched} in-edge, $q'_v = 1-(1-q_v)\max_{e=(u,v)}\prod_{r\ni e}(1-q_r)$, because
 the attacker chooses where to come from.
 
+\subsection{Rules and traps together}\label{sec:jointrules}
+
+In \cref{sec:combined} detection rules enter only as a fixed set, because their effect on the
+value-collecting attacker is not linear. With the translation of \cref{sec:combined}, surviving
+the acquisition of $v$ under rules $x$ is
+\[
+s_v(x) = (1-q_v)\exp\Bigl(-\min_{e=(u,v)}\ \textstyle\sum_{r\ni e} w_r x_r\Bigr),
+\]
+and the value at position $j$ of a sequence is $c_j(x)=r_{v_j}\prod_{l\le j}s_{v_l}(x)$. The
+exponent is a maximum of linear functions, hence convex, so $c_j=\exp(\text{convex})$ is convex
+and every tangent is a valid lower bound:
+$c_j(x)\ge c_j(\hat x)\bigl(1+g_j^\top(x-\hat x)\bigr)$, with $g_j$ a subgradient of $\log c_j$ at
+$\hat x$ (the rules on each node's least-watched in-edge). Traps zero the suffix of a sequence;
+we combine both with one variable per position,
+\[
+y_j\ \ge\ c_j(\hat x)\bigl(1+g_j^\top(x-\hat x)\bigr) - M_j\textstyle\sum_{l\le j} b_{v_l},\quad
+y_j\ge0,\quad \theta_s\ge\textstyle\sum_j y_j,
+\]
+with $M_j=c_j(0)$. The master minimises $\lambda_V\sum_s p_s\theta_s+\lambda_A\sum_r c_r x_r$
+(loot and alert load), optionally with a loot cap $\sum_s p_s\theta_s\le L$, under the path
+guarantee and the trap budget. An outer-approximation loop adds, for every attacker sequence in
+the pool, the tangent at every visited $\hat x$, and the attacker's exact best response to the
+incumbent supplies new sequences and the upper bound. At a visited point the cuts are exact for
+any trap set (a trap in the prefix makes $y_j=0$, which is the true value because
+$c_j\le M_j$), so the loop terminates with matching bounds.
+
 \section{Evaluation}\label{sec:eval}
 
 Everything runs in Python on one core of a shared cloud VM; times are single runs and vary
@@ -517,6 +550,42 @@ holds an ESC edge straight to the domain. No trap can help (there is no transit 
 whole rule catalog only reaches an evasion probability of 0.29: one-hop paths from footholds
 bound every defense that acts on nodes.
 
+\paragraph{Rules and traps together.} The joint defender of \cref{sec:jointrules} minimises the
+alert load ($\lambda_V=0$, $\lambda_A=1$) under the path guarantee $\delta=0.05$, a budget of $k$
+traps and a loot cap $L=\alpha V_0$, on the same five instances (\cref{tab:joint}). Every solution
+is certified; the slowest took 162\,s. On three small instances it matches the enumeration of all
+rule subsets and trap sets.
+
+\begin{table}[t]
+\centering\footnotesize\setlength{\tabcolsep}{4pt}
+\caption{Alert load (median FP/day over the feasible instances, out of 5) needed to meet the path
+guarantee and keep the loot below $\alpha V_0$ with at most $k$ traps. Medians are taken over
+different sets when feasibility differs; per instance, the load never grows with $k$.}
+\label{tab:joint}
+\begin{tabular}{@{}rrrrrrr@{}}
+\toprule
+& \multicolumn{2}{c}{$k=0$} & \multicolumn{2}{c}{$k=1$} & \multicolumn{2}{c}{$k=2$}\\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(l){6-7}
+$\alpha$ & feas. & FP/day & feas. & FP/day & feas. & FP/day \\
+\midrule
+1.00 & 4 & 45.2 & 5 & 14.8 & 5 & 0.0 \\
+0.50 & 4 & 45.2 & 5 & 35.8 & 5 & 0.0 \\
+0.25 & 4 & 64.1 & 5 & 35.8 & 5 & 29.3 \\
+0.10 & 4 & 64.1 & 5 & 44.4 & 5 & 44.4 \\
+0.05 & 4 & 74.0 & 4 & 64.1 & 5 & 67.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two traps meet the guarantee and halve the loot with no rules in all five instances. Below
+$\alpha=0.25$ every solution needs rules, because two traps cannot cover every high-value node;
+at $\alpha=0.1$, two traps cut the alert load of the rules-only solution by 5--47\% (median 23\%)
+on the four instances where rules alone are feasible. The guarantee alone already bounds the loot
+in some instances: the cheapest rules-only defense leaves about 5\% of the loot in two instances and
+about half in two others, so whether a loot cap costs anything depends on where value sits relative
+to the monitored edges. Since the rules' effect on this attacker goes through the least-watched
+in-edge translation, these loads are upper bounds for an attacker who cannot pick its entry edge.
+
 \section{Discussion and limitations}\label{sec:limits}
 
 \begin{itemize}
@@ -534,16 +603,16 @@ quantifies the effect of common-cause correlation separately.
 repository. The worst case of the oracle on real hubs, and the cross-evaluation, are measured
 only on synthetic generators.
 \item \textbf{Projection parameters.} Session lifetimes and grace periods are uncalibrated
-defaults; four prerequisites remain open (logoff, privilege and group-change events, SIDs,
-process host).
+defaults. Of four missing-data prerequisites, logoff, SIDs and the process host are now carried
+by the parsers (under review); privilege and group-change events remain open.
 \end{itemize}
 
 \section{Roadmap}
 
 (1)~Connect the Rust projection to the ingestion journal so that $\Gt$ is maintained live, and
-close the four missing-data prerequisites. (2)~Let the combined defender choose rules as well as
-traps; today rules enter its master only as a fixed set, because their effect on the
-value-collecting attacker is not linear. (3)~Unify the certificate formats of the solvers.
+close the missing-data prerequisites. (2)~Remove the least-watched translation by letting the
+value-collecting attacker choose edges, so that the joint defender optimises against one attacker
+that both models agree on. (3)~Unify the certificate formats of the solvers.
 (4)~Calibrate edge weights and detection rates from attack chains reconstructed by the engine's
 Steiner-arborescence module and from emulation runs. (5)~Measure everything on a large real
 collection under the appropriate data agreements.
