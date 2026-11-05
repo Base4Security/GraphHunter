@@ -9,11 +9,6 @@
 # Gateway uploaded files
 gateway/uploads/
 
-# Large real-world datasets (download separately, see demo_data/DOWNLOAD_REAL_DATA.md)
-demo_data/mordor_combined_attacks.json
-demo_data/mega_attack_dataset.json
-demo_data/mega_dataset_1gb.json
-
 # LaTeX build artifacts
 *.aux
 *.log
@@ -24,6 +19,19 @@ demo_data/mega_dataset_1gb.json
 *.synctex.gz
 *.fdb_latexmk
 *.fls
+
+# demo_data holds the small fixtures the test suite reads, and they must
+# be committable. Order matters here: the negation has to come AFTER the
+# LaTeX block, because `*.log` above was silently swallowing `.log` test
+# inputs — `git add demo_data/whatever.log` did nothing, the file stayed
+# on one machine, and the test failed everywhere else with no clue why.
+!demo_data/**
+# ...except the multi-GB corpora, which are downloaded rather than
+# committed. Re-ignored after the negation, or it would un-ignore them.
+# See demo_data/README.md for what to fetch and where each test uses it.
+demo_data/mordor_combined_attacks.json
+demo_data/mega_attack_dataset.json
+demo_data/mega_dataset_1gb.json
 
 # Other artifacts
 **/target/
@@ -88,3 +96,31 @@ audit-tmp/
 # TypeScript / Vite / npm build outputs (untracked post-book-v1.0.0)
 dist/
 *.tsbuildinfo
+
+# GeoLite2 databases: ~70MB of third-party data under the MaxMind EULA.
+# Obtain per apps/tauri/src-tauri/resources/geoip/README.md; never committed.
+*.mmdb
+
+# DARPA TC training corpora + local training venv (multi-GB, never committed)
+training/.venv/
+training/data/**/*.tar.gz
+training/data/**/*.json
+# DARPA ships the big tables split as numbered continuations —
+# ta1-cadets-e3-official-1.json.1, .json.2, ... — which `*.json` does not
+# match. Seven of those files are 24 GB and were sitting untracked, one
+# `git add -A` away from the index.
+training/data/**/*.json.*
+training/data/**/*.txt
+training/data/**/parsed/
+training/data/**/features/
+
+# Scratch probes written by audit subagents into test dirs — never committed.
+**/tests/zz_*.rs
+
+# Python bytecode from the sidecar — build output, never committed.
+__pycache__/
+*.pyc
+
+# LaTeX build dir del libro: .minted y demás intermedios que las reglas
+# por extensión de arriba no alcanzan.
+docs/**/build/

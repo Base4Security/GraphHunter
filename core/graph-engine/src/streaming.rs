@@ -163,6 +163,10 @@ impl StreamEdge {
 /// O(log d + window), but in practice no production code path
 /// called `iter_window` (the matcher uses `edge_store`'s timestamp
 /// binary search, not streaming's window iter).
+// The `Inline` variant is large on purpose: low-degree vertices keep
+// their edges inline with no heap allocation. Boxing it would defeat
+// the point of the SmallVec.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum NeighborList {
     Inline(SmallVec<[StreamEdge; INLINE_CAPACITY]>),
@@ -463,10 +467,14 @@ pub struct InMemoryStreamingBackend {
 /// the per-vertex `RwLock` already taken on the same call so the
 /// extra atomic is noise.
 struct SpillState {
-    /// Threshold in number of edges. When `edges_since_last_spill`
-    /// hits this value, `append_edge` triggers `auto_spill`.
+    /// Floor for the spill threshold, in edges. The effective
+    /// threshold grows with the graph — see [`SpillState::threshold`].
     budget_edges: usize,
     edges_since_last_spill: usize,
+    /// Every edge ever appended, spilled or not. Needed because each
+    /// spill round rewrites the whole edge set, so the cost of a round
+    /// is a function of the total, not of the new arrivals.
+    total_edges: usize,
     /// Test hook: `auto_spill` returns an I/O error without touching disk.
     force_fail: bool,
     /// Directory hosting the auto-spill files. Either an externally-
@@ -479,6 +487,36 @@ struct SpillState {
     /// a full re-write; old file becomes orphaned).
     current_path: Option<std::path::PathBuf>,
     spill_round: usize,
+}
+
+/// Ceiling on edges held unspilled, so the geometric threshold below
+/// cannot trade unbounded RAM for I/O. 32M edges is ~1 GB of
+/// `StreamEdge`, which is affordable on any machine ingesting logs
+/// large enough to spill at all.
+const MAX_UNSPILLED_EDGES: usize = 32 * 1024 * 1024;
+
+impl SpillState {
+    /// Edges that must accumulate before the next spill round.
+    ///
+    /// A spill round rewrites the *entire* edge set, so a fixed period
+    /// is quadratic: with a 1M-edge budget, N edges cost
+    /// `1M + 2M + … + N` bytes written. That stayed invisible while the
+    /// design target was a 28 GB EVTX session (~30M edges, ~30 rounds,
+    /// tens of GB written — slow but survivable). A 15 GB HTTP access
+    /// log produces ~167M edges: 167 rounds writing ~14e9 records, some
+    /// 450 GB of disk traffic to ingest 5 GB of edges. That is the
+    /// difference between a slow ingest and one that never finishes.
+    ///
+    /// Growing the threshold with the spilled total makes the rounds
+    /// geometric — 1M, 2M, 4M, … — so the count is logarithmic and the
+    /// bytes written sum to a small multiple of the final size. The
+    /// cap keeps the unspilled tail, and therefore RAM, bounded.
+    fn threshold(&self) -> usize {
+        let spilled = self.total_edges - self.edges_since_last_spill;
+        spilled
+            .max(self.budget_edges)
+            .min(MAX_UNSPILLED_EDGES.max(self.budget_edges))
+    }
 }
 
 impl Default for InMemoryStreamingBackend {
@@ -508,6 +546,9 @@ impl InMemoryStreamingBackend {
     ///
     /// `0` disables auto-spill (default). Call once during
     /// `GraphHunter` setup; not safe to flip mid-ingest.
+    ///
+    /// Note this is a *floor*, not a fixed period: see
+    /// [`SpillState::threshold`] for why a fixed period is quadratic.
     pub fn with_memory_budget_edges(self, budget_edges: usize) -> Self {
         if budget_edges == 0 {
             return self;
@@ -517,6 +558,7 @@ impl InMemoryStreamingBackend {
         *self.spill_state.lock() = Some(SpillState {
             budget_edges,
             edges_since_last_spill: 0,
+            total_edges: 0,
             spill_dir: dir,
             _temp_dir: Some(temp),
             current_path: None,
@@ -530,17 +572,14 @@ impl InMemoryStreamingBackend {
     /// externally-supplied directory instead of an auto-cleaned
     /// tempdir. The caller owns the directory's lifetime — same
     /// contract as `SpillableEdgeStore::with_spill_dir`.
-    pub fn with_spill_dir_and_budget(
-        self,
-        dir: std::path::PathBuf,
-        budget_edges: usize,
-    ) -> Self {
+    pub fn with_spill_dir_and_budget(self, dir: std::path::PathBuf, budget_edges: usize) -> Self {
         if budget_edges == 0 {
             return self;
         }
         *self.spill_state.lock() = Some(SpillState {
             budget_edges,
             edges_since_last_spill: 0,
+            total_edges: 0,
             spill_dir: dir,
             _temp_dir: None,
             current_path: None,
@@ -562,6 +601,7 @@ impl InMemoryStreamingBackend {
         *self.spill_state.lock() = Some(SpillState {
             budget_edges: 1,
             edges_since_last_spill: 0,
+            total_edges: 0,
             spill_dir: dir,
             _temp_dir: Some(temp),
             current_path: None,
@@ -600,17 +640,9 @@ impl InMemoryStreamingBackend {
     pub fn degree_of(&self, src: StrId) -> usize {
         let base = {
             let outer = self.vertices.read();
-            outer
-                .get(&src)
-                .map(|slot| slot.read().len())
-                .unwrap_or(0)
+            outer.get(&src).map(|slot| slot.read().len()).unwrap_or(0)
         };
-        let tail = self
-            .tails
-            .read()
-            .get(&src)
-            .map(SmallVec::len)
-            .unwrap_or(0);
+        let tail = self.tails.read().get(&src).map(SmallVec::len).unwrap_or(0);
         base + tail
     }
 
@@ -627,13 +659,8 @@ impl InMemoryStreamingBackend {
     /// `slot.read()` is a second atomic. Concurrent writers on
     /// `src` block on the per-vertex `RwLock` for the duration of
     /// the caller's guard.
-    pub fn neighbors_arc(
-        &self,
-        src: StrId,
-    ) -> Option<Arc<RwLock<NeighborList>>> {
-        let outer = self
-            .vertices
-            .read();
+    pub fn neighbors_arc(&self, src: StrId) -> Option<Arc<RwLock<NeighborList>>> {
+        let outer = self.vertices.read();
         outer.get(&src).cloned()
     }
 
@@ -660,12 +687,10 @@ impl InMemoryStreamingBackend {
     where
         F: FnOnce(&NeighborList) -> R,
     {
-        let outer = self
-            .vertices
-            .read();
+        let outer = self.vertices.read();
         let slot = outer.get(&src)?;
         let guard = slot.read();
-        Some(f(&*guard))
+        Some(f(&guard))
     }
 
     /// Tail-aware companion to [`Self::with_neighbors`]: invoke `f` with
@@ -702,13 +727,8 @@ impl InMemoryStreamingBackend {
         // Materialize a base read guard if the slot exists; otherwise
         // provide an empty slice. Same for the tail.
         let base_guard = base_slot.map(|slot| slot.read());
-        let base_slice: &[StreamEdge] = base_guard
-            .as_deref()
-            .map(|g| g.as_slice())
-            .unwrap_or(&[]);
-        let tail_slice: &[StreamEdge] = tail_entry
-            .map(|t| t.as_slice())
-            .unwrap_or(&[]);
+        let base_slice: &[StreamEdge] = base_guard.as_deref().map(|g| g.as_slice()).unwrap_or(&[]);
+        let tail_slice: &[StreamEdge] = tail_entry.map(|t| t.as_slice()).unwrap_or(&[]);
 
         if base_slice.is_empty() && tail_slice.is_empty() {
             return None;
@@ -752,12 +772,8 @@ impl InMemoryStreamingBackend {
         for (&sid, slot) in outer.iter() {
             let guard = slot.read();
             let mut f = match &*guard {
-                NeighborList::Inline(sv) => {
-                    FrozenNeighborList::InMemory(Arc::from(sv.as_slice()))
-                }
-                NeighborList::Vec(v) => {
-                    FrozenNeighborList::InMemory(Arc::from(v.as_slice()))
-                }
+                NeighborList::Inline(sv) => FrozenNeighborList::InMemory(Arc::from(sv.as_slice())),
+                NeighborList::Vec(v) => FrozenNeighborList::InMemory(Arc::from(v.as_slice())),
                 NeighborList::Mmap {
                     handle,
                     byte_offset,
@@ -768,10 +784,8 @@ impl InMemoryStreamingBackend {
                     len: *len,
                 },
             };
-            if merge_tails {
-                if let Some(tail) = tails.get(&sid) {
-                    f = Self::frozen_neighbor_merging_tail(&f, &guard, tail);
-                }
+            if merge_tails && let Some(tail) = tails.get(&sid) {
+                f = Self::frozen_neighbor_merging_tail(&f, &guard, tail);
             }
             frozen.insert(sid, f);
         }
@@ -782,10 +796,7 @@ impl InMemoryStreamingBackend {
                 }
                 // tail is maintained sorted-on-insert; copy directly.
                 let arc: Arc<[StreamEdge]> = tail.iter().copied().collect();
-                frozen.insert(
-                    sid,
-                    FrozenNeighborList::InMemory(arc),
-                );
+                frozen.insert(sid, FrozenNeighborList::InMemory(arc));
             }
         }
         FrozenSnapshot {
@@ -800,11 +811,7 @@ impl InMemoryStreamingBackend {
 
     /// Total edges in post-finalize tail buffers (not yet merged into base lists).
     pub fn tail_edge_count(&self) -> u64 {
-        self.tails
-            .read()
-            .values()
-            .map(|t| t.len() as u64)
-            .sum()
+        self.tails.read().values().map(|t| t.len() as u64).sum()
     }
 
     fn frozen_neighbor_merging_tail(
@@ -863,7 +870,7 @@ impl InMemoryStreamingBackend {
     pub fn finalize(&self) {
         let outer = self.vertices.read();
         for slot in outer.values() {
-            Self::sort_neighbor_slot(&mut *slot.write());
+            Self::sort_neighbor_slot(&mut slot.write());
         }
         self.finalized.store(true, Ordering::Release);
     }
@@ -886,7 +893,7 @@ impl InMemoryStreamingBackend {
             if slot.read().len() < 2 {
                 return;
             }
-            Self::sort_neighbor_slot(&mut *slot.write());
+            Self::sort_neighbor_slot(&mut slot.write());
         });
         self.finalized.store(true, Ordering::Release);
     }
@@ -1046,10 +1053,7 @@ impl InMemoryStreamingBackend {
     /// the affected vertex back to `Vec` (one O(degree) memcpy
     /// out of mmap on first write). Production today doesn't
     /// write post-consolidate, so this is a soft fallback.
-    pub fn consolidate(
-        &self,
-        path: &std::path::Path,
-    ) -> std::io::Result<()> {
+    pub fn consolidate(&self, path: &std::path::Path) -> std::io::Result<()> {
         use std::io::Write;
 
         const MAGIC: u32 = 0x47485353; // "GHSS"
@@ -1057,9 +1061,7 @@ impl InMemoryStreamingBackend {
         const HEADER_SIZE: usize = 16;
         const RECORD_SIZE: usize = std::mem::size_of::<StreamEdge>();
 
-        let outer = self
-            .vertices
-            .read();
+        let outer = self.vertices.read();
 
         // Snapshot the vertex order. We hold the outer read lock
         // for the whole consolidate pass so the table layout is
@@ -1316,14 +1318,19 @@ impl InMemoryStreamingBackend {
     }
 
     /// Append one edge and surface auto-spill failures to the caller.
-    pub fn try_append_edge(&self, src: StrId, edge: StreamEdge) -> Result<(), crate::errors::GraphError> {
+    pub fn try_append_edge(
+        &self,
+        src: StrId,
+        edge: StreamEdge,
+    ) -> Result<(), crate::errors::GraphError> {
         self.append_edge_inner(src, edge);
         let needs_spill = {
             let mut state = self.spill_state.lock();
             match state.as_mut() {
                 Some(s) => {
                     s.edges_since_last_spill += 1;
-                    s.edges_since_last_spill >= s.budget_edges
+                    s.total_edges += 1;
+                    s.edges_since_last_spill >= s.threshold()
                 }
                 None => false,
             }
@@ -1369,9 +1376,9 @@ impl InMemoryStreamingBackend {
                 // write lock on the outer table just for the
                 // insertion.
                 let mut outer = self.vertices.write();
-                let slot = outer.entry(src).or_insert_with(|| {
-                    Arc::new(RwLock::new(NeighborList::default()))
-                });
+                let slot = outer
+                    .entry(src)
+                    .or_insert_with(|| Arc::new(RwLock::new(NeighborList::default())));
                 let mut guard = slot.write();
                 guard.push(edge);
             }
@@ -1392,9 +1399,7 @@ impl StreamingGraphBackend for InMemoryStreamingBackend {
     }
 
     fn neighbors_snapshot(&self, src: StrId) -> Option<std::sync::Arc<NeighborList>> {
-        let outer = self
-            .vertices
-            .read();
+        let outer = self.vertices.read();
         let slot = outer.get(&src)?;
         let guard = slot.read();
         // Clone the NeighborList into a fresh Arc so the snapshot
@@ -1403,9 +1408,7 @@ impl StreamingGraphBackend for InMemoryStreamingBackend {
     }
 
     fn vertex_count(&self) -> usize {
-        self.vertices
-            .read()
-            .len()
+        self.vertices.read().len()
     }
 
     fn edge_count(&self) -> usize {
@@ -1413,12 +1416,7 @@ impl StreamingGraphBackend for InMemoryStreamingBackend {
             let outer = self.vertices.read();
             outer.values().map(|slot| slot.read().len()).sum()
         };
-        let tail: usize = self
-            .tails
-            .read()
-            .values()
-            .map(SmallVec::len)
-            .sum();
+        let tail: usize = self.tails.read().values().map(SmallVec::len).sum();
         base + tail
     }
 }
@@ -1531,9 +1529,9 @@ mod tests {
         // surface in the streaming backend so a future delta-aware
         // matcher (or live-tail UI feature) can read the new edge
         // without scanning the static edge_store.
-        use crate::graph::GraphHunter;
         use crate::Entity;
         use crate::Relation;
+        use crate::graph::GraphHunter;
         use graph_hunter_dsl::types::{EntityType, RelationType};
 
         let mut g = GraphHunter::new();
@@ -1560,9 +1558,9 @@ mod tests {
         // — modulo field naming. Verifies the dual-write keeps
         // the two stores in sync and that StreamEdge faithfully
         // mirrors CompactRelation.
-        use crate::graph::GraphHunter;
         use crate::Entity;
         use crate::Relation;
+        use crate::graph::GraphHunter;
         use graph_hunter_dsl::types::{EntityType, RelationType};
 
         let mut g = GraphHunter::new();
@@ -1580,9 +1578,9 @@ mod tests {
         assert_eq!(streamed.len(), legacy.len(), "row count parity");
         for s in &streamed {
             // Find the matching legacy row by (dest, ts).
-            let matched = legacy.iter().find(|c| {
-                c.dest_sid == s.dest_sid && c.timestamp == s.timestamp
-            });
+            let matched = legacy
+                .iter()
+                .find(|c| c.dest_sid == s.dest_sid && c.timestamp == s.timestamp);
             assert!(matched.is_some(), "streaming row must appear in legacy");
             let m = matched.unwrap();
             assert_eq!(m.rel_type_tag, s.rel_type_tag);
@@ -1678,8 +1676,7 @@ mod tests {
         // a spill (counter reaches the threshold AT push 5, before
         // pushes 6+ arrive). At that snapshot every vertex slice is
         // Mmap-backed and timestamp-sorted.
-        let backend = InMemoryStreamingBackend::new()
-            .with_memory_budget_edges(5);
+        let backend = InMemoryStreamingBackend::new().with_memory_budget_edges(5);
         let a = StrId::from_raw(1);
         let b = StrId::from_raw(2);
         backend.append_edge(a, edge(10, 100, 0));
@@ -1710,8 +1707,7 @@ mod tests {
         // After auto-spill all vertices are Mmap. The next push
         // promotes ONLY the touched vertex back to Vec; the
         // untouched one stays Mmap.
-        let backend = InMemoryStreamingBackend::new()
-            .with_memory_budget_edges(3);
+        let backend = InMemoryStreamingBackend::new().with_memory_budget_edges(3);
         let a = StrId::from_raw(1);
         let b = StrId::from_raw(2);
         backend.append_edge(a, edge(10, 100, 0));
@@ -1747,12 +1743,12 @@ mod tests {
         // third, every vertex's full insertion history must be
         // present (no edge loss across rounds, no double-counting,
         // sorted by timestamp).
-        let backend = InMemoryStreamingBackend::new()
-            .with_memory_budget_edges(10);
+        let backend = InMemoryStreamingBackend::new().with_memory_budget_edges(10);
         let a = StrId::from_raw(1);
-        // 35 edges total: round-1 at 10, round-2 at 20, round-3 at 30,
-        // and 5 more in-memory after the third spill.
-        for i in 0..35i64 {
+        // 45 edges total. The threshold grows with the spilled total,
+        // so rounds land at 10, 20 and 40 — not every 10 — leaving 5
+        // in memory after the third spill.
+        for i in 0..45i64 {
             // Reverse timestamps to verify sort-on-spill works
             // across rounds (each round receives a mix of mmap'd
             // already-sorted runs and freshly-pushed unsorted ones).
@@ -1761,13 +1757,13 @@ mod tests {
 
         let arc = backend.neighbors_arc(a).expect("a");
         let g = arc.read();
-        assert_eq!(g.len(), 35);
+        assert_eq!(g.len(), 45);
         // Final state should be sorted ascending by timestamp; the
         // last 5 are in-memory (post-third-round) so the variant
         // is whatever the post-spill promote-on-write logic landed
         // on — accept either Mmap (if 5 < budget) or Vec.
         let timestamps: Vec<i64> = g.iter().map(|e| e.timestamp).collect();
-        let mut expected: Vec<i64> = (0..35i64).map(|i| 1000 - i).collect();
+        let mut expected: Vec<i64> = (0..45i64).map(|i| 1000 - i).collect();
         expected.sort();
         // The 5 post-third-round in-memory edges aren't sorted yet
         // (sort happens at spill time, not at every push), so the
@@ -1776,6 +1772,34 @@ mod tests {
         let mut got_set = timestamps.clone();
         got_set.sort();
         assert_eq!(got_set, expected, "edge set preserved across rounds");
+    }
+
+    /// The cost that motivated the geometric threshold. Each round is a
+    /// full rewrite of the edge set, so a fixed period makes total disk
+    /// traffic quadratic in the edge count. This pins the round count to
+    /// something logarithmic instead — the property, not the constant.
+    #[test]
+    fn spill_rounds_grow_logarithmically_not_linearly() {
+        let backend = InMemoryStreamingBackend::new().with_memory_budget_edges(10);
+        let a = StrId::from_raw(1);
+        for i in 0..1000i64 {
+            backend.append_edge(a, edge(i as u32, i, 0));
+        }
+        let rounds = backend
+            .spill_state
+            .lock()
+            .as_ref()
+            .expect("spill armed")
+            .spill_round;
+        // A fixed 10-edge period would be 100 rounds, each rewriting
+        // everything written so far. Geometric: 10, 20, 40, 80, 160,
+        // 320, 640 — seven.
+        assert!(
+            rounds <= 10,
+            "expected a logarithmic number of rounds, got {rounds}"
+        );
+        // And no edge was lost to the larger batches.
+        assert_eq!(backend.neighbors_arc(a).expect("a").read().len(), 1000);
     }
 
     #[test]
@@ -1806,9 +1830,7 @@ mod tests {
             (
                 list.variant_tag(),
                 list.len(),
-                list.iter()
-                    .map(|e| e.timestamp)
-                    .collect::<Vec<_>>(),
+                list.iter().map(|e| e.timestamp).collect::<Vec<_>>(),
             )
         });
         let (tag, len, ts) = final_state.unwrap();
@@ -1892,7 +1914,7 @@ mod tests {
         assert!(snap.neighbors(b).is_none());
         assert_eq!(snap.vertex_count(), 1);
         // Live backend sees `b`.
-        assert_eq!(backend.neighbors_arc(b).is_some(), true);
+        assert!(backend.neighbors_arc(b).is_some());
 
         // Snapshot is Clone-cheap (Arc bump).
         let snap2 = snap.clone();
@@ -1999,10 +2021,7 @@ mod tests {
                 let src = StrId::from_raw(src_raw);
                 let arc = backend.neighbors_arc(src).expect("vertex");
                 let guard = arc.read();
-                out.push((
-                    src,
-                    guard.as_slice().iter().map(|e| e.timestamp).collect(),
-                ));
+                out.push((src, guard.as_slice().iter().map(|e| e.timestamp).collect()));
             }
             out
         }
@@ -2022,6 +2041,8 @@ mod tests {
     }
 
     #[test]
+    // Index access is the point: it mirrors the matcher's `&edges[idx]`.
+    #[allow(clippy::needless_range_loop)]
     fn neighbors_arc_exposes_slice_for_matcher_hotpath() {
         // L3 stage 2c part 2: the matcher hot-path takes the per-vertex
         // Arc, takes a read guard on it, and reads guard.as_slice() to
@@ -2081,9 +2102,7 @@ mod tests {
         // `neighbors_snapshot`.
         let absent = StrId::from_raw(999);
         assert!(backend.neighbors_snapshot(absent).is_none());
-        assert!(backend
-            .with_neighbors(absent, |list| list.len())
-            .is_none());
+        assert!(backend.with_neighbors(absent, |list| list.len()).is_none());
     }
 
     // ── H-3 property test ─────────────────────────────────────────────────
@@ -2099,7 +2118,8 @@ mod tests {
     fn tail_merge_matches_full_resort_on_random_streams() {
         // Knuth MMIX LCG: next state = state * 6364136223846793005 + 1442695040888963407
         fn lcg_next(state: &mut u64) -> u64 {
-            *state = state.wrapping_mul(6_364_136_223_846_793_005)
+            *state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
             *state
         }
@@ -2112,9 +2132,7 @@ mod tests {
             let n = (lcg_next(&mut rng) % 19 + 2) as usize;
 
             // Generate N timestamps in [0, 999]
-            let timestamps: Vec<i64> = (0..n)
-                .map(|_| (lcg_next(&mut rng) % 1000) as i64)
-                .collect();
+            let timestamps: Vec<i64> = (0..n).map(|_| (lcg_next(&mut rng) % 1000) as i64).collect();
 
             // Split index in [1, n) — at least one pre-finalize edge so the
             // base is non-empty, at least one post-finalize edge in the tail.

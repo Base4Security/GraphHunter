@@ -2,6 +2,8 @@
 name = "graph-hunter-app"
 version = "1.0.0"
 edition = "2024"
+license = "GPL-3.0-only"
+publish = false
 
 [lib]
 name = "graph_hunter_app_lib"
@@ -50,7 +52,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 dotenvy = "0.15"
 axum = { version = "0.7", features = ["json"] }
 tower-http = { version = "0.5", features = ["cors"] }
-evtx = { version = "0.11", default-features = false }
+evtx = { version = "0.15", default-features = false }
 memchr = "2"
 rayon = "1"
 rand = "0.8"
@@ -105,3 +107,10 @@ opt-level = 3
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[dev-dependencies]
+# Only for the `/run_hunt` cross-transport oneshot test in
+# `http::hunt::tests` — `ServiceExt::oneshot` drives the real axum
+# router without binding a socket. Matches the workspace's existing
+# tower-http 0.5 line.
+tower = { version = "0.5", features = ["util"] }

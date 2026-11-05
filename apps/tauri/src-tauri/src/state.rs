@@ -20,8 +20,8 @@ use std::sync::{Arc, RwLock};
 // Re-exports: types that moved to the canonical API crate. `SessionState`
 // keeps its legacy name here; in the canonical crate it is `Session`.
 pub use graph_hunter_api::state::{
-    ensure_session_dir, session_data_dir, session_file_path, validate_session_id, DatasetInfo,
-    EntityTag, Note, Session as SessionState, SessionFile,
+    DatasetInfo, EntityTag, Note, Session as SessionState, SessionFile, ensure_session_dir,
+    session_data_dir, session_file_path, validate_session_id,
 };
 
 /// Minimal Tauri-side sidecar state. Everything app-wide that the
@@ -50,4 +50,8 @@ pub struct AppState {
     /// here because the axum auth middleware extracts it via the
     /// `State<Arc<AppState>>` FromRef.
     pub api_token: String,
+    /// Hunt journal store (Task A2). Constructed once in `setup()` and
+    /// shared with the mandatory HTTP capture middleware (Task A4) via
+    /// `State<Arc<AppState>>` / `HttpState`'s `FromRef`.
+    pub journal: Arc<crate::journal::store::JournalStore>,
 }

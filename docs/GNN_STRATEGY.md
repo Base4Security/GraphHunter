@@ -235,8 +235,17 @@ auditoría de sistema (procesos, archivos, red) con ataques APT inyectados por u
 
 **Descargar archivos:**
 
-1. Ir a: https://drive.google.com/drive/folders/1okt4AYElyBohW4XiOBqmsvjwXsnUjLVf
-2. Navegar a la carpeta `data/cadets/`
+> **Corregido 2026-08-13.** Este documento apuntaba antes a
+> `1okt4AYElyBohW4XiOBqmsvjwXsnUjLVf`, que es la carpeta de **Engagement 5**:
+> contiene `*-e5-official-*` en Avro binario, ningún JSON de E3, y su ground
+> truth es un PDF (`TA51_Final_report_E5.pdf`), no labels legibles por máquina
+> — incompatible con `01_parse_darpa_cdm.py` y con los labels de threaTrace,
+> que son de E3. El ID correcto es el de `README-E3.md` en
+> `github.com/darpa-i2o/Transparent-Computing`, abajo.
+
+1. Ir a: https://drive.google.com/drive/folders/1QlbUFWAGq3Hpl8wVdzOdIoZLFxkII4EK
+2. Navegar a la carpeta `data/cadets/` (6 archivos: `.json.tar.gz` y `.bin.tar.gz`
+   para `official`, `official-1` y `official-2`; queremos los **JSON**)
 3. Descargar estos archivos:
    - `ta1-cadets-e3-official.json.tar.gz`
    - `ta1-cadets-e3-official-2.json.tar.gz`
@@ -252,6 +261,14 @@ tar -xzf ta1-cadets-e3-official-2.json.tar.gz
 
 cd ../..
 ```
+
+> **La descarga automatizada no es fiable.** Google Drive aplica cuota por
+> archivo a este dataset (es popular en investigación) y responde *"Too many
+> users have viewed or downloaded this file recently… up to 24 hours"*. `gdown`
+> falla con `FileURLRetrievalError` y no hay forma de sortearlo desde código:
+> hay que bajarlo desde el navegador, con sesión de Google, o reintentar más
+> tarde. La carpeta **sí** se puede listar programáticamente, así que verificar
+> qué archivos existen antes de bajar sigue siendo automatizable.
 
 **Descargar ground truth (labels de qué nodos son maliciosos):**
 

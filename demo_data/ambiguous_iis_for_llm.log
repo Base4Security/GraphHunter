@@ -1,0 +1,9 @@
+#Software: Microsoft Internet Information Services 10.0
+#Version: 1.0
+#Date: 2026-01-15 10:00:00
+#Fields: date time c-ip cs-method cs-uri-stem cs-uri-query s-port cs-username cs(User-Agent) sc-status sc-substatus sc-win32-status time-taken
+2026-01-15 10:00:00 10.0.0.50 GET /admin/login - 443 - Mozilla/5.0 200 0 0 152
+2026-01-15 10:00:05 10.0.0.51 POST /api/transfer accountId=999 443 alice Mozilla/5.0 200 0 0 312
+2026-01-15 10:00:09 10.0.0.50 GET /admin/users - 443 admin Mozilla/5.0 403 0 0 89
+2026-01-15 10:00:14 198.51.100.77 POST /webshell.aspx cmd=whoami 443 - curl/7.85 200 0 0 4521
+2026-01-15 10:00:18 10.0.0.51 GET /api/audit?since=2026-01-01 443 alice Mozilla/5.0 200 0 0 217

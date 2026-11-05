@@ -62,10 +62,7 @@ pub fn cmd_get_memory_status() -> MemoryStatus {
     sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
     let host_total_bytes = sys.total_memory();
     let host_available_bytes = sys.available_memory();
-    let rss_bytes = sys
-        .process(pid)
-        .map(|p| p.memory())
-        .unwrap_or(0);
+    let rss_bytes = sys.process(pid).map(|p| p.memory()).unwrap_or(0);
 
     let usage_ratio = if host_total_bytes == 0 {
         0.0

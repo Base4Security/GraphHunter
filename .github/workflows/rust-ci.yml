@@ -1,12 +1,11 @@
 name: rust-ci
 
+# Sin filtro `paths` en el trigger: un workflow filtrado no corre en los PR que
+# no tocan Rust y su check requerido queda pendiente para siempre. El filtro
+# está en el job `changes`; el check que se marca como requerido en el ruleset
+# es `rust-ci-ok`, que siempre termina.
 on:
   pull_request:
-    paths:
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - '**/*.rs'
-      - '.github/workflows/rust-ci.yml'
   push:
     branches: [main]
 
@@ -18,8 +17,46 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.diff.outputs.rust }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: ¿Cambió algo de Rust?
+        id: diff
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Falla cerrado: si el diff no se puede calcular, corre todo. No se usa
+          # `git diff | grep -q`: con pipefail, el SIGPIPE de grep -q hace que el
+          # pipeline dé falso justo cuando hay coincidencia.
+          if ! git diff --name-only "${BASE_SHA}...HEAD" > "${RUNNER_TEMP}/changed.txt"; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if grep -qE '(^|/)Cargo\.(toml|lock)$|\.rs$|^rust-toolchain\.toml$|^deny\.toml$|^\.github/workflows/rust-ci\.yml$' "${RUNNER_TEMP}/changed.txt"; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: test (${{ matrix.os }} / ${{ matrix.manifest }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -30,6 +67,7 @@ jobs:
           - core/gnn/Cargo.toml
           - core/graph-engine/Cargo.toml
           - core/matcher-ffi/Cargo.toml
+          - core/tpcsa-core/Cargo.toml
           - platform/api/Cargo.toml
           - platform/canonical/Cargo.toml
           - platform/constrained-decode/Cargo.toml
@@ -41,10 +79,12 @@ jobs:
           - platform/vrl/Cargo.toml
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
 
@@ -53,51 +93,91 @@ jobs:
         shell: bash
         run: echo "dir=$(dirname '${{ matrix.manifest }}')" >> "$GITHUB_OUTPUT"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: ${{ steps.crate.outputs.dir }}
 
+      # Barato y bloqueante: va primero para fallar rápido.
+      - name: Fmt check
+        # Sin --all: con --all también revisa las dependencias por ruta, y una
+        # falla en graph-engine se repetiría en cada crate que lo usa.
+        run: cargo fmt --manifest-path ${{ matrix.manifest }} -- --check
+
+      # --locked: el build usa exactamente el Cargo.lock commiteado. Si
+      # Cargo.toml cambió sin actualizar el lock, falla en vez de resolver
+      # versiones nuevas en silencio.
       - name: Build (release)
-        run: cargo build --release --manifest-path ${{ matrix.manifest }}
+        run: cargo build --locked --release --manifest-path ${{ matrix.manifest }}
 
       - name: Test
-        run: cargo test --manifest-path ${{ matrix.manifest }}
+        run: cargo test --locked --manifest-path ${{ matrix.manifest }}
 
-      - name: Clippy (soft)
-        run: cargo clippy --manifest-path ${{ matrix.manifest }} -- -D warnings
-        continue-on-error: true
-
-      - name: Fmt check (soft)
-        run: cargo fmt --manifest-path ${{ matrix.manifest }} --all -- --check
-        continue-on-error: true
+      # Bloqueante. --all-targets incluye tests, benches y examples.
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --manifest-path ${{ matrix.manifest }} -- -D warnings
 
   audit:
-    name: audit (deny + audit, soft)
+    name: audit (dependencias)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Install cargo-deny + cargo-audit
         run: cargo install cargo-deny cargo-audit --locked
 
-      - name: cargo deny (soft for now)
-        continue-on-error: true
+      # Bloqueante: falla con cualquier vulnerabilidad conocida. Una excepción se
+      # documenta en FICHA.md con fecha de vencimiento y se agrega a deny.toml /
+      # .cargo/audit.toml con el mismo id; no se silencia acá.
+      - name: cargo audit
+        shell: bash
         run: |
-          set +e
-          while IFS= read -r manifest; do
-            echo "::group::deny ${manifest}"
-            cargo deny check --manifest-path "${manifest}" || echo "::warning::deny failed for ${manifest}"
-            echo "::endgroup::"
-          done < <(find . -name Cargo.toml -not -path '*/target/*' -not -path '*/_archive/*')
-
-      - name: cargo audit (soft for now)
-        continue-on-error: true
-        run: |
-          set +e
+          status=0
           while IFS= read -r lockfile; do
             echo "::group::audit ${lockfile}"
-            cargo audit --file "${lockfile}" || echo "::warning::audit failed for ${lockfile}"
+            cargo audit --file "${lockfile}" || status=1
             echo "::endgroup::"
-          done < <(find . -name Cargo.lock -not -path '*/target/*' -not -path '*/_archive/*')
+          done < <(git ls-files '*Cargo.lock')
+          exit "${status}"
+
+      # Licencias, crates vetados, fuentes y advisories de mantenimiento
+      # (unmaintained, unsound). Bloqueante; las excepciones viven en deny.toml,
+      # cada una con su motivo.
+      - name: cargo deny
+        shell: bash
+        run: |
+          status=0
+          while IFS= read -r manifest; do
+            echo "::group::deny ${manifest}"
+            cargo deny --manifest-path "${manifest}" check || status=1
+            echo "::endgroup::"
+          done < <(git ls-files '*Cargo.toml')
+          exit "${status}"
+
+  # Check requerido del ruleset. Pasa si los jobs anteriores pasaron o se
+  # saltearon porque el PR no toca Rust; falla si alguno falló o se canceló.
+  rust-ci-ok:
+    name: rust-ci-ok
+    if: always()
+    needs: [changes, test, audit]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resultado
+        shell: bash
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "resultados: ${RESULTS}"
+          for r in ${RESULTS}; do
+            case "$r" in
+              success|skipped) ;;
+              *) echo "::error::un job requerido terminó en '$r'"; exit 1 ;;
+            esac
+          done

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use tauri::State;
 
-use graph_hunter_api::dto::sigma::SaveHypothesisAsSigmaRequest;
 use graph_hunter_api::GraphHunterApi;
+use graph_hunter_api::dto::sigma::SaveHypothesisAsSigmaRequest;
 
 use crate::error::CommandError;
 

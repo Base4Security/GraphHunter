@@ -1,10 +1,10 @@
 //! Sentinel/KQL endpoints.
 
 use axum::{
+    Json,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -43,6 +43,19 @@ pub(super) async fn handler_run_kql(
     State(api): State<Arc<GraphHunterApi>>,
     Json(body): Json<RunKqlBody>,
 ) -> Response {
+    // Escape-hatch gate: analyst free-text KQL is a marked, audited, disable-able
+    // boundary. System-internal run_kql callers (journal expand) and system-
+    // generated collection KQL (graph_build) do NOT pass through this handler.
+    if !super::escape_hatch::kql_escape_hatch_enabled() {
+        tracing::warn!(target: "kql_escape_hatch", "raw /kql blocked: escape hatch disabled");
+        return super::escape_hatch::disabled_response().into_response();
+    }
+    tracing::warn!(
+        target: "kql_escape_hatch",
+        kql_len = body.kql.len(),
+        ingest = ?body.ingest,
+        "raw /kql escape hatch invoked (analyst free-text KQL)"
+    );
     let result = tokio::time::timeout(
         Duration::from_secs(120),
         api.run_kql(graph_hunter_api::dto::sentinel::RunKqlRequest {
@@ -62,8 +75,8 @@ pub(super) async fn handler_run_kql(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("KQL execution timed out (120s)"),
@@ -116,8 +129,8 @@ pub(super) async fn handler_discover_schema(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("Schema discovery timed out (120s)"),
@@ -167,8 +180,8 @@ pub(super) async fn handler_graph_propose(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("graph_propose timed out (120s)"),
@@ -217,8 +230,8 @@ pub(super) async fn handler_graph_build(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("graph_build timed out (300s)"),
@@ -253,8 +266,8 @@ pub(super) async fn handler_seed_from_ioc(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("Sentinel seed timed out (120s)"),
@@ -295,8 +308,8 @@ pub(super) async fn handler_node_enrich(
     match result {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(_) => err_json("Node enrich timed out (120s)"),
@@ -308,8 +321,8 @@ pub(super) async fn handler_sentinel_resume(State(api): State<Arc<GraphHunterApi
     match api.sentinel_resume() {
         Ok(()) => ok_json(serde_json::json!({ "resumed": true })),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -320,8 +333,8 @@ pub(super) async fn handler_sentinel_pause(State(api): State<Arc<GraphHunterApi>
     match api.sentinel_pause() {
         Ok(()) => ok_json(serde_json::json!({ "paused": true })),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -332,8 +345,8 @@ pub(super) async fn handler_sentinel_status(State(api): State<Arc<GraphHunterApi
     match api.sentinel_status() {
         Ok(v) => return ok_json(v),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             return (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response();
         }
     }
@@ -347,5 +360,38 @@ pub(super) async fn handler_sentinel_status(State(api): State<Arc<GraphHunterApi
             "connector_id": null,
             "status": null,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // No axum test harness exists in this crate to construct a full
+    // State<Arc<GraphHunterApi>>/Json<RunKqlBody> call into
+    // `handler_run_kql` (the only other http submodule test, in
+    // http/journal.rs, is a pure helper-function test with no State at
+    // all). This test instead pins the *contract* handler_run_kql's gate
+    // relies on: with the escape hatch disabled, the gate must return
+    // `escape_hatch::disabled_response()` — a structured 403 that steers
+    // analysts to the graph tools — instead of reaching `api.run_kql`.
+    #[tokio::test]
+    async fn kql_gate_blocks_when_flag_disabled() {
+        // Serialize with escape_hatch's env-var test: both mutate the
+        // process-global GRAPHHUNTER_KQL_ESCAPE_HATCH and can race under the
+        // default parallel test runner otherwise.
+        let _guard = crate::http::escape_hatch::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("GRAPHHUNTER_KQL_ESCAPE_HATCH", "0");
+        }
+        assert!(!crate::http::escape_hatch::kql_escape_hatch_enabled());
+        let (status, body) = crate::http::escape_hatch::disabled_response();
+        unsafe {
+            std::env::remove_var("GRAPHHUNTER_KQL_ESCAPE_HATCH");
+        }
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        let v: serde_json::Value = body.0;
+        assert_eq!(v["error"], "kql_escape_hatch_disabled");
+        assert!(v["hint"].as_str().unwrap().contains("graph"));
     }
 }

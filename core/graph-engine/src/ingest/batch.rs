@@ -34,21 +34,16 @@ use graph_hunter_sources::Watermark;
 ///    separate, higher-priority channel that the writer drains first.
 ///    The [`Priority`] field on every batch is the hook that enables
 ///    that without changing the writer's public API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Priority {
     /// Background streaming ingest. The default for `SourcePoller`-
     /// originated batches.
+    #[default]
     Normal,
     /// On-demand enrichment query triggered by an explicit user action
     /// (`cmd_enrich_entity` in Phase 7). Gets per-batch preemption
     /// accounting in the writer metrics.
     Enrichment,
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Priority::Normal
-    }
 }
 
 /// A parsed batch of events ready for the `GraphWriter` to insert.

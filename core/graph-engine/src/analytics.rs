@@ -370,6 +370,9 @@ fn percentile_of(xs: &[f64], x: f64) -> f64 {
     (100.0 * (below + equal / 2.0) / n).clamp(0.0, 100.0)
 }
 
+// Each argument is a distinct, already-computed score component; bundling
+// them into a one-off struct for a single private caller adds no clarity.
+#[allow(clippy::too_many_arguments)]
 fn build_narrative(
     composite: f64,
     composite_pct: f64,
@@ -578,10 +581,12 @@ impl GraphHunter {
                 continue;
             }
 
-            // Outgoing edges
-            if let Some(arc) = self.streaming.neighbors_arc(current_sid) {
-                let g = arc.read();
-                for edge in g.as_slice() {
+            // Outgoing edges (base + post-finalize tail; base-only would
+            // drop every edge appended after the last finalize — the
+            // /expand-shows-0-edges bug on freshly built graphs).
+            {
+                let out_edges = self.neighbors_incl_tail(current_sid);
+                for edge in &out_edges {
                     if edges.len() >= max_edges {
                         truncated = true;
                         break;
@@ -590,37 +595,32 @@ impl GraphHunter {
                     let dest_id_str = self.interner.resolve(dest_sid);
 
                     if let Some(f) = filter {
-                        if let Some(ref rel_types) = f.relation_types {
-                            if !rel_types
-                                .iter()
-                                .any(|rt| rt.to_u8() == edge.rel_type_tag)
-                            {
-                                continue;
-                            }
+                        if let Some(ref rel_types) = f.relation_types
+                            && !rel_types.iter().any(|rt| rt.to_u8() == edge.rel_type_tag)
+                        {
+                            continue;
                         }
-                        if let Some(start) = f.time_start {
-                            if edge.timestamp < start {
-                                continue;
-                            }
+                        if let Some(start) = f.time_start
+                            && edge.timestamp < start
+                        {
+                            continue;
                         }
-                        if let Some(end) = f.time_end {
-                            if edge.timestamp > end {
-                                continue;
-                            }
+                        if let Some(end) = f.time_end
+                            && edge.timestamp > end
+                        {
+                            continue;
                         }
-                        if let Some(ref entity_types) = f.entity_types {
-                            if let Some(entity) = self.entities.get(&dest_sid) {
-                                if !entity_types.contains(&entity.entity_type) {
-                                    continue;
-                                }
-                            }
+                        if let Some(ref entity_types) = f.entity_types
+                            && let Some(entity) = self.entities.get(&dest_sid)
+                            && !entity_types.contains(&entity.entity_type)
+                        {
+                            continue;
                         }
-                        if let Some(min_score) = f.min_score {
-                            if let Some(entity) = self.entities.get(&dest_sid) {
-                                if entity.score < min_score {
-                                    continue;
-                                }
-                            }
+                        if let Some(min_score) = f.min_score
+                            && let Some(entity) = self.entities.get(&dest_sid)
+                            && entity.score < min_score
+                        {
+                            continue;
                         }
                     }
 
@@ -640,10 +640,8 @@ impl GraphHunter {
                         edges.push(NeighborEdge {
                             source: self.interner.resolve(edge.source_sid).to_string(),
                             target: dest_id_str.to_string(),
-                            rel_type: self.resolve_rel_type_name_raw(
-                                edge.rel_type_tag,
-                                edge.metadata_offset,
-                            ),
+                            rel_type: self
+                                .resolve_rel_type_name_raw(edge.rel_type_tag, edge.metadata_offset),
                             timestamp: edge.timestamp,
                             metadata: meta,
                         });
@@ -660,9 +658,9 @@ impl GraphHunter {
                         truncated = true;
                         break;
                     }
-                    if let Some(arc) = self.streaming.neighbors_arc(source_sid) {
-                        let g = arc.read();
-                        for edge in g.as_slice() {
+                    {
+                        let src_out = self.neighbors_incl_tail(source_sid);
+                        for edge in &src_out {
                             if edges.len() >= max_edges {
                                 truncated = true;
                                 break;
@@ -1026,10 +1024,9 @@ impl GraphHunter {
         let mut weighted_edges: Vec<(usize, usize, f64)> = Vec::new();
 
         self.streaming.for_each_edge(|src_sid, edge| {
-            if let (Some(&src_idx), Some(&dst_idx)) = (
-                sid_to_idx.get(&src_sid),
-                sid_to_idx.get(&edge.dest_sid),
-            ) {
+            if let (Some(&src_idx), Some(&dst_idx)) =
+                (sid_to_idx.get(&src_sid), sid_to_idx.get(&edge.dest_sid))
+            {
                 let dt = (t_ref - edge.timestamp).max(0) as f64;
                 let w = (-lambda * dt).exp();
                 w_out[src_idx] += w;
@@ -1172,12 +1169,7 @@ impl GraphHunter {
         // to per-unique-neighbor, matching the intended semantics: "how
         // many neighbors of each type does this node have?".
         self.streaming.with_neighbors_and_tail(sid, |base, tail| {
-            let mut scanned = 0usize;
-            for edge in base.iter().chain(tail.iter()) {
-                if scanned >= config::MAX_SCAN_EDGES {
-                    break;
-                }
-                scanned += 1;
+            for edge in base.iter().chain(tail.iter()).take(config::MAX_SCAN_EDGES) {
                 if edge.timestamp != 0 {
                     min_ts = min_ts.min(edge.timestamp);
                     max_ts = max_ts.max(edge.timestamp);
@@ -1209,12 +1201,7 @@ impl GraphHunter {
         // tail-aware helper and find the first edge that lands on us;
         // any single timestamp suffices to extend the min/max range.
         if let Some(sources) = self.reverse_adj.get(&sid) {
-            let mut scanned = 0usize;
-            for &source_sid in sources.iter() {
-                if scanned >= config::MAX_SCAN_EDGES {
-                    break;
-                }
-                scanned += 1;
+            for &source_sid in sources.iter().take(config::MAX_SCAN_EDGES) {
                 let Some(src_entity) = self.entities.get(&source_sid) else {
                     continue;
                 };
@@ -1369,7 +1356,7 @@ impl GraphHunter {
                 count: ids.len(),
             })
             .collect();
-        type_distribution.sort_by(|a, b| b.count.cmp(&a.count));
+        type_distribution.sort_by_key(|t| std::cmp::Reverse(t.count));
 
         let mut min_ts = i64::MAX;
         let mut max_ts = i64::MIN;
@@ -1693,10 +1680,11 @@ impl GraphHunter {
 
         {
             let cache = self.schema_cache.lock().expect("schema_cache poisoned");
-            if let Some(entry) = cache.as_ref() {
-                if entry.edge_count == edge_count && entry.meta_bytes == meta_bytes {
-                    return (entry.schema.clone(), true);
-                }
+            if let Some(entry) = cache.as_ref()
+                && entry.edge_count == edge_count
+                && entry.meta_bytes == meta_bytes
+            {
+                return (entry.schema.clone(), true);
             }
         }
 
@@ -1749,7 +1737,7 @@ impl GraphHunter {
             })
             .collect();
 
-        out.sort_by(|a, b| b.edge_count.cmp(&a.edge_count));
+        out.sort_by_key(|r| std::cmp::Reverse(r.edge_count));
 
         {
             let mut cache = self.schema_cache.lock().expect("schema_cache poisoned");
@@ -1790,14 +1778,14 @@ impl GraphHunter {
         let (baseline_scored, _) = self.score_and_paginate_paths(
             &baseline_raw,
             0,
-            usize::MAX.min(baseline_raw.len().max(1)),
+            baseline_raw.len().max(1),
             None,
             DedupMode::ByPath,
         );
         let (current_scored, _) = self.score_and_paginate_paths(
             &current_raw,
             0,
-            usize::MAX.min(current_raw.len().max(1)),
+            current_raw.len().max(1),
             None,
             DedupMode::ByPath,
         );
@@ -2098,8 +2086,9 @@ impl GraphHunter {
         // MetadataStore (cf. its existing `visit_keys`) to avoid the alloc.
         self.streaming.for_each_edge(|src, e| {
             let md = self.meta_store.get(e.metadata_offset);
-            let rt = md.get("_rel_type").cloned()
-                .unwrap_or_else(|| format!("{}", crate::types::RelationType::from_u8(e.rel_type_tag)));
+            let rt = md.get("_rel_type").cloned().unwrap_or_else(|| {
+                format!("{}", crate::types::RelationType::from_u8(e.rel_type_tag))
+            });
             let entry = groups.entry((src, e.dest_sid, rt)).or_insert_with(|| Agg {
                 count: 0,
                 bytes: 0,
@@ -2132,8 +2121,8 @@ impl GraphHunter {
         // completeness fix), so heavy_edges covers live Sentinel tail data.
         let mut out: Vec<HeavyEdge> = groups
             .into_iter()
-            .filter(|((_, _, rt), _)| opts.rel_type.as_ref().map_or(true, |w| w == rt))
-            .filter(|(_, a)| opts.min_count.map_or(true, |m| a.count >= m))
+            .filter(|((_, _, rt), _)| opts.rel_type.as_ref().is_none_or(|w| w == rt))
+            .filter(|(_, a)| opts.min_count.is_none_or(|m| a.count >= m))
             .map(|((s, d, rt), a)| HeavyEdge {
                 source: self.interner.resolve(s).to_string(),
                 target: self.interner.resolve(d).to_string(),
@@ -2150,7 +2139,11 @@ impl GraphHunter {
                 last_ts: a.last_ts,
             })
             .collect();
-        out.sort_by(|x, y| y.count.cmp(&x.count).then(y.total_bytes.cmp(&x.total_bytes)));
+        out.sort_by(|x, y| {
+            y.count
+                .cmp(&x.count)
+                .then(y.total_bytes.cmp(&x.total_bytes))
+        });
         out.truncate(opts.top_n);
         out
     }
@@ -2163,30 +2156,39 @@ impl GraphHunter {
         // on-demand analytical query (cf. heavy_edges). `for_each_edge` visits
         // base AND post-finalize tail edges, so live finalized graphs are covered.
         let window = opts.window_secs.max(1) as i64;
-        let mut groups: HashMap<(StrId, StrId, String), Vec<(i64, u64, bool)>> = HashMap::new();
+        // (src, dst, rel_type) -> [(timestamp, sentbyte, is_reset)]
+        type ChannelKey = (StrId, StrId, String);
+        let mut groups: HashMap<ChannelKey, Vec<(i64, u64, bool)>> = HashMap::new();
         self.streaming.for_each_edge(|src, ed| {
             let md = self.meta_store.get(ed.metadata_offset);
-            let rt = md.get("_rel_type").cloned()
-                .unwrap_or_else(|| format!("{}", crate::types::RelationType::from_u8(ed.rel_type_tag)));
-            let bytes = md.get("sentbyte").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let rt = md.get("_rel_type").cloned().unwrap_or_else(|| {
+                format!("{}", crate::types::RelationType::from_u8(ed.rel_type_tag))
+            });
+            let bytes = md
+                .get("sentbyte")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
             let is_reset = matches!(
                 md.get("action").map(|s| s.as_str()),
                 Some("client-rst") | Some("server-rst")
             );
-            groups.entry((src, ed.dest_sid, rt)).or_default().push((ed.timestamp, bytes, is_reset));
+            groups
+                .entry((src, ed.dest_sid, rt))
+                .or_default()
+                .push((ed.timestamp, bytes, is_reset));
         });
 
         let mut out: Vec<ChannelBehavior> = Vec::new();
         for ((s, d, rt), mut edges) in groups {
-            if let Some(m) = opts.min_count {
-                if edges.len() < m {
-                    continue;
-                }
+            if let Some(m) = opts.min_count
+                && edges.len() < m
+            {
+                continue;
             }
-            if let Some(want) = opts.rel_type.as_ref() {
-                if want != &rt {
-                    continue;
-                }
+            if let Some(want) = opts.rel_type.as_ref()
+                && want != &rt
+            {
+                continue;
             }
             edges.sort_by_key(|x| x.0);
             let count = edges.len();
@@ -2197,17 +2199,12 @@ impl GraphHunter {
             let mut interval_cv = 0.0_f64;
             let mut beacon_score = 0.0_f64;
             if count >= 2 {
-                let intervals: Vec<f64> = edges
-                    .windows(2)
-                    .map(|w| (w[1].0 - w[0].0) as f64)
-                    .collect();
+                let intervals: Vec<f64> =
+                    edges.windows(2).map(|w| (w[1].0 - w[0].0) as f64).collect();
                 let mean = intervals.iter().sum::<f64>() / intervals.len() as f64;
                 interval_mean_secs = mean;
                 if count >= 3 && mean > 0.0 {
-                    let var = intervals
-                        .iter()
-                        .map(|x| (x - mean).powi(2))
-                        .sum::<f64>()
+                    let var = intervals.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
                         / intervals.len() as f64;
                     interval_cv = var.sqrt() / mean;
                     beacon_score = 1.0 - interval_cv.min(1.0);
@@ -2306,7 +2303,14 @@ impl GraphHunter {
             edge: None,
         }];
         self.dfs_paths(
-            from_sid, to_sid, max_depth, rel_filter, &mut path, &mut on_path, &mut out, max_paths,
+            from_sid,
+            to_sid,
+            max_depth,
+            rel_filter,
+            &mut path,
+            &mut on_path,
+            &mut out,
+            max_paths,
         );
         out
     }
@@ -2372,7 +2376,9 @@ impl GraphHunter {
                 edge: Some(self.resolve_rel_type_name_raw(tag, off)),
             });
             on_path.insert(dest);
-            self.dfs_paths(dest, to_sid, max_depth, rel_filter, path, on_path, out, max_paths);
+            self.dfs_paths(
+                dest, to_sid, max_depth, rel_filter, path, on_path, out, max_paths,
+            );
             on_path.remove(&dest);
             path.pop();
         }
@@ -2395,6 +2401,7 @@ impl GraphHunter {
         let candidates: Vec<&crate::entity::Entity> = self
             .entities
             .values()
+            .map(|e| &**e)
             .filter(|e| node_class.is_none_or(|c| format!("{}", e.entity_type) == c))
             .collect();
         if candidates.len() < 2 {
@@ -2454,7 +2461,11 @@ impl GraphHunter {
                 });
             }
         }
-        hits.sort_by(|a, b| b.z_score.partial_cmp(&a.z_score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.z_score
+                .partial_cmp(&a.z_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(top_n);
         hits
     }
@@ -2464,9 +2475,9 @@ impl GraphHunter {
 mod heavy_edges_tests {
     use super::*;
     use crate::GraphHunter;
-    use crate::types::{EntityType, RelationType};
     use crate::entity::Entity;
     use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
     use std::collections::HashMap;
 
     fn edge(
@@ -2486,7 +2497,11 @@ mod heavy_edges_tests {
         }
         let mut rel = Relation::new(s, d, rt, ts);
         rel.metadata = md;
-        (Entity::new(s, EntityType::IP), rel, Entity::new(d, EntityType::IP))
+        (
+            Entity::new(s, EntityType::IP),
+            rel,
+            Entity::new(d, EntityType::IP),
+        )
     }
 
     #[test]
@@ -2494,16 +2509,55 @@ mod heavy_edges_tests {
         let mut g = GraphHunter::new();
         g.insert_triples(
             vec![
-                edge("A", "B", RelationType::Connect, 10, Some("100"), Some("close")),
-                edge("A", "B", RelationType::Connect, 20, Some("200"), Some("close")),
-                edge("A", "B", RelationType::Connect, 30, Some("300"), Some("close")),
-                edge("A", "B", RelationType::Connect, 40, Some("400"), Some("client-rst")),
-                edge("A", "C", RelationType::Connect, 50, Some("999"), Some("close")),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    10,
+                    Some("100"),
+                    Some("close"),
+                ),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    20,
+                    Some("200"),
+                    Some("close"),
+                ),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    30,
+                    Some("300"),
+                    Some("close"),
+                ),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    40,
+                    Some("400"),
+                    Some("client-rst"),
+                ),
+                edge(
+                    "A",
+                    "C",
+                    RelationType::Connect,
+                    50,
+                    Some("999"),
+                    Some("close"),
+                ),
             ],
             None,
         )
         .unwrap();
-        let out = g.heavy_edges(&HeavyEdgesOpts { top_n: 10, min_count: None, rel_type: None });
+        let out = g.heavy_edges(&HeavyEdgesOpts {
+            top_n: 10,
+            min_count: None,
+            rel_type: None,
+        });
         let ab = out
             .iter()
             .find(|e| e.source == "A" && e.target == "B")
@@ -2517,10 +2571,17 @@ mod heavy_edges_tests {
         // count 4 ranks first
         assert_eq!(out[0].source, "A");
         assert_eq!(out[0].target, "B");
-        let filtered =
-            g.heavy_edges(&HeavyEdgesOpts { top_n: 10, min_count: Some(2), rel_type: None });
+        let filtered = g.heavy_edges(&HeavyEdgesOpts {
+            top_n: 10,
+            min_count: Some(2),
+            rel_type: None,
+        });
         assert!(filtered.iter().all(|e| e.count >= 2));
-        assert!(filtered.iter().all(|e| !(e.source == "A" && e.target == "C")));
+        assert!(
+            filtered
+                .iter()
+                .all(|e| !(e.source == "A" && e.target == "C"))
+        );
     }
 
     #[test]
@@ -2564,15 +2625,16 @@ mod heavy_edges_tests {
             None,
         )
         .unwrap();
-        let hood = g
-            .get_neighborhood("a", 1, 50, None)
-            .expect("neighborhood");
+        let hood = g.get_neighborhood("a", 1, 50, None).expect("neighborhood");
         let e = hood
             .edges
             .iter()
             .find(|e| e.source == "a" && e.target == "b")
             .expect("edge a->b");
-        assert_eq!(e.rel_type, "SNAT", "rel_type should be recovered custom name");
+        assert_eq!(
+            e.rel_type, "SNAT",
+            "rel_type should be recovered custom name"
+        );
         assert!(
             !e.metadata.contains_key("_rel_type"),
             "_rel_type must not leak into public edge metadata"
@@ -2596,7 +2658,10 @@ mod hydration_outcome_tests {
             hydration: None,
         };
         let json = serde_json::to_string(&hood).unwrap();
-        assert!(!json.contains("hydration"), "None hydration must be skipped: {json}");
+        assert!(
+            !json.contains("hydration"),
+            "None hydration must be skipped: {json}"
+        );
     }
 
     #[test]
@@ -2618,12 +2683,18 @@ mod hydration_outcome_tests {
 mod channel_behavior_tests {
     use super::*;
     use crate::GraphHunter;
-    use crate::types::{EntityType, RelationType};
     use crate::entity::Entity;
     use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
     use std::collections::HashMap;
 
-    fn e(s: &str, d: &str, ts: i64, sentbyte: Option<&str>, action: Option<&str>) -> crate::parser::ParsedTriple {
+    fn e(
+        s: &str,
+        d: &str,
+        ts: i64,
+        sentbyte: Option<&str>,
+        action: Option<&str>,
+    ) -> crate::parser::ParsedTriple {
         let mut md = HashMap::new();
         if let Some(b) = sentbyte {
             md.insert("sentbyte".into(), b.into());
@@ -2633,7 +2704,11 @@ mod channel_behavior_tests {
         }
         let mut rel = Relation::new(s, d, RelationType::Connect, ts);
         rel.metadata = md;
-        (Entity::new(s, EntityType::IP), rel, Entity::new(d, EntityType::IP))
+        (
+            Entity::new(s, EntityType::IP),
+            rel,
+            Entity::new(d, EntityType::IP),
+        )
     }
 
     fn opts(sort_by: ChannelSortBy) -> ChannelBehaviorOpts {
@@ -2734,38 +2809,70 @@ mod channel_behavior_tests {
     #[test]
     fn min_count_filters_small_channels() {
         let mut g = GraphHunter::new();
-        g.insert_triples(vec![
-            e("A","B",0,None,None), e("A","B",60,None,None), e("A","B",120,None,None), // count 3
-            e("A","C",0,None,None), // count 1
-        ], None).unwrap();
+        g.insert_triples(
+            vec![
+                e("A", "B", 0, None, None),
+                e("A", "B", 60, None, None),
+                e("A", "B", 120, None, None), // count 3
+                e("A", "C", 0, None, None),   // count 1
+            ],
+            None,
+        )
+        .unwrap();
         let out = g.channel_behavior(&ChannelBehaviorOpts {
-            top_n: 10, min_count: Some(3), window_secs: 60, rel_type: None, sort_by: ChannelSortBy::Beacon,
+            top_n: 10,
+            min_count: Some(3),
+            window_secs: 60,
+            rel_type: None,
+            sort_by: ChannelSortBy::Beacon,
         });
-        assert!(out.iter().any(|c| c.source=="A" && c.target=="B"));
-        assert!(out.iter().all(|c| !(c.source=="A" && c.target=="C")), "A->C (count 1) must be filtered by min_count=3");
+        assert!(out.iter().any(|c| c.source == "A" && c.target == "B"));
+        assert!(
+            out.iter().all(|c| !(c.source == "A" && c.target == "C")),
+            "A->C (count 1) must be filtered by min_count=3"
+        );
     }
 
     #[test]
     fn rel_type_filter_restricts_channels() {
         let mut g = GraphHunter::new();
         // A->B Connect (built-in) and A->D Other("SNAT")
-        let mut snat = Relation::new("A","D",RelationType::Other("SNAT".to_string()),0);
+        let mut snat = Relation::new("A", "D", RelationType::Other("SNAT".to_string()), 0);
         snat.metadata = HashMap::new();
-        g.insert_triples(vec![
-            e("A","B",0,None,None), e("A","B",60,None,None),
-            (Entity::new("A",EntityType::IP), snat, Entity::new("D",EntityType::IP)),
-        ], None).unwrap();
+        g.insert_triples(
+            vec![
+                e("A", "B", 0, None, None),
+                e("A", "B", 60, None, None),
+                (
+                    Entity::new("A", EntityType::IP),
+                    snat,
+                    Entity::new("D", EntityType::IP),
+                ),
+            ],
+            None,
+        )
+        .unwrap();
         let out = g.channel_behavior(&ChannelBehaviorOpts {
-            top_n: 10, min_count: None, window_secs: 60, rel_type: Some("SNAT".to_string()), sort_by: ChannelSortBy::Beacon,
+            top_n: 10,
+            min_count: None,
+            window_secs: 60,
+            rel_type: Some("SNAT".to_string()),
+            sort_by: ChannelSortBy::Beacon,
         });
-        assert!(out.iter().all(|c| c.rel_type=="SNAT"), "only SNAT channels");
-        assert!(out.iter().any(|c| c.source=="A" && c.target=="D"), "the SNAT channel is present");
+        assert!(
+            out.iter().all(|c| c.rel_type == "SNAT"),
+            "only SNAT channels"
+        );
+        assert!(
+            out.iter().any(|c| c.source == "A" && c.target == "D"),
+            "the SNAT channel is present"
+        );
     }
 }
 
 #[cfg(test)]
 mod find_paths_tests {
-    use super::*;
+
     use crate::GraphHunter;
     use crate::entity::Entity;
     use crate::relation::Relation;
@@ -2853,7 +2960,7 @@ mod find_paths_tests {
 
 #[cfg(test)]
 mod structural_anomaly_tests {
-    use super::*;
+
     use crate::GraphHunter;
     use crate::entity::Entity;
     use crate::relation::Relation;

@@ -95,7 +95,11 @@ impl GraphHunterApi {
         self.with_graph_read(req.session.as_ref(), |graph| {
             let mut edges: Vec<SubgraphEdge> = Vec::new();
 
-            for compact in graph.get_compact_relations(&req.node_id) {
+            // Tail-aware: base-only reads miss every edge appended after the
+            // last finalize (graph_build / second-dataset ingest), which made
+            // this endpoint return 0 events for fully-connected nodes. Sorted
+            // below, so tail ordering is harmless.
+            for compact in graph.neighbors_incl_tail_by_id(&req.node_id) {
                 if edges.len() >= MAX_EVENTS {
                     break;
                 }
@@ -105,24 +109,37 @@ impl GraphHunterApi {
             let target_sid = graph.interner.get(&req.node_id);
             // `reverse_adj` stores one entry per incoming edge, so a single
             // source `S` with `X` incoming edges to `node_id` appears `X`
-            // times. Without dedup, the outer loop fires `X` times per
-            // unique source, and the inner `break` means we push the
-            // same first-match edge `X` times — that's why this endpoint
-            // used to return 500 identical events when a node had one
-            // heavy source.
+            // times. The `seen_sources` dedup below stops the outer loop
+            // from visiting `S` more than once.
+            //
+            // The inner loop must NOT stop at the first match. It used to
+            // `break` there, which capped every neighbour at one incoming
+            // edge and silently dropped the rest: an account that emits
+            // LOGIN, UPDATE_PASSWORD and VERIFY_EMAIL against the same IP
+            // in one second showed up as a single arbitrary event. During
+            // the field-case re-hunt that hid a password change behind an
+            // unrelated event and caused a real indicator to be dismissed
+            // — the analyst only caught it by querying from the other
+            // endpoint. `get_events_paginated` never had the `break` and
+            // has been returning the full set all along; the two had
+            // simply diverged.
             let mut seen_sources: std::collections::HashSet<graph_hunter_core::StrId> =
                 std::collections::HashSet::new();
-            for &source_sid in graph.get_reverse_source_sids(&req.node_id) {
+            'sources: for &source_sid in graph.get_reverse_source_sids(&req.node_id) {
                 if edges.len() >= MAX_EVENTS {
                     break;
                 }
                 if !seen_sources.insert(source_sid) {
                     continue;
                 }
-                for compact in graph.get_relations_by_sid(source_sid) {
+                for compact in graph.neighbors_incl_tail(source_sid) {
                     if Some(compact.dest_sid) == target_sid {
                         edges.push(subgraph_edge_from_compact(graph, &compact));
-                        break;
+                        // Bound here too: one heavy source can now
+                        // contribute many edges on its own.
+                        if edges.len() >= MAX_EVENTS {
+                            break 'sources;
+                        }
                     }
                 }
             }
@@ -148,7 +165,9 @@ impl GraphHunterApi {
         self.with_graph_read(req.session.as_ref(), |graph| {
             let mut compacts: Vec<graph_hunter_core::CompactRelation> = Vec::new();
 
-            for compact in graph.get_compact_relations(&req.node_id) {
+            // Tail-aware (see get_events_for_node): base-only would drop
+            // post-finalize appends. Sorted below, so tail order is fine.
+            for compact in graph.neighbors_incl_tail_by_id(&req.node_id) {
                 compacts.push(compact);
             }
             let target_sid = graph.interner.get(&req.node_id);
@@ -162,7 +181,7 @@ impl GraphHunterApi {
                 if !seen_sources.insert(source_sid) {
                     continue;
                 }
-                for compact in graph.get_relations_by_sid(source_sid) {
+                for compact in graph.neighbors_incl_tail(source_sid) {
                     if Some(compact.dest_sid) == target_sid {
                         compacts.push(compact);
                     }
@@ -220,8 +239,7 @@ impl GraphHunterApi {
         let page_size = req
             .page_size
             .unwrap_or(DEFAULT_PAGE_SIZE)
-            .min(MAX_PAGE_SIZE)
-            .max(1);
+            .clamp(1, MAX_PAGE_SIZE);
         let offset = req.offset.unwrap_or(0);
 
         self.with_graph_read(req.session.as_ref(), |graph| {
@@ -458,10 +476,7 @@ impl GraphHunterApi {
     /// `expand_node` and reshapes to the doc contract — the center entity's
     /// attributes plus its directly-connected entities and per-edge metadata.
     /// Pure graph read; no SIEM round-trip (the value over raw KQL pivoting).
-    pub fn graph_neighbors(
-        &self,
-        req: GraphNeighborsRequest,
-    ) -> ApiResult<GraphNeighborsResult> {
+    pub fn graph_neighbors(&self, req: GraphNeighborsRequest) -> ApiResult<GraphNeighborsResult> {
         let center = req.entity.value.clone();
         let filter = req.edge_filter.clone().map(|rt| ExpandFilter {
             relation_types: Some(rt),
@@ -513,7 +528,11 @@ impl GraphHunterApi {
             neighbors.push(NeighborItem {
                 edge: edge.rel_type.clone(),
                 node: NeighborRef {
-                    class: class_of.get(other.as_str()).copied().unwrap_or("").to_string(),
+                    class: class_of
+                        .get(other.as_str())
+                        .copied()
+                        .unwrap_or("")
+                        .to_string(),
                     value: other.clone(),
                 },
                 attributes: edge.metadata.clone(),
@@ -521,7 +540,11 @@ impl GraphHunterApi {
         }
 
         Ok(GraphNeighborsResult {
-            entity: NeighborsCenter { class: center_class, value: center, label },
+            entity: NeighborsCenter {
+                class: center_class,
+                value: center,
+                label,
+            },
             attributes,
             neighbors,
         })
@@ -565,7 +588,11 @@ impl GraphHunterApi {
                             });
                             PathHopDto {
                                 edge: h.edge,
-                                node: PathNode { class: h.node_class, value: h.node_id, geoip },
+                                node: PathNode {
+                                    class: h.node_class,
+                                    value: h.node_id,
+                                    geoip,
+                                },
                             }
                         })
                         .collect();
@@ -592,7 +619,10 @@ impl GraphHunterApi {
             let anomalies = hits
                 .into_iter()
                 .map(|h| AnomalyItem {
-                    entity: NeighborRef { class: h.node_class, value: h.node_id },
+                    entity: NeighborRef {
+                        class: h.node_class,
+                        value: h.node_id,
+                    },
                     metric: h.metric,
                     observation: h.observation,
                     z_score: h.z_score,
@@ -636,7 +666,9 @@ impl GraphHunterApi {
             rel_type: req.rel_type,
             sort_by,
         };
-        self.with_graph_read(req.session.as_ref(), |graph| Ok(graph.channel_behavior(&opts)))
+        self.with_graph_read(req.session.as_ref(), |graph| {
+            Ok(graph.channel_behavior(&opts))
+        })
     }
 
     /// Live-backed expansion (Enfoque A): hydrate the target node from
@@ -690,10 +722,7 @@ impl GraphHunterApi {
 
         let outcome = match (entity_type, creds) {
             (None, _) => skip("node not in graph; cannot infer entity type"),
-            (
-                Some(ty),
-                (Some(ws), Some(tenant), Some(client), Some(secret)),
-            ) => {
+            (Some(ty), (Some(ws), Some(tenant), Some(client), Some(secret))) => {
                 let transport = graph_hunter_siem::HttpSentinelTransport::new();
                 let cache = graph_hunter_siem::SentinelTokenCache::new();
                 let auth = graph_hunter_siem::SentinelAuth {
@@ -714,9 +743,9 @@ impl GraphHunterApi {
                 .await
                 .unwrap_or_else(|e| skip(&format!("hydration error: {e}")))
             }
-            (Some(_), _) => skip(
-                "Azure credentials not configured (set AZURE_* or connect Sentinel)",
-            ),
+            (Some(_), _) => {
+                skip("Azure credentials not configured (set AZURE_* or connect Sentinel)")
+            }
         };
 
         let mut hood = self.expand_node(req)?;
@@ -896,22 +925,33 @@ mod graph_neighbors_tests {
     #[test]
     fn neighbors_reshapes_to_doc_contract() {
         let api = GraphHunterApi::new_noop();
-        api.create_session(CreateSessionRequest { name: Some("nbr-test".into()) })
-            .unwrap();
+        api.create_session(CreateSessionRequest {
+            name: Some("nbr-test".into()),
+        })
+        .unwrap();
         {
             let session = api.resolve_session(None).unwrap();
             let mut g = session.graph.write().unwrap();
             let user = Entity::new("alice@corp.com", EntityType::User);
             let ip = Entity::new("203.0.113.7", EntityType::IP);
-            let rel = Relation::new("alice@corp.com", "203.0.113.7", RelationType::Auth, 1_700_000_000)
-                .with_metadata("ResultType", "0");
-            g.insert_triples(vec![(user, rel, ip)], Some("test")).unwrap();
+            let rel = Relation::new(
+                "alice@corp.com",
+                "203.0.113.7",
+                RelationType::Auth,
+                1_700_000_000,
+            )
+            .with_metadata("ResultType", "0");
+            g.insert_triples(vec![(user, rel, ip)], Some("test"))
+                .unwrap();
         }
 
         let res = api
             .graph_neighbors(GraphNeighborsRequest {
                 session: None,
-                entity: EntityRef { class: Some("User".into()), value: "alice@corp.com".into() },
+                entity: EntityRef {
+                    class: Some("User".into()),
+                    value: "alice@corp.com".into(),
+                },
                 degree: Some(1),
                 edge_filter: None,
                 max_nodes: None,
@@ -927,14 +967,19 @@ mod graph_neighbors_tests {
             .expect("IP neighbor present");
         assert_eq!(ip_nbr.node.class, "IP");
         assert_eq!(ip_nbr.edge, "Auth");
-        assert_eq!(ip_nbr.attributes.get("ResultType").map(String::as_str), Some("0"));
+        assert_eq!(
+            ip_nbr.attributes.get("ResultType").map(String::as_str),
+            Some("0")
+        );
     }
 
     #[test]
     fn edge_filter_restricts_relation_types() {
         let api = GraphHunterApi::new_noop();
-        api.create_session(CreateSessionRequest { name: Some("nbr-filter".into()) })
-            .unwrap();
+        api.create_session(CreateSessionRequest {
+            name: Some("nbr-filter".into()),
+        })
+        .unwrap();
         {
             let session = api.resolve_session(None).unwrap();
             let mut g = session.graph.write().unwrap();
@@ -963,13 +1008,85 @@ mod graph_neighbors_tests {
         let res = api
             .graph_neighbors(GraphNeighborsRequest {
                 session: None,
-                entity: EntityRef { class: None, value: "alice@corp.com".into() },
+                entity: EntityRef {
+                    class: None,
+                    value: "alice@corp.com".into(),
+                },
                 degree: Some(1),
                 edge_filter: Some(vec!["Auth".into()]),
                 max_nodes: None,
             })
             .expect("graph_neighbors");
-        assert!(res.neighbors.iter().all(|n| n.edge == "Auth"), "only Auth edges pass the filter");
+        assert!(
+            res.neighbors.iter().all(|n| n.edge == "Auth"),
+            "only Auth edges pass the filter"
+        );
         assert!(res.neighbors.iter().any(|n| n.node.value == "203.0.113.7"));
+    }
+
+    /// One account emitting several distinct events against the same IP in
+    /// the same second must surface as several events, not one.
+    ///
+    /// The incoming-edge walk used to `break` at the first match per
+    /// source, so a neighbour with parallel edges contributed exactly one
+    /// arbitrary event. In the field-case re-hunt that hid an UPDATE_PASSWORD
+    /// behind a VERIFY_EMAIL and nearly cost a real indicator.
+    #[test]
+    fn returns_every_parallel_edge_from_one_neighbour() {
+        use crate::state::Session;
+        use graph_hunter_core::{EntityType, GraphHunter, RelationType};
+        use std::sync::Arc;
+
+        let mut g = GraphHunter::new();
+        g.add_entity(Entity::new("user@example.com", EntityType::User))
+            .expect("user");
+        g.add_entity(Entity::new("10.0.0.1", EntityType::IP))
+            .expect("ip");
+        // Three events, same pair, same instant — exactly the Keycloak
+        // shape where one action emits several typed records at once.
+        for t in ["LOGIN", "UPDATE_PASSWORD", "VERIFY_EMAIL"] {
+            let mut r = Relation::new("user@example.com", "10.0.0.1", RelationType::Auth, 1000);
+            r.metadata.insert("type".to_string(), t.to_string());
+            g.add_relation(r).expect("rel");
+        }
+
+        let api = GraphHunterApi::new_noop();
+        api.sessions()
+            .insert(Arc::new(Session::new("s-par", "t", g, 0)));
+        api.sessions().set_current(Some("s-par".into()));
+
+        // From the IP side: this is the direction that was broken.
+        let from_ip = api
+            .get_events_for_node(EventsForNodeRequest {
+                session: None,
+                node_id: "10.0.0.1".to_string(),
+            })
+            .expect("events");
+        assert_eq!(
+            from_ip.len(),
+            3,
+            "expected all three parallel edges, got {from_ip:?}"
+        );
+
+        let mut kinds: Vec<&str> = from_ip
+            .iter()
+            .filter_map(|e| e.metadata.get("type").map(|s| s.as_str()))
+            .collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, vec!["LOGIN", "UPDATE_PASSWORD", "VERIFY_EMAIL"]);
+
+        // And the two directions must agree — the divergence between them
+        // is what made the original bug so hard to notice.
+        let from_user = api
+            .get_events_for_node(EventsForNodeRequest {
+                session: None,
+                node_id: "user@example.com".to_string(),
+            })
+            .expect("events");
+        assert_eq!(
+            from_user.len(),
+            from_ip.len(),
+            "querying from either endpoint must return the same edge set"
+        );
     }
 }

@@ -3,7 +3,8 @@ name = "graph_hunter_vrl"
 version = "0.1.0"
 edition = "2024"
 description = "Deterministic FieldConfig -> VRL compiler and minimal interpreter. Ships the M3 fast-lane wedge: pure projection, no embedded vrl runtime yet, no LLM."
-license = "GPL-3.0"
+license = "GPL-3.0-only"
+publish = false
 
 [lib]
 name = "graph_hunter_vrl"

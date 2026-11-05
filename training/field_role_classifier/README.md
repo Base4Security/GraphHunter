@@ -42,6 +42,8 @@ heuristic returned no canonical match.
 cd training/field_role_classifier
 python -m venv .venv && source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
+# versiones exactas; se regenera desde requirements.in con:
+# uv pip compile requirements.in --universal --python-version 3.12 -o requirements.txt
 
 python extract.py --library "$LOCALAPPDATA/GraphHunter/mapping_library/mappings.jsonl" \
                   --out data/raw.jsonl

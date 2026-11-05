@@ -137,9 +137,7 @@ pub async fn cmd_request_llm_proposal(
     use graph_hunter_api::events::events::{INGEST_LLM_DIAGNOSTIC, INGEST_LLM_PROPOSAL};
     use graph_hunter_api::format_registry::resolve_format;
     use graph_hunter_api::local_llm::default_backend;
-    use graph_hunter_api::operations::negotiation::{
-        NegotiationOutcome, negotiate_field_config,
-    };
+    use graph_hunter_api::operations::negotiation::{NegotiationOutcome, negotiate_field_config};
     use std::io::Read;
     use tauri::Emitter;
 
@@ -164,7 +162,9 @@ pub async fn cmd_request_llm_proposal(
     {
         let mut file = std::fs::File::open(&path).map_err(|e| format!("open {path}: {e}"))?;
         let mut buf = [0u8; 16 * 1024];
-        let n = file.read(&mut buf).map_err(|e| format!("read {path}: {e}"))?;
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("read {path}: {e}"))?;
         peek.push_str(&String::from_utf8_lossy(&buf[..n]));
     }
     let format = resolve_format(&peek, "auto");

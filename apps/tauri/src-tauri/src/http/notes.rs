@@ -1,10 +1,10 @@
 //! Note CRUD endpoints.
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -43,9 +43,7 @@ pub(super) async fn handler_create_note(
 }
 
 pub(super) async fn handler_list_notes(State(api): State<Arc<GraphHunterApi>>) -> Response {
-    api_response(api.get_notes(
-        graph_hunter_api::dto::entity::SessionOnly::default(),
-    ))
+    api_response(api.get_notes(graph_hunter_api::dto::entity::SessionOnly::default()))
 }
 
 /// Fetch a single note by its UUID. Used as the target of the `url` field
@@ -65,8 +63,8 @@ pub(super) async fn handler_get_note_by_id(
                 .into_response(),
         },
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }

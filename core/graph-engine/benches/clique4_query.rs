@@ -85,54 +85,42 @@ fn bench_clique4_query(c: &mut Criterion) {
         let label = format!("V={n},E={},K4={}", fx.edge_count, naive.len());
 
         let mut group = c.benchmark_group("clique4-query");
-        group.bench_with_input(
-            BenchmarkId::new("naive", &label),
-            &&fx,
-            |b, &fx| {
-                b.iter(|| {
-                    black_box(enumerate_4cliques_naive(
-                        black_box(&fx.graph),
-                        black_box(&fx.trie),
-                        black_box(&fx.ts_map),
-                        i64::MIN,
-                        i64::MAX,
-                        10_000_000,
-                    ))
-                })
-            },
-        );
-        group.bench_with_input(
-            BenchmarkId::new("lftj+simd", &label),
-            &&fx,
-            |b, &fx| {
-                b.iter(|| {
-                    black_box(enumerate_4cliques_lftj_simd(
-                        black_box(&fx.graph),
-                        black_box(&fx.trie),
-                        black_box(&fx.ts_map),
-                        i64::MIN,
-                        i64::MAX,
-                        10_000_000,
-                    ))
-                })
-            },
-        );
-        group.bench_with_input(
-            BenchmarkId::new("lftj+simd+par", &label),
-            &&fx,
-            |b, &fx| {
-                b.iter(|| {
-                    black_box(enumerate_4cliques_lftj_simd_par(
-                        black_box(&fx.graph),
-                        black_box(&fx.trie),
-                        black_box(&fx.ts_map),
-                        i64::MIN,
-                        i64::MAX,
-                        10_000_000,
-                    ))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("naive", &label), &&fx, |b, &fx| {
+            b.iter(|| {
+                black_box(enumerate_4cliques_naive(
+                    black_box(&fx.graph),
+                    black_box(&fx.trie),
+                    black_box(&fx.ts_map),
+                    i64::MIN,
+                    i64::MAX,
+                    10_000_000,
+                ))
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("lftj+simd", &label), &&fx, |b, &fx| {
+            b.iter(|| {
+                black_box(enumerate_4cliques_lftj_simd(
+                    black_box(&fx.graph),
+                    black_box(&fx.trie),
+                    black_box(&fx.ts_map),
+                    i64::MIN,
+                    i64::MAX,
+                    10_000_000,
+                ))
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("lftj+simd+par", &label), &&fx, |b, &fx| {
+            b.iter(|| {
+                black_box(enumerate_4cliques_lftj_simd_par(
+                    black_box(&fx.graph),
+                    black_box(&fx.trie),
+                    black_box(&fx.ts_map),
+                    i64::MIN,
+                    i64::MAX,
+                    10_000_000,
+                ))
+            })
+        });
 
         // Windowed: keep only K4s whose t_ab falls in the lower 25%
         // of the timestamp range. Demonstrates that the window cut

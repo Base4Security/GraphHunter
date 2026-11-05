@@ -1,9 +1,9 @@
 //! Catalog lookup endpoints.
 
 use axum::{
+    Json,
     extract::State,
     response::{IntoResponse, Response},
-    Json,
 };
 use std::sync::Arc;
 
@@ -15,7 +15,9 @@ pub(super) async fn handler_catalog(State(api): State<Arc<GraphHunterApi>>) -> R
     ok_json(api.get_catalog())
 }
 
-pub(super) async fn handler_catalog_with_status(State(api): State<Arc<GraphHunterApi>>) -> Response {
+pub(super) async fn handler_catalog_with_status(
+    State(api): State<Arc<GraphHunterApi>>,
+) -> Response {
     match api
         .get_catalog_with_status(graph_hunter_api::dto::dsl::GetCatalogWithStatusRequest::default())
     {
@@ -28,6 +30,8 @@ pub(super) async fn handler_catalog_with_status(State(api): State<Arc<GraphHunte
     }
 }
 
-pub(super) async fn handler_catalog_diagnostics(State(api): State<Arc<GraphHunterApi>>) -> Response {
+pub(super) async fn handler_catalog_diagnostics(
+    State(api): State<Arc<GraphHunterApi>>,
+) -> Response {
     ok_json(api.get_catalog_diagnostics())
 }

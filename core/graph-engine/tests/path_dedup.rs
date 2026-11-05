@@ -35,9 +35,8 @@ fn dedup_by_path_collapses_identical_paths() {
 
     // Simulate what run_hunt would return: one path per raw edge, so
     // 5 identical (u,a) paths, 3 identical (u,b) paths, 1 (u,x) path.
-    let paths: Vec<Vec<String>> = std::iter::repeat(vec!["u".into(), "a".into()])
-        .take(5)
-        .chain(std::iter::repeat(vec!["u".into(), "b".into()]).take(3))
+    let paths: Vec<Vec<String>> = std::iter::repeat_n(vec!["u".into(), "a".into()], 5)
+        .chain(std::iter::repeat_n(vec!["u".into(), "b".into()], 3))
         .chain(std::iter::once(vec!["u".into(), "x".into()]))
         .collect();
 
@@ -61,9 +60,7 @@ fn dedup_by_path_collapses_identical_paths() {
 #[test]
 fn dedup_none_preserves_all_rows() {
     let g = tiny_graph();
-    let paths: Vec<Vec<String>> = std::iter::repeat(vec!["u".into(), "a".into()])
-        .take(5)
-        .collect();
+    let paths: Vec<Vec<String>> = std::iter::repeat_n(vec!["u".into(), "a".into()], 5).collect();
     let (scored, total) = g.score_and_paginate_paths(&paths, 0, 50, None, DedupMode::None);
     assert_eq!(total, 5);
     assert_eq!(scored.len(), 5);
@@ -155,9 +152,8 @@ fn chain_summary_preserves_full_ids_for_emails_and_fqdns() {
 #[test]
 fn dedup_with_pagination_respects_page_size_on_deduped_list() {
     let g = tiny_graph();
-    let paths: Vec<Vec<String>> = std::iter::repeat(vec!["u".into(), "a".into()])
-        .take(5)
-        .chain(std::iter::repeat(vec!["u".into(), "b".into()]).take(3))
+    let paths: Vec<Vec<String>> = std::iter::repeat_n(vec!["u".into(), "a".into()], 5)
+        .chain(std::iter::repeat_n(vec!["u".into(), "b".into()], 3))
         .chain(std::iter::once(vec!["u".into(), "x".into()]))
         .collect();
 

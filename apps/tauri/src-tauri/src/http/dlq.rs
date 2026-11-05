@@ -1,10 +1,10 @@
 //! Dead-letter queue endpoints: list, reingest, purge.
 
 use axum::{
+    Json,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use std::sync::Arc;
 

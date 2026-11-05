@@ -48,14 +48,14 @@ mod tests {
 
     #[test]
     fn current_serializes_as_empty_object() {
-        let s = serde_json::to_value(&SessionScope::current()).unwrap();
+        let s = serde_json::to_value(SessionScope::current()).unwrap();
         assert_eq!(s, serde_json::json!({}));
     }
 
     #[test]
     fn explicit_serializes_with_session_field() {
         let h = SessionHandle::new();
-        let v = serde_json::to_value(&SessionScope::explicit(h)).unwrap();
+        let v = serde_json::to_value(SessionScope::explicit(h)).unwrap();
         assert!(v.get("session").is_some());
     }
 

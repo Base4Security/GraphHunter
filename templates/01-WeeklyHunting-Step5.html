@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Threat Hunting · Fase 5 — Resumen Ejecutivo de Cierre · [FECHA_EMISION] · BASE4 Security</title>
+<link href="https://fonts.googleapis.com/css2?family=Boldonse&family=Lato:ital,wght@0,300;0,400;0,700;0,900;1,400&display=swap" rel="stylesheet">
+<style>
+:root{--or:#DC780F;--or2:#DC780F;--or3:#7C4409;--bk:#282828;--w:#fff;--g1:#404040;--g2:#5A5A5A;--g3:#747474;--g4:#A8A8A8;--g5:#DCDCDC;--cr:#8B0000;--hi:#C0392B;--me:#D68910;--lo:#1E8449;--page:880px}
+*{box-sizing:border-box;margin:0;padding:0}html{background:#1a1a1a}
+body{font-family:'Lato',sans-serif;background:#1a1a1a;color:var(--bk);line-height:1.6;font-size:14px}
+.doc-wrap{max-width:var(--page);margin:32px auto;background:var(--w);box-shadow:0 4px 40px rgba(0,0,0,.5)}
+.page-header{background:var(--bk);padding:18px 48px;display:flex;align-items:center;justify-content:space-between;border-bottom:3px solid var(--or)}
+.ph-logo{display:flex;align-items:center}
+.ph-logo img{display:block;height:72px;width:auto;max-width:220px}
+.ph-right{font-size:11px;color:var(--g4);text-align:right;line-height:1.5}
+.cover{background:var(--bk);padding:56px 48px 48px;position:relative;overflow:hidden}
+.cover-stripe{position:absolute;top:0;right:0;width:6px;height:100%;background:linear-gradient(to bottom,var(--or),var(--or3))}
+.cover>*{position:relative;z-index:1}
+.cover-date{font-size:12px;color:var(--g4);letter-spacing:1px;margin-bottom:28px}
+.cover-title{font-family:'Boldonse',sans-serif;font-weight:400;font-size:30px;color:var(--w);line-height:1.15;margin-bottom:8px}
+.cover-sub{font-size:14px;color:var(--g4);font-weight:300;margin-bottom:4px}
+.cover-phase{font-size:13px;color:var(--or);font-weight:700;margin-bottom:36px}
+.cover-divider{width:56px;height:3px;background:linear-gradient(90deg,var(--or),var(--or3));margin-bottom:28px}
+.cover-meta{display:grid;grid-template-columns:1fr 1fr;border:1px solid rgba(255,255,255,.1)}
+.cm-k{padding:9px 16px;font-size:11px;color:var(--g4);font-weight:700;letter-spacing:.5px;text-transform:uppercase;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)}
+.cm-v{padding:9px 16px;font-size:12px;color:var(--w);border-bottom:1px solid rgba(255,255,255,.08);border-left:1px solid rgba(255,255,255,.08)}
+.doc-main{padding:44px 48px 56px}
+.sec{margin-bottom:36px;scroll-margin-top:16px}
+.sec-title{font-family:'Boldonse',sans-serif;font-weight:400;font-size:16px;color:var(--bk);padding:0 0 10px;border-bottom:3px solid var(--or);margin-bottom:16px}
+.para{font-size:14px;color:var(--g1);line-height:1.75;margin-bottom:12px}
+.para strong{color:var(--bk)}
+.placeholder{color:var(--g3);font-style:italic}
+/* ── Bottom Line banner ── */
+.bottomline{border:1px solid var(--g5);border-left:6px solid var(--lo);background:#f4faf6;padding:22px 26px;margin-bottom:34px}
+.bottomline.state-clean{border-left-color:var(--lo);background:#f1faf4}
+.bottomline.state-contained{border-left-color:var(--me);background:#fdf6ea}
+.bottomline.state-threat{border-left-color:var(--hi);background:#fbeeec}
+.bl-tag{display:inline-block;padding:4px 12px;border-radius:2px;font-size:11px;font-weight:900;letter-spacing:1px;text-transform:uppercase;color:var(--w);margin-bottom:12px}
+.state-clean .bl-tag{background:var(--lo)}
+.state-contained .bl-tag{background:var(--me)}
+.state-threat .bl-tag{background:var(--hi)}
+.bl-head{font-size:20px;font-weight:900;color:var(--bk);line-height:1.35;margin-bottom:8px}
+.bl-sub{font-size:14px;color:var(--g1);line-height:1.65}
+/* ── Value bullets ── */
+.blist{padding-left:0;list-style:none;margin-bottom:6px}
+.blist li{padding:7px 0 7px 22px;position:relative;font-size:14px;color:var(--g1);line-height:1.6;border-bottom:1px dotted var(--g5)}
+.blist li::before{content:"›";position:absolute;left:0;color:var(--or);font-weight:700;font-size:17px;line-height:1.35}
+.blist li strong{color:var(--bk)}
+.checklist{padding-left:0;list-style:none;margin-bottom:6px}
+.checklist li{padding:8px 0 8px 28px;position:relative;font-size:14px;color:var(--g1);line-height:1.6;border-bottom:1px dotted var(--g5)}
+.checklist li::before{content:"✓";position:absolute;left:0;top:7px;color:var(--lo);font-weight:900;font-size:15px}
+.checklist li strong{color:var(--bk)}
+/* ── Numbered next steps ── */
+.steps{counter-reset:step;list-style:none;padding-left:0}
+.steps li{position:relative;padding:12px 0 12px 46px;border-bottom:1px solid var(--g5);font-size:14px;color:var(--g1);line-height:1.6}
+.steps li:last-child{border-bottom:none}
+.steps li::before{counter-increment:step;content:counter(step);position:absolute;left:0;top:11px;width:28px;height:28px;background:var(--or);color:var(--w);font-weight:900;font-size:14px;border-radius:50%;display:flex;align-items:center;justify-content:center}
+.steps li strong{color:var(--bk)}
+.priority{display:inline-block;padding:1px 7px;border-radius:2px;font-size:10px;font-weight:700;letter-spacing:.5px;color:var(--w);margin-left:6px;vertical-align:middle}
+.pr-alta{background:var(--hi)}.pr-media{background:var(--me)}.pr-baja{background:var(--lo)}
+/* ── References ── */
+.refs{background:#fafafa;border:1px solid var(--g5);border-left:4px solid var(--g3);padding:16px 20px}
+.refs .sec-sub{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--g3);margin-bottom:10px}
+.refs ul{list-style:none;padding-left:0}
+.refs li{font-size:13px;color:var(--g2);padding:4px 0;line-height:1.5}
+.refs li strong{color:var(--bk)}
+.scope-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:6px 0 4px}
+.scope-card{background:#fafafa;border:1px solid var(--g5);border-top:3px solid var(--or);padding:14px 16px;text-align:center}
+.scope-num{font-size:30px;font-weight:900;color:var(--bk);line-height:1}
+.scope-num span{color:var(--or)}
+.scope-lbl{font-size:11px;color:var(--g2);letter-spacing:.5px;text-transform:uppercase;font-weight:700;margin-top:6px}
+.page-footer{background:var(--bk);padding:14px 48px;display:flex;justify-content:space-between;align-items:center;border-top:2px solid var(--or3)}
+.pf-left{font-size:11px;color:var(--g4)}.pf-right{font-size:11px;color:var(--g4);text-align:right}
+.pf-right span{color:var(--or)}
+@media (max-width:760px){.cover-meta{grid-template-columns:1fr}.scope-grid{grid-template-columns:1fr}.doc-main{padding:36px 24px 44px}}
+@media print{.doc-wrap{max-width:100%;margin:0;box-shadow:none}body{background:white}}
+</style>
+</head>
+<body>
+<!--
+  Plantilla — Informe de Threat Hunting (Fase 5: Resumen Ejecutivo de Cierre para Cliente)
+  Mapea al prompt: 01-WeeklyHunting-Step5.md
+  Uso: duplicar este archivo por ciclo (ej. hunt-phase5-W23-2026.html).
+  Sustituir todos los marcadores [ENTRE_CORCHETES].
+  Banner de resultado: aplicar en .bottomline una de las clases de estado:
+    state-clean      → sin actividad maliciosa (resultado positivo / controles validados)
+    state-contained  → actividad sospechosa identificada y contenida
+    state-threat     → amenaza activa confirmada
+  Documento de UNA PÁGINA: mantener corto, lenguaje simple, sin jerga técnica.
+-->
+<div class="doc-wrap">
+<header class="page-header">
+  <div class="ph-logo">
+    <img src="https://base4sec.com/wp-content/uploads/2025/05/Logo_Slogan.png" alt="BASE4 Security — Your cyber ally" width="220" height="72" />
+  </div>
+  <div class="ph-right">Threat Hunting · Fase 5 · [FECHA_EMISION]<br>Clasificación: [CLASIFICACION]</div>
+</header>
+
+<div class="cover">
+  <div class="cover-stripe"></div>
+  <div class="cover-date">[FECHA_EMISION]</div>
+  <h1 class="cover-title">Resumen Ejecutivo de Cierre</h1>
+  <div class="cover-sub">[CLIENTE_ENTORNO] · Ciclo de hunting [PERIODO]</div>
+  <div class="cover-phase">Fase 5 · Cierre del ciclo — resumen para dirección</div>
+  <div class="cover-divider"></div>
+  <div class="cover-meta">
+    <div class="cm-k">Cliente</div><div class="cm-v">[CLIENTE_ENTORNO]</div>
+    <div class="cm-k">Período del ciclo</div><div class="cm-v">[PERIODO]</div>
+    <div class="cm-k">Fecha de emisión</div><div class="cm-v">[FECHA_EMISION]</div>
+    <div class="cm-k">Resultado del ciclo</div><div class="cm-v" style="color:var(--or);font-weight:700">[RESULTADO_TITULAR]</div>
+  </div>
+</div>
+
+<main class="doc-main">
+
+<!-- ═══ BOTTOM LINE — resultado en una frase ═══ -->
+<!-- Cambiar la clase de estado: state-clean | state-contained | state-threat -->
+<div class="bottomline state-clean">
+  <span class="bl-tag">[ETIQUETA_RESULTADO — ej. Sin amenazas / Contenido / Amenaza confirmada]</span>
+  <div class="bl-head placeholder">[TITULAR — Una frase clara con el resultado. Ej. "No se detectó actividad maliciosa en el entorno durante este ciclo."]</div>
+  <div class="bl-sub placeholder">[REASEGURO_O_ACCION — Una frase de tranquilidad o llamado a la acción. Ej. "Los controles de seguridad fueron puestos a prueba y respondieron correctamente."]</div>
+</div>
+
+<!-- ═══ 1. ALCANCE DEL HUNT ═══ -->
+<div class="sec" id="sec-alcance">
+<h2 class="sec-title">Qué revisamos este ciclo</h2>
+<p class="para placeholder">[ALCANCE_PARRAFO — En lenguaje simple: qué áreas del entorno examinamos y por qué el hunting proactivo busca amenazas que las alertas automáticas no detectan. Sin jerga técnica.]</p>
+<div class="scope-grid">
+  <div class="scope-card">
+    <div class="scope-num placeholder">[N]</div>
+    <div class="scope-lbl">Hipótesis testeadas</div>
+  </div>
+  <div class="scope-card">
+    <div class="scope-num placeholder">[N]</div>
+    <div class="scope-lbl">Áreas examinadas</div>
+  </div>
+  <div class="scope-card">
+    <div class="scope-num placeholder">[N]</div>
+    <div class="scope-lbl">Días de telemetría</div>
+  </div>
+</div>
+</div>
+
+<!-- ═══ 2. QUÉ ENCONTRAMOS ═══ -->
+<div class="sec" id="sec-hallazgos">
+<h2 class="sec-title">Qué encontramos</h2>
+<!--
+  CASO A — Sin actividad maliciosa: enmarcar como aseguramiento validado, no como "nada".
+  CASO B — Con hallazgos: qué fue, qué riesgo implicaba y qué se hizo / debe hacerse, en lenguaje simple.
+  Usar SOLO el bloque que corresponda y eliminar el otro.
+-->
+<p class="para placeholder">[HALLAZGOS_PARRAFO — Resultado en términos de negocio. Si está limpio: "probamos estos controles y demostraron funcionar". Si hubo hallazgos: qué fue, qué riesgo, qué se hizo.]</p>
+<ul class="checklist">
+  <li class="placeholder"><strong>[PUNTO_1]:</strong> [DETALLE EN LENGUAJE SIMPLE].</li>
+  <li class="placeholder"><strong>[PUNTO_2]:</strong> [DETALLE].</li>
+  <li class="placeholder"><strong>[PUNTO_3]:</strong> [DETALLE].</li>
+</ul>
+</div>
+
+<!-- ═══ 3. VALOR ENTREGADO ═══ -->
+<div class="sec" id="sec-valor">
+<h2 class="sec-title">Valor de este ciclo</h2>
+<p class="para placeholder">[VALOR_INTRO — Por qué este ciclo valió la pena, haya o no encontrado amenazas.]</p>
+<ul class="blist">
+  <li class="placeholder"><strong>[VALOR_1]</strong> — [ej. puntos ciegos cerrados, visibilidad ganada].</li>
+  <li class="placeholder"><strong>[VALOR_2]</strong> — [ej. controles validados y probados bajo escenarios reales].</li>
+  <li class="placeholder"><strong>[VALOR_3]</strong> — [ej. nuevas detecciones que ahora pueden automatizarse].</li>
+  <li class="placeholder"><strong>[VALOR_4]</strong> — [ej. tranquilidad documentada para dirección y auditoría].</li>
+</ul>
+</div>
+
+<!-- ═══ 4. PRÓXIMOS PASOS ═══ -->
+<div class="sec" id="sec-pasos">
+<h2 class="sec-title">Próximos pasos recomendados</h2>
+<ol class="steps">
+  <li class="placeholder"><strong>[PASO_1]</strong> <span class="priority pr-alta">Prioridad alta</span><br>[ACCIÓN EN LENGUAJE SIMPLE, COMO OPCIÓN — NO COMO MANDATO TÉCNICO].</li>
+  <li class="placeholder"><strong>[PASO_2]</strong> <span class="priority pr-media">Prioridad media</span><br>[ACCIÓN].</li>
+  <li class="placeholder"><strong>[PASO_3]</strong> <span class="priority pr-baja">Prioridad baja</span><br>[ACCIÓN].</li>
+</ol>
+</div>
+
+<!-- ═══ 5. REFERENCIAS ═══ -->
+<div class="sec" id="sec-refs">
+<div class="refs">
+  <div class="sec-sub">¿Querés ver el detalle técnico?</div>
+  <ul>
+    <li><strong>Fase 1 — Visibilidad e hipótesis:</strong> <span class="placeholder">[REF_FASE1]</span></li>
+    <li><strong>Fase 2 — Ejecución de la búsqueda:</strong> <span class="placeholder">[REF_FASE2]</span></li>
+    <li><strong>Fase 3 — Validación de hallazgos:</strong> <span class="placeholder">[REF_FASE3]</span></li>
+    <li><strong>Fase 4 — Informe técnico y remediación:</strong> <span class="placeholder">[REF_FASE4]</span></li>
+  </ul>
+</div>
+</div>
+
+</main>
+
+<footer class="page-footer">
+  <div class="pf-left">© [AÑO] BASE4 Security S.A. · Todos los derechos reservados<br>Documento confidencial — [USO_DOCUMENTO]</div>
+  <div class="pf-right">info@base4sec.com<br>LATAM · USA · España &nbsp;|&nbsp; <span>Tu ciber aliado.</span></div>
+</footer>
+</div>
+</body>
+</html>

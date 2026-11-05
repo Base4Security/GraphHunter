@@ -1,10 +1,6 @@
 //! Agentic review queue endpoints (list / approve / reject).
 
-use axum::{
-    extract::State,
-    response::Response,
-    Json,
-};
+use axum::{Json, extract::State, response::Response};
 use std::sync::Arc;
 
 use graph_hunter_api::GraphHunterApi;

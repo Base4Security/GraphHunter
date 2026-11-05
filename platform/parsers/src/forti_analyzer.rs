@@ -581,22 +581,22 @@ impl ChartHandler for GenericFortiHandler {
                 rel.metadata
                     .insert("handler".to_string(), "generic_forti".to_string());
                 // Enrich Application entities with service classification.
-                if let EntityType::Other(ref kind) = entity.entity_type {
-                    if kind == "Application" {
-                        let app_name = entity.id.strip_prefix("application:").unwrap_or(&entity.id);
-                        let info = service_classifier::classify_application(app_name);
-                        let cat = format!("{:?}", info.category);
-                        entity
-                            .metadata
-                            .insert("service_category".into(), cat.clone());
-                        entity
-                            .metadata
-                            .insert("risk_tag".into(), info.risk_tag.into());
-                        entity
-                            .metadata
-                            .insert("service_description".into(), info.description.into());
-                        rel.metadata.insert("service_category".into(), cat);
-                    }
+                if let EntityType::Other(ref kind) = entity.entity_type
+                    && kind == "Application"
+                {
+                    let app_name = entity.id.strip_prefix("application:").unwrap_or(&entity.id);
+                    let info = service_classifier::classify_application(app_name);
+                    let cat = format!("{:?}", info.category);
+                    entity
+                        .metadata
+                        .insert("service_category".into(), cat.clone());
+                    entity
+                        .metadata
+                        .insert("risk_tag".into(), info.risk_tag.into());
+                    entity
+                        .metadata
+                        .insert("service_description".into(), info.description.into());
+                    rel.metadata.insert("service_category".into(), cat);
                 }
                 out.push((context_entity(ctx), rel, entity));
             }
@@ -653,19 +653,19 @@ fn detect_primary_entity(row: &Row) -> Option<(Entity, RelationType)> {
 
     // 2. Content pattern: first value that parses as an IPv4/IPv6.
     for (_, values) in row.iter() {
-        if let Some(value) = values.first() {
-            if looks_like_ip(value) {
-                return Some((Entity::new(value, EntityType::IP), RelationType::Connect));
-            }
+        if let Some(value) = values.first()
+            && looks_like_ip(value)
+        {
+            return Some((Entity::new(value, EntityType::IP), RelationType::Connect));
         }
     }
 
     // 3. Content pattern: first value that looks like a domain.
     for (_, values) in row.iter() {
-        if let Some(value) = values.first() {
-            if looks_like_domain(value) {
-                return Some((Entity::new(value, EntityType::Domain), RelationType::DNS));
-            }
+        if let Some(value) = values.first()
+            && looks_like_domain(value)
+        {
+            return Some((Entity::new(value, EntityType::Domain), RelationType::DNS));
         }
     }
     None
@@ -792,15 +792,14 @@ impl LogParser for FortiAnalyzerXmlParser {
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
-                    let tag_bytes = e.name().into_inner().to_vec();
-                    let tag_name = String::from_utf8_lossy(&tag_bytes).into_owned();
+                    let tag_name = e.name().into_inner().to_string();
 
                     match tag_name.as_str() {
                         "FortiAnalyzer_Report" => {
-                            report_name = attr(&e, b"name");
+                            report_name = attr(&e, "name");
                         }
                         "chart" | "table" => {
-                            if let Some(name) = attr(&e, b"name") {
+                            if let Some(name) = attr(&e, "name") {
                                 let kind = if tag_name == "chart" {
                                     SectionKind::Chart
                                 } else {
@@ -830,23 +829,20 @@ impl LogParser for FortiAnalyzerXmlParser {
                 }
                 Ok(Event::Text(t)) => {
                     if current_field.is_some() {
-                        if let Ok(text) = t.decode() {
-                            current_text.push_str(text.as_ref());
-                        }
+                        current_text.push_str(&t);
                     }
                 }
                 Ok(Event::End(e)) => {
-                    let tag_bytes = e.name().into_inner().to_vec();
-                    let tag_name = String::from_utf8_lossy(&tag_bytes).into_owned();
+                    let tag_name = e.name().into_inner().to_string();
 
-                    if let Some(ref field) = current_field {
-                        if &tag_name == field {
-                            let trimmed = current_text.trim().to_string();
-                            current_row.push(field.clone(), trimmed);
-                            current_field = None;
-                            current_text.clear();
-                            continue;
-                        }
+                    if let Some(ref field) = current_field
+                        && &tag_name == field
+                    {
+                        let trimmed = current_text.trim().to_string();
+                        current_row.push(field.clone(), trimmed);
+                        current_field = None;
+                        current_text.clear();
+                        continue;
                     }
                     match tag_name.as_str() {
                         "id" if in_row => {
@@ -922,11 +918,11 @@ impl LogParser for FortiAnalyzerXmlParser {
 // ---------------------------------------------------------------------------
 
 /// Extracts an attribute value by name from an XML start tag.
-fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
+fn attr(e: &quick_xml::events::BytesStart, key: &str) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| a.key.into_inner() == key)
-        .and_then(|a| std::str::from_utf8(&a.value).ok().map(|s| s.to_string()))
+        .map(|a| a.value.into_owned())
 }
 
 /// Builds the `ReportContext` anchor from the report name + first

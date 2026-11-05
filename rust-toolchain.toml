@@ -1,0 +1,5 @@
+# Versión exacta de Rust para todos los crates, local y en CI. Se sube por PR,
+# como cualquier dependencia. candle-core 0.11 (platform/local-llm) requiere >= 1.99.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]

@@ -199,6 +199,10 @@ impl std::error::Error for HttpError {}
 /// The trait every HTTP client implementation satisfies. Must be
 /// `Send + Sync` so it can be shared across connector tasks via
 /// `Arc<dyn HttpClient>`.
+// `async_trait` tags every generated method with `#[must_use]` even though
+// the returned `Pin<Box<dyn Future>>` already is; the lint fires on the
+// macro expansion, not on code written here.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait HttpClient: Send + Sync {
     /// Dispatches a request and waits for the response. Must observe

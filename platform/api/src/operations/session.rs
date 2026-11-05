@@ -84,30 +84,30 @@ impl GraphHunterApi {
             })
             .collect();
 
-        if let Ok(dir) = session_data_dir() {
-            if let Ok(entries) = fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                        continue;
-                    }
-                    // Format-aware: handles BOTH the binary GHS1 format
-                    // (current) and the legacy JSON format. A previous
-                    // version of this scan only parsed JSON prefixes, so
-                    // binary sessions were silently skipped — they existed
-                    // on disk but never showed up in the picker, appearing
-                    // "lost" after a save+reopen.
-                    if let Some(info) = read_session_info(&path) {
-                        if !seen.contains(&info.id) {
-                            seen.insert(info.id.clone());
-                            list.push(info);
-                        }
-                    }
+        if let Ok(dir) = session_data_dir()
+            && let Ok(entries) = fs::read_dir(&dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                // Format-aware: handles BOTH the binary GHS1 format
+                // (current) and the legacy JSON format. A previous
+                // version of this scan only parsed JSON prefixes, so
+                // binary sessions were silently skipped — they existed
+                // on disk but never showed up in the picker, appearing
+                // "lost" after a save+reopen.
+                if let Some(info) = read_session_info(&path)
+                    && !seen.contains(&info.id)
+                {
+                    seen.insert(info.id.clone());
+                    list.push(info);
                 }
             }
         }
 
-        list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        list.sort_by_key(|a| a.created_at);
         Ok(list)
     }
 
@@ -202,6 +202,15 @@ impl GraphHunterApi {
                 live_tail_stats: std::sync::RwLock::new(crate::state::LiveTailStats::default()),
                 proposals: std::sync::RwLock::new(std::collections::HashMap::new()),
                 last_build: std::sync::RwLock::new(None),
+                // Not persisted in `SessionFile` — same ephemeral policy
+                // as `ai_conversation`/`proposals`. A reloaded session
+                // starts with a clean completeness record; any
+                // incompleteness from the ingest that originally
+                // produced this saved graph is not reconstructable here.
+                ingest_coverage: std::sync::RwLock::new(crate::coverage::IngestCoverage::default()),
+                // Not persisted — same ephemeral policy as `ingest_coverage`
+                // above: a reloaded session starts with a clean breaker.
+                source_coverage: std::sync::RwLock::new(crate::coverage::SourceCoverage::default()),
             });
             self.sessions().insert(session);
         }
@@ -250,7 +259,7 @@ impl GraphHunterApi {
         let id = req
             .session_id
             .or_else(|| self.sessions().current_id())
-            .ok_or_else(|| ApiError::NoCurrentSession)?;
+            .ok_or(ApiError::NoCurrentSession)?;
         let path = session_file_path(&id).map_err(ApiError::Io)?;
         let session = self
             .sessions()
@@ -328,7 +337,7 @@ impl GraphHunterApi {
                         json_progress("entities", i + 1, entity_count),
                     );
                 }
-                entity
+                &**entity
             }),
         )
         .map_err(|e| ApiError::Io(e.to_string()))?;
@@ -461,12 +470,13 @@ fn load_binary_into_graph<R: std::io::Read>(
 
     let mut graph = GraphHunter::new();
 
-    let mut entity_iter = EntityReader::new(reader)
-        .map_err(|e| ApiError::InvalidInput(format!(
+    let mut entity_iter = EntityReader::new(reader).map_err(|e| {
+        ApiError::InvalidInput(format!(
             "session '{}' data could not be read — it was likely saved by an incompatible \
              GraphHunter version (body format mismatch): {e}",
             header.name
-        )))?;
+        ))
+    })?;
     let entity_count = entity_iter.count() as usize;
     let entity_stride = progress_stride(entity_count);
     emitter.emit(
@@ -475,17 +485,16 @@ fn load_binary_into_graph<R: std::io::Read>(
     );
     graph.reserve(entity_count, 0);
     let mut i = 0usize;
-    while let Some(entity) = entity_iter
-        .next()
-        .map_err(|e| ApiError::InvalidInput(format!(
+    while let Some(entity) = entity_iter.next().map_err(|e| {
+        ApiError::InvalidInput(format!(
             "session '{}' data could not be read — it was likely saved by an incompatible \
              GraphHunter version (body format mismatch): {e}",
             header.name
-        )))?
-    {
+        ))
+    })? {
         let _ = graph.add_entity(entity);
         i += 1;
-        if i % entity_stride == 0 {
+        if i.is_multiple_of(entity_stride) {
             emitter.emit(
                 event_names::SESSION_LOAD_PROGRESS,
                 json_progress("entities", i, entity_count),
@@ -497,12 +506,14 @@ fn load_binary_into_graph<R: std::io::Read>(
         json_progress("entities", entity_count, entity_count),
     );
 
-    let mut relation_iter = RelationReader::new(reader)
-        .map_err(|e| ApiError::InvalidInput(format!(
-            "session '{}' data could not be read — it was likely saved by an incompatible \
+    let mut relation_iter =
+        RelationReader::new(reader, header.body_format_version).map_err(|e| {
+            ApiError::InvalidInput(format!(
+                "session '{}' data could not be read — it was likely saved by an incompatible \
              GraphHunter version (body format mismatch): {e}",
-            header.name
-        )))?;
+                header.name
+            ))
+        })?;
     let relation_count = relation_iter.count() as usize;
     let relation_stride = progress_stride(relation_count);
     emitter.emit(
@@ -510,17 +521,20 @@ fn load_binary_into_graph<R: std::io::Read>(
         json_progress("relations", 0, relation_count),
     );
     let mut i = 0usize;
-    while let Some(rel) = relation_iter
-        .next()
-        .map_err(|e| ApiError::InvalidInput(format!(
+    while let Some(rel) = relation_iter.next().map_err(|e| {
+        ApiError::InvalidInput(format!(
             "session '{}' data could not be read — it was likely saved by an incompatible \
              GraphHunter version (body format mismatch): {e}",
             header.name
-        )))?
-    {
-        let _ = graph.add_relation(rel);
+        ))
+    })? {
+        // Preserve the relation's own ingested_at (the real receive time
+        // captured at save) instead of add_relation's now-stamp — a
+        // reloaded session must not silently rewrite every edge's
+        // receive time to the reload instant.
+        let _ = graph.add_relation_preserving_ingested_at(rel);
         i += 1;
-        if i % relation_stride == 0 {
+        if i.is_multiple_of(relation_stride) {
             emitter.emit(
                 event_names::SESSION_LOAD_PROGRESS,
                 json_progress("relations", i, relation_count),
@@ -585,7 +599,9 @@ fn load_json_into_graph(
     );
     let relations = std::mem::take(&mut file.relations);
     for (i, rel) in relations.into_iter().enumerate() {
-        let _ = graph.add_relation(rel);
+        // Same reload-faithfulness rationale as the binary loader: honor
+        // the saved ingested_at rather than re-stamping "now" on reload.
+        let _ = graph.add_relation_preserving_ingested_at(rel);
         if (i + 1) % relation_stride == 0 {
             emitter.emit(
                 event_names::SESSION_LOAD_PROGRESS,
@@ -743,9 +759,8 @@ mod tests {
 
     #[test]
     fn load_accepts_current_body_version_empty_body() {
-        let buf = framed_session_with_body_version(
-            crate::state::session_binary::BODY_FORMAT_VERSION,
-        );
+        let buf =
+            framed_session_with_body_version(crate::state::session_binary::BODY_FORMAT_VERSION);
         let mut cur = std::io::Cursor::new(buf);
         let (_g, file, e, r) = load_binary_into_graph(&mut cur, &test_emitter())
             .expect("current-version empty body must load");
@@ -756,14 +771,13 @@ mod tests {
 
     #[test]
     fn load_maps_corrupt_body_to_clear_message() {
-        let mut buf = framed_session_with_body_version(
-            crate::state::session_binary::BODY_FORMAT_VERSION,
-        );
-        let header_len = buf.len() - 16;      // strip the two 0u64 we appended
+        let mut buf =
+            framed_session_with_body_version(crate::state::session_binary::BODY_FORMAT_VERSION);
+        let header_len = buf.len() - 16; // strip the two 0u64 we appended
         buf.truncate(header_len);
         buf.extend_from_slice(&1u64.to_le_bytes()); // entity_count = 1
         buf.extend_from_slice(&8u32.to_le_bytes()); // record len = 8
-        buf.extend_from_slice(&[0xFF; 8]);          // garbage payload
+        buf.extend_from_slice(&[0xFF; 8]); // garbage payload
         let mut cur = std::io::Cursor::new(buf);
         let err = match load_binary_into_graph(&mut cur, &test_emitter()) {
             Err(e) => e,
@@ -776,6 +790,113 @@ mod tests {
             "msg: {msg}"
         );
         assert!(msg.contains("drift-sess"), "msg: {msg}");
+    }
+
+    #[test]
+    fn load_binary_v2_body_preserves_relation_ingested_at_not_reload_time() {
+        use crate::state::session_binary::{
+            BODY_FORMAT_VERSION, SessionHeader, write_entities, write_header, write_relations,
+        };
+        use graph_hunter_core::relation::INGEST_EPOCH_BASE;
+        use graph_hunter_core::{Entity, EntityType, Relation, RelationType};
+
+        let header = SessionHeader {
+            id: "s".into(),
+            name: "s".into(),
+            created_at: 0,
+            path_node_ids: vec![],
+            notes: vec![],
+            datasets: vec![],
+            tags: vec![],
+            body_format_version: BODY_FORMAT_VERSION,
+        };
+        let entities = vec![
+            Entity::new("a", EntityType::User),
+            Entity::new("b", EntityType::Host),
+        ];
+        let mut rel = Relation::new("a", "b", RelationType::Auth, 100);
+        let real_ingested_at = INGEST_EPOCH_BASE + 999_999;
+        rel.ingested_at = real_ingested_at;
+
+        let mut buf = Vec::new();
+        write_header(&mut buf, &header).unwrap();
+        write_entities(&mut buf, entities.len() as u64, &entities).unwrap();
+        write_relations(&mut buf, 1, vec![rel]).unwrap();
+
+        let mut cur = std::io::Cursor::new(buf);
+        let (graph, _file, _entity_count, relation_count) =
+            load_binary_into_graph(&mut cur, &test_emitter()).unwrap();
+        assert_eq!(relation_count, 1);
+        let edges = graph.get_compact_relations("a");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            edges[0].ingested_at(),
+            real_ingested_at,
+            "session reload must preserve the saved ingested_at (real receive time), \
+             not re-stamp it to the reload instant"
+        );
+    }
+
+    #[test]
+    fn load_binary_v1_body_relation_falls_back_to_reload_time() {
+        // A v1 body carries no ingested_at at all; RelationV1 -> Relation
+        // conversion defaults it to INGEST_EPOCH_BASE, which
+        // add_relation_preserving_ingested_at treats as "never really
+        // stamped" and falls back to now() — same as the pre-fix
+        // behavior for those old sessions specifically (nothing genuine
+        // to preserve), while v2 sessions (test above) DO get preserved.
+        use crate::state::session_binary::{SessionHeader, write_entities, write_header};
+        use graph_hunter_core::relation::{INGEST_EPOCH_BASE, RelationV1};
+        use graph_hunter_core::{Entity, EntityType, RelationType};
+
+        let header = SessionHeader {
+            id: "legacy".into(),
+            name: "legacy".into(),
+            created_at: 0,
+            path_node_ids: vec![],
+            notes: vec![],
+            datasets: vec![],
+            tags: vec![],
+            body_format_version: 1,
+        };
+        let entities = vec![
+            Entity::new("a", EntityType::User),
+            Entity::new("b", EntityType::Host),
+        ];
+        let v1_rel = RelationV1 {
+            source_id: "a".into(),
+            dest_id: "b".into(),
+            rel_type: RelationType::Auth,
+            timestamp: 100,
+            metadata: Default::default(),
+            dataset_id: None,
+        };
+
+        let mut buf = Vec::new();
+        write_header(&mut buf, &header).unwrap();
+        write_entities(&mut buf, entities.len() as u64, &entities).unwrap();
+        let rel_bytes = bincode::serialize(&v1_rel).unwrap();
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&(rel_bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&rel_bytes);
+
+        let before = crate::util::now_secs();
+        let mut cur = std::io::Cursor::new(buf);
+        let (graph, _file, _entity_count, relation_count) =
+            load_binary_into_graph(&mut cur, &test_emitter()).unwrap();
+        let after = crate::util::now_secs();
+        assert_eq!(relation_count, 1);
+        let edges = graph.get_compact_relations("a");
+        assert_eq!(edges.len(), 1);
+        let ingested = edges[0].ingested_at();
+        assert!(
+            ingested > INGEST_EPOCH_BASE,
+            "v1 relation (no ingested_at) must not surface as the bare epoch base after load"
+        );
+        assert!(
+            ingested >= before && ingested <= after,
+            "v1 relation with no real ingested_at should fall back to reload-time, got {ingested}"
+        );
     }
 
     #[test]

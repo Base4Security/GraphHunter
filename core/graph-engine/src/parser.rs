@@ -49,6 +49,13 @@ pub struct RawIngestEvent {
     pub rel_type: RelationType,
     pub rel_metadata: HashMap<String, String>,
     pub timestamp: i64,
+    /// The original source row, verbatim, when the parser captured it — so
+    /// fields the field-config mapping dropped before this triple existed stay
+    /// reconstructable from the journal (field_survival). None when the parser
+    /// did not capture it (those rows fall back to the triple serialization in
+    /// the journal). Not merged into the graph; journal-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_line: Option<String>,
 }
 
 impl RawIngestEvent {
@@ -66,8 +73,44 @@ impl RawIngestEvent {
             rel_type: rel.rel_type,
             rel_metadata: rel.metadata,
             timestamp: rel.timestamp,
+            raw_line: None,
         }
     }
+}
+
+/// Deterministic serialization of a `serde_json::Value` with all object keys
+/// sorted recursively, regardless of the `preserve_order` feature (which is
+/// ON transitively via `evtx`, so `serde_json::to_string` on a `Value`
+/// preserves insertion order — not stable across re-parse of semantically
+/// identical JSON). This is the C-1 `canonical_raw_payload` lesson
+/// (`platform/api/src/journal.rs`) applied at the `Value` level, for the
+/// generic parser path (`core/graph-engine/src/generic.rs`) where only a
+/// parsed `Value` — not the original raw `&str` — is in scope at emit time.
+///
+/// Object keys are sorted via `BTreeMap`; array element order is preserved
+/// (arrays are ordered data, not a key/value bag); scalars are left as-is.
+/// Rebuilding with a `BTreeMap`-sorted iterator and feeding that into
+/// `serde_json::Map::from_iter` yields a sorted-order `Map` even under
+/// `preserve_order` (`IndexMap` preserves *insertion* order, and insertion
+/// order here is the sorted order we iterate in).
+pub fn canonical_value_string(v: &serde_json::Value) -> String {
+    fn canon(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(map) => {
+                let mut sorted = std::collections::BTreeMap::new();
+                for (k, val) in map {
+                    sorted.insert(k.clone(), canon(val));
+                }
+                serde_json::Value::Object(sorted.into_iter().collect())
+            }
+            serde_json::Value::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(canon).collect())
+            }
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string(&canon(v))
+        .expect("canonical Value serialization cannot fail for well-formed input")
 }
 
 /// Aggregate per-ingest parsing statistics. Populated by parsers that
@@ -77,6 +120,12 @@ impl RawIngestEvent {
 ///
 /// Zero-triple detection and per-field coverage reporting both read off
 /// this struct.
+///
+/// Cap on how many `(raw_row, reason)` pairs `skipped_samples` retains.
+/// Shared by every parser (generic + native fast paths) so the reservoir
+/// never grows unbounded on huge ingests. See `skipped_samples` below.
+pub const SKIP_SAMPLE_CAP: usize = 50;
+
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 pub struct ParseStats {
     /// Total number of input events/rows the parser actually saw. Zero
@@ -106,6 +155,16 @@ pub struct ParseStats {
     /// for parsers that cannot surface per-field shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drift: Option<DriftSnapshot>,
+    /// Distinct session correlation ids seen in this batch. Zero when the
+    /// source carries no session field.
+    #[serde(default)]
+    pub sessions_seen: usize,
+    /// Session nodes the ceiling refused to materialize. Non-zero means
+    /// the graph has NO session nodes for this batch and session patterns
+    /// will return nothing — reported rather than left to be discovered
+    /// by an empty result set.
+    #[serde(default)]
+    pub sessions_dropped: usize,
 }
 
 /// Trait for log format parsers.
@@ -219,15 +278,21 @@ pub trait LogParser: Send + Sync {
     /// the typed scratch fast-path (e.g. `SysmonEventTyped` for
     /// SysmonJsonParser) which doesn't materialize a
     /// `serde_json::Value` per event. Without a `Value`, the
-    /// `per_field_occurrence`, `skip_reasons`, and
-    /// `skipped_samples` fields can't be populated cheaply — those
-    /// inspections rely on `Value::as_object()` / cell-by-cell
-    /// scanning. Native overrides may leave those fields empty and
-    /// only populate `rows_seen`, `rows_with_triples`,
-    /// `rows_skipped`, and `drift`. The UI gracefully degrades:
-    /// empty maps render as "not reported", not "all zero".
-    /// Callers that need full per-field stats should call
-    /// `parse_with_stats` instead.
+    /// `per_field_occurrence` and `skip_reasons` fields can't be
+    /// populated cheaply — those inspections rely on
+    /// `Value::as_object()` / cell-by-cell scanning. Native overrides
+    /// may leave those two fields empty and only populate
+    /// `rows_seen`, `rows_with_triples`, `rows_skipped`, and `drift`.
+    /// The UI gracefully degrades: empty maps render as "not
+    /// reported", not "all zero". Callers that need full per-field
+    /// stats should call `parse_with_stats` instead.
+    ///
+    /// `skipped_samples` is the exception: `SysmonJsonParser` and
+    /// `SentinelJsonParser` populate it (bounded to
+    /// [`SKIP_SAMPLE_CAP`]) at the exact point each row is skipped,
+    /// even on the native fast path — capturing the raw row costs a
+    /// `String` allocation only on the (rare) skip branch, so it
+    /// doesn't touch the hot per-row throughput.
     fn parse_raw_with_stats(&self, data: &str) -> (Vec<RawIngestEvent>, ParseStats) {
         let (triples, stats) = self.parse_with_stats(data);
         let events: Vec<RawIngestEvent> = triples
@@ -235,5 +300,59 @@ pub trait LogParser: Send + Sync {
             .map(RawIngestEvent::from_parsed_triple)
             .collect();
         (events, stats)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_value_string_is_stable_across_key_order() {
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"b":2,"a":1,"c":{"y":2,"x":1}}"#).unwrap();
+        let b: serde_json::Value =
+            serde_json::from_str(r#"{"c":{"x":1,"y":2},"a":1,"b":2}"#).unwrap();
+        assert_eq!(canonical_value_string(&a), canonical_value_string(&b));
+        let back: serde_json::Value = serde_json::from_str(&canonical_value_string(&a)).unwrap();
+        assert_eq!(back["a"], serde_json::json!(1));
+        assert_eq!(back["c"]["x"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn canonical_value_string_sorts_keys_of_objects_nested_in_arrays() {
+        // Guards the recursion into Value::Array elements: a bare top-level
+        // sort (or one that only recurses into Value::Object, not Array)
+        // would miss key-order drift inside array elements.
+        let a: serde_json::Value = serde_json::from_str(r#"[{"b":2,"a":1}]"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(r#"[{"a":1,"b":2}]"#).unwrap();
+        assert_eq!(canonical_value_string(&a), canonical_value_string(&b));
+        let back: serde_json::Value = serde_json::from_str(&canonical_value_string(&a)).unwrap();
+        assert_eq!(back[0]["a"], serde_json::json!(1));
+        assert_eq!(back[0]["b"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn raw_ingest_event_carries_optional_raw_line() {
+        // A freshly-built event defaults raw_line to None (backward compatible).
+        let ev = RawIngestEvent {
+            src_id: "u".into(),
+            src_type: crate::types::EntityType::User,
+            src_metadata: Default::default(),
+            dst_id: "h".into(),
+            dst_type: crate::types::EntityType::Host,
+            dst_metadata: Default::default(),
+            rel_type: crate::types::RelationType::Auth,
+            rel_metadata: Default::default(),
+            timestamp: 100,
+            raw_line: None,
+        };
+        assert!(ev.raw_line.is_none());
+        // A serialized round-trip preserves an explicit raw_line.
+        let mut ev2 = ev.clone();
+        ev2.raw_line = Some("{\"orig\":1}".into());
+        let s = serde_json::to_string(&ev2).unwrap();
+        let back: RawIngestEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.raw_line.as_deref(), Some("{\"orig\":1}"));
     }
 }

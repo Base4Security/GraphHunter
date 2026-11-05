@@ -16,13 +16,11 @@ use uuid::Uuid;
 use crate::dto::sentinel::{
     BuildRecord, ConnectorStatusResponse, EnrichmentApplied, GraphBuildRequest, GraphBuildResult,
     GraphProposal, GraphProposePayload, GraphProposeRequest, GraphProposeResult, HuntingTemplateId,
-    KqlResult,
-    NodeEnrichRequest, ProposalEdge, ProposalNode, RunHuntingTemplateRequest, RunKqlRequest,
-    SchemaDiscoverRequest, SchemaDiscoverResult, SchemaField, SchemaTable, SeedFromIocRequest,
-    SeedResult, SelectedField, SentinelConnectRequest, SentinelConnectedEvent, SentinelEnvStatus,
-    TimeWindow,
+    KqlResult, NodeEnrichRequest, ProposalEdge, ProposalNode, RunHuntingTemplateRequest,
+    RunKqlRequest, SchemaDiscoverRequest, SchemaDiscoverResult, SchemaField, SchemaTable,
+    SeedFromIocRequest, SeedResult, SelectedField, SentinelConnectRequest, SentinelConnectedEvent,
+    SentinelEnvStatus, TimeWindow,
 };
-use crate::util::{parse_entity_type, parse_relation_type};
 use crate::events::events as event_names;
 use crate::format_registry::make_parser_for_format;
 use crate::scoring::{run_full_scoring, run_scoring_adaptive, run_scoring_incremental};
@@ -31,6 +29,7 @@ use crate::sentinel_connector::{
 };
 use crate::state::{DatasetInfo, SessionHandle};
 use crate::util::now_secs;
+use crate::util::{parse_entity_type, parse_relation_type};
 use crate::{ApiError, ApiResult, GraphHunterApi};
 
 // LogParser is pulled in transitively via `make_parser_for_format`,
@@ -89,7 +88,11 @@ fn resolve_azure_creds() -> Option<(String, SentinelAuth)> {
     let secret = std::env::var("AZURE_CLIENT_SECRET").ok()?;
     Some((
         ws,
-        SentinelAuth { tenant_id: tenant, client_id: client, client_secret: secret },
+        SentinelAuth {
+            tenant_id: tenant,
+            client_id: client,
+            client_secret: secret,
+        },
     ))
 }
 
@@ -152,6 +155,15 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
+                // `polling_loop` below resolves `make_parser_for_format(
+                // "sentinel")` for every batch — freeze that real
+                // identity now instead of leaving this a `builtin:unknown`
+                // live-tail dataset.
+                parser: Some("sentinel".to_string()),
+                // No FieldConfig on the live-connector path — builtin
+                // identity via `parser` above is the frozen mapping
+                // identity for this dataset.
+                mapping_hash: None,
             });
         }
 
@@ -310,6 +322,8 @@ impl GraphHunterApi {
             azure_resource_group: std::env::var("AZURE_RESOURCE_GROUP").ok(),
             azure_workspace_id: std::env::var("AZURE_WORKSPACE_ID").ok(),
             azure_workspace_name: std::env::var("AZURE_WORKSPACE_NAME").ok(),
+            hunting_templates_enabled: crate::kql_flags::hunting_templates_enabled(),
+            kql_escape_hatch_enabled: crate::kql_flags::kql_escape_hatch_enabled(),
         }
     }
 
@@ -467,6 +481,11 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
+                // `make_parser_for_format("sentinel")` below is the real
+                // (hardcoded) parser for this ad-hoc KQL path — freeze it
+                // now instead of leaving `builtin:unknown`.
+                parser: Some("sentinel".to_string()),
+                mapping_hash: None,
             });
         }
 
@@ -559,7 +578,11 @@ impl GraphHunterApi {
         let tenant_id = env_or(&req.azure_tenant_id, "AZURE_TENANT_ID")?;
         let client_id = env_or(&req.azure_client_id, "AZURE_CLIENT_ID")?;
         let client_secret = env_or(&req.azure_client_secret, "AZURE_CLIENT_SECRET")?;
-        let auth = SentinelAuth { tenant_id, client_id, client_secret };
+        let auth = SentinelAuth {
+            tenant_id,
+            client_id,
+            client_secret,
+        };
 
         let time_filter = req
             .time_window
@@ -579,7 +602,8 @@ impl GraphHunterApi {
              LastIngested = max(TimeGenerated) by DataType | where IngestionMB >= {min_mb} \
              | order by IngestionMB desc"
         );
-        let (usage_rows, usage_stats) = run_kql_rows(&workspace_id, usage_kql, auth.clone()).await?;
+        let (usage_rows, usage_stats) =
+            run_kql_rows(&workspace_id, usage_kql, auth.clone()).await?;
         cost.add(&usage_stats);
 
         // Apply the (case-insensitive) table filter.
@@ -588,7 +612,10 @@ impl GraphHunterApi {
             .filter_map(|row| {
                 let name = row.get("DataType").and_then(|v| v.as_str())?.to_string();
                 if !req.table_filter.is_empty()
-                    && !req.table_filter.iter().any(|t| t.eq_ignore_ascii_case(&name))
+                    && !req
+                        .table_filter
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(&name))
                 {
                     return None;
                 }
@@ -629,7 +656,12 @@ impl GraphHunterApi {
         }
 
         let cost = cost.finish(started.elapsed().as_millis() as u64);
-        Ok(SchemaDiscoverResult { tables, total_tables, note, cost })
+        Ok(SchemaDiscoverResult {
+            tables,
+            total_tables,
+            note,
+            cost,
+        })
     }
 
     /// Phase 2 / MAPPING (§4.2): from analyst-selected `{table, field}` pairs,
@@ -652,8 +684,11 @@ impl GraphHunterApi {
             .unwrap_or_else(|| "where TimeGenerated > ago(24h)".to_string());
         let max_proposals = req.max_proposals.unwrap_or(3).max(1) as usize;
 
-        let mut proposals =
-            build_proposals(&req.selected_fields, req.hypothesis_context.as_deref(), &time_filter);
+        let mut proposals = build_proposals(
+            &req.selected_fields,
+            req.hypothesis_context.as_deref(),
+            &time_filter,
+        );
         proposals.truncate(max_proposals);
 
         // Best-effort estimate probe: one `summarize` per proposal when creds
@@ -668,17 +703,13 @@ impl GraphHunterApi {
         );
         if let Some((ws, auth)) = creds {
             for p in &mut proposals {
-                if let Some(probe_kql) = estimate_probe_kql(p) {
-                    if let Ok((rows, stats)) =
-                        run_kql_rows(&ws, probe_kql, auth.clone()).await
-                    {
-                        cost.add(&stats);
-                        if let Some(row) = rows.first() {
-                            p.estimated_relations =
-                                row.get("Rows").and_then(|v| v.as_u64());
-                            p.estimated_entities =
-                                row.get("Entities").and_then(|v| v.as_u64());
-                        }
+                if let Some(probe_kql) = estimate_probe_kql(p)
+                    && let Ok((rows, stats)) = run_kql_rows(&ws, probe_kql, auth.clone()).await
+                {
+                    cost.add(&stats);
+                    if let Some(row) = rows.first() {
+                        p.estimated_relations = row.get("Rows").and_then(|v| v.as_u64());
+                        p.estimated_entities = row.get("Entities").and_then(|v| v.as_u64());
                     }
                 }
             }
@@ -736,7 +767,11 @@ impl GraphHunterApi {
         let tenant_id = env_or(&req.azure_tenant_id, "AZURE_TENANT_ID")?;
         let client_id = env_or(&req.azure_client_id, "AZURE_CLIENT_ID")?;
         let client_secret = env_or(&req.azure_client_secret, "AZURE_CLIENT_SECRET")?;
-        let auth = SentinelAuth { tenant_id, client_id, client_secret };
+        let auth = SentinelAuth {
+            tenant_id,
+            client_id,
+            client_secret,
+        };
 
         // The stored KQL already filters TimeGenerated; soft-sugar is a no-op
         // unless that filter is somehow absent (explicit always wins).
@@ -748,7 +783,11 @@ impl GraphHunterApi {
 
         let mapped = map_rows_to_graph(&proposal, &rows);
 
-        let merge_mode = req.merge_mode.as_deref().unwrap_or("append").to_ascii_lowercase();
+        let merge_mode = req
+            .merge_mode
+            .as_deref()
+            .unwrap_or("append")
+            .to_ascii_lowercase();
         let replace = merge_mode == "replace";
         let build_id = format!("build-{}", &Uuid::new_v4().to_string()[..8]);
         let dataset_id = if replace {
@@ -775,6 +814,10 @@ impl GraphHunterApi {
                 relation_count: 0,
                 field_config: None,
                 ingest_stats: None,
+                // Materialized from a Sentinel KQL proposal — freeze the
+                // real source identity instead of leaving `builtin:unknown`.
+                parser: Some("sentinel".to_string()),
+                mapping_hash: None,
             });
         }
 
@@ -799,7 +842,7 @@ impl GraphHunterApi {
             let (ec, rc) = graph
                 .insert_triples(mapped.triples, Some(dataset_id.as_str()))
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            run_scoring_adaptive(&mut graph);
+            let _ = run_scoring_adaptive(&mut graph);
             (ec + standalone_count, rc)
         };
 
@@ -815,18 +858,34 @@ impl GraphHunterApi {
             }
         }
 
+        // Re-pin the built session as current. `graph_build` resolved
+        // `session` once at the top and correctly wrote the whole graph into
+        // that Arc, but the materialization KQL above `await`s for seconds —
+        // long enough for the frontend's async session-restore (which fires
+        // `set_current` after the webview mounts) to move `current` to a
+        // different session mid-build. When that happens the freshly built
+        // graph is orphaned: every read endpoint resolves `current` and sees
+        // the OTHER session, so the analyst's build appears to have vanished.
+        // Pinning here enforces the user-visible invariant "after I build a
+        // graph, that graph is what I'm looking at" and makes the
+        // `enrich_ip(session: None)` calls below resolve to the built session.
+        self.sessions().set_current(Some(session.id.clone()));
+
         // Enrichment ONCE, at build (design principle §2): resolve geoip+asn for
         // the IP nodes and store on entity metadata. threat_intel is a stub.
         let want = |name: &str| {
             req.enrich
                 .as_ref()
-                .map_or(true, |e| e.iter().any(|x| x.eq_ignore_ascii_case(name)))
+                .is_none_or(|e| e.iter().any(|x| x.eq_ignore_ascii_case(name)))
         };
         let mut enrichment_applied = EnrichmentApplied::default();
         if want("geoip") || want("asn") {
             for ip in &mapped.ip_values {
                 if let Ok(res) = self
-                    .enrich_ip(crate::dto::geoip::EnrichIpRequest { session: None, ip: ip.clone() })
+                    .enrich_ip(crate::dto::geoip::EnrichIpRequest {
+                        session: None,
+                        ip: ip.clone(),
+                    })
                     .await
                 {
                     if res.country_code.is_some() || res.city.is_some() {
@@ -885,15 +944,24 @@ impl GraphHunterApi {
         &self,
         req: RunHuntingTemplateRequest,
     ) -> ApiResult<KqlResult> {
+        // Fase G gate: fires before any rendering / Azure network / credential
+        // use, so a disabled flag never touches the network. Gates ALL
+        // callers of the template path uniformly (currently Tauri's
+        // `cmd_run_hunting_template`).
+        if !crate::kql_flags::hunting_templates_enabled() {
+            return Err(ApiError::FeatureDisabled {
+                feature: "hunting_templates".into(),
+                hint: "Hunting templates are disabled (GRAPHHUNTER_HUNTING_TEMPLATES). \
+                       Hunt in the local graph via hunt_run / the hypothesis catalog."
+                    .into(),
+            });
+        }
         let template = req
             .template
             .ok_or_else(|| ApiError::InvalidInput("template is required".into()))?;
-        let window = req
-            .time_window
-            .clone()
-            .unwrap_or(TimeWindow::Preset {
-                lookback: crate::dto::sentinel::LookbackPreset::H24,
-            });
+        let window = req.time_window.clone().unwrap_or(TimeWindow::Preset {
+            lookback: crate::dto::sentinel::LookbackPreset::H24,
+        });
         let kql = render_hunting_template(template, &window);
         // Setting `time_window: None` here so `run_kql`'s soft-sugar
         // step doesn't double-prepend a filter onto the rendered
@@ -933,8 +1001,15 @@ impl GraphHunterApi {
         dataset_tag: &str,
     ) -> ApiResult<graph_hunter_core::analytics::HydrationOutcome> {
         self.hydrate_node_filtered_with(
-            transport, token_cache, value, entity_type, time_filter, workspace_id, auth,
-            dataset_tag, None,
+            transport,
+            token_cache,
+            value,
+            entity_type,
+            time_filter,
+            workspace_id,
+            auth,
+            dataset_tag,
+            None,
         )
         .await
     }
@@ -1030,15 +1105,19 @@ impl GraphHunterApi {
                         let triples = parser.parse(&result.data);
                         if !triples.is_empty() {
                             match session.graph.write() {
-                                Ok(mut graph) => match graph.insert_triples(triples, Some(dataset_tag)) {
-                                    Ok((e, r)) => {
-                                        new_e += e;
-                                        new_r += r;
-                                        tables_hit += 1;
+                                Ok(mut graph) => {
+                                    match graph.insert_triples(triples, Some(dataset_tag)) {
+                                        Ok((e, r)) => {
+                                            new_e += e;
+                                            new_r += r;
+                                            tables_hit += 1;
+                                        }
+                                        Err(e) => tracing::warn!("hydration insert {table}: {e}"),
                                     }
-                                    Err(e) => tracing::warn!("hydration insert {table}: {e}"),
-                                },
-                                Err(e) => tracing::warn!("hydration graph lock poisoned {table}: {e}"),
+                                }
+                                Err(e) => {
+                                    tracing::warn!("hydration graph lock poisoned {table}: {e}")
+                                }
                             }
                         }
                     }
@@ -1049,10 +1128,10 @@ impl GraphHunterApi {
             }
         }
 
-        if new_e > 0 || new_r > 0 {
-            if let Ok(mut graph) = session.graph.write() {
-                run_scoring_incremental(&mut graph);
-            }
+        if (new_e > 0 || new_r > 0)
+            && let Ok(mut graph) = session.graph.write()
+        {
+            run_scoring_incremental(&mut graph);
         }
 
         Ok(HydrationOutcome {
@@ -1074,7 +1153,11 @@ impl GraphHunterApi {
     ) -> ApiResult<SeedResult> {
         let neighborhood = self.seeded_neighborhood(value)?;
         let top_anomalies = Self::rank_top_anomalies(&neighborhood, 5);
-        Ok(SeedResult { hydration, neighborhood, top_anomalies })
+        Ok(SeedResult {
+            hydration,
+            neighborhood,
+            top_anomalies,
+        })
     }
 
     /// Generic seed engine (mockable). Assumes the entity type is valid
@@ -1136,17 +1219,30 @@ impl GraphHunterApi {
             Some((ws, auth)) => {
                 let transport = HttpSentinelTransport::new();
                 let cache = SentinelTokenCache::new();
-                self.seed_from_ioc_with(&transport, &cache, &req.value, &ty, &time_filter, &ws, &auth)
-                    .await
+                self.seed_from_ioc_with(
+                    &transport,
+                    &cache,
+                    &req.value,
+                    &ty,
+                    &time_filter,
+                    &ws,
+                    &auth,
+                )
+                .await
             }
-            None => self.build_seed_result(&req.value, HydrationOutcome {
-                skipped: true,
-                reason: Some("Azure credentials not configured (set AZURE_* or connect Sentinel)".into()),
-                new_entities: 0,
-                new_relations: 0,
-                tables_hit: 0,
-                tables_attempted: 0,
-            }),
+            None => self.build_seed_result(
+                &req.value,
+                HydrationOutcome {
+                    skipped: true,
+                    reason: Some(
+                        "Azure credentials not configured (set AZURE_* or connect Sentinel)".into(),
+                    ),
+                    new_entities: 0,
+                    new_relations: 0,
+                    tables_hit: 0,
+                    tables_attempted: 0,
+                },
+            ),
         };
 
         // Record the pivot intent regardless of hydration outcome: even the
@@ -1405,7 +1501,12 @@ fn apply_time_window_sugar(kql: &str, window: Option<&TimeWindow>) -> String {
     // keeps the rest of the user's pipeline intact.
     let trimmed = kql.trim();
     if let Some((head, tail)) = trimmed.split_once('|') {
-        format!("{} | {} | {}", head.trim_end(), window.kql_filter(), tail.trim_start())
+        format!(
+            "{} | {} | {}",
+            head.trim_end(),
+            window.kql_filter(),
+            tail.trim_start()
+        )
     } else {
         format!("{} | {}", trimmed, window.kql_filter())
     }
@@ -1418,8 +1519,7 @@ fn apply_time_window_sugar(kql: &str, window: Option<&TimeWindow>) -> String {
 /// `take` stages and the last one is the actual ceiling.
 fn extract_take_limit(kql: &str) -> Option<u32> {
     let mut last: Option<u32> = None;
-    let mut iter = kql.char_indices().peekable();
-    while let Some((i, _)) = iter.next() {
+    for (i, _) in kql.char_indices() {
         let rest = &kql[i..];
         let stripped = rest.trim_start();
         if let Some(after_take) = stripped.strip_prefix("take ") {
@@ -1449,7 +1549,10 @@ async fn run_kql_rows(
     let res = tokio::task::spawn_blocking(move || run_sentinel_query(&ws, &kql, Some(auth)))
         .await
         .map_err(|e| ApiError::Internal(format!("task join error: {e}")))?
-        .map_err(|e| ApiError::Upstream { service: "sentinel-kql".into(), message: e })?;
+        .map_err(|e| ApiError::Upstream {
+            service: "sentinel-kql".into(),
+            message: e,
+        })?;
     let rows = serde_json::from_str::<Vec<serde_json::Value>>(&res.data).unwrap_or_default();
     Ok((rows, res.stats))
 }
@@ -1510,7 +1613,11 @@ fn is_node_class(class: &str) -> bool {
 /// `enrichment_applied` and the `capabilities` flag.
 fn enrichable_for(class: &str) -> Vec<String> {
     match class {
-        "IP" => vec!["geoip".to_string(), "asn".to_string(), "threat_intel".to_string()],
+        "IP" => vec![
+            "geoip".to_string(),
+            "asn".to_string(),
+            "threat_intel".to_string(),
+        ],
         _ => Vec::new(),
     }
 }
@@ -1519,7 +1626,7 @@ fn enrichable_for(class: &str) -> Vec<String> {
 /// ingest preview classifier for role/canonical/sample-value detection, then
 /// layers on graph_affinity + enrichable + a sample-based cardinality estimate.
 fn classify_table_fields(rows: &[serde_json::Value]) -> Vec<SchemaField> {
-    use graph_hunter_core::field_preview::{preview_fields_from_events_with_classifier, FieldRole};
+    use graph_hunter_core::field_preview::{FieldRole, preview_fields_from_events_with_classifier};
     use graph_hunter_core::generic::GenericParser;
 
     if rows.is_empty() {
@@ -1528,8 +1635,10 @@ fn classify_table_fields(rows: &[serde_json::Value]) -> Vec<SchemaField> {
 
     // Independent pass over the rows for full distinct counts + coarse JSON
     // type (the preview only keeps 5 sample values, too few for cardinality).
-    let mut stats: std::collections::HashMap<String, (usize, std::collections::HashSet<String>, &'static str)> =
-        std::collections::HashMap::new();
+    let mut stats: std::collections::HashMap<
+        String,
+        (usize, std::collections::HashSet<String>, &'static str),
+    > = std::collections::HashMap::new();
     for row in rows {
         if let Some(obj) = row.as_object() {
             for (key, value) in obj {
@@ -1539,7 +1648,10 @@ fn classify_table_fields(rows: &[serde_json::Value]) -> Vec<SchemaField> {
                     serde_json::Value::Bool(b) => (b.to_string(), "bool"),
                     _ => continue,
                 };
-                let entry = stats.entry(key.clone()).or_insert((0, std::collections::HashSet::new(), ty));
+                let entry =
+                    stats
+                        .entry(key.clone())
+                        .or_insert((0, std::collections::HashSet::new(), ty));
                 entry.0 += 1;
                 entry.1.insert(val_str);
             }
@@ -1572,7 +1684,9 @@ fn classify_table_fields(rows: &[serde_json::Value]) -> Vec<SchemaField> {
             };
 
             let (ty, cardinality) = match stats.get(&fi.raw_name) {
-                Some((occ, distinct, ty)) => (ty.to_string(), cardinality_label(distinct.len(), *occ)),
+                Some((occ, distinct, ty)) => {
+                    (ty.to_string(), cardinality_label(distinct.len(), *occ))
+                }
                 None => ("string".to_string(), "low".to_string()),
             };
 
@@ -1652,22 +1766,47 @@ fn classify_field_name(field: &str) -> Option<String> {
 fn name_to_class(leaf_lower: &str) -> Option<&'static str> {
     const RULES: &[(&str, &str)] = &[
         // IP
-        ("ipaddress", "IP"), ("ipaddr", "IP"), ("remoteip", "IP"), ("sourceip", "IP"),
-        ("destinationip", "IP"), ("clientip", "IP"), ("callerip", "IP"), ("publicip", "IP"),
+        ("ipaddress", "IP"),
+        ("ipaddr", "IP"),
+        ("remoteip", "IP"),
+        ("sourceip", "IP"),
+        ("destinationip", "IP"),
+        ("clientip", "IP"),
+        ("callerip", "IP"),
+        ("publicip", "IP"),
         ("privateip", "IP"),
         // User / identity
-        ("userprincipalname", "User"), ("useridentityarn", "User"), ("useridentity", "User"),
-        ("username", "User"), ("samaccountname", "User"), ("accountname", "User"),
-        ("subjectusername", "User"), ("targetusername", "User"), ("principalid", "User"),
+        ("userprincipalname", "User"),
+        ("useridentityarn", "User"),
+        ("useridentity", "User"),
+        ("username", "User"),
+        ("samaccountname", "User"),
+        ("accountname", "User"),
+        ("subjectusername", "User"),
+        ("targetusername", "User"),
+        ("principalid", "User"),
+        // UPN is the strongest identity key — it unifies device/endpoint
+        // activity (InitiatingProcessAccountUpn, AccountUpn) with Azure AD
+        // SigninLogs (UserPrincipalName) on one User node.
+        ("accountupn", "User"),
+        ("userupn", "User"),
         // Host
-        ("hostname", "Host"), ("devicename", "Host"), ("machinename", "Host"),
-        ("workstation", "Host"), ("computer", "Host"),
+        ("hostname", "Host"),
+        ("devicename", "Host"),
+        ("machinename", "Host"),
+        ("workstation", "Host"),
+        ("computer", "Host"),
         // Process / file
-        ("newprocessname", "Process"), ("parentprocessname", "Process"),
-        ("initiatingprocessfilename", "Process"), ("processname", "Process"),
-        ("filename", "File"), ("filepath", "File"),
+        ("newprocessname", "Process"),
+        ("parentprocessname", "Process"),
+        ("initiatingprocessfilename", "Process"),
+        ("processname", "Process"),
+        ("filename", "File"),
+        ("filepath", "File"),
         // Domain / URL
-        ("fqdn", "Domain"), ("dnsname", "Domain"), ("domainname", "Domain"),
+        ("fqdn", "Domain"),
+        ("dnsname", "Domain"),
+        ("domainname", "Domain"),
     ];
     for (needle, class) in RULES {
         if leaf_lower.contains(needle) {
@@ -1721,7 +1860,13 @@ fn rel_name_for(to_class: &str) -> &'static str {
 
 fn slugify(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .split('-')
         .filter(|p| !p.is_empty())
@@ -1792,7 +1937,10 @@ fn build_proposals(
         if !by_table.contains_key(&sf.table) {
             order.push(sf.table.clone());
         }
-        by_table.entry(sf.table.clone()).or_default().push(sf.field.clone());
+        by_table
+            .entry(sf.table.clone())
+            .or_default()
+            .push(sf.field.clone());
     }
 
     let mut proposals = Vec::new();
@@ -1836,20 +1984,29 @@ fn build_proposals(
             })
             .collect();
 
-        let mut proj: Vec<String> =
-            node_fields.iter().map(|(f, _)| project_expr_for_field(f)).collect();
+        let mut proj: Vec<String> = node_fields
+            .iter()
+            .map(|(f, _)| project_expr_for_field(f))
+            .collect();
         proj.extend(attr_fields.iter().map(|f| project_expr_for_field(f)));
         proj.push("TimeGenerated".to_string());
         let materialization_kql =
             format!("{table}\n| {time_filter}\n| project {}", proj.join(", "));
 
-        let classes: Vec<String> =
-            node_fields.iter().map(|(_, c)| c.clone()).collect();
-        let proposal_id =
-            format!("{}-{}", slugify(&table), classes.join("-").to_ascii_lowercase());
+        let classes: Vec<String> = node_fields.iter().map(|(_, c)| c.clone()).collect();
+        let proposal_id = format!(
+            "{}-{}",
+            slugify(&table),
+            classes.join("-").to_ascii_lowercase()
+        );
         let description = match hypothesis_context {
             Some(ctx) if !ctx.trim().is_empty() => {
-                format!("{} graph from {} ({})", classes.join("→"), table, ctx.trim())
+                format!(
+                    "{} graph from {} ({})",
+                    classes.join("→"),
+                    table,
+                    ctx.trim()
+                )
             }
             _ => format!("{} graph from {}", classes.join("→"), table),
         };
@@ -1920,7 +2077,8 @@ fn map_rows_to_graph(p: &GraphProposal, rows: &[serde_json::Value]) -> MappedGra
             None => continue,
         };
         // Resolve each node class to this row's value (first node of a class wins).
-        let mut class_val: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+        let mut class_val: std::collections::HashMap<&str, String> =
+            std::collections::HashMap::new();
         for n in &p.nodes {
             if let Some(v) = cell_string(obj.get(&node_alias(&n.source))) {
                 if n.class == "IP" {
@@ -1945,8 +2103,8 @@ fn map_rows_to_graph(p: &GraphProposal, rows: &[serde_json::Value]) -> MappedGra
                 (Some(f), Some(t)) => (f.clone(), t.clone()),
                 _ => continue,
             };
-            let rel_type =
-                parse_relation_type(&e.r#type).unwrap_or_else(|| RelationType::Other(e.r#type.clone()));
+            let rel_type = parse_relation_type(&e.r#type)
+                .unwrap_or_else(|| RelationType::Other(e.r#type.clone()));
             let mut rel = Relation::new(from.clone(), to.clone(), rel_type, ts);
             for attr in &e.attributes {
                 if attr == "TimeGenerated" {
@@ -1963,7 +2121,11 @@ fn map_rows_to_graph(p: &GraphProposal, rows: &[serde_json::Value]) -> MappedGra
             ));
         }
     }
-    MappedGraph { triples, standalone, ip_values }
+    MappedGraph {
+        triples,
+        standalone,
+        ip_values,
+    }
 }
 
 /// Graph-first nudge for inspect-mode KQL: return an advisory when the query
@@ -1990,7 +2152,10 @@ const ENTITY_COLUMNS: &[(&str, &str)] = &[
 
 fn kql_graph_advisory(kql: &str) -> Option<String> {
     let lower = kql.to_ascii_lowercase();
-    if ENTITY_COLUMNS.iter().any(|(needle, _)| lower.contains(needle)) {
+    if ENTITY_COLUMNS
+        .iter()
+        .any(|(needle, _)| lower.contains(needle))
+    {
         Some(
             "This query touches IPs/identities that GraphHunter can materialize as graph \
              entities. For recurring pivots, prefer sentinel_seed (cold-start from an IoC) or \
@@ -2011,7 +2176,10 @@ fn extract_propose_payload(kql: &str) -> Option<GraphProposePayload> {
     let mut selected_fields: Vec<SelectedField> = ENTITY_COLUMNS
         .iter()
         .filter(|(needle, _)| lower.contains(needle))
-        .map(|(_, name)| SelectedField { table: String::new(), field: (*name).to_string() })
+        .map(|(_, name)| SelectedField {
+            table: String::new(),
+            field: (*name).to_string(),
+        })
         .collect();
     if selected_fields.is_empty() {
         return None;
@@ -2025,7 +2193,11 @@ fn extract_propose_payload(kql: &str) -> Option<GraphProposePayload> {
     for f in &mut selected_fields {
         f.table = table.clone();
     }
-    Some(GraphProposePayload { next_tool: "graph_propose".to_string(), table, selected_fields })
+    Some(GraphProposePayload {
+        next_tool: "graph_propose".to_string(),
+        table,
+        selected_fields,
+    })
 }
 
 /// Phase M (revised): ingest-scope templates — pull RAW events in a
@@ -2144,6 +2316,125 @@ mod cap_kql_rows_tests {
     }
 }
 
+/// Fase G: `run_hunting_template` gate + `sentinel_check_env` reporting.
+/// Both touch the process-global `GRAPHHUNTER_HUNTING_TEMPLATES` /
+/// `GRAPHHUNTER_KQL_ESCAPE_HATCH` env vars, so tests here serialize via
+/// `crate::kql_flags::ENV_LOCK` (shared with `kql_flags`'s own flag-reader
+/// tests) to avoid cross-test races under the default multi-threaded runner.
+#[cfg(test)]
+// Tests hold the process-wide `ENV_LOCK` (std Mutex) across awaits on purpose:
+// it serializes env-var mutation for the whole test body. `#[tokio::test]`
+// runs on a current-thread runtime, so nothing else contends for it there.
+#[allow(clippy::await_holding_lock)]
+mod hunting_template_gate_tests {
+    use super::*;
+    use crate::kql_flags::ENV_LOCK;
+
+    #[tokio::test]
+    async fn run_hunting_template_disabled_returns_structured_steer() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("GRAPHHUNTER_HUNTING_TEMPLATES", "0");
+        }
+        let api = GraphHunterApi::new_noop();
+        let err = api
+            .run_hunting_template(RunHuntingTemplateRequest {
+                template: Some(HuntingTemplateId::FailedLogonBurst),
+                workspace_id: "ws-dummy".into(),
+                azure_tenant_id: "tenant-dummy".into(),
+                azure_client_id: "client-dummy".into(),
+                azure_client_secret: "secret-dummy".into(),
+                time_window: None,
+            })
+            .await
+            .unwrap_err();
+        unsafe {
+            std::env::remove_var("GRAPHHUNTER_HUNTING_TEMPLATES");
+        }
+        // The gate must fire before any network/credential use: this must be
+        // the structured disabled steer, not an Upstream/network error, even
+        // though the dummy creds above would fail a real Azure call.
+        match &err {
+            ApiError::FeatureDisabled { feature, .. } => {
+                assert_eq!(feature, "hunting_templates");
+            }
+            other => panic!("expected FeatureDisabled, got {other:?}"),
+        }
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("disabled")
+                && msg.contains("GRAPHHUNTER_HUNTING_TEMPLATES"),
+            "expected feature-disabled steer wording, got: {msg}"
+        );
+        assert!(
+            msg.contains("hunt_run"),
+            "expected steer to local hunting tools, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_hunting_template_enabled_by_default_proceeds_past_gate() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("GRAPHHUNTER_HUNTING_TEMPLATES");
+        }
+        let api = GraphHunterApi::new_noop();
+        let err = api
+            .run_hunting_template(RunHuntingTemplateRequest {
+                template: Some(HuntingTemplateId::FailedLogonBurst),
+                workspace_id: "ws-dummy".into(),
+                azure_tenant_id: "tenant-dummy".into(),
+                azure_client_id: "client-dummy".into(),
+                azure_client_secret: "secret-dummy".into(),
+                time_window: None,
+            })
+            .await
+            .unwrap_err();
+        // Default-on: the gate does not fire, so the request proceeds to
+        // `run_kql` and fails downstream (dummy creds, no real transport) —
+        // anything other than FeatureDisabled proves the gate didn't trip.
+        if let ApiError::FeatureDisabled { .. } = err {
+            panic!("gate must not fire when flag is default-enabled")
+        }
+    }
+}
+
+#[cfg(test)]
+mod sentinel_check_env_flag_tests {
+    use super::*;
+    use crate::kql_flags::ENV_LOCK;
+
+    #[test]
+    fn sentinel_check_env_defaults_both_fase_g_flags_enabled() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("GRAPHHUNTER_HUNTING_TEMPLATES");
+            std::env::remove_var("GRAPHHUNTER_KQL_ESCAPE_HATCH");
+        }
+        let api = GraphHunterApi::new_noop();
+        let status = api.sentinel_check_env();
+        assert!(status.hunting_templates_enabled, "default must be enabled");
+        assert!(status.kql_escape_hatch_enabled, "default must be enabled");
+    }
+
+    #[test]
+    fn sentinel_check_env_reflects_explicit_falsy() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("GRAPHHUNTER_HUNTING_TEMPLATES", "0");
+            std::env::set_var("GRAPHHUNTER_KQL_ESCAPE_HATCH", "off");
+        }
+        let api = GraphHunterApi::new_noop();
+        let status = api.sentinel_check_env();
+        assert!(!status.hunting_templates_enabled);
+        assert!(!status.kql_escape_hatch_enabled);
+        unsafe {
+            std::env::remove_var("GRAPHHUNTER_HUNTING_TEMPLATES");
+            std::env::remove_var("GRAPHHUNTER_KQL_ESCAPE_HATCH");
+        }
+    }
+}
+
 #[cfg(test)]
 mod resume_pause_tests {
     use super::*;
@@ -2152,14 +2443,20 @@ mod resume_pause_tests {
     async fn resume_without_connector_errors() {
         let api = GraphHunterApi::new_noop();
         let err = api.sentinel_resume().unwrap_err();
-        match err { ApiError::InvalidState(_) => {}, o => panic!("expected InvalidState, got {o:?}") }
+        match err {
+            ApiError::InvalidState(_) => {}
+            o => panic!("expected InvalidState, got {o:?}"),
+        }
     }
 
     #[tokio::test]
     async fn pause_without_connector_errors() {
         let api = GraphHunterApi::new_noop();
         let err = api.sentinel_pause().unwrap_err();
-        match err { ApiError::InvalidState(_) => {}, o => panic!("expected InvalidState, got {o:?}") }
+        match err {
+            ApiError::InvalidState(_) => {}
+            o => panic!("expected InvalidState, got {o:?}"),
+        }
     }
 }
 
@@ -2173,9 +2470,14 @@ mod sugar_tests {
     fn time_window_sugar_prepends_when_no_filter() {
         let out = apply_time_window_sugar(
             "SecurityEvent | take 50",
-            Some(&TimeWindow::Preset { lookback: LookbackPreset::H1 }),
+            Some(&TimeWindow::Preset {
+                lookback: LookbackPreset::H1,
+            }),
         );
-        assert_eq!(out, "SecurityEvent | where TimeGenerated > ago(1h) | take 50");
+        assert_eq!(
+            out,
+            "SecurityEvent | where TimeGenerated > ago(1h) | take 50"
+        );
     }
 
     #[test]
@@ -2183,7 +2485,9 @@ mod sugar_tests {
         let original = "SecurityEvent | where TimeGenerated > ago(7d) | take 50";
         let out = apply_time_window_sugar(
             original,
-            Some(&TimeWindow::Preset { lookback: LookbackPreset::H1 }),
+            Some(&TimeWindow::Preset {
+                lookback: LookbackPreset::H1,
+            }),
         );
         assert_eq!(out, original);
     }
@@ -2223,6 +2527,10 @@ mod sugar_tests {
 }
 
 #[cfg(test)]
+// Tests hold the process-wide `ENV_LOCK` (std Mutex) across awaits on purpose:
+// it serializes env-var mutation for the whole test body. `#[tokio::test]`
+// runs on a current-thread runtime, so nothing else contends for it there.
+#[allow(clippy::await_holding_lock)]
 mod fallback_gate_tests {
     use super::*;
 
@@ -2256,7 +2564,10 @@ mod fallback_gate_tests {
             })
             .await
             .expect("gated path returns Ok without executing");
-        assert!(res.fallback_gated, "entity-class inspect query must be gated");
+        assert!(
+            res.fallback_gated,
+            "entity-class inspect query must be gated"
+        );
         assert!(res.rows.is_none(), "gated query is not executed");
         let gp = res.graph_propose.expect("ready-to-run propose payload");
         assert_eq!(gp.table, "SigninLogs");
@@ -2268,8 +2579,19 @@ mod fallback_gate_tests {
         // With acknowledge_fallback the gate does not fire; the call then
         // proceeds to credential resolution (which fails here with no AZURE_*),
         // proving it was NOT short-circuited as gated.
-        for k in ["AZURE_WORKSPACE_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"] {
-            // SAFETY: see other AZURE_* tests in this file — no concurrent reader.
+        //
+        // `sentinel_check_env_flag_tests` exercises `sentinel_check_env` (an
+        // AZURE_*-reading production path) from a test, so serialize against
+        // it via the shared `kql_flags::ENV_LOCK`.
+        let _guard = crate::kql_flags::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for k in [
+            "AZURE_WORKSPACE_ID",
+            "AZURE_TENANT_ID",
+            "AZURE_CLIENT_ID",
+            "AZURE_CLIENT_SECRET",
+        ] {
             unsafe { std::env::remove_var(k) };
         }
         let api = GraphHunterApi::new_noop();
@@ -2308,12 +2630,19 @@ mod schema_discover_tests {
     #[test]
     fn classify_marks_ip_as_node_with_enrichment() {
         let fields = classify_table_fields(&signin_rows());
-        let ip = fields.iter().find(|f| f.name == "IPAddress").expect("IPAddress field");
+        let ip = fields
+            .iter()
+            .find(|f| f.name == "IPAddress")
+            .expect("IPAddress field");
         assert_eq!(ip.graph_affinity, "node");
         assert_eq!(ip.node_class.as_deref(), Some("IP"));
         assert_eq!(
             ip.enrichable,
-            vec!["geoip".to_string(), "asn".to_string(), "threat_intel".to_string()]
+            vec![
+                "geoip".to_string(),
+                "asn".to_string(),
+                "threat_intel".to_string()
+            ]
         );
         assert_eq!(ip.cardinality, "high");
     }
@@ -2333,7 +2662,10 @@ mod schema_discover_tests {
     #[test]
     fn classify_marks_categorical_as_attribute() {
         let fields = classify_table_fields(&signin_rows());
-        let rt = fields.iter().find(|f| f.name == "ResultType").expect("ResultType field");
+        let rt = fields
+            .iter()
+            .find(|f| f.name == "ResultType")
+            .expect("ResultType field");
         assert_eq!(rt.graph_affinity, "attribute");
         assert_eq!(rt.cardinality, "low");
         assert!(rt.node_class.is_none());
@@ -2350,7 +2682,66 @@ mod graph_propose_tests {
     use super::*;
 
     fn sf(table: &str, field: &str) -> SelectedField {
-        SelectedField { table: table.into(), field: field.into() }
+        SelectedField {
+            table: table.into(),
+            field: field.into(),
+        }
+    }
+
+    #[test]
+    fn account_upn_field_classifies_as_user_node_for_identity_correlation() {
+        // Device tables carry the SAM account name (InitiatingProcessAccountName,
+        // a short name) as the User node AND the UPN (InitiatingProcessAccountUpn,
+        // e.g. "jdoe@example.com") as an attribute. But the UPN is the key
+        // that unifies endpoint activity with Azure AD SigninLogs (also UPN),
+        // so a hunt can pivot identity -> endpoint on one User node. Selecting
+        // the UPN field must therefore produce a User node, not an attribute.
+        let selected = vec![
+            sf("DeviceNetworkEvents", "InitiatingProcessAccountUpn"),
+            sf("DeviceNetworkEvents", "RemoteIP"),
+        ];
+        let props = build_proposals(&selected, None, "where TimeGenerated > ago(1h)");
+        assert_eq!(props.len(), 1);
+        let p = &props[0];
+        assert!(
+            p.nodes.iter().any(|n| n.class == "User"),
+            "InitiatingProcessAccountUpn must be a User node; got {:?}",
+            p.nodes
+        );
+    }
+
+    #[test]
+    fn proposes_ip_to_ip_flow_graph_from_aws_firewall() {
+        // AWS Network Firewall flow logs name their columns SrcIp/DestIp.
+        // "destip" was missing from the canonical alias table, so DestIp
+        // classified as attribute and the proposal came out edge-less:
+        // graph_build materialized 4K isolated IP nodes with 0 relations.
+        let selected = vec![
+            sf("AWSNetworkFirewallFlow", "SrcIp"),
+            sf("AWSNetworkFirewallFlow", "DestIp"),
+            sf("AWSNetworkFirewallFlow", "DestPort"),
+            sf("AWSNetworkFirewallFlow", "AppProto"),
+        ];
+        let props = build_proposals(&selected, Some("egress"), "where TimeGenerated > ago(1h)");
+        assert_eq!(props.len(), 1);
+        let p = &props[0];
+        assert_eq!(
+            p.nodes.len(),
+            2,
+            "SrcIp and DestIp must both be IP nodes; got {:?}",
+            p.nodes
+        );
+        assert_eq!(
+            p.edges.len(),
+            1,
+            "flow table must propose an IP->IP edge; got {:?}",
+            p.edges
+        );
+        assert_eq!(p.edges[0].from, "IP");
+        assert_eq!(p.edges[0].to, "IP");
+        // Ports/protocol ride the edge as attributes.
+        assert!(p.edges[0].attributes.iter().any(|a| a == "DestPort"));
+        assert!(p.edges[0].attributes.iter().any(|a| a == "AppProto"));
     }
 
     #[test]
@@ -2360,7 +2751,11 @@ mod graph_propose_tests {
             sf("SigninLogs", "IPAddress"),
             sf("SigninLogs", "ResultType"),
         ];
-        let props = build_proposals(&selected, Some("auth pivot"), "where TimeGenerated > ago(24h)");
+        let props = build_proposals(
+            &selected,
+            Some("auth pivot"),
+            "where TimeGenerated > ago(24h)",
+        );
         assert_eq!(props.len(), 1);
         let p = &props[0];
         // UserPrincipalName + IPAddress are nodes; ResultType is an attribute.
@@ -2381,12 +2776,19 @@ mod graph_propose_tests {
 
     #[test]
     fn materialization_kql_guards_columns_and_projects_time() {
-        let selected = vec![sf("SigninLogs", "UserPrincipalName"), sf("SigninLogs", "IPAddress")];
+        let selected = vec![
+            sf("SigninLogs", "UserPrincipalName"),
+            sf("SigninLogs", "IPAddress"),
+        ];
         let p = &build_proposals(&selected, None, "where TimeGenerated > ago(7d)")[0];
         let kql = &p.materialization_kql;
         assert!(kql.starts_with("SigninLogs\n| where TimeGenerated > ago(7d)\n| project "));
         // columnifexists guard on each projected source column.
-        assert!(kql.contains("UserPrincipalName = tostring(columnifexists(\"UserPrincipalName\", \"\"))"));
+        assert!(
+            kql.contains(
+                "UserPrincipalName = tostring(columnifexists(\"UserPrincipalName\", \"\"))"
+            )
+        );
         assert!(kql.contains("IPAddress = tostring(columnifexists(\"IPAddress\", \"\"))"));
         assert!(kql.trim_end().ends_with("TimeGenerated"));
     }
@@ -2411,7 +2813,10 @@ mod graph_propose_tests {
     #[test]
     fn table_with_no_node_fields_is_skipped() {
         // ResultType / ResultDescription are categorical attributes, no nodes.
-        let selected = vec![sf("SigninLogs", "ResultType"), sf("SigninLogs", "ResultDescription")];
+        let selected = vec![
+            sf("SigninLogs", "ResultType"),
+            sf("SigninLogs", "ResultDescription"),
+        ];
         assert!(build_proposals(&selected, None, "where TimeGenerated > ago(24h)").is_empty());
     }
 
@@ -2431,7 +2836,10 @@ mod graph_propose_tests {
 
     #[test]
     fn estimate_probe_wraps_materialization() {
-        let selected = vec![sf("SigninLogs", "UserPrincipalName"), sf("SigninLogs", "IPAddress")];
+        let selected = vec![
+            sf("SigninLogs", "UserPrincipalName"),
+            sf("SigninLogs", "IPAddress"),
+        ];
         let p = &build_proposals(&selected, None, "where TimeGenerated > ago(24h)")[0];
         let probe = estimate_probe_kql(p).expect("probe");
         assert!(probe.contains("summarize Rows = count(), Entities = dcount(UserPrincipalName)"));
@@ -2445,9 +2853,18 @@ mod graph_build_mapper_tests {
 
     fn signin_proposal() -> GraphProposal {
         let selected = vec![
-            SelectedField { table: "SigninLogs".into(), field: "UserPrincipalName".into() },
-            SelectedField { table: "SigninLogs".into(), field: "IPAddress".into() },
-            SelectedField { table: "SigninLogs".into(), field: "ResultType".into() },
+            SelectedField {
+                table: "SigninLogs".into(),
+                field: "UserPrincipalName".into(),
+            },
+            SelectedField {
+                table: "SigninLogs".into(),
+                field: "IPAddress".into(),
+            },
+            SelectedField {
+                table: "SigninLogs".into(),
+                field: "ResultType".into(),
+            },
         ];
         build_proposals(&selected, None, "where TimeGenerated > ago(24h)")
             .into_iter()
@@ -2481,7 +2898,10 @@ mod graph_build_mapper_tests {
         let (src, rel, dst) = &mapped.triples[0];
         assert_eq!(src.id, "alice@corp.com");
         assert_eq!(dst.id, "203.0.113.7");
-        assert_eq!(rel.metadata.get("ResultType").map(String::as_str), Some("0"));
+        assert_eq!(
+            rel.metadata.get("ResultType").map(String::as_str),
+            Some("0")
+        );
         assert!(rel.timestamp > 0, "TimeGenerated parsed to epoch");
         // edge-bearing proposals produce no standalone entities.
         assert!(mapped.standalone.is_empty());
@@ -2501,7 +2921,10 @@ mod graph_build_mapper_tests {
 
     #[test]
     fn edgeless_single_node_proposal_yields_standalone_entities() {
-        let selected = vec![SelectedField { table: "SigninLogs".into(), field: "IPAddress".into() }];
+        let selected = vec![SelectedField {
+            table: "SigninLogs".into(),
+            field: "IPAddress".into(),
+        }];
         let p = build_proposals(&selected, None, "where TimeGenerated > ago(24h)")
             .into_iter()
             .next()
@@ -2603,7 +3026,11 @@ mod hydrate_tests {
         assert_eq!(outcome.tables_attempted, 3);
         assert!(!outcome.skipped);
         // The mock returns a SigninLogs row for every query; at least one table ingested.
-        assert!(outcome.tables_hit >= 1, "expected ≥1 table ingested, got {}", outcome.tables_hit);
+        assert!(
+            outcome.tables_hit >= 1,
+            "expected ≥1 table ingested, got {}",
+            outcome.tables_hit
+        );
         assert!(
             outcome.new_relations >= 1,
             "expected ingested relations, got {}",
@@ -2651,7 +3078,11 @@ mod hydrate_tests {
         // IP maps to 3 tables; the filter narrows to SigninLogs only -> 1 query.
         assert_eq!(queries.len(), 1, "filter must restrict to one table");
         assert!(queries[0].contains("SigninLogs"), "query: {}", queries[0]);
-        assert!(queries[0].contains("take 100"), "max_rows must cap take: {}", queries[0]);
+        assert!(
+            queries[0].contains("take 100"),
+            "max_rows must cap take: {}",
+            queries[0]
+        );
         assert_eq!(outcome.tables_attempted, 1);
     }
 
@@ -2693,7 +3124,11 @@ mod hydrate_tests {
 
         assert!(outcome.skipped, "unknown-table filter must be skipped");
         assert_eq!(outcome.tables_attempted, 0);
-        assert_eq!(transport.queries.lock().unwrap().len(), 0, "no queries issued");
+        assert_eq!(
+            transport.queries.lock().unwrap().len(),
+            0,
+            "no queries issued"
+        );
     }
 
     #[tokio::test]
@@ -2735,6 +3170,10 @@ mod hydrate_tests {
 }
 
 #[cfg(test)]
+// Tests hold the process-wide `ENV_LOCK` (std Mutex) across awaits on purpose:
+// it serializes env-var mutation for the whole test body. `#[tokio::test]`
+// runs on a current-thread runtime, so nothing else contends for it there.
+#[allow(clippy::await_holding_lock)]
 mod seed_tests {
     use super::*;
     use crate::dto::session::CreateSessionRequest;
@@ -2825,21 +3264,24 @@ mod seed_tests {
 
     #[tokio::test]
     async fn seed_without_session_auto_creates_one() {
+        // Fase G added `sentinel_check_env_flag_tests`, which DOES exercise
+        // `sentinel_check_env` (an AZURE_*-reading production path) from a
+        // test. So this test now also acquires `kql_flags::ENV_LOCK` before
+        // stripping AZURE_* vars, serializing against that module (and any
+        // other env-touching test) instead of relying on "no test reads
+        // AZURE_*".
+        let _guard = crate::kql_flags::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         for k in [
             "AZURE_WORKSPACE_ID",
             "AZURE_TENANT_ID",
             "AZURE_CLIENT_ID",
             "AZURE_CLIENT_SECRET",
         ] {
-            // SAFETY: no TEST in this binary reads AZURE_* from the process
-            // environment — the production readers (run_kql, sentinel_connect,
-            // sentinel_check_env) are never exercised by a test, and
-            // hydrate_tests/seed_tests pass credentials as literals. So
-            // stripping these vars races with no concurrent observer. If a
-            // future test calls an env-reading production path, serialize it
-            // (e.g. add the serial_test dep + #[serial]) or pass creds via
-            // request fields.
-            unsafe { std::env::remove_var(k); }
+            unsafe {
+                std::env::remove_var(k);
+            }
         }
         let api = GraphHunterApi::new_noop();
         let result = api
@@ -2903,7 +3345,10 @@ mod node_enrich_tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ApiError::InvalidInput(_)));
-        assert!(err.to_string().contains("does-not-exist"), "error should name the missing node: {err}");
+        assert!(
+            err.to_string().contains("does-not-exist"),
+            "error should name the missing node: {err}"
+        );
     }
 
     #[tokio::test]

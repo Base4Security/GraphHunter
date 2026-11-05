@@ -1,10 +1,10 @@
 //! Export, publish, sigma-save, and ticket-filing endpoints.
 
 use axum::{
+    Json,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -32,8 +32,8 @@ pub(super) async fn handler_export_iocs(
     }) {
         Ok(data) => ok_json(serde_json::json!({ "data": data, "format": format })),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -72,8 +72,8 @@ pub(super) async fn handler_publish_iocs_to_sentinel(
     {
         Ok(v) => ok_json(v),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -95,20 +95,22 @@ pub(super) async fn handler_save_hypothesis_as_sigma(
 ) -> Response {
     let api_clone = api.clone();
     let res = tokio::task::spawn_blocking(move || {
-        api_clone.save_hypothesis_as_sigma(graph_hunter_api::dto::sigma::SaveHypothesisAsSigmaRequest {
-            session: None,
-            hypothesis_dsl: body.hypothesis_dsl,
-            title: body.title,
-            tag_prefix: body.tag_prefix,
-            level: body.level,
-        })
+        api_clone.save_hypothesis_as_sigma(
+            graph_hunter_api::dto::sigma::SaveHypothesisAsSigmaRequest {
+                session: None,
+                hypothesis_dsl: body.hypothesis_dsl,
+                title: body.title,
+                tag_prefix: body.tag_prefix,
+                level: body.level,
+            },
+        )
     })
     .await;
     match res {
         Ok(Ok(v)) => ok_json(v),
         Ok(Err(e)) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Err(e) => err_json(format!("Task error: {e}")),
@@ -148,8 +150,8 @@ pub(super) async fn handler_file_ticket(
     {
         Ok(v) => ok_json(v),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -174,8 +176,8 @@ pub(super) async fn handler_export_subgraph(
     }) {
         Ok(text) => ok_json(serde_json::json!({ "data": text, "format": fmt_for_resp })),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -208,8 +210,8 @@ pub(super) async fn handler_export_ocsf(
     }) {
         Ok(text) => ok_json(serde_json::json!({ "data": text, "format": fmt_for_resp })),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -243,8 +245,8 @@ pub(super) async fn handler_export_hunt_results(
     }) {
         Ok(text) => ok_json(serde_json::json!({ "data": text, "format": fmt_for_resp })),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }

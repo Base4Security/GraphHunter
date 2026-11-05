@@ -13,10 +13,12 @@
 //!   * `provenance::*` — `ProvenanceCtx` carried alongside every emitted event.
 //!   * `project::*` — `triple_to_ocsf` / `ocsf_to_triple`. Pure, deterministic.
 
+pub mod envelope;
 pub mod ocsf;
 pub mod project;
 pub mod provenance;
 
+pub use envelope::{CanonicalEnvelope, ChangeKind};
 pub use ocsf::OcsfEvent;
 pub use project::{ocsf_to_triple, triple_to_ocsf};
 pub use provenance::ProvenanceCtx;
