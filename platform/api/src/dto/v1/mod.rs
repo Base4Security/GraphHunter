@@ -10,6 +10,7 @@ pub mod agentic;
 pub mod ai;
 pub mod analytics;
 pub mod anomaly;
+pub mod attack_graph;
 pub mod dataset;
 pub mod dlq;
 pub mod dsl;

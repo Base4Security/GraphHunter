@@ -286,6 +286,13 @@ impl JournalStore {
     }
 }
 
+/// Where ingestion journals: `<data_dir>/GraphHunter/journal`, a sibling of
+/// the session data rather than part of any one `Session`. `None` when the
+/// platform has no data directory.
+pub fn ingest_journal_dir() -> Option<std::path::PathBuf> {
+    dirs::data_dir().map(|d| d.join("GraphHunter").join("journal"))
+}
+
 /// `GRAPHHUNTER_JOURNAL`: enable the append-only canonical journal on the
 /// ingest write path. Default ON (falsy-to-disable) as of the enable-defaults
 /// fase; the journal is bounded by GRAPHHUNTER_JOURNAL_MAX_BYTES rotation

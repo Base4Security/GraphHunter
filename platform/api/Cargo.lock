@@ -1266,6 +1266,7 @@ dependencies = [
  "dirs",
  "etherparse",
  "evtx",
+ "graph_hunter_attack_projection",
  "graph_hunter_canonical",
  "graph_hunter_constrained_decode",
  "graph_hunter_core",
@@ -1294,6 +1295,16 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "graph_hunter_attack_projection"
+version = "0.1.0"
+dependencies = [
+ "graph_hunter_canonical",
+ "graph_hunter_core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
