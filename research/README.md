@@ -26,6 +26,11 @@ el núcleo del grafo de ataque dinámico (G_t) descrito en `docs/unificacion/`.
   traducción de una defensa de detcover al modelo de PERIPLO.
 - `gtdin/combinado.py`: k trampas que minimizan el botín del atacante de
   PERIPLO sujeto a la garantía δ de detcover (generación de columnas).
+- `gtdin/conjunto.py`: defensor conjunto, reglas Y trampas contra los dos
+  atacantes (botín, carga de alertas y garantía), con cortes tangentes porque
+  el efecto de las reglas sobre el botín es convexo. `exp_conjunto.py` y
+  `resumen_conjunto.py`: carga de alertas necesaria para acotar el botín.
+  `test_conjunto.py` enumera todas las combinaciones y tarda unos 2 minutos.
 - `gtdin/exp_cruzado.py` y `gtdin/resumen_cruzado.py`: cada defensa contra los
   dos atacantes (`resultados/cruzado.csv`).
 - `datos/goad/`: colección BloodHound de GOADv2 (laboratorio público, Unlicense).
