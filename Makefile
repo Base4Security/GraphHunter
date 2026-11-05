@@ -37,6 +37,7 @@ ALL_CRATES := \
 	core/matcher-ffi \
 	core/tpcsa-core \
 	platform/api \
+	platform/attack-projection \
 	platform/canonical \
 	platform/constrained-decode \
 	platform/dsl \
