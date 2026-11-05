@@ -1,0 +1,777 @@
+{
+  "spec": "proyeccion-procedencia-ataque",
+  "version": "0",
+  "nota": "valores sinteticos; dominio corp.example",
+  "params": {
+    "session_grace_ms": 28800000,
+    "session_ttl_ms": 86400000,
+    "process_ttl_ms": 3600000,
+    "permission_ttl_ms": 2592000000
+  },
+  "identities": {
+    "domains": {
+      "CORP": "corp.example"
+    },
+    "hosts": [
+      "ws01.corp.example",
+      "srv01.corp.example",
+      "srv01.lab.example"
+    ],
+    "system_accounts": [
+      "SYSTEM",
+      "LOCAL SERVICE",
+      "NETWORK SERVICE"
+    ],
+    "machine_account_suffix": "$"
+  },
+  "cases": [
+    {
+      "id": "R1-logon-interactivo",
+      "rule": "R1",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e1",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e1",
+              "confidence": "confirmed",
+              "expires_at": 1793086400000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "R2-logon-rdp",
+      "rule": "R1,R2",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e2",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 10
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e2",
+              "confidence": "confirmed",
+              "expires_at": 1793086400000
+            },
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "alice@corp.example",
+                "kind": "CanRDP",
+                "dst": "ws01.corp.example"
+              },
+              "event_id": "e2",
+              "confidence": "confirmed",
+              "expires_at": 1795592000000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "R3-logon-servicio",
+      "rule": "R3",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e3",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "svc_backup",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 5
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "svc_backup@corp.example"
+              },
+              "event_id": "e3",
+              "confidence": "inferred",
+              "expires_at": 1793086400000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "R5-logon-red-no-proyecta",
+      "rule": "R5",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e4",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 3
+            }
+          },
+          "expect": []
+        }
+      ]
+    },
+    {
+      "id": "R6-logon-fallido-no-proyecta",
+      "rule": "R6",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e5",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "failure",
+              "logon_type_id": 2
+            }
+          },
+          "expect": []
+        }
+      ]
+    },
+    {
+      "id": "P1-sin-logon-type-no-proyecta",
+      "rule": "R1",
+      "note": "sin logon_type_id no se puede distinguir R1 de R5; no se adivina",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e6",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success"
+            }
+          },
+          "expect": []
+        }
+      ]
+    },
+    {
+      "id": "R7-logoff-cierra-con-gracia",
+      "rule": "R1,R7",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e7",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e7",
+              "confidence": "confirmed",
+              "expires_at": 1793086400000
+            }
+          ]
+        },
+        {
+          "input": {
+            "event_id": "e8",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 2,
+              "time": 1793007200000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success"
+            }
+          },
+          "expect": [
+            {
+              "op": "Close",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e8",
+              "expires_at": 1793036000000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "R8-proceso-de-usuario",
+      "rule": "R8",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e9",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 1007,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "device": {
+                "hostname": "ws01"
+              },
+              "process": {
+                "name": "C:\\Windows\\System32\\notepad.exe"
+              }
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e9",
+              "confidence": "inferred",
+              "expires_at": 1793003600000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "R8-cuenta-de-sistema-excluida",
+      "rule": "R8",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e10",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 1007,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "SYSTEM",
+                "domain": "NT AUTHORITY"
+              },
+              "device": {
+                "hostname": "ws01"
+              },
+              "process": {
+                "name": "C:\\Windows\\System32\\notepad.exe"
+              }
+            }
+          },
+          "expect": []
+        }
+      ]
+    },
+    {
+      "id": "R8-cuenta-de-maquina-excluida",
+      "rule": "R8",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e11",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 1007,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "WS01$",
+                "domain": "CORP"
+              },
+              "device": {
+                "hostname": "ws01"
+              },
+              "process": {
+                "name": "C:\\Windows\\System32\\notepad.exe"
+              }
+            }
+          },
+          "expect": []
+        }
+      ]
+    },
+    {
+      "id": "identidad-host-ambiguo",
+      "rule": "§6",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e12",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "srv01"
+              },
+              "status": "success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": [
+            {
+              "op": "Unresolved",
+              "event_id": "e12",
+              "reason": "host_ambiguous"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "identidad-dominio-desconocido",
+      "rule": "§6",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e13",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "OTRO"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": [
+            {
+              "op": "Unresolved",
+              "event_id": "e13",
+              "reason": "domain_unknown"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "R9-tombstone-retira",
+      "rule": "R1,R9",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e14",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e14",
+              "confidence": "confirmed",
+              "expires_at": 1793086400000
+            }
+          ]
+        },
+        {
+          "input": {
+            "event_id": "e14",
+            "change": "Tombstone"
+          },
+          "expect": [
+            {
+              "op": "Retract",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e14"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "idempotencia-reaplicar",
+      "rule": "§3",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e15",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e15",
+              "confidence": "confirmed",
+              "expires_at": 1793086400000
+            }
+          ]
+        },
+        {
+          "input": {
+            "event_id": "e15",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": []
+        }
+      ]
+    },
+    {
+      "id": "fuera-de-orden-no-adelanta-vencimiento",
+      "rule": "§5",
+      "note": "el segundo evento es anterior: solo baja first_seen",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e16",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e16",
+              "confidence": "confirmed",
+              "expires_at": 1793086400000
+            }
+          ]
+        },
+        {
+          "input": {
+            "event_id": "e17",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1792989200000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e17",
+              "confidence": "confirmed",
+              "expires_at": 1793086400000
+            }
+          ]
+        }
+      ],
+      "final_state": [
+        {
+          "edge": {
+            "src": "ws01.corp.example",
+            "kind": "HasSession",
+            "dst": "alice@corp.example"
+          },
+          "origins": [
+            "observed"
+          ],
+          "support": [
+            "e16",
+            "e17"
+          ],
+          "first_seen": 1792989200000,
+          "last_seen": 1793000000000,
+          "expires_at": 1793086400000,
+          "confidence": "confirmed"
+        }
+      ]
+    },
+    {
+      "id": "R7-logoff-sin-sesion-no-emite",
+      "rule": "R7",
+      "note": "no hay sesion observada que cerrar",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e18",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 2,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success"
+            }
+          },
+          "expect": []
+        }
+      ]
+    },
+    {
+      "id": "correction-reproyecta",
+      "rule": "§3",
+      "note": "un logon corregido a tipo red retira la sesion y no proyecta nada nuevo",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e19",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e19",
+              "confidence": "confirmed",
+              "expires_at": 1793086400000
+            }
+          ]
+        },
+        {
+          "input": {
+            "event_id": "e19",
+            "change": "Correction",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "alice",
+                "domain": "CORP"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "success",
+              "logon_type_id": 3
+            }
+          },
+          "expect": [
+            {
+              "op": "Retract",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e19"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
