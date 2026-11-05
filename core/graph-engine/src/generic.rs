@@ -269,10 +269,10 @@ impl GenericParser {
             | "local_ip" => Some("source_ip"),
 
             // Target IP (also used for client connecting IPs in RDP/TerminalServices)
-            "destinationip" | "dst_ip" | "dest_ip" | "target_ip" | "dstip" | "destip" | "remoteip"
-            | "remote_ip" | "dst_addr" | "destinationaddress" | "server_ip" | "remoteaddress"
-            | "targetaddress" | "address" | "clientaddressv4" | "clientaddressv6"
-            | "remoteaddresses" => Some("target_ip"),
+            "destinationip" | "dst_ip" | "dest_ip" | "target_ip" | "dstip" | "destip"
+            | "remoteip" | "remote_ip" | "dst_addr" | "destinationaddress" | "server_ip"
+            | "remoteaddress" | "targetaddress" | "address" | "clientaddressv4"
+            | "clientaddressv6" | "remoteaddresses" => Some("target_ip"),
 
             // Source host
             "computer" | "hostname" | "devicename" | "source_host" | "src_host" | "host"
@@ -1648,7 +1648,10 @@ impl LogParser for GenericParser {
     fn parse_raw_with_stats(
         &self,
         data: &str,
-    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+    ) -> (
+        Vec<crate::parser::RawIngestEvent>,
+        crate::parser::ParseStats,
+    ) {
         let events = Self::parse_events(data);
         let (each, stats) = parse_events_each_with_stats(&events, |event| Self::parse_event(event));
         (raw_events_from_each(&events, each), stats)
@@ -2040,7 +2043,10 @@ mod session_entity_tests {
     fn junk_session_values_are_refused() {
         assert_eq!(GenericParser::session_entity_id(""), None);
         assert_eq!(GenericParser::session_entity_id("   "), None);
-        assert_eq!(GenericParser::session_entity_id("2026-06-18T15:56:13"), None);
+        assert_eq!(
+            GenericParser::session_entity_id("2026-06-18T15:56:13"),
+            None
+        );
         assert_eq!(GenericParser::session_entity_id(&"x".repeat(300)), None);
     }
 
@@ -2055,7 +2061,9 @@ mod session_entity_tests {
         });
         let triples = GenericParser::parse_event(&event);
         assert!(
-            !triples.iter().any(|(s, _, d)| is_session_entity(s) || is_session_entity(d)),
+            !triples
+                .iter()
+                .any(|(s, _, d)| is_session_entity(s) || is_session_entity(d)),
             "no session field, no session node"
         );
         assert!(!triples.is_empty(), "the User->IP edge must still be there");
@@ -2095,7 +2103,9 @@ mod session_entity_tests {
         assert_eq!(stats.sessions_seen, 3);
         assert_eq!(stats.sessions_dropped, 3, "over the ceiling, none survive");
         assert!(
-            !triples.iter().any(|(s, _, d)| is_session_entity(s) || is_session_entity(d)),
+            !triples
+                .iter()
+                .any(|(s, _, d)| is_session_entity(s) || is_session_entity(d)),
             "no session node may reach the graph once the ceiling trips"
         );
         // The User->IP edges are unaffected: the ceiling bounds sessions,
@@ -2279,8 +2289,10 @@ mod raw_line_tests {
         // Two Values with the same fields in different key order must
         // produce the same canonical raw_line — otherwise a re-parse of
         // semantically identical JSON would look like drift in the journal.
-        let a = r#"[{"src_ip": "10.0.0.1", "dst_ip": "8.8.8.8", "dst_port": "53", "protocol": "UDP"}]"#;
-        let b = r#"[{"protocol": "UDP", "dst_port": "53", "dst_ip": "8.8.8.8", "src_ip": "10.0.0.1"}]"#;
+        let a =
+            r#"[{"src_ip": "10.0.0.1", "dst_ip": "8.8.8.8", "dst_port": "53", "protocol": "UDP"}]"#;
+        let b =
+            r#"[{"protocol": "UDP", "dst_port": "53", "dst_ip": "8.8.8.8", "src_ip": "10.0.0.1"}]"#;
 
         let events_a = GenericParser.parse_raw(a);
         let events_b = GenericParser.parse_raw(b);

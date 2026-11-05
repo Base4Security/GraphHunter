@@ -229,7 +229,9 @@ impl GraphHunterApi {
                 .iter()
                 .map(|d| {
                     let ctx = match &d.mapping_hash {
-                        Some(hash) => ProvenanceCtx::with_mapping_hash(hash.clone(), d.id.clone(), &[]),
+                        Some(hash) => {
+                            ProvenanceCtx::with_mapping_hash(hash.clone(), d.id.clone(), &[])
+                        }
                         None => {
                             let parser = d.parser.as_deref().unwrap_or("unknown");
                             ProvenanceCtx::for_builtin_parser(parser, d.id.clone(), &[])
@@ -666,9 +668,7 @@ fn build_kql_ioc_set(items: &[IocItem]) -> String {
     push_table(&mut out, "IoC_Processes", "process_name", &processes);
     push_table(&mut out, "IoC_Hashes", "hash", &hashes);
     if out.lines().count() <= 1 {
-        out.push_str(
-            "// (no IoCs of IP/Domain/File/Process/Hash type in the current tag set)\n",
-        );
+        out.push_str("// (no IoCs of IP/Domain/File/Process/Hash type in the current tag set)\n");
     }
     out
 }
