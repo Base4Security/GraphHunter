@@ -165,9 +165,9 @@ const MAX_PREALLOC_ENTITIES: usize = 2_000_000;
 /// Maximum relations pre-allocated based on file size heuristics.
 const MAX_PREALLOC_RELATIONS: usize = 4_000_000;
 /// Available physical memory (MB) below which ingestion stops to prevent a crash.
-/// Only consulted on Windows via `GlobalMemoryStatusEx`; gated to avoid a
-/// dead-code warning on Linux/macOS where the check is skipped.
-#[cfg(target_os = "windows")]
+/// Only reachable on Windows, where `memory_snapshot_mb` reads
+/// `GlobalMemoryStatusEx`; elsewhere that returns `None` and the guard never
+/// fires, but the comparison still compiles, so the constant is not gated.
 const CRITICAL_MEMORY_MB: u64 = 256;
 
 /// Growth in this process's own working set, since the ingest began, above
