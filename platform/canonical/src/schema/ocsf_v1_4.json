@@ -134,6 +134,7 @@
         "actor_user": { "anyOf": [{ "$ref": "#/$defs/UserRef" }, { "type": "null" }] },
         "parent_process": { "anyOf": [{ "$ref": "#/$defs/ProcessRef" }, { "type": "null" }] },
         "process": { "$ref": "#/$defs/ProcessRef" },
+        "device": { "anyOf": [{ "$ref": "#/$defs/EndpointRef" }, { "type": "null" }] },
         "provenance": { "$ref": "#/$defs/ProvenanceCtx" }
       },
       "required": ["class_uid", "activity_id", "time", "process", "provenance"]

@@ -91,7 +91,8 @@ Decisiones y motivos:
   eso `Close` aplica una gracia configurable en vez de retirar la arista.
 - **R8.** Un proceso corriendo como `u` en `h` implica un token de `u` en `h`.
   Es evidencia más débil que un logon y se excluyen las cuentas de sistema
-  (`SYSTEM`, `LOCAL SERVICE`, `NETWORK SERVICE`, cuentas de máquina `…$`).
+  (`SYSTEM`, `LOCAL SERVICE`, `NETWORK SERVICE`, cuentas de máquina `…$`), mirando
+  la cuenta y no el dominio (`NT AUTHORITY\SYSTEM` es `SYSTEM`).
 
 Parámetros (valores por defecto a calibrar, no medidos):
 
@@ -122,7 +123,8 @@ Reglas:
 
 1. Si el evento trae SID (`UserRef.uid`), se usa el SID. Es la única identidad
    exacta.
-2. Si no, se normaliza: minúsculas; NetBIOS → dominio DNS usando la tabla de
+2. Si no, se normaliza: un nombre `DOMINIO\usuario` (la forma de los parsers
+   de Windows) aporta el dominio NetBIOS; minúsculas; NetBIOS → dominio DNS usando la tabla de
    dominios del snapshot de BloodHound; host corto → FQDN solo si hay un único
    candidato en el snapshot.
 3. Si no hay un único candidato, se emite `Unresolved` y no se crea nada.
@@ -133,7 +135,9 @@ Reglas:
 
 ## 7. Prerrequisitos en el código actual
 
-Detectados al leer el código el 2026-11-04; bloquean la v0:
+Detectados al leer el código el 2026-11-04. Estado al 2026-11-05: P1 y P2
+resueltos en el PR #164; P3, P5 y P6 resueltos para el parser Sysmon/Security
+(el de Sentinel sigue pendiente); P4 sigue abierto.
 
 | # | Problema | Dónde | Efecto en la proyección |
 |---|---|---|---|

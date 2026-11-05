@@ -95,6 +95,8 @@ struct SysmonEventTyped<'a> {
     target_user_name: Option<&'a str>,
     #[serde(rename = "TargetDomainName", default, borrow)]
     target_domain_name: Option<&'a str>,
+    #[serde(rename = "TargetUserSid", default, borrow)]
+    target_user_sid: Option<&'a str>,
     #[serde(rename = "LogonType", default)]
     logon_type: Option<LogonTypeField<'a>>,
     #[serde(rename = "IpAddress", default, borrow)]
@@ -189,6 +191,8 @@ impl LogonTypeField<'_> {
 /// |----------|----------------------|-----------------------------------------------------------|
 /// | 4624     | Logon Success        | User -[Auth]-> Host                                       |
 /// | 4625     | Logon Failure        | User -[Auth]-> Host                                       |
+/// | 4634     | Logoff               | User -[Logoff]-> Host (`RelationType::Other`)             |
+/// | 4647     | User-initiated logoff| User -[Logoff]-> Host (`RelationType::Other`)             |
 /// | 4688     | Process Create       | User -[Execute]-> Process, Process -[Spawn]-> Process     |
 /// | 4689     | Process Terminated   | Process -[Delete]-> Host                                  |
 /// | 4663     | Object Access        | Process -[Read]-> File/Registry                           |
@@ -318,7 +322,7 @@ impl SysmonJsonParser {
             22 => Self::parse_dns_query(ev, timestamp),
             23 => Self::parse_file_delete(ev, timestamp),
             // Windows Security events
-            4624 | 4625 => Self::parse_security_logon(ev, event_id, timestamp),
+            4624 | 4625 | 4634 | 4647 => Self::parse_security_logon(ev, event_id, timestamp),
             4688 => Self::parse_security_process_create(ev, timestamp),
             4689 => Self::parse_security_process_terminated(ev, timestamp),
             4663 => Self::parse_security_object_access(ev, timestamp),
@@ -772,9 +776,12 @@ impl SysmonJsonParser {
             .or_else(|| Self::extract_str(event, "Hostname"))
             .unwrap_or("unknown-host");
 
-        let user = Entity::new(&user_id, EntityType::User);
+        let (rel_type, user_meta) =
+            Self::logon_family(event_id, Self::extract_str(event, "TargetUserSid"), domain);
+        let mut user = Entity::new(&user_id, EntityType::User);
+        user.metadata.extend(user_meta);
         let host = Entity::new(host_name, EntityType::Host);
-        let mut rel = Relation::new(&user.id, &host.id, RelationType::Auth, timestamp);
+        let mut rel = Relation::new(&user.id, &host.id, rel_type, timestamp);
         if let Some(logon_type) = Self::extract_str(event, "LogonType")
             .or_else(|| event.get("LogonType").and_then(|v| v.as_u64()).map(|_| ""))
         {
@@ -804,15 +811,17 @@ impl SysmonJsonParser {
         // Same values as the Sentinel parser: the OCSF projection reads
         // `status`, and without it a 4625 would look like a logon of
         // unknown outcome.
-        rel.metadata.insert(
-            "status".into(),
-            if event_id == 4625 {
-                "Failure"
-            } else {
-                "Success"
-            }
-            .into(),
-        );
+        if !matches!(event_id, 4634 | 4647) {
+            rel.metadata.insert(
+                "status".into(),
+                if event_id == 4625 {
+                    "Failure"
+                } else {
+                    "Success"
+                }
+                .into(),
+            );
+        }
         vec![(user, rel, host)]
     }
 
@@ -1064,7 +1073,9 @@ impl SysmonJsonParser {
             12 | 13 => Self::typed_registry_event_raw(&event, timestamp),
             15 => Self::typed_file_stream_hash_raw(&event, timestamp),
             23 => Self::typed_file_delete_raw(&event, timestamp),
-            4624 | 4625 => Self::typed_security_logon_raw(&event, event_id, timestamp),
+            4624 | 4625 | 4634 | 4647 => {
+                Self::typed_security_logon_raw(&event, event_id, timestamp)
+            }
             4688 => Self::typed_security_process_create_raw(&event, timestamp),
             4689 => Self::typed_security_process_terminated_raw(&event, timestamp),
             4663 => Self::typed_security_object_access_raw(&event, timestamp),
@@ -1100,7 +1111,7 @@ impl SysmonJsonParser {
             15 => Self::typed_file_stream_hash(&event, timestamp),
             23 => Self::typed_file_delete(&event, timestamp),
             // Windows Security.
-            4624 | 4625 => Self::typed_security_logon(&event, event_id, timestamp),
+            4624 | 4625 | 4634 | 4647 => Self::typed_security_logon(&event, event_id, timestamp),
             4688 => Self::typed_security_process_create(&event, timestamp),
             4689 => Self::typed_security_process_terminated(&event, timestamp),
             4663 => Self::typed_security_object_access(&event, timestamp),
@@ -1675,6 +1686,31 @@ impl SysmonJsonParser {
         }
     }
 
+    /// Logon-family metadata shared by the three 4624/4625/4634/4647 paths.
+    /// User side: the SID (the only exact identity, used by the attack-graph
+    /// projection) and the domain. Relation side: a logoff (4634/4647) is
+    /// not an `Auth` — hunting patterns on `Auth` must not match it — so it
+    /// travels as `Other("Logoff")`; logons keep `Auth` with their outcome.
+    fn logon_family(
+        event_id: u64,
+        sid: Option<&str>,
+        domain: Option<&str>,
+    ) -> (RelationType, std::collections::HashMap<String, String>) {
+        let mut user_meta = std::collections::HashMap::new();
+        if let Some(sid) = sid.filter(|s| !s.is_empty() && *s != "-" && *s != "S-1-0-0") {
+            user_meta.insert("uid".into(), sid.into());
+        }
+        if let Some(d) = domain.filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case("-")) {
+            user_meta.insert("domain".into(), d.into());
+        }
+        let rel = if matches!(event_id, 4634 | 4647) {
+            RelationType::Other("Logoff".into())
+        } else {
+            RelationType::Auth
+        };
+        (rel, user_meta)
+    }
+
     // Raw-event variants for Windows Security + PowerShell EventIDs.
     // Same shape as the Sysmon long-tail raw migrations: skip
     // `Entity`/`Relation` struct allocs, build metadata HashMaps
@@ -1693,6 +1729,8 @@ impl SysmonJsonParser {
         let user_name = event.target_user_name?;
         let user_id = Self::build_user_id(user_name, event.target_domain_name);
         let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
+        let (rel_type, user_meta) =
+            Self::logon_family(event_id, event.target_user_sid, event.target_domain_name);
         let mut rel_meta: HashMap<String, String> = HashMap::new();
         if let Some(lt) = &event.logon_type {
             let s = lt.as_string();
@@ -1711,23 +1749,25 @@ impl SysmonJsonParser {
         // Same values as the Sentinel parser: the OCSF projection reads
         // `status`, and without it a 4625 would look like a logon of
         // unknown outcome.
-        rel_meta.insert(
-            "status".into(),
-            if event_id == 4625 {
-                "Failure"
-            } else {
-                "Success"
-            }
-            .into(),
-        );
+        if !matches!(event_id, 4634 | 4647) {
+            rel_meta.insert(
+                "status".into(),
+                if event_id == 4625 {
+                    "Failure"
+                } else {
+                    "Success"
+                }
+                .into(),
+            );
+        }
         Some(vec![RawIngestEvent {
             src_id: user_id,
             src_type: EntityType::User,
-            src_metadata: HashMap::new(),
+            src_metadata: user_meta,
             dst_id: host_name.into(),
             dst_type: EntityType::Host,
             dst_metadata: HashMap::new(),
-            rel_type: RelationType::Auth,
+            rel_type,
             rel_metadata: rel_meta,
             timestamp,
             raw_line: None,
@@ -1955,9 +1995,12 @@ impl SysmonJsonParser {
         let user_name = event.target_user_name?;
         let user_id = Self::build_user_id(user_name, event.target_domain_name);
         let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
-        let user = Entity::new(&user_id, EntityType::User);
+        let (rel_type, user_meta) =
+            Self::logon_family(event_id, event.target_user_sid, event.target_domain_name);
+        let mut user = Entity::new(&user_id, EntityType::User);
+        user.metadata.extend(user_meta);
         let host = Entity::new(host_name, EntityType::Host);
-        let mut rel = Relation::new(&user.id, &host.id, RelationType::Auth, timestamp);
+        let mut rel = Relation::new(&user.id, &host.id, rel_type, timestamp);
         if let Some(lt) = &event.logon_type {
             let s = lt.as_string();
             if !s.is_empty() {
@@ -1975,15 +2018,17 @@ impl SysmonJsonParser {
         // Same values as the Sentinel parser: the OCSF projection reads
         // `status`, and without it a 4625 would look like a logon of
         // unknown outcome.
-        rel.metadata.insert(
-            "status".into(),
-            if event_id == 4625 {
-                "Failure"
-            } else {
-                "Success"
-            }
-            .into(),
-        );
+        if !matches!(event_id, 4634 | 4647) {
+            rel.metadata.insert(
+                "status".into(),
+                if event_id == 4625 {
+                    "Failure"
+                } else {
+                    "Success"
+                }
+                .into(),
+            );
+        }
         Some(vec![(user, rel, host)])
     }
 

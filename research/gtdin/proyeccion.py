@@ -89,7 +89,8 @@ class Identidades:
         self.sufijo_maquina = tabla.get("machine_account_suffix", "$")
 
     def es_cuenta_de_sistema(self, user: dict) -> bool:
-        nombre = (user.get("name") or "").upper()
+        # `NT AUTHORITY\\SYSTEM`, `CORP\\WS01$`: se juzga la cuenta, no su dominio.
+        nombre = (user.get("name") or "").upper().rsplit("\\", 1)[-1]
         return nombre in self.sistema or nombre.endswith(self.sufijo_maquina)
 
     def usuario(self, user: dict | None) -> str:
@@ -98,12 +99,15 @@ class Identidades:
         if user.get("uid"):
             return user["uid"].upper()  # SID: la única identidad exacta
         nombre = user["name"].strip().lower()
+        dominio = (user.get("domain") or "").strip().upper()
+        if "\\" in nombre:  # NETBIOS\usuario, la forma de los parsers de Windows
+            dom, nombre = nombre.split("\\", 1)
+            dominio = dom.upper()
         if "@" in nombre:
             local, dom = nombre.split("@", 1)
             if dom in self.dns:
                 return f"{local}@{dom}"
             raise NoResuelta("domain_unknown")
-        dominio = (user.get("domain") or "").strip().upper()
         if not dominio:
             raise NoResuelta("domain_missing")
         dns = self.dominios.get(dominio) or (dominio.lower() if dominio.lower() in self.dns else None)

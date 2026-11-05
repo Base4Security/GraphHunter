@@ -218,3 +218,27 @@ fn security_4625_projects_as_failure_with_logon_type() {
         _ => panic!("expected Authentication"),
     }
 }
+
+/// Logoffs and process events with a device stay schema-legal.
+#[test]
+fn logoff_and_process_device_conform() {
+    let schema = compiled_schema();
+    validate(
+        &schema,
+        &project(
+            Entity::new("alice", EntityType::User),
+            Relation::new("alice", "ws-01", RelationType::Other("Logoff".into()), 1),
+            Entity::new("ws-01", EntityType::Host),
+        ),
+    );
+    let mut proc_ = Entity::new("notepad.exe", EntityType::Process);
+    proc_.metadata.insert("computer".into(), "ws-01".into());
+    validate(
+        &schema,
+        &project(
+            Entity::new("alice", EntityType::User),
+            Relation::new("alice", "notepad.exe", RelationType::Execute, 1),
+            proc_,
+        ),
+    );
+}

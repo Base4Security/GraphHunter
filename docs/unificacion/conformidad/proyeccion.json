@@ -772,6 +772,72 @@
           ]
         }
       ]
+    },
+    {
+      "id": "identidad-netbios-barra",
+      "rule": "§6",
+      "note": "los parsers de Windows nombran al usuario DOMINIO\\\\usuario sin campo domain",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e20",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 3002,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "CORP\\alice"
+              },
+              "dst_endpoint": {
+                "hostname": "ws01"
+              },
+              "status": "Success",
+              "logon_type_id": 2
+            }
+          },
+          "expect": [
+            {
+              "op": "Assert",
+              "edge": {
+                "src": "ws01.corp.example",
+                "kind": "HasSession",
+                "dst": "alice@corp.example"
+              },
+              "event_id": "e20",
+              "confidence": "confirmed",
+              "expires_at": 1793086400000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "R8-sistema-con-dominio-excluido",
+      "rule": "R8",
+      "steps": [
+        {
+          "input": {
+            "event_id": "e21",
+            "change": "Insert",
+            "ocsf": {
+              "class_uid": 1007,
+              "activity_id": 1,
+              "time": 1793000000000,
+              "actor_user": {
+                "name": "NT AUTHORITY\\SYSTEM"
+              },
+              "device": {
+                "hostname": "ws01"
+              },
+              "process": {
+                "name": "x.exe"
+              }
+            }
+          },
+          "expect": []
+        }
+      ]
     }
   ]
 }
