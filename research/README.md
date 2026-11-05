@@ -20,6 +20,14 @@ el núcleo del grafo de ataque dinámico (G_t) descrito en `docs/unificacion/`.
 - `gtdin/trampas.py`: trampas de PERIPLO como reglas de detcover (partición de
   nodos), así todos los solvers de detcover deciden reglas y trampas juntos.
 - `gtdin/exp_trampas_goad.py`: reglas solas frente a reglas + trampas en GOADv2.
+- `gtdin/ad/attacker.py`, `gtdin/ad/game.py`: el juego de PERIPLO (mejor
+  respuesta exacta del atacante que junta botín, interdicción visible).
+- `gtdin/puente.py`: instancia de detcover sobre el mismo grafo de PERIPLO y
+  traducción de una defensa de detcover al modelo de PERIPLO.
+- `gtdin/combinado.py`: k trampas que minimizan el botín del atacante de
+  PERIPLO sujeto a la garantía δ de detcover (generación de columnas).
+- `gtdin/exp_cruzado.py` y `gtdin/resumen_cruzado.py`: cada defensa contra los
+  dos atacantes (`resultados/cruzado.csv`).
 - `datos/goad/`: colección BloodHound de GOADv2 (laboratorio público, Unlicense).
 - `gtdin/test_conformidad.py`: corre los casos de
   `docs/unificacion/conformidad/proyeccion.json`; la implementación en Rust

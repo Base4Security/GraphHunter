@@ -33,6 +33,10 @@ NOISE = {
     "T1003.006": 0.1,
     "T1098": 0.3,
     "T1190": 5.0,
+    # Agregadas para el grafo de PERIPLO (ADCS y coerción); mismo carácter de
+    # supuesto sintético que el resto de la tabla.
+    "T1649": 0.2,
+    "T1187": 0.5,
 }
 
 
