@@ -112,9 +112,8 @@ impl<T: Copy + 'static> IndexBacking<T> {
         // Reinterpret the byte buffer as `&mut [T]`.
         // SAFETY: mmap is page-aligned (≥ align_of::<T>() for any
         // realistic T); length matches len * size_of::<T>().
-        let typed: &mut [T] = unsafe {
-            std::slice::from_raw_parts_mut(mmap_mut.as_mut_ptr() as *mut T, len)
-        };
+        let typed: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(mmap_mut.as_mut_ptr() as *mut T, len) };
         // Initialize all rows to `init`. We can't use `vec![init; len]`
         // because that would heap-allocate the very buffer we're trying
         // to keep off-heap; the per-element write is fine since `T: Copy`.

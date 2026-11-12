@@ -117,6 +117,12 @@ export default function DatasetsLeftPanel({
     tookMs: number;
     truncated: boolean;
   } | null>(null);
+  // Fase G: server-side gates for the hunting-templates surface and the
+  // ad-hoc raw-KQL escape hatch. `undefined` means "not checked yet /
+  // older backend" and is treated as visible (default ON), matching the
+  // backend's default-true behavior.
+  const [huntingTemplatesEnabled, setHuntingTemplatesEnabled] = useState<boolean | undefined>(undefined);
+  const [kqlEscapeHatchEnabled, setKqlEscapeHatchEnabled] = useState<boolean | undefined>(undefined);
 
   const [ingestProgress, setIngestProgress] = useState<{
     processed: number;
@@ -341,6 +347,8 @@ export default function DatasetsLeftPanel({
       if (env.azure_resource_group && !azureResourceGroup) setAzureResourceGroup(env.azure_resource_group);
       if (env.azure_workspace_name && !azureWorkspaceName) setAzureWorkspaceName(env.azure_workspace_name);
       // Client secret is not auto-filled for security — env_or fallback handles it on the backend
+      setHuntingTemplatesEnabled(env.hunting_templates_enabled);
+      setKqlEscapeHatchEnabled(env.kql_escape_hatch_enabled);
     }).catch((err) => console.error("cmd_sentinel_check_env:", err));
   }, []);
 
@@ -1070,6 +1078,8 @@ export default function DatasetsLeftPanel({
                   setCustomToIso,
                   onRunHuntingTemplate: runHuntingTemplate,
                   lastKqlSummary,
+                  huntingTemplatesEnabled,
+                  kqlEscapeHatchEnabled,
                 }}
               />
             )}

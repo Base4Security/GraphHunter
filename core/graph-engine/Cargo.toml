@@ -3,7 +3,8 @@ name = "graph_hunter_core"
 version = "1.0.0"
 edition = "2024"
 description = "Graph-based threat hunting engine: temporal knowledge graphs and hypothesis-driven path search"
-license = "GPL-3.0"
+license = "GPL-3.0-only"
+publish = false
 
 [features]
 default = []
@@ -40,7 +41,7 @@ chrono = { version = "0.4", features = ["serde"] }
 rayon = "1"
 ahash = "0.8"
 ordered-float = "4"
-lru = "0.12"
+lru = "0.19"
 tempfile = "3"
 memmap2 = "0.9"
 fs4 = "0.8"
@@ -82,7 +83,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Already present transitively via `plist` → `tauri`, so this is a
 # zero-compile-cost promotion to a direct dependency. Uses the raw
 # event-based Reader API — no `serialize` feature needed.
-quick-xml = "0.38"
+quick-xml = "0.42"
 # MaxMind GeoLite2 offline GeoIP/ASN lookup. Optional: only pulled when the
 # `geoip` feature is enabled. The reader is ~50KB compiled, no network deps.
 maxminddb = { version = "0.28", optional = true }
@@ -104,6 +105,18 @@ graph_hunter_dsl = { path = "../../platform/dsl" }
 mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
+# Dev-only: activates preserve_order for the *test build's* unified feature
+# set (Cargo unifies features across the whole dep graph, dev-deps included).
+# In core's real deploy target (inside platform/api), preserve_order is
+# already ON transitively via evtx — Value::Object becomes an IndexMap that
+# preserves insertion order, not sorted order. Without this dev-dep, core's
+# standalone test build never activates preserve_order, so Value::Object is
+# a plain BTreeMap (already sorted) and a naive/no-op canonicalization would
+# pass canonical_value_string's regression test by accident. This makes the
+# test build match the real deploy target so the test genuinely exercises
+# the non-determinism the function fixes. Dev-only: does not affect the
+# published lib's dependency graph or downstream consumers.
+serde_json = { version = "1", features = ["preserve_order"] }
 # Enables `tokio::time::advance` + `#[tokio::test(start_paused = true)]`
 # for deterministic rate-limiter tests. Only pulled during test builds.
 tokio = { version = "1", features = ["test-util"] }

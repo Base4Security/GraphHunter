@@ -24,10 +24,7 @@ use crate::{ApiError, ApiResult, GraphHunterApi};
 ///
 /// `DedupMode::None` short-circuits: the input is returned unchanged so
 /// the legacy code path is bit-for-bit identical when no dedup is asked.
-fn dedup_arc_paths(
-    paths: Vec<Vec<Arc<str>>>,
-    mode: DedupMode,
-) -> Vec<Vec<Arc<str>>> {
+fn dedup_arc_paths(paths: Vec<Vec<Arc<str>>>, mode: DedupMode) -> Vec<Vec<Arc<str>>> {
     match mode {
         DedupMode::None => paths,
         DedupMode::ByPath => {
@@ -81,14 +78,60 @@ pub(crate) fn ensure_huntable_phase(phase: crate::state::SessionPhase) -> ApiRes
     }
 }
 
-fn live_tail_coverage_for_session(
-    session: &crate::state::Session,
-) -> Option<LiveTailCoverage> {
+fn live_tail_coverage_for_session(session: &crate::state::Session) -> Option<LiveTailCoverage> {
     if session.phase() != crate::state::SessionPhase::LiveTail {
         return None;
     }
     let graph = session.graph.read().ok()?;
     graph.live_tail_coverage("live_tail")
+}
+
+/// Build the [`crate::coverage::AnswerCoverage`] for a session: reads
+/// the session's `IngestCoverage`, the graph's edge-timestamp span
+/// (Fase F Task 1 `GraphHunter::edge_timestamp_range`), and the
+/// per-source watermark/breaker snapshot (Fase F Task 3
+/// `SourceCoverage::snapshot`), then folds all three into
+/// `answer_coverage`. Factored out so both `run_hunt`'s single-query
+/// call site and every `run_hunt_batch` entry-construction path
+/// (fast/cache paths included) populate `coverage` from the same real
+/// session state rather than duplicating the 3 reads per site.
+///
+/// With `GRAPHHUNTER_COVERAGE` off this is a true no-op: it returns the
+/// all-clear default *before* touching any lock or scanning the graph.
+/// `edge_timestamp_range()` is an O(E) full edge scan (not a cheap
+/// lock read like the other two), so a batch of N hypotheses must not
+/// pay for N scans just to have `answer_coverage` throw the result away
+/// afterward — a prior phase explicitly rejected exactly that per-query
+/// tax. Flag-on keeps paying the O(E) cost (accepted tradeoff, disclosed
+/// in `coverage_enabled`'s doc).
+fn session_answer_coverage(
+    session: &crate::state::Session,
+) -> ApiResult<crate::coverage::AnswerCoverage> {
+    if !crate::coverage::coverage_enabled() {
+        return Ok(crate::coverage::AnswerCoverage::default());
+    }
+    let ic = session
+        .ingest_coverage
+        .read()
+        .map_err(|e| ApiError::Internal(format!("ingest_coverage lock poisoned: {e}")))?;
+    let (source_watermarks, missing_sources) = session
+        .source_coverage
+        .read()
+        .map_err(|e| ApiError::Internal(format!("source_coverage lock poisoned: {e}")))?
+        .snapshot();
+    let (edge_ts_min, edge_ts_max) = session
+        .graph
+        .read()
+        .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?
+        .edge_timestamp_range()
+        .map_or((None, None), |(min, max)| (Some(min), Some(max)));
+    Ok(crate::coverage::answer_coverage(
+        &ic,
+        edge_ts_min,
+        edge_ts_max,
+        source_watermarks,
+        missing_sources,
+    ))
 }
 
 impl GraphHunterApi {
@@ -158,19 +201,11 @@ impl GraphHunterApi {
             };
             if use_smart {
                 graph
-                    .search_temporal_pattern_smart(
-                        &req.hypothesis,
-                        req.time_window,
-                        max_results,
-                    )
+                    .search_temporal_pattern_smart(&req.hypothesis, req.time_window, max_results)
                     .map_err(|e| ApiError::Internal(format!("search failed: {e}")))?
             } else {
                 graph
-                    .search_temporal_pattern(
-                        &req.hypothesis,
-                        req.time_window,
-                        Some(max_results),
-                    )
+                    .search_temporal_pattern(&req.hypothesis, req.time_window, Some(max_results))
                     .map_err(|e| ApiError::Internal(format!("search failed: {e}")))?
             }
         };
@@ -197,13 +232,29 @@ impl GraphHunterApi {
         // Zero-match diagnostic: read-only schema probe so the analyst
         // knows whether the hypothesis direction / type was plausible at
         // all. Skipped on non-zero to avoid the cost in the happy path.
-        let diagnostic = if path_count == 0 {
+        // The two opposite failure modes, each probed only in the branch
+        // where it can occur: zero paths may mean the pattern is
+        // structurally impossible against this graph, while a large
+        // result set may mean it matches most of the population and
+        // discriminates nothing.
+        let (diagnostic, non_discriminating) = if path_count == 0 {
             let graph = session.graph.read().ok();
-            graph.map(|g| g.hunt_diagnostic(&req.hypothesis))
+            (graph.map(|g| g.hunt_diagnostic(&req.hypothesis)), None)
         } else {
-            None
+            let flag = session.graph.read().ok().and_then(|g| {
+                crate::operations::precision::assess(&req.hypothesis, &paths, truncated, &g)
+            });
+            (None, flag)
         };
         let live_tail_coverage = live_tail_coverage_for_session(&session);
+
+        // Completeness metadata (design spec §17): `IngestCoverage` +
+        // the graph's edge-timestamp span (Fase F Task 1) + the
+        // session's `SourceCoverage` snapshot (Fase F Task 3), folded
+        // together by `session_answer_coverage` (also used by every
+        // `run_hunt_batch` entry so both response shapes see the same
+        // real values).
+        let coverage = session_answer_coverage(&session)?;
 
         // Publish to the shared cache so get_hunt_page can serve it.
         let mut cache = self
@@ -221,6 +272,8 @@ impl GraphHunterApi {
                 truncated,
                 diagnostic,
                 live_tail_coverage,
+                coverage,
+                non_discriminating,
             })
         } else {
             *cache = paths;
@@ -230,6 +283,8 @@ impl GraphHunterApi {
                 truncated,
                 diagnostic,
                 live_tail_coverage,
+                coverage,
+                non_discriminating,
             })
         }
     }
@@ -294,10 +349,7 @@ impl GraphHunterApi {
     /// The batch returns `(entries, indexes_were_warm)` so callers
     /// can distinguish "first batch, expect a build" from "warm
     /// batch, every entry is fast".
-    pub fn run_hunt_batch(
-        &self,
-        req: RunHuntBatchRequest,
-    ) -> ApiResult<RunHuntBatchResponse> {
+    pub fn run_hunt_batch(&self, req: RunHuntBatchRequest) -> ApiResult<RunHuntBatchResponse> {
         let RunHuntBatchRequest {
             session,
             hypotheses,
@@ -357,8 +409,7 @@ impl GraphHunterApi {
         // existing per-call run_hunt — they materialize their
         // own bags inside the matcher and don't benefit from
         // the cache, but they also don't pay any extra cost.
-        let (t_lo_window, t_hi_window) =
-            time_window.unwrap_or((i64::MIN, i64::MAX));
+        let (t_lo_window, t_hi_window) = time_window.unwrap_or((i64::MIN, i64::MAX));
         let mut bag_cache: std::collections::HashMap<
             String,
             std::sync::Arc<graph_hunter_core::yannakakis::Bag>,
@@ -400,7 +451,7 @@ impl GraphHunterApi {
         const PREFIX_CACHE_CAP: usize = 50_000;
         let mut prefix_cache: std::collections::HashMap<
             String,
-            std::sync::Arc<Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>>,
+            std::sync::Arc<crate::state::session::PrefixSnapshot>,
         > = std::collections::HashMap::new();
         let mut last_prefix_resume_depth: usize = 0;
         let mut prefix_cache_hits: usize = 0;
@@ -438,8 +489,7 @@ impl GraphHunterApi {
             // entry with a higher cap is still valid for a lower
             // cap (truncate on the way out).
             let result_cache_key = {
-                let hypo_json =
-                    serde_json::to_string(&hypothesis).unwrap_or_default();
+                let hypo_json = serde_json::to_string(&hypothesis).unwrap_or_default();
                 format!("{hypo_json}|{t_lo_window}|{t_hi_window}")
             };
             if let Some(cached) = result_cache.get(&result_cache_key) {
@@ -460,14 +510,27 @@ impl GraphHunterApi {
             // in the batch. Yannakakis still wins for α-acyclic chains
             // and is checked below; if neither LFTJ nor Yannakakis
             // applies, the per-call `run_hunt` branch handles it.
+            // Temporal tolerances must survive the batch path too.
+            // `GraphHunter::search_temporal_pattern` refuses to route a
+            // hypothesis with skew δ>0 or gap g>0 to an LFTJ/Yannakakis
+            // operator, because those enumerators enforce strict
+            // monotonicity in their join structure and would silently
+            // ignore the tolerance — returning a STRICTER set than the
+            // analyst asked for. This batch entry point called the
+            // planner directly and skipped that guard, so a δ- or
+            // gap-bearing hypothesis lost its tolerance here while the
+            // single-hunt path honored it. Same guard, same reason.
+            let temporal_tolerance_active =
+                hypothesis.resolve_skew_delta() > 0 || hypothesis.resolve_max_gap() > 0;
             let lftj_plan = graph_hunter_core::planner::plan(&hypothesis);
-            let lftj_routed = matches!(
-                lftj_plan,
-                graph_hunter_core::planner::DispatchPlan::TriangleLftj
-                    | graph_hunter_core::planner::DispatchPlan::K4Lftj
-                    | graph_hunter_core::planner::DispatchPlan::K5Lftj
-                    | graph_hunter_core::planner::DispatchPlan::C6Lftj
-            );
+            let lftj_routed = !temporal_tolerance_active
+                && matches!(
+                    lftj_plan,
+                    graph_hunter_core::planner::DispatchPlan::TriangleLftj
+                        | graph_hunter_core::planner::DispatchPlan::K4Lftj
+                        | graph_hunter_core::planner::DispatchPlan::K5Lftj
+                        | graph_hunter_core::planner::DispatchPlan::C6Lftj
+                );
             if lftj_routed {
                 let session_for_lftj = self.resolve_session(session.as_ref())?;
                 let graph = session_for_lftj
@@ -496,12 +559,11 @@ impl GraphHunterApi {
                 // mutated since last write). Allocates a fresh empty
                 // typed_tries + canonical_results map at the new
                 // version stamp.
-                let cache_was_warm =
-                    cache_lock.as_ref().is_some_and(|c| c.version == live_version);
+                let cache_was_warm = cache_lock
+                    .as_ref()
+                    .is_some_and(|c| c.version == live_version);
                 if !cache_was_warm {
-                    *cache_lock = Some(crate::state::session::LftjSessionCache::new(
-                        live_version,
-                    ));
+                    *cache_lock = Some(crate::state::session::LftjSessionCache::new(live_version));
                 } else {
                     lftj_session_cache_reused = true;
                 }
@@ -521,8 +583,11 @@ impl GraphHunterApi {
                         None => paths,
                     };
                     let path_count = paths.len();
-                    let inline =
-                        if path_count <= 100 { paths.clone() } else { Vec::new() };
+                    let inline = if path_count <= 100 {
+                        paths.clone()
+                    } else {
+                        Vec::new()
+                    };
                     if let Ok(mut hc) = self.inner.hunt_cache.write() {
                         *hc = paths;
                     }
@@ -532,6 +597,7 @@ impl GraphHunterApi {
                         truncated,
                         diagnostic: None,
                         live_tail_coverage: batch_live_tail_coverage.clone(),
+                        coverage: session_answer_coverage(&session_handle)?,
                         error: None,
                     };
                     result_cache.insert(result_cache_key, entry.clone());
@@ -554,9 +620,8 @@ impl GraphHunterApi {
                     }
                 } else {
                     let trie = graph.build_lftj_trie_for(&hypothesis);
-                    let ts_map = graph_hunter_core::lftj_query::MinTimestampMap::build(
-                        &*graph, &trie,
-                    );
+                    let ts_map =
+                        graph_hunter_core::lftj_query::MinTimestampMap::build(&graph, &trie);
                     let entry = crate::state::session::LftjTypedTrie {
                         forward: std::sync::Arc::new(trie),
                         ts_map: std::sync::Arc::new(ts_map),
@@ -576,29 +641,27 @@ impl GraphHunterApi {
 
                 // C6 needs the reverse trie. Build lazily and
                 // populate the typed_tries entry if absent.
-                let reverse = if matches!(
-                    lftj_plan,
-                    graph_hunter_core::planner::DispatchPlan::C6Lftj
-                ) {
-                    if let Some(r) = typed_trie.reverse.clone() {
-                        Some(r)
-                    } else if let Some(r) = cache
-                        .typed_tries
-                        .get(&type_sig)
-                        .and_then(|e| e.reverse.clone())
-                    {
-                        Some(r)
-                    } else {
-                        let rev = graph.build_lftj_reverse_trie_for(&hypothesis);
-                        let arc = std::sync::Arc::new(rev);
-                        if let Some(slot) = cache.typed_tries.get_mut(&type_sig) {
-                            slot.reverse = Some(arc.clone());
+                let reverse =
+                    if matches!(lftj_plan, graph_hunter_core::planner::DispatchPlan::C6Lftj) {
+                        if let Some(r) = typed_trie.reverse.clone() {
+                            Some(r)
+                        } else if let Some(r) = cache
+                            .typed_tries
+                            .get(&type_sig)
+                            .and_then(|e| e.reverse.clone())
+                        {
+                            Some(r)
+                        } else {
+                            let rev = graph.build_lftj_reverse_trie_for(&hypothesis);
+                            let arc = std::sync::Arc::new(rev);
+                            if let Some(slot) = cache.typed_tries.get_mut(&type_sig) {
+                                slot.reverse = Some(arc.clone());
+                            }
+                            Some(arc)
                         }
-                        Some(arc)
-                    }
-                } else {
-                    None
-                };
+                    } else {
+                        None
+                    };
 
                 let trie = typed_trie.forward.clone();
                 let ts_map = typed_trie.ts_map.clone();
@@ -611,23 +674,44 @@ impl GraphHunterApi {
                 let raw = match lftj_plan {
                     graph_hunter_core::planner::DispatchPlan::TriangleLftj => {
                         graph_hunter_core::lftj_query::enumerate_triangles_lftj_simd_window(
-                            &*graph, &trie, &ts_map, t_lo_window, t_hi_window, cap,
+                            &graph,
+                            &trie,
+                            &ts_map,
+                            t_lo_window,
+                            t_hi_window,
+                            cap,
                         )
                     }
                     graph_hunter_core::planner::DispatchPlan::K4Lftj => {
                         graph_hunter_core::lftj_query::enumerate_4cliques_lftj_simd_par(
-                            &*graph, &trie, &ts_map, t_lo_window, t_hi_window, cap,
+                            &graph,
+                            &trie,
+                            &ts_map,
+                            t_lo_window,
+                            t_hi_window,
+                            cap,
                         )
                     }
                     graph_hunter_core::planner::DispatchPlan::K5Lftj => {
                         graph_hunter_core::lftj_query::enumerate_5cliques_lftj_simd_par(
-                            &*graph, &trie, &ts_map, t_lo_window, t_hi_window, cap,
+                            &graph,
+                            &trie,
+                            &ts_map,
+                            t_lo_window,
+                            t_hi_window,
+                            cap,
                         )
                     }
                     graph_hunter_core::planner::DispatchPlan::C6Lftj => {
                         let rev = reverse.expect("C6 path built reverse above");
                         graph_hunter_core::lftj_query::enumerate_6cycles_lftj_simd_par(
-                            &*graph, &trie, &rev, &ts_map, t_lo_window, t_hi_window, cap,
+                            &graph,
+                            &trie,
+                            &rev,
+                            &ts_map,
+                            t_lo_window,
+                            t_hi_window,
+                            cap,
                         )
                     }
                     _ => unreachable!("filtered above"),
@@ -635,12 +719,11 @@ impl GraphHunterApi {
                 let raw_paths = std::sync::Arc::new(raw);
 
                 // Insert into the persistent canonical cache.
-                if let Ok(mut cache_lock) = session_for_lftj.lftj_cache.write() {
-                    if let Some(cache) = cache_lock.as_mut() {
-                        if cache.version == live_version {
-                            cache.insert_canonical(canonical_key, raw_paths.clone());
-                        }
-                    }
+                if let Ok(mut cache_lock) = session_for_lftj.lftj_cache.write()
+                    && let Some(cache) = cache_lock.as_mut()
+                    && cache.version == live_version
+                {
+                    cache.insert_canonical(canonical_key, raw_paths.clone());
                 }
                 let truncated = raw_paths.len() >= cap;
                 // Apply per-hypothesis aggregation (HAVING / WITHIN)
@@ -656,8 +739,11 @@ impl GraphHunterApi {
                 };
 
                 let path_count = paths.len();
-                let inline =
-                    if path_count <= 100 { paths.clone() } else { Vec::new() };
+                let inline = if path_count <= 100 {
+                    paths.clone()
+                } else {
+                    Vec::new()
+                };
                 if let Ok(mut cache) = self.inner.hunt_cache.write() {
                     *cache = paths;
                 }
@@ -667,6 +753,7 @@ impl GraphHunterApi {
                     truncated,
                     diagnostic: None,
                     live_tail_coverage: batch_live_tail_coverage.clone(),
+                    coverage: session_answer_coverage(&session_handle)?,
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -680,15 +767,23 @@ impl GraphHunterApi {
             // the dispatch needs the env flag check anyway, and the
             // planner is graph-internal; mirror its yannakakis_dispatch
             // logic here for the routing decision.
-            let yannakakis_ok =
-                std::env::var("GRAPHHUNTER_YANNAKAKIS")
+            //
+            // Note the hazard this mirroring creates: because the check
+            // is a COPY of `planner::yannakakis_dispatch` rather than a
+            // call to it, the two drift independently. It had already
+            // drifted — the core matcher refuses to route a hypothesis
+            // carrying skew δ>0 or gap g>0 to Yannakakis (that operator
+            // enforces strict monotonicity and would silently drop the
+            // tolerance), and this copy did not. Same guard, restored.
+            let yannakakis_ok = !temporal_tolerance_active
+                && std::env::var("GRAPHHUNTER_YANNAKAKIS")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false)
-                    && !hypothesis.steps.is_empty()
-                    && {
-                        let g = graph_hunter_core::yannakakis::Hypergraph::of(&hypothesis);
-                        graph_hunter_core::yannakakis::is_alpha_acyclic(&g)
-                    };
+                && !hypothesis.steps.is_empty()
+                && {
+                    let g = graph_hunter_core::yannakakis::Hypergraph::of(&hypothesis);
+                    graph_hunter_core::yannakakis::is_alpha_acyclic(&g)
+                };
 
             if yannakakis_ok {
                 // Materialize bags via the shared cache.
@@ -700,9 +795,7 @@ impl GraphHunterApi {
                 let step_fingerprints: Vec<String> = hypothesis
                     .steps
                     .iter()
-                    .map(|step| {
-                        serde_json::to_string(step).unwrap_or_default()
-                    })
+                    .map(|step| serde_json::to_string(step).unwrap_or_default())
                     .collect();
                 // D3 stage 5 — try the persistent session bag
                 // cache before the per-batch one. Session cache is
@@ -727,19 +820,20 @@ impl GraphHunterApi {
                             return (**arc).clone();
                         }
                         // Persistent session cache lookup.
-                        let session_hit = session_for_bags
-                            .yannakakis_cache
-                            .read()
-                            .ok()
-                            .and_then(|cache| {
-                                cache.as_ref().and_then(|c| {
-                                    if c.version == live_version {
-                                        c.bags.get(&key).cloned()
-                                    } else {
-                                        None
-                                    }
-                                })
-                            });
+                        let session_hit =
+                            session_for_bags
+                                .yannakakis_cache
+                                .read()
+                                .ok()
+                                .and_then(|cache| {
+                                    cache.as_ref().and_then(|c| {
+                                        if c.version == live_version {
+                                            c.bags.get(&key).cloned()
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                });
                         if let Some(arc) = session_hit {
                             bag_cache_hits += 1;
                             yannakakis_persistent_bag_hits += 1;
@@ -761,9 +855,7 @@ impl GraphHunterApi {
                         // it if the graph mutated since last batch).
                         if let Ok(mut slot) = session_for_bags.yannakakis_cache.write() {
                             let cache = slot.get_or_insert_with(|| {
-                                crate::state::session::YannakakisSessionCache::new(
-                                    live_version,
-                                )
+                                crate::state::session::YannakakisSessionCache::new(live_version)
                             });
                             if cache.version != live_version {
                                 *cache = crate::state::session::YannakakisSessionCache::new(
@@ -783,8 +875,7 @@ impl GraphHunterApi {
                 // the tree-walk enumerator which doesn't have a
                 // chain-prefix concept yet.
                 let mut resume_depth = 0usize;
-                let mut resume_starting:
-                    std::sync::Arc<Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>> =
+                let mut resume_starting: std::sync::Arc<crate::state::session::PrefixSnapshot> =
                     std::sync::Arc::new(Vec::new());
                 if matches!(
                     hypothesis.shape,
@@ -800,22 +891,16 @@ impl GraphHunterApi {
                     // hypotheses benefit too.
                     let max_depth = hypothesis.steps.len().saturating_sub(1);
                     for depth in (1..=max_depth).rev() {
-                        let prefix_key = build_prefix_key(
-                            &step_fingerprints[..depth],
-                            t_lo_window,
-                            t_hi_window,
-                        );
+                        let prefix_key =
+                            build_prefix_key(&step_fingerprints[..depth], t_lo_window, t_hi_window);
                         if let Some(snapshot) = prefix_cache.get(&prefix_key) {
                             resume_depth = depth;
                             resume_starting = snapshot.clone();
                             prefix_cache_hits += 1;
                             break;
                         }
-                        let session_hit = session_for_bags
-                            .yannakakis_cache
-                            .read()
-                            .ok()
-                            .and_then(|c| {
+                        let session_hit =
+                            session_for_bags.yannakakis_cache.read().ok().and_then(|c| {
                                 c.as_ref().and_then(|y| {
                                     if y.version == live_version {
                                         y.prefixes.get(&prefix_key).cloned()
@@ -855,11 +940,8 @@ impl GraphHunterApi {
                     // already cached). Cap each snapshot at
                     // PREFIX_CACHE_CAP entries to bound memory.
                     for depth in 1..hypothesis.steps.len() {
-                        let prefix_key = build_prefix_key(
-                            &step_fingerprints[..depth],
-                            t_lo_window,
-                            t_hi_window,
-                        );
+                        let prefix_key =
+                            build_prefix_key(&step_fingerprints[..depth], t_lo_window, t_hi_window);
                         if prefix_cache.contains_key(&prefix_key) {
                             continue;
                         }
@@ -877,9 +959,7 @@ impl GraphHunterApi {
                             // cache (resets on graph version mismatch).
                             if let Ok(mut slot) = session_for_bags.yannakakis_cache.write() {
                                 let cache = slot.get_or_insert_with(|| {
-                                    crate::state::session::YannakakisSessionCache::new(
-                                        live_version,
-                                    )
+                                    crate::state::session::YannakakisSessionCache::new(live_version)
                                 });
                                 if cache.version != live_version {
                                     *cache = crate::state::session::YannakakisSessionCache::new(
@@ -907,7 +987,11 @@ impl GraphHunterApi {
                     None => paths,
                 };
                 let path_count = paths.len();
-                let inline = if path_count <= 100 { paths.clone() } else { Vec::new() };
+                let inline = if path_count <= 100 {
+                    paths.clone()
+                } else {
+                    Vec::new()
+                };
                 // Update the shared hunt cache so cmd_get_hunt_page
                 // sees the most recent batch entry's results.
                 if let Ok(mut cache) = self.inner.hunt_cache.write() {
@@ -919,6 +1003,7 @@ impl GraphHunterApi {
                     truncated,
                     diagnostic: None,
                     live_tail_coverage: batch_live_tail_coverage.clone(),
+                    coverage: session_answer_coverage(&session_handle)?,
                     error: None,
                 };
                 result_cache.insert(result_cache_key, entry.clone());
@@ -944,6 +1029,7 @@ impl GraphHunterApi {
                         truncated: resp.truncated,
                         diagnostic: resp.diagnostic,
                         live_tail_coverage: resp.live_tail_coverage,
+                        coverage: resp.coverage,
                         error: None,
                     },
                     Err(e) => RunHuntBatchEntry {
@@ -952,6 +1038,7 @@ impl GraphHunterApi {
                         truncated: false,
                         diagnostic: None,
                         live_tail_coverage: batch_live_tail_coverage.clone(),
+                        coverage: crate::coverage::AnswerCoverage::default(),
                         error: Some(e.to_string()),
                     },
                 };
@@ -1175,6 +1262,196 @@ mod tests {
             .expect("Structural override after Anomaly must not error");
     }
 
+    /// `RunHuntResponse.coverage` reflects the session's `IngestCoverage`
+    /// when `GRAPHHUNTER_COVERAGE` is on: a session marked incomplete
+    /// by a prior ingest (`stopped_early = true`) produces
+    /// `coverage.possibly_incomplete == true` on the next `run_hunt`.
+    /// Wiring check for Task 5 (completeness_flag) — end-to-end through
+    /// `answer_coverage`, not just the DTO default.
+    #[test]
+    fn run_hunt_coverage_flag_on_reflects_incomplete_session() {
+        let _env_guard = lock_env();
+        let prior = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "1") };
+
+        let api = api();
+        if let Some(session) = api.sessions().current_session() {
+            session
+                .ingest_coverage
+                .write()
+                .unwrap()
+                .observe(true, false);
+        } else {
+            panic!("test harness session must exist");
+        }
+
+        let resp = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: None,
+                dedup_mode: None,
+            })
+            .expect("run_hunt should not error");
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
+        }
+
+        assert!(
+            resp.coverage.possibly_incomplete,
+            "session with stopped_early=true must mark the answer possibly_incomplete"
+        );
+        assert!(
+            resp.coverage
+                .incomplete_reasons
+                .iter()
+                .any(|r| r.contains("stopped_early"))
+        );
+    }
+
+    /// With `GRAPHHUNTER_COVERAGE` off (default), `run_hunt` never marks
+    /// the answer — even on a session whose ingest stopped early. Pins
+    /// the "flag off = no behavior change" contract from the brief.
+    #[test]
+    fn run_hunt_coverage_flag_off_stays_clear_even_if_session_incomplete() {
+        let _env_guard = lock_env();
+        let prior = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        // Coverage now defaults ON; exercise the explicit-off path.
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "0") };
+
+        let api = api();
+        if let Some(session) = api.sessions().current_session() {
+            session
+                .ingest_coverage
+                .write()
+                .unwrap()
+                .observe(true, false);
+        }
+
+        let resp = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: None,
+                dedup_mode: None,
+            })
+            .expect("run_hunt should not error");
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
+        }
+
+        assert!(!resp.coverage.possibly_incomplete);
+        assert!(resp.coverage.coverage_start.is_none());
+    }
+
+    /// `session_answer_coverage` itself (not just the `run_hunt` wrapper)
+    /// is a true no-op when `GRAPHHUNTER_COVERAGE` is off: it must return
+    /// the all-clear default without needing the graph's edge-timestamp
+    /// scan or the ingest/source-coverage lock reads to produce anything
+    /// meaningful — even on a session whose ingest is marked incomplete
+    /// and whose source_coverage has a missing source, the flag-off
+    /// result is indistinguishable from a pristine session. Pins the
+    /// perf fix: flag-off must skip the O(E) `edge_timestamp_range()`
+    /// scan entirely rather than compute-then-discard it.
+    #[test]
+    fn session_answer_coverage_flag_off_is_default_no_op() {
+        let _env_guard = lock_env();
+        let prior = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        // Coverage now defaults ON; exercise the explicit-off path.
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "0") };
+
+        let api = api();
+        let session = api
+            .sessions()
+            .current_session()
+            .expect("test harness session must exist");
+        session
+            .ingest_coverage
+            .write()
+            .unwrap()
+            .observe(true, false);
+        session
+            .source_coverage
+            .write()
+            .unwrap()
+            .record_missing("xdr:tenant");
+
+        let coverage = session_answer_coverage(&session).expect("must not error");
+
+        match prior {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
+        }
+
+        assert_eq!(coverage, crate::coverage::AnswerCoverage::default());
+    }
+
+    /// `RunHuntResponse.coverage` also carries the session's
+    /// `SourceCoverage` snapshot (Fase F Task 3/5): a source with an
+    /// open breaker + `record_missing` shows up in `missing_sources`,
+    /// and a source with a recorded watermark shows up in
+    /// `source_watermarks`. Wiring check that `run_hunt` reads
+    /// `session.source_coverage` — not just `session.ingest_coverage`
+    /// — when building the answer's coverage.
+    #[test]
+    fn run_hunt_answer_carries_missing_sources_when_breaker_open() {
+        let _env_guard = lock_env();
+        let prior_coverage = std::env::var("GRAPHHUNTER_COVERAGE").ok();
+        let prior_source_coverage = std::env::var("GRAPHHUNTER_SOURCE_COVERAGE").ok();
+        unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", "1") };
+        unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", "1") };
+
+        let api = api();
+        let session = api
+            .sessions()
+            .current_session()
+            .expect("test harness session must exist");
+        {
+            let mut sc = session.source_coverage.write().unwrap();
+            sc.record_covered("la:ws", 500);
+            for _ in 0..5 {
+                sc.record_failure("xdr:tenant", 5);
+            }
+            sc.record_missing("xdr:tenant");
+        }
+
+        let resp = api
+            .run_hunt(RunHuntRequest {
+                session: None,
+                hypothesis: hypo("User -[Auth]-> Host"),
+                time_window: None,
+                max_results: None,
+                scoring: None,
+                dedup_mode: None,
+            })
+            .expect("run_hunt should not error");
+
+        match prior_coverage {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_COVERAGE") },
+        }
+        match prior_source_coverage {
+            Some(v) => unsafe { std::env::set_var("GRAPHHUNTER_SOURCE_COVERAGE", v) },
+            None => unsafe { std::env::remove_var("GRAPHHUNTER_SOURCE_COVERAGE") },
+        }
+
+        assert!(
+            resp.coverage
+                .missing_sources
+                .contains(&"xdr:tenant".to_string())
+        );
+        assert_eq!(resp.coverage.source_watermarks.get("la:ws"), Some(&500));
+        assert!(resp.coverage.possibly_incomplete);
+    }
+
     #[test]
     fn run_hunt_empty_graph_returns_zero_with_diagnostic() {
         let api = api();
@@ -1254,7 +1531,11 @@ mod tests {
             .expect("batch should not error on empty graph");
         assert_eq!(resp.entries.len(), 3);
         for entry in &resp.entries {
-            assert!(entry.error.is_none(), "individual hypothesis errored: {:?}", entry.error);
+            assert!(
+                entry.error.is_none(),
+                "individual hypothesis errored: {:?}",
+                entry.error
+            );
             assert_eq!(entry.path_count, 0);
         }
     }
@@ -1331,7 +1612,10 @@ mod tests {
         // and distinct second steps. Across both: 4 step
         // materialization requests, of which 1 is the cached
         // duplicate of the first step.
-        assert_eq!(resp.bag_cache_hits, 1, "duplicate User-Auth-Host step should hit cache");
+        assert_eq!(
+            resp.bag_cache_hits, 1,
+            "duplicate User-Auth-Host step should hit cache"
+        );
         assert_eq!(resp.bag_cache_misses, 3, "3 distinct step fingerprints");
     }
 
@@ -1378,9 +1662,7 @@ mod tests {
         let _b1 = api
             .run_hunt_batch(RunHuntBatchRequest {
                 session: None,
-                hypotheses: vec![hypo(
-                    "User -[Auth]-> Host -[Connect]-> IP -[DNS]-> Domain",
-                )],
+                hypotheses: vec![hypo("User -[Auth]-> Host -[Connect]-> IP -[DNS]-> Domain")],
                 time_window: None,
                 max_results: None,
                 dedup_mode: None,
@@ -1392,9 +1674,7 @@ mod tests {
         let b2 = api
             .run_hunt_batch(RunHuntBatchRequest {
                 session: None,
-                hypotheses: vec![hypo(
-                    "User -[Auth]-> Host -[Connect]-> IP -[Modify]-> File",
-                )],
+                hypotheses: vec![hypo("User -[Auth]-> Host -[Connect]-> IP -[Modify]-> File")],
                 time_window: None,
                 max_results: None,
                 dedup_mode: None,
@@ -1899,10 +2179,7 @@ mod tests {
         let resp = api
             .run_hunt_batch(RunHuntBatchRequest {
                 session: None,
-                hypotheses: vec![
-                    hypo("User -[Auth]-> Host"),
-                    hypo("Host -[Connect]-> IP"),
-                ],
+                hypotheses: vec![hypo("User -[Auth]-> Host"), hypo("Host -[Connect]-> IP")],
                 time_window: None,
                 max_results: None,
                 dedup_mode: None,

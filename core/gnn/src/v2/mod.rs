@@ -52,9 +52,15 @@ mod tests {
 
     fn write_pair(dir: &Path, stem: &str, json: &str) -> std::path::PathBuf {
         let onnx = dir.join(format!("{stem}.onnx"));
-        std::fs::File::create(&onnx).unwrap().write_all(b"\x00").unwrap();
+        std::fs::File::create(&onnx)
+            .unwrap()
+            .write_all(b"\x00")
+            .unwrap();
         let meta = dir.join(format!("{stem}.metadata.json"));
-        std::fs::File::create(&meta).unwrap().write_all(json.as_bytes()).unwrap();
+        std::fs::File::create(&meta)
+            .unwrap()
+            .write_all(json.as_bytes())
+            .unwrap();
         onnx
     }
 
@@ -111,6 +117,9 @@ mod tests {
 
     #[test]
     fn shape_sanity() {
-        let _ = TensorShape { k_max: 32, d_node: 16 };
+        let _ = TensorShape {
+            k_max: 32,
+            d_node: 16,
+        };
     }
 }

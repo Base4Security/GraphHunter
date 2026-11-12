@@ -1,10 +1,10 @@
 //! Invariant-check endpoints (current graph + hypothetical dry-run).
 
 use axum::{
+    Json,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -27,12 +27,13 @@ pub(super) async fn handler_check_invariants(
         session: None,
         dataset_id: body.dataset_id,
     }) {
-        Ok(report) => ok_json(serde_json::to_value(&report).unwrap_or_else(|_| {
-            serde_json::json!({ "error": "serialize invariant report" })
-        })),
+        Ok(report) => ok_json(
+            serde_json::to_value(&report)
+                .unwrap_or_else(|_| serde_json::json!({ "error": "serialize invariant report" })),
+        ),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }

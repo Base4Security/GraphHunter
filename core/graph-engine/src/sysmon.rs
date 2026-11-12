@@ -9,7 +9,7 @@ use crate::types::{EntityType, RelationType};
 
 /// Typed Sysmon event row used by the direct-typed fast path
 /// (`SysmonJsonParser::try_parse_typed_with_scratch`). Every field is `Option`
-/// + `borrow`ed from the input scratch buffer for zero-copy
+/// and `borrow`ed from the input scratch buffer for zero-copy
 /// deserialization through `simd_json::serde::from_slice`. The
 /// fields cover the union of what every implemented EventID needs
 /// — fields not relevant to the active EventID stay `None` and
@@ -271,14 +271,13 @@ impl SysmonJsonParser {
                 merged.insert(k.clone(), v.clone());
             }
             // Propagate hostname variants
-            if !merged.contains_key("Computer") {
-                if let Some(host) = event
+            if !merged.contains_key("Computer")
+                && let Some(host) = event
                     .get("computer_name")
                     .or_else(|| event.get("Hostname"))
                     .or_else(|| event.get("host_name"))
-                {
-                    merged.insert("Computer".to_string(), host.clone());
-                }
+            {
+                merged.insert("Computer".to_string(), host.clone());
             }
             Some((event_id, std::borrow::Cow::Owned(Value::Object(merged))))
         } else {
@@ -794,10 +793,10 @@ impl SysmonJsonParser {
             }
             let _ = logon_type; // used above
         }
-        if let Some(ip) = Self::extract_str(event, "IpAddress") {
-            if ip != "-" {
-                rel.metadata.insert("ip_address".into(), ip.into());
-            }
+        if let Some(ip) = Self::extract_str(event, "IpAddress")
+            && ip != "-"
+        {
+            rel.metadata.insert("ip_address".into(), ip.into());
         }
         if event_id == 4625 {
             rel.metadata.insert("success".into(), "false".into());
@@ -1145,6 +1144,7 @@ impl SysmonJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         if let Some(parent_image) = event.parent_image {
@@ -1167,6 +1167,7 @@ impl SysmonJsonParser {
                 rel_type: RelationType::Spawn,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         Some(events)
@@ -1191,8 +1192,7 @@ impl SysmonJsonParser {
         }
         if let Some(user_name) = event.user {
             let user_entity = Entity::new(user_name, EntityType::User);
-            let rel =
-                Relation::new(&user_entity.id, &child.id, RelationType::Execute, timestamp);
+            let rel = Relation::new(&user_entity.id, &child.id, RelationType::Execute, timestamp);
             triples.push((user_entity, rel, child.clone()));
         }
         if let Some(parent_image) = event.parent_image {
@@ -1206,13 +1206,13 @@ impl SysmonJsonParser {
         Some(triples)
     }
 
-    /// Raw-event variants for the long-tail Sysmon EventIDs. Each
-    /// mirrors its `typed_*` legacy counterpart but emits
-    /// `RawIngestEvent`s without the Entity/Relation struct
-    /// allocations. Where a handler emits multiple triples sharing a
-    /// dst entity, the metadata is moved into the first event and
-    /// later emissions carry empty `dst_metadata` — the writer's
-    /// `merge_metadata` already dedupes by entity id.
+    // Raw-event variants for the long-tail Sysmon EventIDs. Each
+    // mirrors its `typed_*` legacy counterpart but emits
+    // `RawIngestEvent`s without the Entity/Relation struct
+    // allocations. Where a handler emits multiple triples sharing a
+    // dst entity, the metadata is moved into the first event and
+    // later emissions carry empty `dst_metadata` — the writer's
+    // `merge_metadata` already dedupes by entity id.
 
     #[inline]
     fn typed_network_connection_raw(
@@ -1262,6 +1262,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Connect,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         });
         if let Some(image) = event.image {
             events.push(RawIngestEvent {
@@ -1274,6 +1275,7 @@ impl SysmonJsonParser {
                 rel_type: RelationType::Connect,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         Some(events)
@@ -1308,6 +1310,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Read,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1334,6 +1337,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Write,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1360,6 +1364,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Delete,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1392,6 +1397,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Execute,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1421,6 +1427,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Modify,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1447,6 +1454,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Write,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1473,6 +1481,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Delete,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1518,10 +1527,7 @@ impl SysmonJsonParser {
     }
 
     #[inline]
-    fn typed_image_load(
-        event: &SysmonEventTyped<'_>,
-        timestamp: i64,
-    ) -> Option<Vec<ParsedTriple>> {
+    fn typed_image_load(event: &SysmonEventTyped<'_>, timestamp: i64) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
         let image_loaded = event.image_loaded?;
         let process = Entity::new(image, EntityType::Process);
@@ -1561,10 +1567,7 @@ impl SysmonJsonParser {
         timestamp: i64,
     ) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         let mut process = Entity::new(image, EntityType::Process);
         if let Some(pid) = event.process_id {
             process.metadata.insert("pid".into(), pid.to_string());
@@ -1660,12 +1663,12 @@ impl SysmonJsonParser {
         }
     }
 
-    /// Raw-event variants for Windows Security + PowerShell EventIDs.
-    /// Same shape as the Sysmon long-tail raw migrations: skip
-    /// `Entity`/`Relation` struct allocs, build metadata HashMaps
-    /// only on the side that actually owns metadata, and apply the
-    /// dst-metadata-skip-on-second-emission trick when a handler
-    /// emits multiple triples that share a dst (4688 child process).
+    // Raw-event variants for Windows Security + PowerShell EventIDs.
+    // Same shape as the Sysmon long-tail raw migrations: skip
+    // `Entity`/`Relation` struct allocs, build metadata HashMaps
+    // only on the side that actually owns metadata, and apply the
+    // dst-metadata-skip-on-second-emission trick when a handler
+    // emits multiple triples that share a dst (4688 child process).
 
     #[inline]
     fn typed_security_logon_raw(
@@ -1685,10 +1688,10 @@ impl SysmonJsonParser {
                 rel_meta.insert("logon_type".into(), s);
             }
         }
-        if let Some(ip) = event.ip_address {
-            if ip != "-" {
-                rel_meta.insert("ip_address".into(), ip.into());
-            }
+        if let Some(ip) = event.ip_address
+            && ip != "-"
+        {
+            rel_meta.insert("ip_address".into(), ip.into());
         }
         if event_id == 4625 {
             rel_meta.insert("success".into(), "false".into());
@@ -1703,6 +1706,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Auth,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1739,6 +1743,7 @@ impl SysmonJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         if let Some(parent_name) = event.parent_process_name {
@@ -1757,6 +1762,7 @@ impl SysmonJsonParser {
                 rel_type: RelationType::Spawn,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         Some(events)
@@ -1781,6 +1787,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Delete,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1808,6 +1815,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Read,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1843,6 +1851,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Read,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1879,6 +1888,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Connect,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1908,6 +1918,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Execute,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1919,10 +1930,7 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let user_name = event.target_user_name?;
         let user_id = Self::build_user_id(user_name, event.target_domain_name);
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         let user = Entity::new(&user_id, EntityType::User);
         let host = Entity::new(host_name, EntityType::Host);
         let mut rel = Relation::new(&user.id, &host.id, RelationType::Auth, timestamp);
@@ -1932,10 +1940,10 @@ impl SysmonJsonParser {
                 rel.metadata.insert("logon_type".into(), s);
             }
         }
-        if let Some(ip) = event.ip_address {
-            if ip != "-" {
-                rel.metadata.insert("ip_address".into(), ip.into());
-            }
+        if let Some(ip) = event.ip_address
+            && ip != "-"
+        {
+            rel.metadata.insert("ip_address".into(), ip.into());
         }
         if event_id == 4625 {
             rel.metadata.insert("success".into(), "false".into());
@@ -1977,10 +1985,7 @@ impl SysmonJsonParser {
         timestamp: i64,
     ) -> Option<Vec<ParsedTriple>> {
         let process_name = event.process_name?;
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         let process = Entity::new(process_name, EntityType::Process);
         let host = Entity::new(host_name, EntityType::Host);
         let rel = Relation::new(&process.id, &host.id, RelationType::Delete, timestamp);
@@ -2059,10 +2064,7 @@ impl SysmonJsonParser {
         event: &SysmonEventTyped<'_>,
         timestamp: i64,
     ) -> Option<Vec<ParsedTriple>> {
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         let host = Entity::new(host_name, EntityType::Host);
         let mut process = Entity::new("powershell.exe", EntityType::Process);
         if let Some(script_text) = event.script_block_text {
@@ -2070,7 +2072,9 @@ impl SysmonJsonParser {
             process.metadata.insert("script_preview".into(), preview);
         }
         if let Some(sbid) = event.script_block_id {
-            process.metadata.insert("script_block_id".into(), sbid.into());
+            process
+                .metadata
+                .insert("script_block_id".into(), sbid.into());
         }
         let rel = Relation::new(&host.id, &process.id, RelationType::Execute, timestamp);
         Some(vec![(host, rel, process)])
@@ -2124,10 +2128,7 @@ impl LogParser for SysmonJsonParser {
         if trimmed.starts_with('[') {
             let mut buf = trimmed.as_bytes().to_vec();
             if let Ok(events) = simd_json::serde::from_slice::<Vec<Value>>(&mut buf) {
-                return events
-                    .par_iter()
-                    .flat_map(|event| Self::parse_event(event))
-                    .collect();
+                return events.par_iter().flat_map(Self::parse_event).collect();
             }
         }
 
@@ -2144,9 +2145,7 @@ impl LogParser for SysmonJsonParser {
             .map_init(
                 || Vec::<u8>::with_capacity(2048),
                 |scratch, line| {
-                    if let Some(triples) =
-                        Self::try_parse_typed_with_scratch(line, scratch)
-                    {
+                    if let Some(triples) = Self::try_parse_typed_with_scratch(line, scratch) {
                         return triples;
                     }
                     scratch.clear();
@@ -2163,7 +2162,7 @@ impl LogParser for SysmonJsonParser {
 
     fn parse_with_stats(&self, data: &str) -> (Vec<ParsedTriple>, crate::parser::ParseStats) {
         let events = Self::collect_events(data);
-        crate::generic::parse_events_with_stats(&events, |ev| Self::parse_event(ev))
+        crate::generic::parse_events_with_stats(&events, Self::parse_event)
     }
 
     /// Raw-event override: NDJSON-only fast path that emits
@@ -2229,12 +2228,15 @@ impl LogParser for SysmonJsonParser {
     /// those should call `parse_with_stats` instead.
     ///
     /// JSON-array inputs delegate to the legacy `parse_with_stats`
-    /// + lift path to keep full stat fidelity (those inputs are
+    /// plus lift path to keep full stat fidelity (those inputs are
     /// rare for ingest and going through the stats path is fine).
     fn parse_raw_with_stats(
         &self,
         data: &str,
-    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+    ) -> (
+        Vec<crate::parser::RawIngestEvent>,
+        crate::parser::ParseStats,
+    ) {
         use rayon::prelude::*;
         let trimmed = data.trim();
 
@@ -2247,10 +2249,14 @@ impl LogParser for SysmonJsonParser {
             return (events, stats);
         }
 
-        // Per-line: (events, produced_at_least_one_triple). Reduce
-        // counts after the collect; events are flattened into the
-        // returned Vec.
-        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool)> = trimmed
+        // Per-line: (events, produced_at_least_one_triple, skip_sample).
+        // `skip_sample` is `Some((raw_row, reason))` only when the row was
+        // skipped — the `line.to_string()` allocation is paid solely on
+        // that (rare) branch so the hot per-row throughput this fast path
+        // exists for is untouched. Reduce counts after the collect;
+        // events are flattened into the returned Vec.
+        type SkipSample = Option<(String, String)>;
+        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool, SkipSample)> = trimmed
             .par_lines()
             .filter(|l| !l.trim().is_empty())
             .map_init(
@@ -2258,7 +2264,12 @@ impl LogParser for SysmonJsonParser {
                 |scratch, line| {
                     if let Some(events) = Self::try_parse_typed_raw_with_scratch(line, scratch) {
                         let produced = !events.is_empty();
-                        return (events, produced);
+                        // Matched a typed EventID but yielded zero
+                        // triples (e.g. EventID 1 with no
+                        // User/ParentImage to anchor a triple on).
+                        let skip = (!produced)
+                            .then(|| (line.to_string(), "no_mappable_entities".to_string()));
+                        return (events, produced, skip);
                     }
                     if let Some(triples) = Self::try_parse_typed_with_scratch(line, scratch) {
                         let produced = !triples.is_empty();
@@ -2266,7 +2277,9 @@ impl LogParser for SysmonJsonParser {
                             .into_iter()
                             .map(crate::parser::RawIngestEvent::from_parsed_triple)
                             .collect();
-                        return (events, produced);
+                        let skip = (!produced)
+                            .then(|| (line.to_string(), "no_mappable_entities".to_string()));
+                        return (events, produced, skip);
                     }
                     scratch.clear();
                     scratch.extend_from_slice(line.as_bytes());
@@ -2274,32 +2287,55 @@ impl LogParser for SysmonJsonParser {
                         .ok()
                         .or_else(|| serde_json::from_str(line).ok());
                     let events: Vec<crate::parser::RawIngestEvent> = parsed
+                        .as_ref()
                         .map(|e| {
-                            Self::parse_event(&e)
+                            Self::parse_event(e)
                                 .into_iter()
                                 .map(crate::parser::RawIngestEvent::from_parsed_triple)
                                 .collect()
                         })
                         .unwrap_or_default();
                     let produced = !events.is_empty();
-                    (events, produced)
+                    let skip = (!produced).then(|| {
+                        // `parsed` deserialized fine (e.g. unsupported
+                        // EventID falling to `parse_event`'s `_ =>
+                        // Vec::new()` arm) — reuse the same
+                        // classification the generic/non-native paths
+                        // report via `skip_reasons` so the reason is
+                        // consistent across fast and legacy paths.
+                        // Otherwise the line didn't even deserialize.
+                        let reason = parsed
+                            .as_ref()
+                            .map(crate::generic::classify_skip_reason)
+                            .unwrap_or("unparseable_row");
+                        (line.to_string(), reason.to_string())
+                    });
+                    (events, produced, skip)
                 },
             )
             .collect();
 
-        let mut stats = crate::parser::ParseStats::default();
-        stats.rows_seen = per_line.len();
+        let mut stats = crate::parser::ParseStats {
+            rows_seen: per_line.len(),
+            ..Default::default()
+        };
         let mut all_events: Vec<crate::parser::RawIngestEvent> = Vec::new();
-        for (events, produced) in per_line {
+        for (events, produced, skip) in per_line {
             if produced {
                 stats.rows_with_triples += 1;
             } else {
                 stats.rows_skipped += 1;
+                if let Some(sample) = skip
+                    && stats.skipped_samples.len() < crate::parser::SKIP_SAMPLE_CAP
+                {
+                    stats.skipped_samples.push(sample);
+                }
             }
             all_events.extend(events);
         }
-        // per_field_occurrence, skip_reasons, skipped_samples, drift
-        // intentionally left empty — see trait docstring.
+        // per_field_occurrence, skip_reasons, drift intentionally left
+        // empty — see trait docstring. `skipped_samples` is populated
+        // above (bounded reservoir, closes the S4 gap).
         (all_events, stats)
     }
 }

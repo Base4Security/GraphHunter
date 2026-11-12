@@ -32,11 +32,14 @@ fn api_with_fixture(session_name: &str, path: &str, format: &str) -> GraphHunter
     })
     .expect("create_session");
     let result = api
-        .load_data(LoadDataRequest {
-            session: None,
-            path: path.into(),
-            format: format.into(),
-        })
+        .load_data(
+            LoadDataRequest {
+                session: None,
+                path: path.into(),
+                format: format.into(),
+            },
+            &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+        )
         .expect("load_data");
     assert!(
         !result.zero_triples,

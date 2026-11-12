@@ -202,22 +202,22 @@ pub fn resolve_model_path() -> Option<PathBuf> {
         );
         return Some(PathBuf::from(p));
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for candidate in [
-                dir.join("resources").join("models").join(MODEL_FILENAME),
-                dir.join("models").join(MODEL_FILENAME),
-            ] {
-                #[cfg(feature = "candle")]
-                tracing::debug!(
-                    target: "graph_hunter_local_llm::resolver",
-                    "resolve_model_path: try exe-relative {} -> {}",
-                    candidate.display(),
-                    if candidate.is_file() { "HIT" } else { "miss" }
-                );
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        for candidate in [
+            dir.join("resources").join("models").join(MODEL_FILENAME),
+            dir.join("models").join(MODEL_FILENAME),
+        ] {
+            #[cfg(feature = "candle")]
+            tracing::debug!(
+                target: "graph_hunter_local_llm::resolver",
+                "resolve_model_path: try exe-relative {} -> {}",
+                candidate.display(),
+                if candidate.is_file() { "HIT" } else { "miss" }
+            );
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
     }
@@ -269,7 +269,38 @@ pub fn default_backend() -> LocalLlmHandle {
     BACKEND.get_or_init(build_default_backend).clone()
 }
 
+/// Environment variable that forces [`MockBackend`] regardless of
+/// features or model availability.
+///
+/// The fallback in [`build_default_backend`] is written as "mock unless a
+/// model is found", which makes any caller's behaviour depend on whether
+/// a GGUF happens to be sitting on the machine. For a test that is not a
+/// fallback, it is a coin flip: `cargo test --all-features` on a
+/// developer box with a model runs real 2.2 GB CPU inference inside a
+/// unit test. That was measured at over five hours for a single test in
+/// `platform/api`, with the rest of that suite finishing in seconds.
+///
+/// Set this to make the choice explicit and hermetic:
+/// `GRAPHHUNTER_LLM_FORCE_MOCK=1 cargo test --all-features`.
+///
+/// **Caveat, stated because it matters:** the handle is a process-wide
+/// `OnceLock`, so this is read once, by whichever caller gets there
+/// first. Setting it from inside a single test is therefore not reliable
+/// under parallel execution — set it for the whole process. Removing that
+/// caveat means injecting the backend instead of resolving a singleton,
+/// which is a larger change than this hatch.
+pub const FORCE_MOCK_ENV: &str = "GRAPHHUNTER_LLM_FORCE_MOCK";
+
 fn build_default_backend() -> LocalLlmHandle {
+    if std::env::var_os(FORCE_MOCK_ENV).is_some() {
+        tracing::info!(
+            target: "graph_hunter_local_llm",
+            "{} is set — using the mock backend",
+            FORCE_MOCK_ENV
+        );
+        return Arc::new(MockBackend::new());
+    }
+
     #[cfg(feature = "candle")]
     {
         if let Some(path) = resolve_model_path() {

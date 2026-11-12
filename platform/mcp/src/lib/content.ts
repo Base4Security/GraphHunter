@@ -115,7 +115,26 @@ function sanitizeObject(obj: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
+/**
+ * True when `v` is an API-produced summary envelope
+ * (`{ _summary: true, kind, counts, top, detail_ref }`). Summaries are
+ * already compact by construction — server-side summarization builds
+ * them specifically to fit the LLM's context budget — so running the
+ * usual array/string truncation over one would corrupt an
+ * intentionally-small payload and strip the `_summary`/`detail_ref`
+ * markers the caller relies on to know it's looking at a summary.
+ */
+function isSummary(v: unknown): v is Record<string, unknown> {
+  return (
+    v != null &&
+    typeof v === "object" &&
+    !Array.isArray(v) &&
+    (v as Record<string, unknown>)._summary === true
+  );
+}
+
 export function sanitizeApiResponse(data: unknown): unknown {
+  if (isSummary(data)) return data;
   if (data == null || typeof data !== "object") return data;
   if (Array.isArray(data)) {
     if (data.length <= MAX_ARRAY_ITEMS) {

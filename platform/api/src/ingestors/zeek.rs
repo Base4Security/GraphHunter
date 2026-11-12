@@ -107,10 +107,7 @@ impl StreamingIngestor for ZeekIngestor {
     ///   formats (PCAP/EVTX = 255) but above any future fallback.
     /// - `None` otherwise.
     fn sniff(&self, path: &Path, _magic: &[u8]) -> Option<u8> {
-        let peek = match read_first_line(path) {
-            Some(s) => s,
-            None => return None,
-        };
+        let peek = read_first_line(path)?;
         let v = serde_json::from_str::<serde_json::Value>(&peek).ok()?;
         let obj = v.as_object()?;
         // Zeek's defining keys: `uid` (Connection UID, format `CXXXX`)
@@ -269,8 +266,7 @@ fn resolve_kind(path: &str) -> Result<ZeekLogKind, String> {
     if let Some(k) = zeek_kind_from_filename(p) {
         return Ok(k);
     }
-    let first = read_first_line(p)
-        .ok_or_else(|| format!("Zeek log appears empty: {path}"))?;
+    let first = read_first_line(p).ok_or_else(|| format!("Zeek log appears empty: {path}"))?;
     let v: serde_json::Value = serde_json::from_str(&first)
         .map_err(|e| format!("First line is not valid JSON in '{path}': {e}"))?;
     Ok(zeek_kind_from_first_record(&v))
@@ -329,12 +325,16 @@ fn parse_conn(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
 fn parse_dns(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent> {
     let (src_ip, dst_ip, src_port, dst_port, proto) = zeek_5tuple(v)?;
-    let qname = v.get("query").and_then(|x| x.as_str()).map(str::to_string)?;
+    let qname = v
+        .get("query")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)?;
     if qname.is_empty() {
         return None;
     }
@@ -357,6 +357,7 @@ fn parse_dns(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent>
         rel_type: RelationType::DNS,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -387,6 +388,7 @@ fn parse_http(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -420,6 +422,7 @@ fn parse_ssl(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent>
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -443,7 +446,15 @@ fn parse_kerberos(v: &serde_json::Value, source_file: &str) -> Option<RawIngestE
     };
     let ts = zeek_ts(v).unwrap_or(0);
     let mut md = HashMap::with_capacity(12);
-    base_metadata(&mut md, v, source_file, "kerberos", proto, src_port, dst_port);
+    base_metadata(
+        &mut md,
+        v,
+        source_file,
+        "kerberos",
+        proto,
+        src_port,
+        dst_port,
+    );
     md.insert("l7_decoded".to_string(), "kerberos".to_string());
     md.insert("kerberos_kind".to_string(), kind.to_string());
     md.insert("kerberos_user".to_string(), client.clone());
@@ -466,6 +477,7 @@ fn parse_kerberos(v: &serde_json::Value, source_file: &str) -> Option<RawIngestE
         rel_type: RelationType::Auth,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -606,11 +618,7 @@ mod tests {
     #[test]
     fn sniff_accepts_zeek_json_with_filename_hint() {
         let body = r#"{"ts":1.0,"uid":"CAbcde","id.orig_h":"10.0.0.1","id.resp_h":"1.1.1.1","proto":"tcp"}"#;
-        let p = tmp_in_subdir(
-            "gh_zeek_sniff_hint",
-            "conn.log",
-            &format!("{body}\n"),
-        );
+        let p = tmp_in_subdir("gh_zeek_sniff_hint", "conn.log", &format!("{body}\n"));
         let ing = ZeekIngestor::new();
         assert_eq!(ing.sniff(&p, &[]), Some(200));
         std::fs::remove_file(&p).ok();
@@ -703,7 +711,10 @@ mod tests {
             .unwrap();
         assert_eq!(e.src_id, "192.168.1.5");
         assert_eq!(e.dst_id, "8.8.8.8");
-        assert_eq!(e.rel_metadata.get("protocol").map(String::as_str), Some("UDP"));
+        assert_eq!(
+            e.rel_metadata.get("protocol").map(String::as_str),
+            Some("UDP")
+        );
     }
 
     #[test]

@@ -270,6 +270,14 @@ pub fn suggest_entity_type_with_source(
     field_name: &str,
     sample_values: &[String],
 ) -> Option<Suggestion> {
+    // A user-agent string describes a client, not an identity. The name
+    // tier matched it as a User ("user_agent" contains "user"), so an Auth0
+    // export minted one bogus User per UA string plus an edge per row to
+    // it — a fifth of the graph. No suggestion leaves it as edge metadata,
+    // where it stays filterable.
+    if is_user_agent_field(field_name) {
+        return None;
+    }
     if let Some(et) = suggest_by_name(field_name) {
         return Some(Suggestion {
             entity_type: et,
@@ -319,6 +327,17 @@ fn looks_like_categorical_label(samples: &[String]) -> bool {
     // Soft ratio: distinct/total ≤ 0.25 also qualifies (e.g. 5 labels across
     // 30 rows).
     (distinct as f32) / (non_empty.len() as f32) <= 0.25
+}
+
+/// `user_agent`, `userAgent`, `User-Agent`, `http_user_agent`,
+/// `cs(User-Agent)`: the name with separators removed contains `useragent`.
+fn is_user_agent_field(field_name: &str) -> bool {
+    let squashed: String = field_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    squashed.contains("useragent")
 }
 
 fn suggest_by_name(field_name: &str) -> Option<EntityType> {
@@ -535,6 +554,43 @@ fn suggest_by_values(samples: &[String]) -> Option<EntityType> {
     }
 }
 
+/// Values longer than this never become node IDs, no matter what a
+/// FieldConfig says. Command lines and similar free-text payloads are
+/// unique per row — promoting them mints one giant-ID node per event
+/// (26K entities from a 13K-row MDE export before this cap existed).
+pub const MAX_NODE_VALUE_LEN: usize = 256;
+
+/// True when `v` looks like an ISO-ish timestamp (`2026-06-18T15:56:13`,
+/// `2026-06-18 15:56:13`). Used to keep timestamp-valued columns from
+/// being promoted to entity nodes.
+pub fn value_looks_like_timestamp(v: &str) -> bool {
+    let b = v.trim().as_bytes();
+    b.len() >= 19
+        && b[..4].iter().all(|c| c.is_ascii_digit())
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && (b[10] == b'T' || b[10] == b' ')
+        && v.contains(':')
+}
+
+/// True when at least 60% of the non-empty samples look like timestamps.
+/// Mirrors the majority rule `suggest_by_values` uses.
+pub fn values_look_like_timestamps(samples: &[String]) -> bool {
+    let non_empty: Vec<&str> = samples
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        return false;
+    }
+    let hits = non_empty
+        .iter()
+        .filter(|v| value_looks_like_timestamp(v))
+        .count();
+    hits * 5 >= non_empty.len() * 3
+}
+
 /// Infers the relation type to use when connecting a promoted field entity to
 /// its context anchor.
 fn infer_relation_type(entity_type: &EntityType) -> RelationType {
@@ -582,6 +638,12 @@ pub fn infer_relation_from_action(action: &str) -> Option<RelationType> {
     // Spawn (process-specific; keep before generic "run"/"exec").
     if a.contains("spawn") || a.contains("fork") {
         return Some(RelationType::Spawn);
+    }
+    // Process lifecycle ("ProcessCreated", "CreateProcess", "ProcessStarted"):
+    // must beat the generic create→Write branch below or MDE/EDR process
+    // events get labeled Write.
+    if a.contains("process") && (a.contains("creat") || a.contains("start")) {
+        return Some(RelationType::Execute);
     }
     // Execute / run / launch.
     if a.contains("execute")
@@ -805,6 +867,11 @@ impl ConfigurableParser {
         // Canonical triples come from the STRIPPED event — this is where
         // Ignore/Node overrides actually take effect.
         let mut triples = GenericParser::parse_event(stripped);
+        // GenericParser's last-resort fallback: an event with a single
+        // recognizable entity becomes that entity's self-loop, so it leaves
+        // a trace. Only meaningful if nothing else below links the entity.
+        let canonical_is_fallback_loop =
+            triples.len() == 1 && triples[0].0.id == triples[0].2.id;
 
         // But for the user-override loop below, iterate the ORIGINAL event's
         // keys. Otherwise fields we just stripped would be invisible to their
@@ -872,6 +939,21 @@ impl ConfigurableParser {
             if let Some(mapping) = user_override {
                 match mapping.role {
                     FieldRole::Node => {
+                        // Defense-in-depth against node-ID explosions: values
+                        // that cannot be meaningful entity IDs stay off the
+                        // graph even when a (user or auto) config promotes
+                        // the field — long free-text payloads and timestamps
+                        // are unique per row and would mint one node per
+                        // event. The value stays available as raw metadata.
+                        if val_str.len() > MAX_NODE_VALUE_LEN
+                            || value_looks_like_timestamp(&val_str)
+                            || val_str.chars().all(|c| c.is_ascii_digit())
+                        {
+                            // Pure-numeric values (PIDs, logon ids, report
+                            // ids) are opaque row-local numbers, one junk
+                            // node per event.
+                            continue;
+                        }
                         // Promote to entity node
                         let et = mapping
                             .entity_type
@@ -880,8 +962,26 @@ impl ConfigurableParser {
                             .or_else(|| suggest_entity_type(key, &[val_str.clone()]))
                             .unwrap_or(EntityType::Process);
 
-                        // Entity ID prefixed with field name to avoid collisions
-                        let entity_id = format!("{}:{}", key, val_str);
+                        // Canonical entity types carry globally identifying
+                        // values — an IP is the same IP whichever column it
+                        // came from — so they use the bare value as ID and
+                        // merge with entities the canonical path created.
+                        // Only free-form Other/Any types keep the column
+                        // prefix, guarding against cross-field value
+                        // collisions ("Severity:High" vs "Status:High").
+                        let entity_id = match &et {
+                            EntityType::Other(t) if t != "Hash" => {
+                                format!("{}:{}", key, val_str)
+                            }
+                            EntityType::Any => format!("{}:{}", key, val_str),
+                            // Hostnames/domains/accounts are case-insensitive;
+                            // match the lowercase normalization the canonical
+                            // path applies so both create the same entity.
+                            EntityType::Host | EntityType::Domain | EntityType::User => {
+                                val_str.to_lowercase()
+                            }
+                            _ => val_str.clone(),
+                        };
                         let dst = Entity::new(&entity_id, et.clone())
                             .with_metadata("raw_field", key)
                             .with_metadata("raw_value", &val_str);
@@ -904,10 +1004,54 @@ impl ConfigurableParser {
                         // Do nothing
                     }
                     FieldRole::Metadata => {
-                        // Metadata fields are already handled by GenericParser's
-                        // entity metadata or simply not extracted. No extra action needed
-                        // since we can't easily attach arbitrary metadata to existing
-                        // triples after the fact. The field remains in the JSON source.
+                        // Handled after the loop: Metadata-role fields are
+                        // stamped onto every relation this event produced.
+                    }
+                }
+            }
+        }
+
+        // The fallback self-loop is redundant once promoted fields linked
+        // the anchor to something: the entity is in the graph through those
+        // edges, and the event's metadata is stamped onto them below. On an
+        // Auth0 export it was one `IP -[Connect]-> IP` per row, a fifth of
+        // all edges. Events with nothing else keep it (field-case rejections).
+        if canonical_is_fallback_loop && triples.len() > 1 {
+            triples.remove(0);
+        }
+
+        // Stamp Metadata-role fields onto the relations. Each edge
+        // represents exactly one source event, so event-level attributes
+        // (type/error/auth_method/...) belong on the EDGE — attaching them
+        // to the anchor node instead would overwrite them with every later
+        // event touching the same entity. Collisions resolve in favor of
+        // keys the canonical rules already set (protocol, dest_port);
+        // canonical-timestamp fields are skipped because the relation
+        // already carries `timestamp` natively.
+        if !triples.is_empty() {
+            let edge_meta: Vec<(&str, String)> = self
+                .config
+                .mappings
+                .iter()
+                .filter(|m| matches!(m.role, FieldRole::Metadata))
+                .filter(|m| GenericParser::canonical_field(&m.raw_name) != Some("timestamp"))
+                .filter_map(|m| {
+                    let v = obj.get(&m.raw_name)?;
+                    let s = match v {
+                        Value::String(s) if !s.is_empty() => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        Value::Bool(b) => b.to_string(),
+                        _ => return None,
+                    };
+                    Some((m.raw_name.as_str(), s))
+                })
+                .collect();
+            if !edge_meta.is_empty() {
+                for (_, rel, _) in triples.iter_mut() {
+                    for (k, v) in &edge_meta {
+                        rel.metadata
+                            .entry((*k).to_string())
+                            .or_insert_with(|| v.clone());
                     }
                 }
             }
@@ -947,5 +1091,267 @@ impl LogParser for ConfigurableParser {
         crate::generic::parse_events_with_stats(&events, |event| {
             self.parse_event_with_config(event)
         })
+    }
+
+    /// Native raw-event override (Fase C-2 Task 3 follow-up, field_survival
+    /// for configured mappings). `event` here is the pre-mapping `Value` —
+    /// the same one `parse_event_with_config` receives before
+    /// `apply_timestamp_hints` strips any `FieldRole::Ignore` field — so its
+    /// canonical serialization contains every field the config later drops.
+    /// Without this, the `unmapped_field` field_survival context would be
+    /// dishonest for the one path (`ConfigurableParser`) that actually applies
+    /// a field-config mapping.
+    fn parse_raw(&self, data: &str) -> Vec<crate::parser::RawIngestEvent> {
+        let events = Self::collect_events(data);
+        if events.is_empty() {
+            return Vec::new();
+        }
+
+        events
+            .par_iter()
+            .flat_map(|event| {
+                let triples = self.parse_event_with_config(event);
+                if triples.is_empty() {
+                    return Vec::new();
+                }
+                let raw_line = crate::parser::canonical_value_string(event);
+                triples
+                    .into_iter()
+                    .map(|t| {
+                        let mut e = crate::parser::RawIngestEvent::from_parsed_triple(t);
+                        e.raw_line = Some(raw_line.clone());
+                        e
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Raw-event-with-stats variant of [`parse_raw`]. Single pass: the
+    /// per-event triples computed for the aggregate counters are reused to
+    /// build the `RawIngestEvent`s, instead of re-running
+    /// `parse_event_with_config` on every row a second time as this used
+    /// to do — on the whole-file CSV ingest path that double parse was
+    /// pure waste.
+    fn parse_raw_with_stats(
+        &self,
+        data: &str,
+    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+        let events = Self::collect_events(data);
+        let (each, stats) = crate::generic::parse_events_each_with_stats(&events, |event| {
+            self.parse_event_with_config(event)
+        });
+        (crate::generic::raw_events_from_each(&events, each), stats)
+    }
+}
+
+/// Fase C-2 Task 3 follow-up: `raw_line` capture on the configured-mapping
+/// path. This is the `unmapped_field` field_survival property: a field the
+/// user's `FieldConfig` drops (`FieldRole::Ignore`) must still be
+/// reconstructable from the journal via `raw_line`, since the mapping that
+/// dropped it is exactly what field_survival is meant to audit.
+#[cfg(test)]
+mod raw_line_tests {
+    use super::*;
+
+    #[test]
+    fn configurable_parser_attaches_canonical_raw_line() {
+        // Same fixture as `configurable_parser_ignores_field`: "Noise" is
+        // explicitly dropped by the config (FieldRole::Ignore), so it never
+        // reaches a triple — but it must still survive in raw_line.
+        let data = r#"[{
+            "User": "admin",
+            "Image": "cmd.exe",
+            "Noise": "ignore_me"
+        }]"#;
+
+        let config = FieldConfig {
+            mappings: vec![FieldMapping {
+                raw_name: "Noise".to_string(),
+                role: FieldRole::Ignore,
+                entity_type: None,
+                timestamp_format: None,
+                locale: None,
+            }],
+        };
+
+        let parser = ConfigurableParser::new(config);
+
+        // Sanity: the mapping really does drop "Noise" from the triples
+        // (mirrors `configurable_parser_ignores_field`).
+        let triples = parser.parse(data);
+        assert!(!triples.is_empty());
+        let has_noise_node = triples
+            .iter()
+            .any(|(src, _, dst)| src.id.contains("Noise") || dst.id.contains("Noise"));
+        assert!(!has_noise_node, "Ignored field should not produce nodes");
+
+        let (events, _stats) = parser.parse_raw_with_stats(data);
+        assert!(!events.is_empty());
+        // Every produced event carries the canonical serialization of its
+        // pre-mapping source Value.
+        assert!(events.iter().all(|e| e.raw_line.is_some()));
+        // The dropped field's value survives in raw_line even though it was
+        // stripped before triple construction — the exact unmapped_field
+        // field_survival property.
+        let raw = events[0].raw_line.as_ref().unwrap();
+        assert!(
+            raw.contains("ignore_me"),
+            "raw_line must retain the value of a field the config dropped, got: {raw}"
+        );
+
+        // `parse_raw` (used on the streaming ingest path) attaches the same
+        // canonical raw_line.
+        let raw_only = parser.parse_raw(data);
+        assert!(!raw_only.is_empty());
+        assert!(raw_only.iter().all(|e| e.raw_line.is_some()));
+        assert!(raw_only[0].raw_line.as_ref().unwrap().contains("ignore_me"));
+    }
+
+    /// Parity guard for the single-pass `parse_raw_with_stats` rewrite: it
+    /// must produce exactly what the old two-call shape produced — the same
+    /// raw events as `parse_raw` (order included) and the same counters as
+    /// `parse_with_stats` — just without re-running the per-event parse.
+    #[test]
+    fn raw_with_stats_single_pass_matches_two_call_baseline() {
+        let data = r#"[
+            {"User": "admin", "Image": "cmd.exe"},
+            {"User": "guest", "Image": "powershell.exe"},
+            {"OrphanMetadata": "no anchor here"}
+        ]"#;
+        let parser = ConfigurableParser::new(FieldConfig { mappings: vec![] });
+
+        let (raw, stats) = parser.parse_raw_with_stats(data);
+        let raw_baseline = parser.parse_raw(data);
+        let (triples_baseline, stats_baseline) = parser.parse_with_stats(data);
+
+        assert_eq!(raw.len(), raw_baseline.len());
+        assert_eq!(raw.len(), triples_baseline.len());
+        for (a, b) in raw.iter().zip(raw_baseline.iter()) {
+            assert_eq!(a.raw_line, b.raw_line);
+            assert_eq!(a.src_id, b.src_id);
+            assert_eq!(a.dst_id, b.dst_id);
+        }
+        assert_eq!(stats.rows_seen, stats_baseline.rows_seen);
+        assert_eq!(stats.rows_with_triples, stats_baseline.rows_with_triples);
+        assert_eq!(stats.rows_skipped, stats_baseline.rows_skipped);
+        assert_eq!(stats.skip_reasons, stats_baseline.skip_reasons);
+        assert_eq!(stats.rows_skipped, 1); // the anchorless third event
+    }
+
+    /// `FieldRole::Metadata` used to be a silent no-op — the mapped fields
+    /// went neither to the edge nor to any node (found via the Keycloak
+    /// ingest: 24 of 27 auto-mapped columns vanished). They must land on
+    /// the relation metadata of every triple the event produces; canonical
+    /// timestamp fields stay off the edge (it already carries `timestamp`).
+    #[test]
+    fn metadata_role_fields_land_on_relation_metadata() {
+        let data = r#"[{
+            "username": "ana",
+            "ipaddress": "1.2.3.4",
+            "auth_method": "openid-connect",
+            "error": "invalid_grant",
+            "time": "2026-08-01T00:00:00Z"
+        }]"#;
+        let meta = |name: &str| FieldMapping {
+            raw_name: name.to_string(),
+            role: FieldRole::Metadata,
+            entity_type: None,
+            timestamp_format: None,
+            locale: None,
+        };
+        let parser = ConfigurableParser::new(FieldConfig {
+            mappings: vec![meta("auth_method"), meta("error"), meta("time")],
+        });
+
+        let triples = parser.parse(data);
+        assert!(!triples.is_empty(), "User+IP event must produce triples");
+        for (_, rel, _) in &triples {
+            assert_eq!(
+                rel.metadata.get("auth_method").map(String::as_str),
+                Some("openid-connect")
+            );
+            assert_eq!(
+                rel.metadata.get("error").map(String::as_str),
+                Some("invalid_grant")
+            );
+            assert!(
+                !rel.metadata.contains_key("time"),
+                "canonical timestamp fields must not duplicate onto edge metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn user_agent_columns_are_not_users() {
+        let ua = vec!["Linux; U; Android 15; SM-A256E".to_string(); 6];
+        for name in ["user_agent", "userAgent", "User-Agent", "cs(User-Agent)", "http_user_agent"] {
+            assert_eq!(suggest_entity_type(name, &ua), None, "{name}");
+        }
+        assert_eq!(
+            suggest_entity_type("user_name", &["ana".to_string()]),
+            Some(EntityType::User)
+        );
+    }
+
+    fn node(name: &str, et: &str) -> FieldMapping {
+        FieldMapping {
+            raw_name: name.to_string(),
+            role: FieldRole::Node,
+            entity_type: Some(et.to_string()),
+            timestamp_format: None,
+            locale: None,
+        }
+    }
+
+    fn meta_field(name: &str) -> FieldMapping {
+        FieldMapping {
+            raw_name: name.to_string(),
+            role: FieldRole::Metadata,
+            entity_type: None,
+            timestamp_format: None,
+            locale: None,
+        }
+    }
+
+    /// Auth0 shape: the IP is the only canonical entity, so GenericParser
+    /// falls back to an `IP -> IP` self-loop; the promoted user columns then
+    /// link the IP for real. The self-loop must go, and the event's metadata
+    /// must still reach the surviving edges.
+    #[test]
+    fn fallback_self_loop_dropped_when_promoted_fields_link_the_anchor() {
+        let data = r#"[{
+            "ip": "198.51.100.186",
+            "user_id": "auth0|000000000000000000000001",
+            "user_name": "usuario.cuatro@example.com",
+            "type": "sepft"
+        }]"#;
+        let parser = ConfigurableParser::new(FieldConfig {
+            mappings: vec![
+                node("ip", "IP"),
+                node("user_id", "User"),
+                node("user_name", "User"),
+                meta_field("type"),
+            ],
+        });
+        let triples = parser.parse(data);
+        assert_eq!(triples.len(), 2, "{:?}", triples.iter().map(|t| (&t.0.id, &t.2.id)).collect::<Vec<_>>());
+        for (src, rel, dst) in &triples {
+            assert_ne!(src.id, dst.id, "no self-loop alongside real edges");
+            assert_eq!(rel.metadata.get("type").map(String::as_str), Some("sepft"));
+        }
+    }
+
+    /// An event whose only entity is the IP keeps its self-loop — without it
+    /// the event leaves no trace (the field-case `realm_disabled` rejections).
+    #[test]
+    fn fallback_self_loop_kept_when_it_is_the_only_edge() {
+        let data = r#"[{"ip": "198.51.100.186", "type": "f"}]"#;
+        let parser = ConfigurableParser::new(FieldConfig {
+            mappings: vec![node("ip", "IP"), meta_field("type")],
+        });
+        let triples = parser.parse(data);
+        assert_eq!(triples.len(), 1);
+        assert_eq!(triples[0].0.id, triples[0].2.id);
     }
 }

@@ -37,43 +37,123 @@ use crate::graph::{GraphHunter, HuntResult};
 use crate::interner::StrId;
 use crate::lftj::{CsrTrieIter, MaterializedCsrTrie, TrieIter};
 
-/// Per-edge minimum timestamp keyed parallel to `MaterializedCsrTrie`.
-/// `min_ts[i] = min { e.timestamp : e is some src->dst edge }` where
-/// `(src, dst)` is the i-th pair in the trie's CSR layout. Lookup is
-/// O(log d) via binary search inside the source's dst slice. Built
-/// once per query — turns per-match `smallest_edge_timestamp` from
-/// O(deg) into O(log deg) and removes the `HashMap` indirection that
-/// `get_relations_by_sid` carries.
+/// Per-pair timestamp index keyed parallel to `MaterializedCsrTrie`.
+///
+/// Two views of the same data, both O(log d) to reach via binary search
+/// inside the source's dst slice:
+///
+/// * [`get`](Self::get) — the **minimum** timestamp on `src -> dst`. This
+///   is the original behaviour and stays the fast path.
+/// * [`successor`](Self::successor) — the **smallest timestamp ≥ a floor**
+///   on `src -> dst`. This is what makes multi-edge pairs correct.
+///
+/// # Why `successor` had to exist
+///
+/// The map used to store *only* the minimum, so an enumerator testing a
+/// time-respecting chain tested exactly ONE candidate combination. With
+/// parallel edges that silently drops real matches: given `t_ab = 10`,
+/// `b→c ∈ {5, 20}` and `t_ac = 30`, the chain (10, 20, 30) is perfectly
+/// time-respecting, but `min(t_bc) = 5` fails `t_bc ≥ t_ab` and the
+/// triangle was dropped. The DFS, which walks every edge, finds it.
+/// Parallel edges between the same pair are the norm in real telemetry
+/// (repeated connections between two hosts), so this was a routine
+/// false-negative, not a corner case.
+///
+/// With `successor`, the enumerators ask the correct question — *does
+/// **any** combination of parallel edges respect time?* — via a greedy
+/// walk that is optimal for a chain constraint: take the earliest
+/// admissible first edge, then the earliest next edge at or after it, and
+/// so on. Earliest-so-far always leaves the most room downstream.
+///
+/// # Cost
+///
+/// `ts_values` holds one `i64` per edge rather than one per pair, so this
+/// is proportional to the edge count instead of the distinct-pair count.
+/// That is the honest price of correctness here; the graph already stores
+/// the same timestamps, and the index is built once per query.
+///
+/// No sort is needed at build time: the streaming adjacency is already
+/// ordered by timestamp (the `edges_sorted` invariant), so appending in
+/// adjacency order leaves every pair's sublist ascending by construction.
 pub struct MinTimestampMap {
     /// Same length as `trie.dst_keys`. `min_ts[trie.dst_offsets[i] +
     /// idx_within_a_dsts]` is the smallest timestamp on `a -> dst`.
     min_ts: Vec<i64>,
+    /// CSR over ALL timestamps of each pair, ascending. Slot `s` owns
+    /// `ts_values[ts_offsets[s] .. ts_offsets[s + 1]]`. Length is
+    /// `trie.dst_keys.len() + 1`.
+    ts_offsets: Vec<u32>,
+    /// Flattened per-pair timestamps, each pair's run ascending.
+    ts_values: Vec<i64>,
 }
 
 impl MinTimestampMap {
     pub fn build(graph: &GraphHunter, trie: &MaterializedCsrTrie) -> Self {
-        let mut min_ts = vec![i64::MAX; trie.dst_keys.len()];
-        for (ai, &a_raw) in trie.src_keys.iter().enumerate() {
-            let a_sid = StrId::from_raw(a_raw);
+        let n_slots = trie.dst_keys.len();
+        let mut min_ts = vec![i64::MAX; n_slots];
+
+        // Two passes so the flattened storage is exact — a Vec-per-slot
+        // would cost 24 bytes of header per distinct pair, which on a
+        // multi-million-pair trie dwarfs the payload.
+        let mut counts = vec![0u32; n_slots];
+        let visit = |ai: usize, f: &mut dyn FnMut(usize, i64)| {
+            let a_sid = StrId::from_raw(trie.src_keys[ai]);
             let off = trie.dst_offsets[ai] as usize;
             let end = trie.dst_offsets[ai + 1] as usize;
             let dsts = &trie.dst_keys[off..end];
-            let arc = match graph.streaming.neighbors_arc(a_sid) {
-                Some(a) => a,
-                None => continue,
-            };
-            let g = arc.read();
-            for e in g.as_slice() {
-                let d = e.dest_sid.index() as u32;
-                if let Ok(idx) = dsts.binary_search(&d) {
-                    let slot = &mut min_ts[off + idx];
-                    if e.timestamp < *slot {
-                        *slot = e.timestamp;
+            if let Some(arc) = graph.streaming.neighbors_arc(a_sid) {
+                let g = arc.read();
+                for e in g.as_slice() {
+                    let d = e.dest_sid.index() as u32;
+                    if let Ok(idx) = dsts.binary_search(&d) {
+                        f(off + idx, e.timestamp);
                     }
                 }
             }
+        };
+
+        for ai in 0..trie.src_keys.len() {
+            visit(ai, &mut |slot, _ts| counts[slot] += 1);
         }
-        Self { min_ts }
+        let mut ts_offsets = Vec::with_capacity(n_slots + 1);
+        let mut running = 0u32;
+        for &c in &counts {
+            ts_offsets.push(running);
+            running += c;
+        }
+        ts_offsets.push(running);
+
+        let mut ts_values = vec![0i64; running as usize];
+        let mut cursor: Vec<u32> = ts_offsets[..n_slots].to_vec();
+        for ai in 0..trie.src_keys.len() {
+            visit(ai, &mut |slot, ts| {
+                let at = cursor[slot] as usize;
+                ts_values[at] = ts;
+                cursor[slot] += 1;
+                if ts < min_ts[slot] {
+                    min_ts[slot] = ts;
+                }
+            });
+        }
+
+        // Each pair's run is ascending already: the streaming adjacency is
+        // timestamp-ordered, so appends within one slot arrive in order.
+        // Sorting defensively would be O(E log E) for no gain — but a
+        // debug assert keeps the invariant from rotting silently.
+        debug_assert!(
+            (0..n_slots).all(|s| {
+                let r = &ts_values[ts_offsets[s] as usize..ts_offsets[s + 1] as usize];
+                r.windows(2).all(|w| w[0] <= w[1])
+            }),
+            "per-pair timestamp runs must be ascending; the edges_sorted \
+             invariant is what guarantees it"
+        );
+
+        Self {
+            min_ts,
+            ts_offsets,
+            ts_values,
+        }
     }
 
     /// O(log deg(a)) timestamp lookup. None when the edge isn't in
@@ -88,15 +168,38 @@ impl MinTimestampMap {
         if t == i64::MAX { None } else { Some(t) }
     }
 
+    /// Smallest timestamp on `src -> dst` that is **≥ `floor`**, or `None`
+    /// when the pair has no such edge.
+    ///
+    /// This is what lets an enumerator ask whether *any* combination of
+    /// parallel edges is time-respecting instead of testing only the
+    /// minimum. Taking the earliest admissible edge at each step is
+    /// optimal for a chain constraint: it leaves the widest possible range
+    /// for every later hop, so if the greedy fails no other choice
+    /// succeeds.
+    #[inline]
+    pub fn successor(
+        &self,
+        trie: &MaterializedCsrTrie,
+        ai: usize,
+        dst: u32,
+        floor: i64,
+    ) -> Option<i64> {
+        let off = trie.dst_offsets[ai] as usize;
+        let end = trie.dst_offsets[ai + 1] as usize;
+        let dsts = &trie.dst_keys[off..end];
+        let idx = dsts.binary_search(&dst).ok()?;
+        let slot = off + idx;
+        let run =
+            &self.ts_values[self.ts_offsets[slot] as usize..self.ts_offsets[slot + 1] as usize];
+        let at = run.partition_point(|&t| t < floor);
+        run.get(at).copied()
+    }
+
     /// Variant for callers that only have the source's StrId, not its
     /// trie index. Does the source-row binary search inside.
     #[inline]
-    pub fn get_by_src(
-        &self,
-        trie: &MaterializedCsrTrie,
-        src: u32,
-        dst: u32,
-    ) -> Option<i64> {
+    pub fn get_by_src(&self, trie: &MaterializedCsrTrie, src: u32, dst: u32) -> Option<i64> {
         let ai = trie.src_keys.binary_search(&src).ok()?;
         self.get(trie, ai, dst)
     }
@@ -190,13 +293,22 @@ pub fn enumerate_triangles_lftj(
             while !r2.at_end() && !r3.at_end() {
                 let c2 = r2.key();
                 let c3 = r3.key();
-                if c2 == c3 {
+                // Three distinct vertices: self-loops would otherwise yield
+                // (a, b, b), (a, a, c) and the like.
+                if c2 == c3 && (c2 == kb || c2 == ka || kb == ka) {
+                    r2.next();
+                    r3.next();
+                } else if c2 == c3 {
                     let c_u32 = c2 as u32;
-                    if let Some(t_bc) = ts_map.get(trie, bi, c_u32) {
-                        if t_bc > t_ab {
+                    // `successor` = non-strict + multi-edge aware; see the
+                    // note in `enumerate_triangles_lftj_simd`.
+                    if let Some(t_bc) = ts_map.successor(trie, bi, c_u32, t_ab) {
+                        {
                             // Third edge is a -> c (forward triangle).
-                            if let Some(t_ac) = ts_map.get(trie, ai, c_u32) {
-                                if t_ac > t_bc {
+                            // Existence closes the triangle; the value is
+                            // not needed again in this variant.
+                            if ts_map.successor(trie, ai, c_u32, t_bc).is_some() {
+                                {
                                     let c_sid = StrId::from_raw(c_u32);
                                     out.push(vec![
                                         graph.interner.resolve_arc(a_sid),
@@ -262,6 +374,11 @@ pub fn enumerate_triangles_lftj_simd(
         let a_end = trie.dst_offsets[ai + 1] as usize;
         let a_dsts = &trie.dst_keys[a_off..a_end];
         for &b in a_dsts {
+            // A self-loop a->a would make `b == a`; a triangle needs three
+            // distinct vertices, as the K4 enumerators already require.
+            if b == a {
+                continue;
+            }
             let b_sid = StrId::from_raw(b);
             let bi = match trie.src_keys.binary_search(&b) {
                 Ok(i) => i,
@@ -279,18 +396,21 @@ pub fn enumerate_triangles_lftj_simd(
             crate::simd_rust::intersect_sorted_u32_collect(a_dsts, b_dsts, &mut intersect_buf);
 
             for &c in intersect_buf.iter() {
-                let t_bc = match ts_map.get(trie, bi, c) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                if t_bc <= t_ab {
+                if c == a || c == b {
                     continue;
                 }
-                let t_ac = match ts_map.get(trie, ai, c) {
+                // `successor` is non-strict (≥ the floor, matching the DFS
+                // floor, which keeps edges whose timestamp EQUALS the
+                // previous hop's) and searches every parallel edge rather
+                // than only the pair's minimum.
+                let t_bc = match ts_map.successor(trie, bi, c, t_ab) {
                     Some(t) => t,
                     None => continue,
                 };
-                if t_ac <= t_bc {
+                // Existence is the whole test here: `successor` returning
+                // Some means a valid `a -> c` edge at or after `t_bc`
+                // exists, which closes the time-respecting triangle.
+                if ts_map.successor(trie, ai, c, t_bc).is_none() {
                     continue;
                 }
                 let c_sid = StrId::from_raw(c);
@@ -325,6 +445,11 @@ pub fn enumerate_triangles_naive(
         let a_dsts =
             &trie.dst_keys[trie.dst_offsets[ai] as usize..trie.dst_offsets[ai + 1] as usize];
         for &b in a_dsts {
+            // A self-loop a->a would make `b == a`; a triangle needs three
+            // distinct vertices, as the K4 enumerators already require.
+            if b == a {
+                continue;
+            }
             let b_sid = StrId::from_raw(b);
             let bi = match trie.src_keys.binary_search(&b) {
                 Ok(i) => i,
@@ -334,25 +459,28 @@ pub fn enumerate_triangles_naive(
                 Some(t) => t,
                 None => continue,
             };
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             for &c in b_dsts {
+                if c == a || c == b {
+                    continue;
+                }
                 if a_dsts.binary_search(&c).is_err() {
                     continue;
                 }
                 let c_sid = StrId::from_raw(c);
-                let t_bc = match ts_map.get(trie, bi, c) {
+                // `successor` is non-strict (≥ the floor, matching the DFS
+                // floor, which keeps edges whose timestamp EQUALS the
+                // previous hop's) and searches every parallel edge rather
+                // than only the pair's minimum.
+                let t_bc = match ts_map.successor(trie, bi, c, t_ab) {
                     Some(t) => t,
                     None => continue,
                 };
-                if t_bc <= t_ab {
-                    continue;
-                }
-                let t_ac = match ts_map.get(trie, ai, c) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                if t_ac <= t_bc {
+                // Existence is the whole test here: `successor` returning
+                // Some means a valid `a -> c` edge at or after `t_bc`
+                // exists, which closes the time-respecting triangle.
+                if ts_map.successor(trie, ai, c, t_bc).is_none() {
                     continue;
                 }
                 out.push(vec![
@@ -369,17 +497,28 @@ pub fn enumerate_triangles_naive(
     out
 }
 
-/// SIMD enumerator with a time-window predicate. Emits only triangles
-/// whose `t_ab` falls in `[t_lo, t_hi)`. The narrower the window, the
-/// fewer triangles emitted — but the trie + ts_map build cost is
-/// window-independent, so a shared trie amortizes across many narrow
-/// windows.
+/// SIMD enumerator with a time-window predicate. Emits only triangles all
+/// of whose edges fall in the **inclusive** window `[t_lo, t_hi]`. The
+/// narrower the window, the fewer triangles emitted — but the trie +
+/// ts_map build cost is window-independent, so a shared trie amortizes
+/// across many narrow windows.
 ///
-/// Why filter on `t_ab` rather than `t_ac`: `t_ab` is the earliest
-/// timestamp in the time-respecting chain, so an early `continue`
-/// short-circuits the inner SIMD intersect entirely when `t_ab` is
-/// out-of-window. Filtering on `t_ac` would still pay for the
-/// intersect.
+/// **Window semantics match the DFS**, and both parts of that were once
+/// wrong here:
+///
+/// * The upper bound is **inclusive**. It used to be half-open
+///   (`t_ab >= t_hi` rejected), while the DFS bounds its range with
+///   `partition_point(|e| e.timestamp <= tw_end)` — so a first edge landing
+///   exactly on `t_hi` was inside the DFS's window and outside this one.
+/// * **Every** edge is window-checked, not just `t_ab`. Filtering only the
+///   first edge let a triangle whose 2nd and 3rd edges fell far outside the
+///   requested window be emitted anyway — the operator reporting a match
+///   the analyst's window excluded. That was the one divergence here that
+///   *over*-reported, which makes it the one that could invent a finding.
+///
+/// `t_ab` is still checked first, before the SIMD intersect, so the cheap
+/// rejection still short-circuits the expensive step; the other two checks
+/// simply happen where those timestamps become known.
 pub fn enumerate_triangles_lftj_simd_window(
     graph: &GraphHunter,
     trie: &MaterializedCsrTrie,
@@ -397,16 +536,26 @@ pub fn enumerate_triangles_lftj_simd_window(
         let a_end = trie.dst_offsets[ai + 1] as usize;
         let a_dsts = &trie.dst_keys[a_off..a_end];
         for &b in a_dsts {
+            // A self-loop a->a would make `b == a`; a triangle needs three
+            // distinct vertices, as the K4 enumerators already require.
+            if b == a {
+                continue;
+            }
             let b_sid = StrId::from_raw(b);
             let bi = match trie.src_keys.binary_search(&b) {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let t_ab = match ts_map.get(trie, ai, b) {
+            // Earliest `a -> b` edge at or after the window opens — NOT the
+            // global minimum, which may predate the window while a later
+            // parallel edge sits comfortably inside it.
+            let t_ab = match ts_map.successor(trie, ai, b, t_lo) {
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab > t_hi {
                 continue;
             }
             let b_off = trie.dst_offsets[bi] as usize;
@@ -417,18 +566,32 @@ pub fn enumerate_triangles_lftj_simd_window(
             crate::simd_rust::intersect_sorted_u32_collect(a_dsts, b_dsts, &mut intersect_buf);
 
             for &c in intersect_buf.iter() {
-                let t_bc = match ts_map.get(trie, bi, c) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                if t_bc <= t_ab {
+                if c == a || c == b {
                     continue;
                 }
-                let t_ac = match ts_map.get(trie, ai, c) {
+                // `successor` carries both corrections at once: it is
+                // non-strict (≥ the floor, matching the DFS, which keeps
+                // edges whose timestamp EQUALS the previous hop's), and it
+                // searches EVERY parallel edge instead of testing only the
+                // pair's minimum. Greedy-earliest is optimal for a chain:
+                // it leaves the widest range for the next hop.
+                let t_bc = match ts_map.successor(trie, bi, c, t_ab) {
                     Some(t) => t,
                     None => continue,
                 };
-                if t_ac <= t_bc {
+                // The window applies to EVERY edge, as in the DFS. Only the
+                // upper bound needs testing: the chain already gives
+                // `t_bc >= t_ab >= t_lo`, so the lower bound is implied.
+                if t_bc > t_hi {
+                    continue;
+                }
+                // Here the closing edge's timestamp is needed, not just its
+                // existence, because it too must sit inside the window.
+                let t_ac = match ts_map.successor(trie, ai, c, t_bc) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                if t_ac > t_hi {
                     continue;
                 }
                 let c_sid = StrId::from_raw(c);
@@ -502,22 +665,29 @@ pub fn enumerate_4cliques_naive(
         let a_dsts =
             &trie.dst_keys[trie.dst_offsets[ai] as usize..trie.dst_offsets[ai + 1] as usize];
         for &b in a_dsts {
+            // `b == a` was the one distinctness case even this baseline
+            // missed; only a self-loop can produce it.
+            if b == a {
+                continue;
+            }
             let b_sid = StrId::from_raw(b);
             let bi = match trie.src_keys.binary_search(&b) {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let t_ab = match ts_map.get(trie, ai, b) {
+            let t_ab = match ts_map.successor(trie, ai, b, t_lo) {
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab > t_hi {
                 continue;
             }
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             for &c in a_dsts {
-                if c == b {
+                if c == a || c == b {
                     continue;
                 }
                 if b_dsts.binary_search(&c).is_err() {
@@ -527,25 +697,22 @@ pub fn enumerate_4cliques_naive(
                     Ok(i) => i,
                     Err(_) => continue,
                 };
-                let t_ac = match ts_map.get(trie, ai, c) {
+                // Chain: t_ab <= t_ac <= t_ad <= t_bc <= t_bd <= t_cd.
+                let t_ac = match ts_map.successor(trie, ai, c, t_ab) {
                     Some(t) => t,
                     None => continue,
                 };
-                if t_ac <= t_ab {
+                if t_ac > t_hi {
                     continue;
                 }
-                let t_bc = match ts_map.get(trie, bi, c) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                if t_ac >= t_bc {
+                if ts_map.successor(trie, bi, c, t_ac).is_none() {
                     continue;
                 }
                 let c_sid = StrId::from_raw(c);
                 let c_dsts = &trie.dst_keys
                     [trie.dst_offsets[ci] as usize..trie.dst_offsets[ci + 1] as usize];
                 for &d in a_dsts {
-                    if d == b || d == c {
+                    if d == a || d == b || d == c {
                         continue;
                     }
                     if b_dsts.binary_search(&d).is_err() {
@@ -554,25 +721,32 @@ pub fn enumerate_4cliques_naive(
                     if c_dsts.binary_search(&d).is_err() {
                         continue;
                     }
-                    let t_ad = match ts_map.get(trie, ai, d) {
+                    let t_ad = match ts_map.successor(trie, ai, d, t_ac) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_ad <= t_ac || t_ad >= t_bc {
+                    if t_ad > t_hi {
                         continue;
                     }
-                    let t_bd = match ts_map.get(trie, bi, d) {
+                    let t_bc = match ts_map.successor(trie, bi, c, t_ad) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_bd <= t_bc {
+                    if t_bc > t_hi {
                         continue;
                     }
-                    let t_cd = match ts_map.get(trie, ci, d) {
+                    let t_bd = match ts_map.successor(trie, bi, d, t_bc) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_cd <= t_bd {
+                    if t_bd > t_hi {
+                        continue;
+                    }
+                    let t_cd = match ts_map.successor(trie, ci, d, t_bd) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    if t_cd > t_hi {
                         continue;
                     }
                     let d_sid = StrId::from_raw(d);
@@ -617,16 +791,23 @@ pub fn enumerate_4cliques_lftj_simd(
         let a_end = trie.dst_offsets[ai + 1] as usize;
         let a_dsts = &trie.dst_keys[a_off..a_end];
         for &b in a_dsts {
+            // Distinctness — see the note in the parallel twin. Required
+            // once the comparisons below became non-strict.
+            if b == a {
+                continue;
+            }
             let b_sid = StrId::from_raw(b);
             let bi = match trie.src_keys.binary_search(&b) {
                 Ok(i) => i,
                 Err(_) => continue,
             };
-            let t_ab = match ts_map.get(trie, ai, b) {
+            let t_ab = match ts_map.successor(trie, ai, b, t_lo) {
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab > t_hi {
                 continue;
             }
             let b_off = trie.dst_offsets[bi] as usize;
@@ -641,22 +822,23 @@ pub fn enumerate_4cliques_lftj_simd(
 
             for c_idx in 0..ab_isect.len() {
                 let c = ab_isect[c_idx];
+                if c == a || c == b {
+                    continue;
+                }
                 let ci = match trie.src_keys.binary_search(&c) {
                     Ok(i) => i,
                     Err(_) => continue,
                 };
-                let t_ac = match ts_map.get(trie, ai, c) {
+                // Chain: t_ab <= t_ac <= t_ad <= t_bc <= t_bd <= t_cd.
+                let t_ac = match ts_map.successor(trie, ai, c, t_ab) {
                     Some(t) => t,
                     None => continue,
                 };
-                if t_ac <= t_ab {
+                if t_ac > t_hi {
                     continue;
                 }
-                let t_bc = match ts_map.get(trie, bi, c) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                if t_ac >= t_bc {
+                // Necessary condition before the second intersect.
+                if ts_map.successor(trie, bi, c, t_ac).is_none() {
                     continue;
                 }
                 let c_sid = StrId::from_raw(c);
@@ -672,25 +854,35 @@ pub fn enumerate_4cliques_lftj_simd(
                 );
 
                 for &d in abc_isect.iter() {
-                    let t_ad = match ts_map.get(trie, ai, d) {
-                        Some(t) => t,
-                        None => continue,
-                    };
-                    if t_ad <= t_ac || t_ad >= t_bc {
+                    if d == a || d == b || d == c {
                         continue;
                     }
-                    let t_bd = match ts_map.get(trie, bi, d) {
+                    let t_ad = match ts_map.successor(trie, ai, d, t_ac) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_bd <= t_bc {
+                    if t_ad > t_hi {
                         continue;
                     }
-                    let t_cd = match ts_map.get(trie, ci, d) {
+                    let t_bc = match ts_map.successor(trie, bi, c, t_ad) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_cd <= t_bd {
+                    if t_bc > t_hi {
+                        continue;
+                    }
+                    let t_bd = match ts_map.successor(trie, bi, d, t_bc) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    if t_bd > t_hi {
+                        continue;
+                    }
+                    let t_cd = match ts_map.successor(trie, ci, d, t_bd) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    if t_cd > t_hi {
                         continue;
                     }
                     let d_sid = StrId::from_raw(d);
@@ -741,16 +933,34 @@ pub fn enumerate_4cliques_lftj_simd_par(
                 let a_end = trie.dst_offsets[ai + 1] as usize;
                 let a_dsts = &trie.dst_keys[a_off..a_end];
                 'a_loop: for &b in a_dsts {
+                    // Distinctness. A 4-clique needs four DISTINCT
+                    // vertices, and the intersects below can legitimately
+                    // contain `a`/`b`/`c` when self-loops exist. The naive
+                    // baseline guards this explicitly; the SIMD variants did
+                    // not, and got away with it only because the strict
+                    // comparisons rejected the degenerate tuples by
+                    // accident (d == b forces t_ad == t_ab, which tripped
+                    // `t_ad <= t_ac`). Relaxing to non-strict removes that
+                    // accidental cover, so the guards must be explicit —
+                    // and self-loops are no longer hypothetical here: the
+                    // single-endpoint ingest fallback emits `IP -> IP`
+                    // self-loops for events that name only one entity.
+                    if b == a {
+                        continue;
+                    }
                     let b_sid = StrId::from_raw(b);
                     let bi = match trie.src_keys.binary_search(&b) {
                         Ok(i) => i,
                         Err(_) => continue,
                     };
-                    let t_ab = match ts_map.get(trie, ai, b) {
+                    // Earliest `a -> b` at or after the window opens, over
+                    // all parallel edges — see `MinTimestampMap::successor`.
+                    let t_ab = match ts_map.successor(trie, ai, b, t_lo) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_ab < t_lo || t_ab >= t_hi {
+                    // Inclusive upper bound, matching the DFS.
+                    if t_ab > t_hi {
                         continue;
                     }
                     let b_off = trie.dst_offsets[bi] as usize;
@@ -763,22 +973,30 @@ pub fn enumerate_4cliques_lftj_simd_par(
                     }
                     for c_idx in 0..ab_isect.len() {
                         let c = ab_isect[c_idx];
+                        if c == a || c == b {
+                            continue;
+                        }
                         let ci = match trie.src_keys.binary_search(&c) {
                             Ok(i) => i,
                             Err(_) => continue,
                         };
-                        let t_ac = match ts_map.get(trie, ai, c) {
+                        // The predicate is one chain:
+                        //   t_ab <= t_ac <= t_ad <= t_bc <= t_bd <= t_cd
+                        // so each link is the earliest edge at or after the
+                        // previous one. Greedy-earliest is optimal for a
+                        // chain: it leaves the widest range downstream.
+                        let t_ac = match ts_map.successor(trie, ai, c, t_ab) {
                             Some(t) => t,
                             None => continue,
                         };
-                        if t_ac <= t_ab {
+                        if t_ac > t_hi {
                             continue;
                         }
-                        let t_bc = match ts_map.get(trie, bi, c) {
-                            Some(t) => t,
-                            None => continue,
-                        };
-                        if t_ac >= t_bc {
+                        // Cheap necessary condition before the expensive
+                        // second intersect: `t_bc` sits after `t_ad`, which
+                        // sits after `t_ac`, so a usable `b -> c` must exist
+                        // at or after `t_ac`.
+                        if ts_map.successor(trie, bi, c, t_ac).is_none() {
                             continue;
                         }
                         let c_sid = StrId::from_raw(c);
@@ -792,25 +1010,35 @@ pub fn enumerate_4cliques_lftj_simd_par(
                             abc_isect,
                         );
                         for &d in abc_isect.iter() {
-                            let t_ad = match ts_map.get(trie, ai, d) {
-                                Some(t) => t,
-                                None => continue,
-                            };
-                            if t_ad <= t_ac || t_ad >= t_bc {
+                            if d == a || d == b || d == c {
                                 continue;
                             }
-                            let t_bd = match ts_map.get(trie, bi, d) {
+                            let t_ad = match ts_map.successor(trie, ai, d, t_ac) {
                                 Some(t) => t,
                                 None => continue,
                             };
-                            if t_bd <= t_bc {
+                            if t_ad > t_hi {
                                 continue;
                             }
-                            let t_cd = match ts_map.get(trie, ci, d) {
+                            let t_bc = match ts_map.successor(trie, bi, c, t_ad) {
                                 Some(t) => t,
                                 None => continue,
                             };
-                            if t_cd <= t_bd {
+                            if t_bc > t_hi {
+                                continue;
+                            }
+                            let t_bd = match ts_map.successor(trie, bi, d, t_bc) {
+                                Some(t) => t,
+                                None => continue,
+                            };
+                            if t_bd > t_hi {
+                                continue;
+                            }
+                            let t_cd = match ts_map.successor(trie, ci, d, t_bd) {
+                                Some(t) => t,
+                                None => continue,
+                            };
+                            if t_cd > t_hi {
                                 continue;
                             }
                             let d_sid = StrId::from_raw(d);
@@ -829,13 +1057,10 @@ pub fn enumerate_4cliques_lftj_simd_par(
                 local
             },
         )
-        .reduce(
-            Vec::new,
-            |mut a, b| {
-                a.extend(b);
-                a
-            },
-        );
+        .reduce(Vec::new, |mut a, b| {
+            a.extend(b);
+            a
+        });
     if all.len() > max_results {
         all.truncate(max_results);
     }
@@ -883,11 +1108,13 @@ pub fn enumerate_5cliques_naive(
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab < t_lo || t_ab > t_hi {
                 continue;
             }
-            let b_dsts = &trie.dst_keys
-                [trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
+            let b_dsts =
+                &trie.dst_keys[trie.dst_offsets[bi] as usize..trie.dst_offsets[bi + 1] as usize];
             for &c in a_dsts {
                 if c == b {
                     continue;
@@ -1043,7 +1270,9 @@ pub fn enumerate_5cliques_lftj_simd(
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab < t_lo || t_ab > t_hi {
                 continue;
             }
             let b_off = trie.dst_offsets[bi] as usize;
@@ -1197,7 +1426,8 @@ pub fn enumerate_5cliques_lftj_simd_par(
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_ab < t_lo || t_ab >= t_hi {
+                    // Inclusive upper bound, matching the DFS.
+                    if t_ab < t_lo || t_ab > t_hi {
                         continue;
                     }
                     let b_off = trie.dst_offsets[bi] as usize;
@@ -1316,13 +1546,10 @@ pub fn enumerate_5cliques_lftj_simd_par(
                 local
             },
         )
-        .reduce(
-            Vec::new,
-            |mut a, b| {
-                a.extend(b);
-                a
-            },
-        );
+        .reduce(Vec::new, |mut a, b| {
+            a.extend(b);
+            a
+        });
     if all.len() > max_results {
         all.truncate(max_results);
     }
@@ -1373,7 +1600,9 @@ pub fn enumerate_6cycles_naive(
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab < t_lo || t_ab > t_hi {
                 continue;
             }
             let b_dsts = forward.neighbors_of(b);
@@ -1390,7 +1619,14 @@ pub fn enumerate_6cycles_naive(
                     Some(t) => t,
                     None => continue,
                 };
-                if t_bc <= t_ab {
+                // Non-strict, matching the DFS floor: `edge_range_sid`
+                // keeps edges whose timestamp EQUALS the previous hop's
+                // (`partition_point(|e| e.timestamp < lo_ts)`), so a
+                // same-second causal chain is a valid match there and must
+                // be one here too. Sources routinely stamp ordered events
+                // inside one second, and our own CDM parser floors
+                // nanoseconds to seconds, so this is the common case.
+                if t_bc < t_ab {
                     continue;
                 }
                 let c_dsts = forward.neighbors_of(c);
@@ -1516,7 +1752,9 @@ pub fn enumerate_6cycles_lftj_simd(
                 Some(t) => t,
                 None => continue,
             };
-            if t_ab < t_lo || t_ab >= t_hi {
+            // Inclusive upper bound, matching the DFS's
+            // `partition_point(|e| e.timestamp <= tw_end)`.
+            if t_ab < t_lo || t_ab > t_hi {
                 continue;
             }
             let b_dsts = forward.neighbors_of(b);
@@ -1533,7 +1771,14 @@ pub fn enumerate_6cycles_lftj_simd(
                     Some(t) => t,
                     None => continue,
                 };
-                if t_bc <= t_ab {
+                // Non-strict, matching the DFS floor: `edge_range_sid`
+                // keeps edges whose timestamp EQUALS the previous hop's
+                // (`partition_point(|e| e.timestamp < lo_ts)`), so a
+                // same-second causal chain is a valid match there and must
+                // be one here too. Sources routinely stamp ordered events
+                // inside one second, and our own CDM parser floors
+                // nanoseconds to seconds, so this is the common case.
+                if t_bc < t_ab {
                     continue;
                 }
                 let c_dsts = forward.neighbors_of(c);
@@ -1574,7 +1819,9 @@ pub fn enumerate_6cycles_lftj_simd(
                         let e_dsts = forward.neighbors_of(e);
                         ef_isect.clear();
                         crate::simd_rust::intersect_sorted_u32_collect(
-                            e_dsts, pred_a, &mut ef_isect,
+                            e_dsts,
+                            pred_a,
+                            &mut ef_isect,
                         );
                         for &f in ef_isect.iter() {
                             if f == a || f == b || f == c || f == d || f == e {
@@ -1635,139 +1882,134 @@ pub fn enumerate_6cycles_lftj_simd_par(
     use rayon::prelude::*;
     let mut all: Vec<HuntResult> = (0..forward.src_keys.len())
         .into_par_iter()
-        .map_init(
-            || Vec::<u32>::new(),
-            |ef_isect, ai| {
-                let mut local: Vec<HuntResult> = Vec::new();
-                let a = forward.src_keys[ai];
-                let a_sid = StrId::from_raw(a);
-                let pred_a = reverse.neighbors_of(a);
-                if pred_a.is_empty() {
-                    return local;
+        .map_init(Vec::<u32>::new, |ef_isect, ai| {
+            let mut local: Vec<HuntResult> = Vec::new();
+            let a = forward.src_keys[ai];
+            let a_sid = StrId::from_raw(a);
+            let pred_a = reverse.neighbors_of(a);
+            if pred_a.is_empty() {
+                return local;
+            }
+            let a_dsts = &forward.dst_keys
+                [forward.dst_offsets[ai] as usize..forward.dst_offsets[ai + 1] as usize];
+            'a_loop: for &b in a_dsts {
+                if b == a {
+                    continue;
                 }
-                let a_dsts = &forward.dst_keys
-                    [forward.dst_offsets[ai] as usize..forward.dst_offsets[ai + 1] as usize];
-                'a_loop: for &b in a_dsts {
-                    if b == a {
+                let b_sid = StrId::from_raw(b);
+                let bi = match forward.src_keys.binary_search(&b) {
+                    Ok(i) => i,
+                    Err(_) => continue,
+                };
+                let t_ab = match ts_map.get(forward, ai, b) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                // Inclusive upper bound, matching the DFS.
+                if t_ab < t_lo || t_ab > t_hi {
+                    continue;
+                }
+                let b_dsts = forward.neighbors_of(b);
+                for &c in b_dsts {
+                    if c == a || c == b {
                         continue;
                     }
-                    let b_sid = StrId::from_raw(b);
-                    let bi = match forward.src_keys.binary_search(&b) {
+                    let c_sid = StrId::from_raw(c);
+                    let ci = match forward.src_keys.binary_search(&c) {
                         Ok(i) => i,
                         Err(_) => continue,
                     };
-                    let t_ab = match ts_map.get(forward, ai, b) {
+                    let t_bc = match ts_map.get(forward, bi, c) {
                         Some(t) => t,
                         None => continue,
                     };
-                    if t_ab < t_lo || t_ab >= t_hi {
+                    if t_bc <= t_ab {
                         continue;
                     }
-                    let b_dsts = forward.neighbors_of(b);
-                    for &c in b_dsts {
-                        if c == a || c == b {
+                    let c_dsts = forward.neighbors_of(c);
+                    for &d in c_dsts {
+                        if d == a || d == b || d == c {
                             continue;
                         }
-                        let c_sid = StrId::from_raw(c);
-                        let ci = match forward.src_keys.binary_search(&c) {
+                        let d_sid = StrId::from_raw(d);
+                        let di = match forward.src_keys.binary_search(&d) {
                             Ok(i) => i,
                             Err(_) => continue,
                         };
-                        let t_bc = match ts_map.get(forward, bi, c) {
+                        let t_cd = match ts_map.get(forward, ci, d) {
                             Some(t) => t,
                             None => continue,
                         };
-                        if t_bc <= t_ab {
+                        if t_cd <= t_bc {
                             continue;
                         }
-                        let c_dsts = forward.neighbors_of(c);
-                        for &d in c_dsts {
-                            if d == a || d == b || d == c {
+                        let d_dsts = forward.neighbors_of(d);
+                        for &e in d_dsts {
+                            if e == a || e == b || e == c || e == d {
                                 continue;
                             }
-                            let d_sid = StrId::from_raw(d);
-                            let di = match forward.src_keys.binary_search(&d) {
+                            let e_sid = StrId::from_raw(e);
+                            let ei = match forward.src_keys.binary_search(&e) {
                                 Ok(i) => i,
                                 Err(_) => continue,
                             };
-                            let t_cd = match ts_map.get(forward, ci, d) {
+                            let t_de = match ts_map.get(forward, di, e) {
                                 Some(t) => t,
                                 None => continue,
                             };
-                            if t_cd <= t_bc {
+                            if t_de <= t_cd {
                                 continue;
                             }
-                            let d_dsts = forward.neighbors_of(d);
-                            for &e in d_dsts {
-                                if e == a || e == b || e == c || e == d {
+                            let e_dsts = forward.neighbors_of(e);
+                            ef_isect.clear();
+                            crate::simd_rust::intersect_sorted_u32_collect(
+                                e_dsts, pred_a, ef_isect,
+                            );
+                            for &f in ef_isect.iter() {
+                                if f == a || f == b || f == c || f == d || f == e {
                                     continue;
                                 }
-                                let e_sid = StrId::from_raw(e);
-                                let ei = match forward.src_keys.binary_search(&e) {
+                                let fi = match forward.src_keys.binary_search(&f) {
                                     Ok(i) => i,
                                     Err(_) => continue,
                                 };
-                                let t_de = match ts_map.get(forward, di, e) {
+                                let t_ef = match ts_map.get(forward, ei, f) {
                                     Some(t) => t,
                                     None => continue,
                                 };
-                                if t_de <= t_cd {
+                                if t_ef <= t_de {
                                     continue;
                                 }
-                                let e_dsts = forward.neighbors_of(e);
-                                ef_isect.clear();
-                                crate::simd_rust::intersect_sorted_u32_collect(
-                                    e_dsts, pred_a, ef_isect,
-                                );
-                                for &f in ef_isect.iter() {
-                                    if f == a || f == b || f == c || f == d || f == e {
-                                        continue;
-                                    }
-                                    let fi = match forward.src_keys.binary_search(&f) {
-                                        Ok(i) => i,
-                                        Err(_) => continue,
-                                    };
-                                    let t_ef = match ts_map.get(forward, ei, f) {
-                                        Some(t) => t,
-                                        None => continue,
-                                    };
-                                    if t_ef <= t_de {
-                                        continue;
-                                    }
-                                    let t_fa = match ts_map.get(forward, fi, a) {
-                                        Some(t) => t,
-                                        None => continue,
-                                    };
-                                    if t_fa <= t_ef {
-                                        continue;
-                                    }
-                                    let f_sid = StrId::from_raw(f);
-                                    local.push(vec![
-                                        graph.interner.resolve_arc(a_sid),
-                                        graph.interner.resolve_arc(b_sid),
-                                        graph.interner.resolve_arc(c_sid),
-                                        graph.interner.resolve_arc(d_sid),
-                                        graph.interner.resolve_arc(e_sid),
-                                        graph.interner.resolve_arc(f_sid),
-                                    ]);
-                                    if local.len() >= max_results {
-                                        break 'a_loop;
-                                    }
+                                let t_fa = match ts_map.get(forward, fi, a) {
+                                    Some(t) => t,
+                                    None => continue,
+                                };
+                                if t_fa <= t_ef {
+                                    continue;
+                                }
+                                let f_sid = StrId::from_raw(f);
+                                local.push(vec![
+                                    graph.interner.resolve_arc(a_sid),
+                                    graph.interner.resolve_arc(b_sid),
+                                    graph.interner.resolve_arc(c_sid),
+                                    graph.interner.resolve_arc(d_sid),
+                                    graph.interner.resolve_arc(e_sid),
+                                    graph.interner.resolve_arc(f_sid),
+                                ]);
+                                if local.len() >= max_results {
+                                    break 'a_loop;
                                 }
                             }
                         }
                     }
                 }
-                local
-            },
-        )
-        .reduce(
-            Vec::new,
-            |mut a, b| {
-                a.extend(b);
-                a
-            },
-        );
+            }
+            local
+        })
+        .reduce(Vec::new, |mut a, b| {
+            a.extend(b);
+            a
+        });
     if all.len() > max_results {
         all.truncate(max_results);
     }
@@ -1870,19 +2112,51 @@ mod tests {
 
         // Windowed variant: full-range window must match unwindowed.
         let win_full = sort_triangles(enumerate_triangles_lftj_simd_window(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 10_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            10_000,
         ));
-        assert_eq!(win_full, naive, "windowed enumerator must match unwindowed at full range");
+        assert_eq!(
+            win_full, naive,
+            "windowed enumerator must match unwindowed at full range"
+        );
 
-        // Windowed variant: disjoint window union covers full range.
+        // Sub-windows are SOUND but not COMPLETE, and that is correct.
+        //
+        // This assertion used to be `union == naive`: partitioning the time
+        // range and unioning the results reconstructed everything. That
+        // property held only because the window was applied to `t_ab`
+        // alone, so every triangle belonged to exactly one sub-window — the
+        // one containing its first edge, no matter where its other two
+        // edges landed. That was the over-reporting divergence from the
+        // DFS, which applies the window at every hop.
+        //
+        // Now that a window means "every edge inside", a triangle straddling
+        // a boundary belongs to NEITHER half, so the union is a strict
+        // subset of the full-range result. The DFS behaves the same way, so
+        // this is alignment, not loss. What must still hold is soundness:
+        // no sub-window may report a triangle the full range does not.
         let mut win_union = Vec::new();
-        for (lo, hi) in [(i64::MIN, 50_i64), (50, 1_000)] {
+        for (lo, hi) in [(i64::MIN, 49_i64), (50, 1_000)] {
             win_union.extend(enumerate_triangles_lftj_simd_window(
                 &g, &trie, &ts_map, lo, hi, 10_000,
             ));
         }
         let win_union = sort_triangles(win_union);
-        assert_eq!(win_union, naive, "disjoint windows over full range must reconstruct full result");
+        for t in &win_union {
+            assert!(
+                naive.contains(t),
+                "a sub-window reported {t:?}, which the full range does not \
+                 contain — a window must never invent a match"
+            );
+        }
+        assert!(
+            win_union.len() <= naive.len(),
+            "sub-windows cannot report more than the full range"
+        );
     }
 
     #[test]
@@ -1958,12 +2232,9 @@ mod tests {
         let g = make_k4_chronological();
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
-        let naive =
-            enumerate_4cliques_naive(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
-        let simd =
-            enumerate_4cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
-        let par =
-            enumerate_4cliques_lftj_simd_par(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let naive = enumerate_4cliques_naive(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let simd = enumerate_4cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let par = enumerate_4cliques_lftj_simd_par(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
         for (label, r) in [("naive", &naive), ("simd", &simd), ("par", &par)] {
             assert_eq!(r.len(), 1, "{label}: exactly one chronological K4");
             assert_eq!(&*r[0][0], "a", "{label}");
@@ -1996,9 +2267,7 @@ mod tests {
         g.sort_edges_by_timestamp().unwrap();
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
-        let r = enumerate_4cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let r = enumerate_4cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
         assert!(r.is_empty(), "out-of-order K4 must be rejected");
     }
 
@@ -2013,17 +2282,35 @@ mod tests {
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
         let naive = sort_4cliques(enumerate_4cliques_naive(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let simd = sort_4cliques(enumerate_4cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let par = sort_4cliques(enumerate_4cliques_lftj_simd_par(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         assert_eq!(simd, naive, "LFTJ-SIMD K4 enumerate must match naive");
         assert_eq!(par, naive, "rayon-parallel K4 enumerate must match naive");
-        assert!(!naive.is_empty(), "expected at least one chronological K4 at p=0.40");
+        assert!(
+            !naive.is_empty(),
+            "expected at least one chronological K4 at p=0.40"
+        );
     }
 
     #[test]
@@ -2033,7 +2320,12 @@ mod tests {
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
         let full = sort_4cliques(enumerate_4cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         // Disjoint window union over the full timestamp range must
         // reconstruct the unwindowed result.
@@ -2115,9 +2407,7 @@ mod tests {
         // Type-aware trie via the new helper.
         let trie = g.build_lftj_trie_for(&h);
         let ts_map = MinTimestampMap::build(&g, &trie);
-        let mut results = enumerate_4cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let mut results = enumerate_4cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
         results.sort_by(|a, b| a[0].cmp(&b[0]));
 
         assert_eq!(
@@ -2131,9 +2421,8 @@ mod tests {
         // Sanity: the type-blind trie sees both K4s.
         let blind_trie = MaterializedCsrTrie::build(&g);
         let blind_ts = MinTimestampMap::build(&g, &blind_trie);
-        let blind = enumerate_4cliques_lftj_simd(
-            &g, &blind_trie, &blind_ts, i64::MIN, i64::MAX, 100,
-        );
+        let blind =
+            enumerate_4cliques_lftj_simd(&g, &blind_trie, &blind_ts, i64::MIN, i64::MAX, 100);
         assert_eq!(
             blind.len(),
             2,
@@ -2176,12 +2465,9 @@ mod tests {
         let g = make_k5_chronological();
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
-        let naive =
-            enumerate_5cliques_naive(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
-        let simd =
-            enumerate_5cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
-        let par =
-            enumerate_5cliques_lftj_simd_par(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let naive = enumerate_5cliques_naive(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let simd = enumerate_5cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
+        let par = enumerate_5cliques_lftj_simd_par(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
         for (label, r) in [("naive", &naive), ("simd", &simd), ("par", &par)] {
             assert_eq!(r.len(), 1, "{label}: exactly one chronological K5");
             assert_eq!(&*r[0][0], "a", "{label}");
@@ -2219,9 +2505,7 @@ mod tests {
         g.sort_edges_by_timestamp().unwrap();
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
-        let r = enumerate_5cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let r = enumerate_5cliques_lftj_simd(&g, &trie, &ts_map, i64::MIN, i64::MAX, 100);
         assert!(r.is_empty(), "out-of-order K5 must be rejected");
     }
 
@@ -2238,13 +2522,28 @@ mod tests {
         let trie = MaterializedCsrTrie::build(&g);
         let ts_map = MinTimestampMap::build(&g, &trie);
         let naive = sort_5cliques(enumerate_5cliques_naive(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let simd = sort_5cliques(enumerate_5cliques_lftj_simd(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let par = sort_5cliques(enumerate_5cliques_lftj_simd_par(
-            &g, &trie, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &trie,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         assert_eq!(simd, naive, "LFTJ-SIMD K5 enumerate must match naive");
         assert_eq!(par, naive, "rayon-parallel K5 enumerate must match naive");
@@ -2294,14 +2593,9 @@ mod tests {
         let fwd = MaterializedCsrTrie::build(&g);
         let rev = MaterializedCsrTrie::build_reverse(&g);
         let ts_map = MinTimestampMap::build(&g, &fwd);
-        let naive =
-            enumerate_6cycles_naive(&g, &fwd, &ts_map, i64::MIN, i64::MAX, 100);
-        let simd = enumerate_6cycles_lftj_simd(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100,
-        );
-        let par = enumerate_6cycles_lftj_simd_par(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let naive = enumerate_6cycles_naive(&g, &fwd, &ts_map, i64::MIN, i64::MAX, 100);
+        let simd = enumerate_6cycles_lftj_simd(&g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100);
+        let par = enumerate_6cycles_lftj_simd_par(&g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100);
         for (label, r) in [("naive", &naive), ("simd", &simd), ("par", &par)] {
             assert_eq!(r.len(), 1, "{label}: exactly one chronological C6");
             assert_eq!(&*r[0][0], "a", "{label}");
@@ -2337,9 +2631,7 @@ mod tests {
         let fwd = MaterializedCsrTrie::build(&g);
         let rev = MaterializedCsrTrie::build_reverse(&g);
         let ts_map = MinTimestampMap::build(&g, &fwd);
-        let r = enumerate_6cycles_lftj_simd(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let r = enumerate_6cycles_lftj_simd(&g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100);
         assert!(r.is_empty(), "out-of-order C6 must be rejected");
     }
 
@@ -2366,9 +2658,7 @@ mod tests {
         let fwd = MaterializedCsrTrie::build(&g);
         let rev = MaterializedCsrTrie::build_reverse(&g);
         let ts_map = MinTimestampMap::build(&g, &fwd);
-        let r = enumerate_6cycles_lftj_simd(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100,
-        );
+        let r = enumerate_6cycles_lftj_simd(&g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100);
         assert!(r.is_empty(), "open path must not produce C6 matches");
     }
 
@@ -2383,13 +2673,30 @@ mod tests {
         let rev = MaterializedCsrTrie::build_reverse(&g);
         let ts_map = MinTimestampMap::build(&g, &fwd);
         let naive = sort_6cycles(enumerate_6cycles_naive(
-            &g, &fwd, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &fwd,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let simd = sort_6cycles(enumerate_6cycles_lftj_simd(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &fwd,
+            &rev,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         let par = sort_6cycles(enumerate_6cycles_lftj_simd_par(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 100_000,
+            &g,
+            &fwd,
+            &rev,
+            &ts_map,
+            i64::MIN,
+            i64::MAX,
+            100_000,
         ));
         assert_eq!(simd, naive, "LFTJ-SIMD C6 enumerate must match naive");
         assert_eq!(par, naive, "rayon-parallel C6 enumerate must match naive");
@@ -2404,9 +2711,7 @@ mod tests {
         // Only one C6 in the chronological fixture; cap=1 is a
         // tautology so this just verifies that the cap doesn't
         // exceed the requested bound.
-        let r = enumerate_6cycles_lftj_simd(
-            &g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 1,
-        );
+        let r = enumerate_6cycles_lftj_simd(&g, &fwd, &rev, &ts_map, i64::MIN, i64::MAX, 1);
         assert!(r.len() <= 1, "max_results must cap output");
     }
 }

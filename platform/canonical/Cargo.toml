@@ -3,7 +3,8 @@ name = "graph_hunter_canonical"
 version = "0.1.0"
 edition = "2024"
 description = "OCSF v1.4 + Provenance Extension canonical view for Graph Hunter. Pure projection from (Entity, Relation, Entity) triples to an auditable canonical form."
-license = "GPL-3.0"
+license = "GPL-3.0-only"
+publish = false
 
 [lib]
 name = "graph_hunter_canonical"

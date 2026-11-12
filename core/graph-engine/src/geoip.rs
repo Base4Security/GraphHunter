@@ -9,6 +9,7 @@
 //! Both return a [`GeoIpResult`] with country, city, ASN, and ISP info.
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "geoip")]
 use std::path::Path;
 
 /// Which source a GeoIP result came from. Useful for the UI to surface a
@@ -137,34 +138,30 @@ pub mod maxmind {
             let addr: IpAddr = ip_str.trim().parse().ok()?;
             let mut result = GeoIpResult::default();
 
-            if let Some(reader) = &self.city_reader {
-                if let Ok(lookup) = reader.lookup(addr) {
-                    if let Ok(Some(city)) = lookup.decode::<geoip2::City>() {
-                        if !city.country.is_empty() {
-                            result.country_code = city.country.iso_code.map(|s| s.to_string());
-                            result.country_name =
-                                city.country.names.english.map(|s| s.to_string());
-                        }
-                        if !city.city.is_empty() {
-                            result.city = city.city.names.english.map(|s| s.to_string());
-                        }
-                        // 0.28: `Traits::is_anonymous_proxy` was removed
-                        // upstream; the field is no longer surfaced. Leave
-                        // `result.is_anonymous_proxy` as `None`.
-                    }
+            if let Some(reader) = &self.city_reader
+                && let Ok(lookup) = reader.lookup(addr)
+                && let Ok(Some(city)) = lookup.decode::<geoip2::City>()
+            {
+                if !city.country.is_empty() {
+                    result.country_code = city.country.iso_code.map(|s| s.to_string());
+                    result.country_name = city.country.names.english.map(|s| s.to_string());
                 }
+                if !city.city.is_empty() {
+                    result.city = city.city.names.english.map(|s| s.to_string());
+                }
+                // 0.28: `Traits::is_anonymous_proxy` was removed
+                // upstream; the field is no longer surfaced. Leave
+                // `result.is_anonymous_proxy` as `None`.
             }
 
-            if let Some(reader) = &self.asn_reader {
-                if let Ok(lookup) = reader.lookup(addr) {
-                    if let Ok(Some(asn)) = lookup.decode::<geoip2::Asn>() {
-                        result.asn = asn.autonomous_system_number;
-                        result.as_org =
-                            asn.autonomous_system_organization.map(|s| s.to_string());
-                        // Use AS org as ISP approximation.
-                        result.isp = result.as_org.clone();
-                    }
-                }
+            if let Some(reader) = &self.asn_reader
+                && let Ok(lookup) = reader.lookup(addr)
+                && let Ok(Some(asn)) = lookup.decode::<geoip2::Asn>()
+            {
+                result.asn = asn.autonomous_system_number;
+                result.as_org = asn.autonomous_system_organization.map(|s| s.to_string());
+                // Use AS org as ISP approximation.
+                result.isp = result.as_org.clone();
             }
 
             if result.country_code.is_some() || result.asn.is_some() {
@@ -296,10 +293,10 @@ pub fn geoip_from_metadata(
 ) -> Option<GeoIpResult> {
     let get = |keys: &[&str]| -> Option<String> {
         for k in keys {
-            if let Some(v) = metadata.get(*k) {
-                if !v.is_empty() {
-                    return Some(v.clone());
-                }
+            if let Some(v) = metadata.get(*k)
+                && !v.is_empty()
+            {
+                return Some(v.clone());
             }
         }
         None

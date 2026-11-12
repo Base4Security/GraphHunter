@@ -35,6 +35,14 @@ use crate::types::{
 /// because `Arc<str>: Serialize` produces the same JSON.
 pub type HuntResult = Vec<std::sync::Arc<str>>;
 
+/// One row of [`GraphHunter::temporal_heatmap`]:
+/// `(entity_type, [(bucket_start, count)], bucket_size_seconds)`.
+pub type HeatmapRow = (String, Vec<(i64, usize)>, i64);
+
+/// One row of [`GraphHunter::timeline_data`]:
+/// `(entity_type, min_ts, max_ts, [(bucket, count)])`.
+pub type TimelineRow = (String, i64, i64, Vec<(i64, usize)>);
+
 /// Current wall-clock time in epoch seconds. Falls back to the
 /// [`crate::relation::INGEST_EPOCH_BASE`] if the system clock is
 /// somehow set before 1970 (paranoid; real systems won't hit this).
@@ -95,7 +103,7 @@ const TAG_DEAD: u8 = 253;
 pub struct GraphHunter {
     /// String interner: stores each unique entity ID once.
     pub interner: StringInterner,
-    pub entities: HashMap<StrId, Entity>,
+    pub entities: HashMap<StrId, Box<Entity>>,
     /// SoA hot-path index: `entity_type_tags[sid.index()]` holds the u8
     /// tag of the entity's type, or `TAG_DEAD` when the slot is empty
     /// (never populated, or removed). Kept in lockstep with `entities`.
@@ -120,6 +128,15 @@ pub struct GraphHunter {
     pub anomaly_scorer: Option<AnomalyScorer>,
     /// Whether edges have been sorted by timestamp (avoids re-sorting on every search).
     edges_sorted: bool,
+    /// Session triples refused because the graph is at its session
+    /// ceiling. Accumulates across ingests so a long streaming run can
+    /// report the total rather than losing it per batch.
+    ///
+    /// The parser-side cap in `generic::parse_events_each_with_stats`
+    /// bounds one batch; this bounds the graph. Both are needed: a stream
+    /// of a hundred batches, each individually under the batch cap, adds
+    /// up to a hundred times the ceiling without this.
+    sessions_refused: usize,
     /// Memoized relation schema. Keyed by the `(edge_count, meta_bytes)`
     /// fingerprint so it auto-invalidates after any ingest that appends
     /// an edge (and any edge with metadata grows `meta_bytes`). Schema
@@ -151,8 +168,7 @@ pub struct GraphHunter {
     /// `streaming_snapshot().neighbors_arc(sid)` to skip the
     /// per-frame outer-table `RwLock` acquire that
     /// `streaming.neighbors_arc(sid)` performs.
-    pub(crate) streaming_snapshot:
-        std::sync::OnceLock<crate::streaming::FrozenSnapshot>,
+    pub(crate) streaming_snapshot: std::sync::OnceLock<crate::streaming::FrozenSnapshot>,
     /// D3 stage 3 — monotonic mutation counter. Bumped on every
     /// edge / entity ingestion or removal. External caches keyed
     /// on this counter (e.g. the per-Session LFTJ trie cache in
@@ -165,6 +181,12 @@ pub struct GraphHunter {
     /// gets the same version as the original at the clone moment,
     /// then both diverge as they take subsequent writes.
     pub(crate) mutation_version: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Event ids already applied via `apply_delta`, for idempotent journal
+    /// replay. Stored as 64-bit hashes of the event_id to stay compact —
+    /// trades a (negligible but nonzero) hash-collision risk for memory
+    /// footprint; a collision would wrongly no-op a genuinely distinct
+    /// event_id. In-memory only: does not survive a process restart.
+    applied_event_ids: std::collections::HashSet<u64>,
 }
 
 /// One entry in the schema cache: stores the fingerprint used to validate
@@ -214,6 +236,16 @@ pub(crate) fn should_finalize_parallel(
     }
 }
 
+/// Outcome of [`GraphHunter::apply_delta`]. `applied == false` means the
+/// delta's `event_id` had already been applied and the call was a no-op
+/// (no entities/edges were touched, counts are 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppliedOutcome {
+    pub applied: bool,
+    pub new_entities: usize,
+    pub new_relations: usize,
+}
+
 impl GraphHunter {
     /// Creates a new empty graph.
     pub fn new() -> Self {
@@ -228,6 +260,7 @@ impl GraphHunter {
             dataset_tags: vec![Arc::from("")],
             anomaly_scorer: None,
             edges_sorted: false,
+            sessions_refused: 0,
             schema_cache: Arc::new(Mutex::new(None)),
             nlf: std::sync::OnceLock::new(),
             khop_reach: std::sync::OnceLock::new(),
@@ -247,6 +280,7 @@ impl GraphHunter {
             ),
             streaming_snapshot: std::sync::OnceLock::new(),
             mutation_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            applied_event_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -402,6 +436,28 @@ impl GraphHunter {
         self.streaming_edge_count()
     }
 
+    /// Min and max edge timestamp across the graph, or `None` if there are
+    /// no edges. Used to report the covered time span on query answers
+    /// (coverage_start/coverage_end). A single O(E) pass over `for_each_edge`
+    /// — the streaming backend's edge iterator visits base per-vertex lists
+    /// plus post-finalize tail buffers (see `InMemoryStreamingBackend::
+    /// for_each_edge`, streaming.rs:995), so this is one bounded query over
+    /// the timestamp column, not a per-edge caller cost. `edges_sorted`
+    /// (set by `sort_edges_by_timestamp`) only orders edges within each
+    /// vertex's own list, not across vertices, so it can't be used for an
+    /// O(1) global min/max shortcut here.
+    pub fn edge_timestamp_range(&self) -> Option<(i64, i64)> {
+        let mut range: Option<(i64, i64)> = None;
+        self.streaming.for_each_edge(|_src, edge| {
+            let ts = edge.timestamp;
+            range = Some(match range {
+                None => (ts, ts),
+                Some((lo, hi)) => (lo.min(ts), hi.max(ts)),
+            });
+        });
+        range
+    }
+
     /// Adds an entity to the graph.
     pub fn add_entity(&mut self, entity: Entity) -> Result<(), GraphError> {
         let sid = self.interner.intern(&entity.id);
@@ -413,14 +469,54 @@ impl GraphHunter {
             .or_default()
             .insert(sid);
         self.set_entity_type_tag(sid, &entity.entity_type);
-        self.entities.insert(sid, entity);
+        self.entities.insert(sid, Box::new(entity));
         self.reverse_adj.entry(sid).or_default();
         self.bump_mutation_version();
         Ok(())
     }
 
-    /// Adds a relation (directed edge) to the graph.
+    /// Adds a relation (directed edge) to the graph, stamping it with the
+    /// current wall-clock time as its `ingested_at` (receive time). This is
+    /// the right choice for genuinely NEW edges (live ingest, tests, GNN
+    /// bridges): the graph is learning about them right now.
     pub fn add_relation(&mut self, relation: Relation) -> Result<(), GraphError> {
+        let ingested_at = now_seconds();
+        self.insert_relation_stamped(relation, ingested_at)
+    }
+
+    /// Adds a relation, preserving its own `ingested_at` when the caller
+    /// already knows a real one (non-[`crate::relation::INGEST_EPOCH_BASE`]) —
+    /// e.g. re-inserting relations materialized from a saved session, where
+    /// `relation.ingested_at` is the ORIGINAL receive time. Restamping to
+    /// "now" on every reload would silently rewrite every edge's receive
+    /// time to the reload instant (false receive-times; late/prompt
+    /// collapse) — this is the load-specific path that avoids that.
+    ///
+    /// When `relation.ingested_at` is still the epoch-base default (it was
+    /// never really stamped — e.g. a v1 session body with no ingested_at at
+    /// all), this falls back to `add_relation`'s now-stamp behavior, same
+    /// as before this method existed: a base value can't be told apart from
+    /// "never stamped", so there's nothing genuine to preserve.
+    pub fn add_relation_preserving_ingested_at(
+        &mut self,
+        relation: Relation,
+    ) -> Result<(), GraphError> {
+        let ingested_at = if relation.ingested_at > crate::relation::INGEST_EPOCH_BASE {
+            relation.ingested_at
+        } else {
+            now_seconds()
+        };
+        self.insert_relation_stamped(relation, ingested_at)
+    }
+
+    /// Shared insert body for [`Self::add_relation`] and
+    /// [`Self::add_relation_preserving_ingested_at`] — identical except for
+    /// which `ingested_at` instant gets encoded into the stored delta.
+    fn insert_relation_stamped(
+        &mut self,
+        relation: Relation,
+        ingested_at: i64,
+    ) -> Result<(), GraphError> {
         let src_sid = self
             .interner
             .get(&relation.source_id)
@@ -455,7 +551,7 @@ impl GraphHunter {
             timestamp: relation.timestamp,
             metadata_offset: meta_offset,
             dataset_tag: ds_tag,
-            ingested_at_delta: encode_ingested_at(now_seconds()),
+            ingested_at_delta: encode_ingested_at(ingested_at),
         };
 
         // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
@@ -521,8 +617,7 @@ impl GraphHunter {
         let reverse_adj_view: &ahash::HashMap<StrId, Vec<StrId>> = &self.reverse_adj;
         let reverse_adj_ptr: *const ahash::HashMap<StrId, Vec<StrId>> = reverse_adj_view;
         if let Some(reach) = self.khop_reach.get_mut() {
-            let reverse_adj_safe: &ahash::HashMap<StrId, Vec<StrId>> =
-                unsafe { &*reverse_adj_ptr };
+            let reverse_adj_safe: &ahash::HashMap<StrId, Vec<StrId>> = unsafe { &*reverse_adj_ptr };
             if reach.try_record_edge_delta(
                 src_sid,
                 &streaming_handle,
@@ -605,12 +700,12 @@ impl GraphHunter {
         rel_type: &crate::types::RelationType,
         metadata: &std::collections::HashMap<String, String>,
     ) -> u64 {
-        if let crate::types::RelationType::Other(name) = rel_type {
-            if !name.is_empty() {
-                let mut m = metadata.clone();
-                m.insert("_rel_type".to_string(), name.clone());
-                return self.meta_store.append(&m);
-            }
+        if let crate::types::RelationType::Other(name) = rel_type
+            && !name.is_empty()
+        {
+            let mut m = metadata.clone();
+            m.insert("_rel_type".to_string(), name.clone());
+            return self.meta_store.append(&m);
         }
         self.meta_store.append(metadata)
     }
@@ -631,6 +726,7 @@ impl GraphHunter {
             timestamp: compact.timestamp,
             metadata,
             dataset_id: self.resolve_dataset_tag(compact.dataset_tag),
+            ingested_at: compact.ingested_at(),
         }
     }
 
@@ -650,10 +746,10 @@ impl GraphHunter {
     pub fn resolve_rel_type_name_raw(&self, rel_type_tag: u8, metadata_offset: u64) -> String {
         if rel_type_tag == crate::types::RelationType::Other(String::new()).to_u8() {
             let meta = self.meta_store.get(metadata_offset);
-            if let Some(name) = meta.get("_rel_type") {
-                if !name.is_empty() {
-                    return name.clone();
-                }
+            if let Some(name) = meta.get("_rel_type")
+                && !name.is_empty()
+            {
+                return name.clone();
             }
         }
         format!("{}", crate::types::RelationType::from_u8(rel_type_tag))
@@ -662,13 +758,13 @@ impl GraphHunter {
     /// Retrieves an entity by its ID.
     pub fn get_entity(&self, id: &str) -> Option<&Entity> {
         let sid = self.interner.get(id)?;
-        self.entities.get(&sid)
+        self.entities.get(&sid).map(|e| &**e)
     }
 
     /// Retrieves a mutable reference to an entity by its ID.
     pub fn get_entity_mut(&mut self, id: &str) -> Option<&mut Entity> {
         let sid = self.interner.get(id)?;
-        self.entities.get_mut(&sid)
+        self.entities.get_mut(&sid).map(|e| &mut **e)
     }
 
     /// Retrieves all outgoing relations from a given entity (materialized).
@@ -686,9 +782,8 @@ impl GraphHunter {
             .iter()
             .map(|edge| {
                 // SAFETY: layout-identical with CompactRelation.
-                let compact: CompactRelation = unsafe {
-                    std::ptr::read(edge as *const _ as *const CompactRelation)
-                };
+                let compact: CompactRelation =
+                    unsafe { std::ptr::read(edge as *const _ as *const CompactRelation) };
                 self.materialize_relation(&compact)
             })
             .collect()
@@ -723,6 +818,45 @@ impl GraphHunter {
             .unwrap_or(&[])
     }
 
+    /// How many session nodes this graph currently holds.
+    pub fn session_entity_count(&self) -> usize {
+        self.type_index
+            .get(&crate::generic::session_entity_type())
+            .map(|s| s.len())
+            .unwrap_or(0)
+    }
+
+    /// How many more session nodes may be created before the graph hits
+    /// [`crate::generic::MAX_SESSION_ENTITIES`].
+    pub fn remaining_session_budget(&self) -> usize {
+        crate::generic::max_session_entities().saturating_sub(self.session_entity_count())
+    }
+
+    /// Session triples refused by the ceiling, cumulative over the life
+    /// of this graph.
+    ///
+    /// Read this after an ingest: a non-zero value means session patterns
+    /// will under-report, and the analyst should know that rather than
+    /// discover it as an unexplained empty result.
+    pub fn sessions_refused(&self) -> usize {
+        self.sessions_refused
+    }
+
+    /// The interned id for `id`, or `None` when the graph has never seen
+    /// it. Callers that already hold a `CompactRelation` (whose endpoints
+    /// are `StrId`s) need this to compare against a node they only know by
+    /// name, without resolving every neighbour back to a string.
+    pub fn sid_for_id(&self, id: &str) -> Option<StrId> {
+        self.interner.get(id)
+    }
+
+    /// The name behind an interned id. Inverse of [`Self::sid_for_id`],
+    /// for callers walking `CompactRelation` endpoints that need to report
+    /// a node by name.
+    pub fn id_for_sid(&self, sid: StrId) -> Option<&str> {
+        Some(self.interner.resolve(sid))
+    }
+
     /// Materializes the outgoing-edge slice for `sid` as an owned
     /// `Vec<CompactRelation>` from the streaming layer. Stage 2c
     /// part 2 final migration — every hot-path matcher caller was
@@ -749,6 +883,51 @@ impl GraphHunter {
             )
         };
         compact_slice.to_vec()
+    }
+
+    /// Tail-aware outgoing edges for `sid`: the sorted base list PLUS the
+    /// post-finalize tail buffer, as owned `CompactRelation`s.
+    ///
+    /// [`Self::get_relations_by_sid`] is base-only on purpose — its
+    /// consumers (the matcher via `GraphRead::neighbors`, the anomaly
+    /// path-walk, `edge_range_sid`'s binary search) rely on the sorted
+    /// invariant and the tail is unsorted relative to base. This variant
+    /// is for the read-only "what are this node's neighbors" paths
+    /// (`get_neighborhood`/`get_events_for_node`) that either re-sort or
+    /// just collect: after the first finalize, every edge a `graph_build`
+    /// or second-dataset ingest appends lands in the tail, and a base-only
+    /// read renders the node as isolated even though it is fully connected
+    /// (this is why /expand showed 0 edges on freshly built graphs while
+    /// `get_node_details` — already tail-aware via `degree_of` — showed
+    /// the right degree).
+    pub fn neighbors_incl_tail(&self, sid: StrId) -> Vec<CompactRelation> {
+        self.streaming
+            .with_neighbors_and_tail(sid, |base, tail| {
+                let mut out = Vec::with_capacity(base.len() + tail.len());
+                for slice in [base, tail] {
+                    // SAFETY: StreamEdge and CompactRelation are #[repr(C)]
+                    // layout-compatible — identical transmute to the one in
+                    // `get_relations_by_sid` above.
+                    let compact: &[CompactRelation] = unsafe {
+                        std::slice::from_raw_parts(
+                            slice.as_ptr() as *const CompactRelation,
+                            slice.len(),
+                        )
+                    };
+                    out.extend_from_slice(compact);
+                }
+                out
+            })
+            .unwrap_or_default()
+    }
+
+    /// String-id convenience for [`Self::neighbors_incl_tail`]. Empty when
+    /// the id is unknown.
+    pub fn neighbors_incl_tail_by_id(&self, id: &str) -> Vec<CompactRelation> {
+        match self.interner.get(id) {
+            Some(sid) => self.neighbors_incl_tail(sid),
+            None => Vec::new(),
+        }
     }
 
     /// L3 stage 2c part 2 — streaming-side edge count. Replaces
@@ -788,11 +967,9 @@ impl GraphHunter {
     fn push_to_streaming(&self, compact: &CompactRelation) -> Result<(), GraphError> {
         // SAFETY: CompactRelation and StreamEdge are both
         // #[repr(C)] with identical field order and types.
-        let edge: crate::streaming::StreamEdge = unsafe {
-            std::ptr::read(compact as *const _ as *const crate::streaming::StreamEdge)
-        };
-        self.streaming
-            .append_edge_checked(compact.source_sid, edge)
+        let edge: crate::streaming::StreamEdge =
+            unsafe { std::ptr::read(compact as *const _ as *const crate::streaming::StreamEdge) };
+        self.streaming.append_edge_checked(compact.source_sid, edge)
     }
 
     /// Internal: get compact relations by StrId and type.
@@ -958,6 +1135,25 @@ impl GraphHunter {
             .validate()
             .map_err(GraphError::InvalidHypothesis)?;
 
+        // Gap tolerance has its own dedicated matcher — it changes what
+        // "the next step" means (a bounded wildcard bridge, not a direct
+        // edge), which the DFS/LFTJ/Yannakakis operators do not model.
+        // Route there before anything else when g > 0.
+        if hypothesis.resolve_max_gap() > 0 {
+            return self.search_temporal_pattern_gapped(hypothesis, time_window, max_results);
+        }
+
+        // Clock-skew tolerance is only implemented on the DFS path. The
+        // LFTJ and Yannakakis operators enforce strict monotonicity in
+        // their join structure and would silently ignore δ, returning a
+        // stricter result set than the caller asked for. Rather than let
+        // the planner route a δ query to an operator that drops it, fall
+        // to the DFS whenever δ is active. Correctness over the speed of
+        // the specialized operators — and δ queries are the exception,
+        // not the hot path. (Lifting δ into LFTJ/Yannakakis is future
+        // work; until then this guard keeps the answer honest.)
+        let skew_active = hypothesis.resolve_skew_delta() > 0;
+
         // M1 — planner-driven dispatch. The shape-detection logic that
         // used to live inline (S3) now lives in `planner::plan`, which
         // honors both the legacy name-marker route
@@ -970,15 +1166,16 @@ impl GraphHunter {
         // is on; otherwise it short-circuits to the legacy plan().
         // Skipping the graph walk on the default path saves O(V)
         // per-query overhead (~300 us at V=100K).
-        match crate::planner::plan_with_hints_lazy(hypothesis, || {
-            crate::planner::CostHints::from_graph(self)
-        }) {
+        let plan = if skew_active {
+            crate::planner::DispatchPlan::DfsMatch
+        } else {
+            crate::planner::plan_with_hints_lazy(hypothesis, || {
+                crate::planner::CostHints::from_graph(self)
+            })
+        };
+        match plan {
             crate::planner::DispatchPlan::TriangleLftj => {
-                return self.search_temporal_pattern_triangle(
-                    hypothesis,
-                    time_window,
-                    max_results,
-                );
+                return self.search_temporal_pattern_triangle(hypothesis, time_window, max_results);
             }
             crate::planner::DispatchPlan::K4Lftj => {
                 return self.search_temporal_pattern_k4_lftj(hypothesis, time_window, max_results);
@@ -990,13 +1187,12 @@ impl GraphHunter {
                 return self.search_temporal_pattern_c6_lftj(hypothesis, time_window, max_results);
             }
             crate::planner::DispatchPlan::Yannakakis => {
-                let (paths, truncated) =
-                    crate::yannakakis::search_temporal_pattern_yannakakis(
-                        self,
-                        hypothesis,
-                        time_window,
-                        max_results,
-                    );
+                let (paths, truncated) = crate::yannakakis::search_temporal_pattern_yannakakis(
+                    self,
+                    hypothesis,
+                    time_window,
+                    max_results,
+                );
                 let paths = self.apply_aggregation(paths, hypothesis);
                 return Ok((paths, truncated));
             }
@@ -1056,13 +1252,18 @@ impl GraphHunter {
             crate::semijoin::filter_starts(&mut start_sids, &cands.candidates[0]);
         }
 
-        // B9 — symmetry analysis. Computed once at query entry, applied
-        // per-emission inside the DFS. For palindromic chains, halves
-        // the result set by enforcing a canonical direction; no-op for
-        // asymmetric chains (the common ATT&CK case).
-        let symmetry_hint = crate::symmetry::analyze(hypothesis);
+        // B9 — symmetry breaking is OFF for the DFS. A palindromic chain
+        // only has a reverse automorphism over an undirected graph; here
+        // every edge is directed and timestamped, so the reverse of a
+        // match is usually not a match, and keeping only
+        // `path[0] < path[last]` drops matches with no mirror
+        // (tests/semantic_gaps.rs).
+        let symmetry_hint = crate::symmetry::SymmetryHint::default();
 
         let k = hypothesis.k_simplicity.max(1);
+        // Resolve δ once, here, not inside the match loop: it may read an
+        // environment variable, and the hot path must never pay for that.
+        let skew_delta = hypothesis.resolve_skew_delta();
         let result_count = Arc::new(AtomicUsize::new(0));
 
         // Pre-size scratch buffers based on hypothesis depth.
@@ -1120,6 +1321,7 @@ impl GraphHunter {
                         cap,
                         &rc,
                         &mut local_results,
+                        skew_delta,
                         symmetry_hint,
                     );
                     local_results
@@ -1140,7 +1342,7 @@ impl GraphHunter {
                     DFS_SCRATCH.with(|cell| {
                         let mut s = cell.borrow_mut();
                         init_buffers(&mut s);
-                        let s_ref: &mut (DfsPath, Vec<DfsFrame>) = &mut *s;
+                        let s_ref: &mut (DfsPath, Vec<DfsFrame>) = &mut s;
                         self.dfs_match_iterative(
                             start_sid,
                             &hypothesis.steps,
@@ -1149,6 +1351,7 @@ impl GraphHunter {
                             cap,
                             &rc,
                             &mut local_results,
+                            skew_delta,
                             &mut s_ref.0,
                             &mut s_ref.1,
                             symmetry_hint,
@@ -1174,6 +1377,7 @@ impl GraphHunter {
                     cap,
                     &result_count,
                     &mut results,
+                    skew_delta,
                     &mut path,
                     &mut stack,
                     symmetry_hint,
@@ -1201,7 +1405,11 @@ impl GraphHunter {
         let trie = self.build_lftj_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
         self.search_temporal_pattern_k4_lftj_with_trie(
-            hypothesis, &trie, &ts_map, time_window, max_results,
+            hypothesis,
+            &trie,
+            &ts_map,
+            time_window,
+            max_results,
         )
     }
 
@@ -1246,7 +1454,12 @@ impl GraphHunter {
         let reverse = self.build_lftj_reverse_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &forward);
         self.search_temporal_pattern_c6_lftj_with_trie(
-            hypothesis, &forward, &reverse, &ts_map, time_window, max_results,
+            hypothesis,
+            &forward,
+            &reverse,
+            &ts_map,
+            time_window,
+            max_results,
         )
     }
 
@@ -1287,7 +1500,11 @@ impl GraphHunter {
         let trie = self.build_lftj_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
         self.search_temporal_pattern_k5_lftj_with_trie(
-            hypothesis, &trie, &ts_map, time_window, max_results,
+            hypothesis,
+            &trie,
+            &ts_map,
+            time_window,
+            max_results,
         )
     }
 
@@ -1324,7 +1541,11 @@ impl GraphHunter {
         let trie = self.build_lftj_trie_for(hypothesis);
         let ts_map = crate::lftj_query::MinTimestampMap::build(self, &trie);
         self.search_temporal_pattern_triangle_with_trie(
-            hypothesis, &trie, &ts_map, time_window, max_results,
+            hypothesis,
+            &trie,
+            &ts_map,
+            time_window,
+            max_results,
         )
     }
 
@@ -1359,10 +1580,7 @@ impl GraphHunter {
     /// Note that the caller already knows the hypothesis routes
     /// to LFTJ — this helper only decides whether the trie should
     /// be filtered, not whether LFTJ applies.
-    pub fn build_lftj_trie_for(
-        &self,
-        hypothesis: &Hypothesis,
-    ) -> crate::lftj::MaterializedCsrTrie {
+    pub fn build_lftj_trie_for(&self, hypothesis: &Hypothesis) -> crate::lftj::MaterializedCsrTrie {
         if let Some((rel_tag, ent_tag)) = self.homogeneous_lftj_signature(hypothesis) {
             crate::lftj::MaterializedCsrTrie::build_filtered(self, |src_sid, edge| {
                 if edge.rel_type_tag != rel_tag {
@@ -1446,10 +1664,7 @@ impl GraphHunter {
         ) {
             return None;
         }
-        if matches!(
-            first.origin_type,
-            EntityType::Any | EntityType::Other(_)
-        ) {
+        if matches!(first.origin_type, EntityType::Any | EntityType::Other(_)) {
             return None;
         }
         if first.origin_type != first.dest_type {
@@ -1632,6 +1847,7 @@ impl GraphHunter {
         }
 
         let k = hypothesis.k_simplicity.max(1);
+        let skew_delta = hypothesis.resolve_skew_delta();
         let total_steps = hypothesis.steps.len();
         let depth = hypothesis.steps.len();
         let visit_cap = (depth * k).max(8);
@@ -1642,11 +1858,7 @@ impl GraphHunter {
         // Per-thread state used by both branches: a top-K min-heap plus
         // two DFS scratch buffers. C0 dropped the visit_count HashMap.
         let _ = visit_cap;
-        type SmartChunk = (
-            SmartHeap,
-            Vec<StrId>,
-            Vec<AnomalyFrame>,
-        );
+        type SmartChunk = (SmartHeap, Vec<StrId>, Vec<AnomalyFrame>);
         let init_chunk = || -> SmartChunk {
             (
                 BinaryHeap::with_capacity(top_k + 1),
@@ -1683,8 +1895,7 @@ impl GraphHunter {
                 .par_iter()
                 .with_min_len(256)
                 .fold(init_chunk, |mut chunk, &start_sid| {
-                    let (heap, path, stack) =
-                        (&mut chunk.0, &mut chunk.1, &mut chunk.2);
+                    let (heap, path, stack) = (&mut chunk.0, &mut chunk.1, &mut chunk.2);
                     self.dfs_match_smart(
                         start_sid,
                         &hypothesis.steps,
@@ -1692,6 +1903,7 @@ impl GraphHunter {
                         k,
                         top_k,
                         total_steps,
+                        skew_delta,
                         heap,
                         path,
                         stack,
@@ -1716,6 +1928,7 @@ impl GraphHunter {
                     k,
                     top_k,
                     total_steps,
+                    skew_delta,
                     &mut heap,
                     &mut path,
                     &mut stack,
@@ -1743,6 +1956,7 @@ impl GraphHunter {
     /// buffers (cleared on entry) so the function can be invoked many times
     /// per search without per-call allocations. The heap is the *only* buffer
     /// that carries information out of the call — the rest is reset.
+    #[allow(clippy::too_many_arguments)]
     fn dfs_match_smart(
         &self,
         start_sid: StrId,
@@ -1751,6 +1965,11 @@ impl GraphHunter {
         k: usize,
         top_k: usize,
         total_steps: usize,
+        // Clock-skew tolerance δ, resolved once by the caller. Lowers the
+        // temporal floor of the next-edge search by δ; the path itself
+        // still advances by the edge's real timestamp, so tolerance is
+        // per-hop, never accumulated. δ = 0 is strict monotonicity.
+        skew_delta: i64,
         heap: &mut SmartHeap,
         path: &mut Vec<StrId>,
         stack: &mut Vec<AnomalyFrame>,
@@ -1938,7 +2157,9 @@ impl GraphHunter {
                     self.edge_range_sid(
                         dest_sid,
                         &steps[next_step_idx],
-                        edge.timestamp,
+                        // δ lowers the floor; the path still advanced by the
+                        // edge's real timestamp above, so this is per-hop.
+                        edge.timestamp.saturating_sub(skew_delta),
                         time_window,
                     )
                 } else {
@@ -1970,6 +2191,7 @@ impl GraphHunter {
     /// thousands of small allocations per search. The function clears them
     /// on entry to make the contract explicit; the buffers are also left
     /// empty by the natural backtrack at the end of the DFS.
+    #[allow(clippy::too_many_arguments)]
     fn dfs_match_iterative(
         &self,
         start_sid: StrId,
@@ -1979,6 +2201,8 @@ impl GraphHunter {
         cap: usize,
         result_count: &AtomicUsize,
         results: &mut Vec<HuntResult>,
+        // Clock-skew tolerance δ; see `dfs_match_smart`.
+        skew_delta: i64,
         path: &mut DfsPath,
         stack: &mut Vec<DfsFrame>,
         symmetry_hint: crate::symmetry::SymmetryHint,
@@ -2138,7 +2362,9 @@ impl GraphHunter {
                     self.edge_range_sid(
                         dest_sid,
                         &steps[next_step_idx],
-                        edge.timestamp,
+                        // δ lowers the floor; the path still advanced by the
+                        // edge's real timestamp above, so this is per-hop.
+                        edge.timestamp.saturating_sub(skew_delta),
                         time_window,
                     )
                 } else {
@@ -2197,8 +2423,10 @@ impl GraphHunter {
             let reach = self.ensure_khop_reach();
             start_sids.retain(|&sid| reach.can_reach_in_window(sid, khop_mask, time_window));
         }
-        let symmetry_hint = crate::symmetry::analyze(hypothesis);
+        // Same as the sequential DFS: no symmetry breaking on directed edges.
+        let symmetry_hint = crate::symmetry::SymmetryHint::default();
         let k = hypothesis.k_simplicity.max(1);
+        let skew_delta = hypothesis.resolve_skew_delta();
         let result_count = AtomicUsize::new(0);
         let mut results: Vec<HuntResult> = Vec::new();
         const K: usize = 8;
@@ -2214,6 +2442,7 @@ impl GraphHunter {
                 cap,
                 &result_count,
                 &mut results,
+                skew_delta,
                 symmetry_hint,
             );
         }
@@ -2248,6 +2477,8 @@ impl GraphHunter {
         cap: usize,
         result_count: &AtomicUsize,
         results: &mut Vec<HuntResult>,
+        // Clock-skew tolerance δ; see `dfs_match_smart`.
+        skew_delta: i64,
         symmetry_hint: crate::symmetry::SymmetryHint,
     ) {
         const K: usize = 8;
@@ -2350,6 +2581,7 @@ impl GraphHunter {
                     cap,
                     result_count,
                     results,
+                    skew_delta,
                     symmetry_hint,
                 );
                 if done {
@@ -2367,6 +2599,7 @@ impl GraphHunter {
     /// Each call does at most ONE edge probe — this is the granularity
     /// that lets cross-context prefetch hide DRAM latency.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn amac_step_one_edge(
         &self,
         snap: &crate::streaming::FrozenSnapshot,
@@ -2378,6 +2611,8 @@ impl GraphHunter {
         cap: usize,
         result_count: &AtomicUsize,
         results: &mut Vec<HuntResult>,
+        // Clock-skew tolerance δ; see `dfs_match_smart`.
+        skew_delta: i64,
         symmetry_hint: crate::symmetry::SymmetryHint,
     ) -> bool {
         if result_count.load(Ordering::Relaxed) >= cap {
@@ -2474,7 +2709,12 @@ impl GraphHunter {
         path.push(dest_sid);
         let next_step_idx = frame.step_idx + 1;
         let (next_lo, next_hi) = if next_step_idx < steps.len() {
-            self.edge_range_sid(dest_sid, &steps[next_step_idx], edge.timestamp, time_window)
+            self.edge_range_sid(
+                dest_sid,
+                &steps[next_step_idx],
+                edge.timestamp.saturating_sub(skew_delta),
+                time_window,
+            )
         } else {
             (0, 0)
         };
@@ -2595,8 +2835,26 @@ impl GraphHunter {
         let mut new_relations = 0usize;
         let ds: Option<Arc<str>> = dataset_id.map(|s| Arc::from(s.as_str()));
         let ds_tag = self.intern_dataset_tag(ds.as_deref());
+        // Stamp every edge from this call with the same receive-time —
+        // computed once, outside the per-edge loop (this is a mass
+        // ingest, not a per-event wall-clock sample).
+        let ingested_at_delta = encode_ingested_at(now_seconds());
+        // Graph-wide session ceiling. Read once here rather than probed
+        // per triple: this loop runs over every edge of the ingest, and
+        // `session_entity_count` is a HashMap lookup plus a set length.
+        // The budget is then tracked locally as new sessions land.
+        let mut session_budget = self.remaining_session_budget();
 
         for (mut src, rel, mut dst) in triples {
+            // Ordered so the common case — a graph with budget left, or a
+            // triple with no session in it — costs one integer compare.
+            if session_budget == 0
+                && (crate::generic::is_session_entity(&src)
+                    || crate::generic::is_session_entity(&dst))
+            {
+                self.sessions_refused += 1;
+                continue;
+            }
             if let Some(ref id) = ds {
                 src.dataset_id = Some(Arc::clone(id));
                 dst.dataset_id = Some(Arc::clone(id));
@@ -2604,12 +2862,15 @@ impl GraphHunter {
 
             // Upsert source entity
             let src_sid = self.interner.intern(&src.id);
+            if !self.entities.contains_key(&src_sid) && crate::generic::is_session_entity(&src) {
+                session_budget = session_budget.saturating_sub(1);
+            }
             if let Some(existing) = self.entities.get_mut(&src_sid) {
                 Self::merge_metadata(&mut existing.metadata, &src.metadata, merge_policy);
             } else {
                 let et = src.entity_type.clone();
                 self.set_entity_type_tag(src_sid, &et);
-                self.entities.insert(src_sid, src);
+                self.entities.insert(src_sid, Box::new(src));
                 self.type_index.entry(et).or_default().insert(src_sid);
                 self.reverse_adj.entry(src_sid).or_default();
                 new_entities += 1;
@@ -2617,12 +2878,15 @@ impl GraphHunter {
 
             // Upsert destination entity
             let dst_sid = self.interner.intern(&dst.id);
+            if !self.entities.contains_key(&dst_sid) && crate::generic::is_session_entity(&dst) {
+                session_budget = session_budget.saturating_sub(1);
+            }
             if let Some(existing) = self.entities.get_mut(&dst_sid) {
                 Self::merge_metadata(&mut existing.metadata, &dst.metadata, merge_policy);
             } else {
                 let et = dst.entity_type.clone();
                 self.set_entity_type_tag(dst_sid, &et);
-                self.entities.insert(dst_sid, dst);
+                self.entities.insert(dst_sid, Box::new(dst));
                 self.type_index.entry(et).or_default().insert(dst_sid);
                 self.reverse_adj.entry(dst_sid).or_default();
                 new_entities += 1;
@@ -2643,7 +2907,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
-                ingested_at_delta: 0,
+                ingested_at_delta,
             };
 
             // Always insert relation
@@ -2679,11 +2943,10 @@ impl GraphHunter {
         let total_before = self.streaming_edge_count();
         let mut kept: Vec<CompactRelation> = Vec::new();
         self.streaming.for_each_edge(|_src, edge| {
-            if ds_tag.map_or(true, |tag| edge.dataset_tag != tag) {
+            if ds_tag != Some(edge.dataset_tag) {
                 // SAFETY: layout-identical (#[repr(C)]).
-                let compact: CompactRelation = unsafe {
-                    std::ptr::read(edge as *const _ as *const CompactRelation)
-                };
+                let compact: CompactRelation =
+                    unsafe { std::ptr::read(edge as *const _ as *const CompactRelation) };
                 kept.push(compact);
             }
         });
@@ -2711,10 +2974,10 @@ impl GraphHunter {
         // Remove entities
         let entities_removed = to_remove.len();
         for sid in &to_remove {
-            if let Some(entity) = self.entities.remove(sid) {
-                if let Some(set) = self.type_index.get_mut(&entity.entity_type) {
-                    set.remove(sid);
-                }
+            if let Some(entity) = self.entities.remove(sid)
+                && let Some(set) = self.type_index.get_mut(&entity.entity_type)
+            {
+                set.remove(sid);
             }
             self.mark_entity_dead(*sid);
             self.reverse_adj.remove(sid);
@@ -2777,13 +3040,12 @@ impl GraphHunter {
 
     /// Exports the graph as a snapshot for serialization.
     pub fn to_snapshot(&self) -> (Vec<Entity>, Vec<Relation>) {
-        let entities: Vec<Entity> = self.entities.values().cloned().collect();
+        let entities: Vec<Entity> = self.entities.values().map(|e| (**e).clone()).collect();
         let mut relations: Vec<Relation> = Vec::new();
         self.streaming.for_each_edge(|_src, edge| {
             // SAFETY: layout-identical with CompactRelation.
-            let compact: CompactRelation = unsafe {
-                std::ptr::read(edge as *const _ as *const CompactRelation)
-            };
+            let compact: CompactRelation =
+                unsafe { std::ptr::read(edge as *const _ as *const CompactRelation) };
             relations.push(self.materialize_relation(&compact));
         });
         (entities, relations)
@@ -2815,8 +3077,9 @@ impl GraphHunter {
 
         let mut results: Vec<HuntResult> = Vec::new();
         let mut nodes_visited: usize = 0;
+        let skew_delta = hypothesis.resolve_skew_delta();
 
-        for (&start_sid, _) in &self.entities {
+        for &start_sid in self.entities.keys() {
             let mut visited = HashSet::new();
             visited.insert(start_sid);
             let mut path = vec![self.interner.resolve(start_sid).to_string()];
@@ -2825,6 +3088,7 @@ impl GraphHunter {
                 start_sid,
                 &hypothesis.steps,
                 0,
+                skew_delta,
                 &mut visited,
                 &mut path,
                 &mut results,
@@ -2836,11 +3100,13 @@ impl GraphHunter {
     }
 
     /// Naive DFS recursive core.
+    #[allow(clippy::too_many_arguments)]
     fn naive_dfs_recurse(
         &self,
         current_sid: StrId,
         steps: &[crate::hypothesis::HypothesisStep],
         step_idx: usize,
+        skew_delta: i64,
         visited: &mut HashSet<StrId>,
         path: &mut Vec<String>,
         results: &mut Vec<HuntResult>,
@@ -2849,7 +3115,7 @@ impl GraphHunter {
         *nodes_visited += 1;
 
         if step_idx >= steps.len() {
-            let valid = self.verify_path_matches(path, steps);
+            let valid = self.verify_path_matches(path, steps, skew_delta);
             if valid {
                 results.push(
                     path.iter()
@@ -2874,6 +3140,7 @@ impl GraphHunter {
                 dest_sid,
                 steps,
                 step_idx + 1,
+                skew_delta,
                 visited,
                 path,
                 results,
@@ -2885,11 +3152,14 @@ impl GraphHunter {
         }
     }
 
-    /// Verifies that a completed path matches the hypothesis types and temporal order.
+    /// Verifies that a completed path matches the hypothesis types and
+    /// temporal order, allowing each step to fall up to `skew_delta`
+    /// seconds before the previous one (δ = 0 is strict monotonicity).
     fn verify_path_matches(
         &self,
         path: &[String],
         steps: &[crate::hypothesis::HypothesisStep],
+        skew_delta: i64,
     ) -> bool {
         if path.len() != steps.len() + 1 {
             return false;
@@ -2916,23 +3186,25 @@ impl GraphHunter {
             let edges = self.get_relations(src_id);
             let mut found = false;
             for edge in edges {
-                if edge.dest_id == *dst_id {
-                    if relation_type_matches(&step.relation_type, &edge.rel_type) {
-                        let dst_sid = match self.interner.get(dst_id) {
-                            Some(s) => s,
-                            None => continue,
-                        };
-                        let dest = match self.entities.get(&dst_sid) {
-                            Some(e) => e,
-                            None => continue,
-                        };
-                        if entity_type_matches(&step.dest_type, &dest.entity_type)
-                            && edge.timestamp >= last_timestamp
-                        {
-                            last_timestamp = edge.timestamp;
-                            found = true;
-                            break;
-                        }
+                if edge.dest_id == *dst_id
+                    && relation_type_matches(&step.relation_type, &edge.rel_type)
+                {
+                    let dst_sid = match self.interner.get(dst_id) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let dest = match self.entities.get(&dst_sid) {
+                        Some(e) => e,
+                        None => continue,
+                    };
+                    if entity_type_matches(&step.dest_type, &dest.entity_type)
+                        && edge.timestamp >= last_timestamp.saturating_sub(skew_delta)
+                    {
+                        // Advance by the real timestamp, not the relaxed
+                        // floor, so tolerance stays per-hop.
+                        last_timestamp = edge.timestamp;
+                        found = true;
+                        break;
                     }
                 }
             }
@@ -2942,6 +3214,270 @@ impl GraphHunter {
         }
 
         true
+    }
+
+    /// Gap-tolerant temporal match: allows up to `g` wildcard edges to
+    /// bridge the hole between consecutive observed steps, for telemetry
+    /// with dropped logs. See [`Hypothesis::max_gap`].
+    ///
+    /// This is a separate, unoptimised path on purpose. Gap tolerance is a
+    /// robustness mode, not the hot path, and folding a per-step bounded
+    /// wildcard walk into the SIMD/AMAC DFS would tax every strict query
+    /// to serve the rare lossy one. `search_temporal_pattern` routes here
+    /// only when `g > 0`; `g = 0` never pays for any of this.
+    ///
+    /// Complexity is O(|S₀| · (d^g) · d) per level in the worst case,
+    /// where d is average out-degree — acceptable because g is small
+    /// (1–3 in practice) and the query is deliberate.
+    pub fn search_temporal_pattern_gapped(
+        &self,
+        hypothesis: &Hypothesis,
+        time_window: Option<(i64, i64)>,
+        max_results: Option<usize>,
+    ) -> Result<(Vec<HuntResult>, bool), GraphError> {
+        hypothesis
+            .validate()
+            .map_err(GraphError::InvalidHypothesis)?;
+
+        let cap = max_results.unwrap_or(10_000);
+        let delta = hypothesis.resolve_skew_delta();
+        let g = hypothesis.resolve_max_gap();
+        let k = hypothesis.k_simplicity.max(1);
+        let steps = &hypothesis.steps;
+
+        let first = &steps[0];
+        let starts: Vec<StrId> = if first.origin_type == EntityType::Any {
+            self.entities.keys().copied().collect()
+        } else {
+            self.type_index
+                .get(&first.origin_type)
+                .map(|s| s.iter().copied().collect())
+                .unwrap_or_default()
+        };
+
+        let mut results: Vec<HuntResult> = Vec::new();
+        let mut path: Vec<StrId> = Vec::with_capacity(steps.len() + 1);
+        for start in starts {
+            if results.len() >= cap {
+                break;
+            }
+            path.clear();
+            path.push(start);
+            self.gapped_recurse(
+                start,
+                steps,
+                0,
+                i64::MIN,
+                delta,
+                g,
+                k,
+                cap,
+                time_window,
+                &mut path,
+                &mut results,
+            );
+        }
+        let truncated = results.len() >= cap;
+        results.truncate(cap);
+        // WITHIN / HAVING are post-filters on the matcher output, gap or not.
+        let results = self.apply_aggregation(results, hypothesis);
+        Ok((results, truncated))
+    }
+
+    /// Vertices reachable from `from` in 0..=`g` wildcard hops that are
+    /// temporally monotone (each hop `≥ prev − δ`) and inside the window,
+    /// paired with the timestamp of the last gap edge taken (or `floor`
+    /// itself at depth 0, i.e. no gap consumed).
+    ///
+    /// Depth 0 always yields `(from, floor)` so the no-gap case matches
+    /// the strict path exactly. The walk avoids revisiting a vertex within
+    /// one gap chain, so a cycle cannot inflate the frontier.
+    fn gap_frontier(
+        &self,
+        from: StrId,
+        floor: i64,
+        delta: i64,
+        g: usize,
+        time_window: Option<(i64, i64)>,
+    ) -> Vec<(StrId, i64)> {
+        let mut out: Vec<(StrId, i64)> = vec![(from, floor)];
+        if g == 0 {
+            return out;
+        }
+        let mut seen: HashSet<StrId> = HashSet::new();
+        seen.insert(from);
+        let mut chain: Vec<StrId> = vec![from];
+        self.gap_walk(
+            from,
+            floor,
+            delta,
+            g,
+            time_window,
+            &mut seen,
+            &mut chain,
+            &mut out,
+        );
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gap_walk(
+        &self,
+        cur: StrId,
+        prev_ts: i64,
+        delta: i64,
+        remaining: usize,
+        time_window: Option<(i64, i64)>,
+        seen: &mut HashSet<StrId>,
+        chain: &mut Vec<StrId>,
+        out: &mut Vec<(StrId, i64)>,
+    ) {
+        if remaining == 0 {
+            return;
+        }
+        for edge in self.neighbors_incl_tail(cur) {
+            let ts = edge.timestamp;
+            if ts < prev_ts.saturating_sub(delta) {
+                continue;
+            }
+            if let Some((lo, hi)) = time_window
+                && (ts < lo || ts > hi)
+            {
+                continue;
+            }
+            let next = edge.dest_sid;
+            if seen.contains(&next) {
+                continue;
+            }
+            // A gap-fill edge is a wildcard: no relation-type or predicate
+            // check — that is the whole point of a gap.
+            out.push((next, ts));
+            seen.insert(next);
+            chain.push(next);
+            self.gap_walk(
+                next,
+                ts,
+                delta,
+                remaining - 1,
+                time_window,
+                seen,
+                chain,
+                out,
+            );
+            chain.pop();
+            seen.remove(&next);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gapped_recurse(
+        &self,
+        cur: StrId,
+        steps: &[crate::hypothesis::HypothesisStep],
+        step_idx: usize,
+        last_ts: i64,
+        delta: i64,
+        g: usize,
+        k: usize,
+        cap: usize,
+        time_window: Option<(i64, i64)>,
+        path: &mut Vec<StrId>,
+        results: &mut Vec<HuntResult>,
+    ) {
+        if step_idx >= steps.len() {
+            results.push(
+                path.iter()
+                    .map(|&sid| self.interner.resolve_arc(sid))
+                    .collect(),
+            );
+            return;
+        }
+        if results.len() >= cap {
+            return;
+        }
+        let step = &steps[step_idx];
+
+        // Candidate origins for this step: `cur`, plus anything reachable
+        // from it across a wildcard gap. Dedup on vertex, keeping the
+        // earliest reach timestamp so the tightest monotonicity bound wins.
+        let mut origins: std::collections::HashMap<StrId, i64> = std::collections::HashMap::new();
+        for (v, ts) in self.gap_frontier(cur, last_ts, delta, g, time_window) {
+            origins
+                .entry(v)
+                .and_modify(|e| *e = (*e).min(ts))
+                .or_insert(ts);
+        }
+
+        for (origin, origin_ts) in origins {
+            for edge in self.neighbors_incl_tail(origin) {
+                if results.len() >= cap {
+                    return;
+                }
+                // Real step edge: relation type, dest type, monotonicity,
+                // window and predicates all enforced — the gap relaxed the
+                // hole before this edge, not the edge itself.
+                if !relation_type_matches(&step.relation_type, &edge.rel_type()) {
+                    continue;
+                }
+                let edge_ts = edge.timestamp;
+                if edge_ts < origin_ts.saturating_sub(delta) {
+                    continue;
+                }
+                if let Some((lo, hi)) = time_window
+                    && (edge_ts < lo || edge_ts > hi)
+                {
+                    continue;
+                }
+                let dest_sid = edge.dest_sid;
+                let dest = match self.entities.get(&dest_sid) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                if !entity_type_matches(&step.dest_type, &dest.entity_type) {
+                    continue;
+                }
+                if !step.edge_predicates.is_empty() {
+                    let metadata = if edge.metadata_offset != 0 {
+                        self.meta_store.get(edge.metadata_offset)
+                    } else {
+                        std::collections::HashMap::new()
+                    };
+                    if !crate::hypothesis::all_predicates_match(&step.edge_predicates, &metadata) {
+                        continue;
+                    }
+                }
+                if !step.dest_predicates.is_empty()
+                    && !crate::hypothesis::all_predicates_match(
+                        &step.dest_predicates,
+                        &dest.metadata,
+                    )
+                {
+                    continue;
+                }
+                // k-simplicity over anchor vertices only — gap-fill
+                // vertices are never in the path, so they never count.
+                let visits = path.iter().filter(|&&s| s == dest_sid).count();
+                if visits >= k {
+                    continue;
+                }
+
+                path.push(dest_sid);
+                self.gapped_recurse(
+                    dest_sid,
+                    steps,
+                    step_idx + 1,
+                    edge_ts,
+                    delta,
+                    g,
+                    k,
+                    cap,
+                    time_window,
+                    path,
+                    results,
+                );
+                path.pop();
+            }
+        }
     }
 
     /// Ingests log data in chunks with progress callback.
@@ -2964,6 +3500,8 @@ impl GraphHunter {
         let mut new_relations = 0usize;
         let ds: Option<Arc<str>> = dataset_id.map(|s| Arc::from(s.as_str()));
         let ds_tag = self.intern_dataset_tag(ds.as_deref());
+        // Same receive-time for every edge in this chunked ingest call.
+        let ingested_at_delta = encode_ingested_at(now_seconds());
 
         for (i, (mut src, rel, mut dst)) in triples.into_iter().enumerate() {
             if let Some(ref id) = ds {
@@ -2977,7 +3515,7 @@ impl GraphHunter {
             } else {
                 let et = src.entity_type.clone();
                 self.set_entity_type_tag(src_sid, &et);
-                self.entities.insert(src_sid, src);
+                self.entities.insert(src_sid, Box::new(src));
                 self.type_index.entry(et).or_default().insert(src_sid);
                 self.reverse_adj.entry(src_sid).or_default();
                 new_entities += 1;
@@ -2989,7 +3527,7 @@ impl GraphHunter {
             } else {
                 let et = dst.entity_type.clone();
                 self.set_entity_type_tag(dst_sid, &et);
-                self.entities.insert(dst_sid, dst);
+                self.entities.insert(dst_sid, Box::new(dst));
                 self.type_index.entry(et).or_default().insert(dst_sid);
                 self.reverse_adj.entry(dst_sid).or_default();
                 new_entities += 1;
@@ -3009,7 +3547,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
-                ingested_at_delta: 0,
+                ingested_at_delta,
             };
 
             // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
@@ -3093,6 +3631,8 @@ impl GraphHunter {
         let mut new_relations = 0usize;
         let ds: Option<Arc<str>> = dataset_id.map(Arc::from);
         let ds_tag = self.intern_dataset_tag(dataset_id);
+        // Same receive-time for every edge in this batch insert.
+        let ingested_at_delta = encode_ingested_at(now_seconds());
 
         for (mut src, rel, mut dst) in triples {
             if let Some(ref id) = ds {
@@ -3106,7 +3646,7 @@ impl GraphHunter {
             } else {
                 let et = src.entity_type.clone();
                 self.set_entity_type_tag(src_sid, &et);
-                self.entities.insert(src_sid, src);
+                self.entities.insert(src_sid, Box::new(src));
                 self.type_index.entry(et).or_default().insert(src_sid);
                 self.reverse_adj.entry(src_sid).or_default();
                 new_entities += 1;
@@ -3118,7 +3658,7 @@ impl GraphHunter {
             } else {
                 let et = dst.entity_type.clone();
                 self.set_entity_type_tag(dst_sid, &et);
-                self.entities.insert(dst_sid, dst);
+                self.entities.insert(dst_sid, Box::new(dst));
                 self.type_index.entry(et).or_default().insert(dst_sid);
                 self.reverse_adj.entry(dst_sid).or_default();
                 new_entities += 1;
@@ -3138,7 +3678,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
-                ingested_at_delta: 0,
+                ingested_at_delta,
             };
 
             // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
@@ -3167,6 +3707,8 @@ impl GraphHunter {
         let mut new_relations = 0usize;
         let ds: Option<Arc<str>> = dataset_id.map(Arc::from);
         let ds_tag = self.intern_dataset_tag(dataset_id);
+        // Same receive-time for every edge in this batch insert.
+        let ingested_at_delta = encode_ingested_at(now_seconds());
 
         for ev in events {
             let crate::parser::RawIngestEvent {
@@ -3179,6 +3721,7 @@ impl GraphHunter {
                 rel_type,
                 rel_metadata,
                 timestamp,
+                raw_line: _,
             } = ev;
 
             let src_sid = self.interner.intern(&src_id);
@@ -3191,7 +3734,7 @@ impl GraphHunter {
                     entity.dataset_id = Some(Arc::clone(id));
                 }
                 self.set_entity_type_tag(src_sid, &src_type);
-                self.entities.insert(src_sid, entity);
+                self.entities.insert(src_sid, Box::new(entity));
                 self.type_index.entry(src_type).or_default().insert(src_sid);
                 self.reverse_adj.entry(src_sid).or_default();
                 new_entities += 1;
@@ -3207,7 +3750,7 @@ impl GraphHunter {
                     entity.dataset_id = Some(Arc::clone(id));
                 }
                 self.set_entity_type_tag(dst_sid, &dst_type);
-                self.entities.insert(dst_sid, entity);
+                self.entities.insert(dst_sid, Box::new(entity));
                 self.type_index.entry(dst_type).or_default().insert(dst_sid);
                 self.reverse_adj.entry(dst_sid).or_default();
                 new_entities += 1;
@@ -3227,7 +3770,7 @@ impl GraphHunter {
                 timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
-                ingested_at_delta: 0,
+                ingested_at_delta,
             };
 
             // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
@@ -3238,6 +3781,80 @@ impl GraphHunter {
         }
 
         Ok((new_entities, new_relations))
+    }
+
+    /// Apply one [`crate::delta::GraphDelta`] idempotently. If the delta's
+    /// `event_id` was already applied, this is a no-op (no edge added).
+    /// Otherwise the event's edge is inserted (entity dedup via the
+    /// interner is unchanged) and the event_id recorded. Distinct event_ids
+    /// between the same entities coexist — edge multiplicity is preserved;
+    /// only exact event_id repeats are collapsed (design spec §11).
+    pub fn apply_delta(
+        &mut self,
+        delta: &crate::delta::GraphDelta,
+    ) -> Result<AppliedOutcome, GraphError> {
+        let key = Self::hash_event_id(&delta.event_id);
+        if self.applied_event_ids.contains(&key) {
+            return Ok(AppliedOutcome {
+                applied: false,
+                new_entities: 0,
+                new_relations: 0,
+            });
+        }
+        let (new_entities, new_relations) =
+            self.insert_raw_events(vec![delta.event.clone()], delta.dataset_id.as_deref())?;
+        self.applied_event_ids.insert(key);
+        Ok(AppliedOutcome {
+            applied: true,
+            new_entities,
+            new_relations,
+        })
+    }
+
+    /// Batch form of [`Self::apply_delta`]: `keys[i]` is the
+    /// [`Self::event_key`] of `events[i]`'s event_id. Events whose key was
+    /// already applied — earlier, or earlier in this same batch — are
+    /// dropped; the survivors go through ONE `insert_raw_events` call.
+    ///
+    /// Same outcome as calling `apply_delta` per event, without its
+    /// per-event cost (a clone, a one-element `Vec`, a dataset-tag lookup
+    /// and a clock read each), which dominated multi-million-row ingests.
+    /// Keys are recorded only after the insert succeeds, so a spill failure
+    /// leaves the batch replayable instead of marked applied.
+    pub fn insert_raw_events_idempotent(
+        &mut self,
+        events: Vec<crate::parser::RawIngestEvent>,
+        keys: &[u64],
+        dataset_id: Option<&str>,
+    ) -> Result<(usize, usize), GraphError> {
+        debug_assert_eq!(events.len(), keys.len());
+        let mut batch_keys: HashSet<u64> = HashSet::with_capacity(keys.len());
+        let mut fresh = Vec::with_capacity(events.len());
+        for (ev, &key) in events.into_iter().zip(keys) {
+            if !self.applied_event_ids.contains(&key) && batch_keys.insert(key) {
+                fresh.push(ev);
+            }
+        }
+        let counts = self.insert_raw_events(fresh, dataset_id)?;
+        self.applied_event_ids.extend(batch_keys);
+        Ok(counts)
+    }
+
+    /// The `applied_event_ids` key for an event_id — what
+    /// [`Self::apply_delta`] dedups on. Public so batch callers can hash
+    /// ids off the graph lock and pass them to
+    /// [`Self::insert_raw_events_idempotent`].
+    pub fn event_key(id: &str) -> u64 {
+        Self::hash_event_id(id)
+    }
+
+    /// Hashes an `event_id` string to a compact 64-bit key for the
+    /// `applied_event_ids` set used by [`Self::apply_delta`].
+    fn hash_event_id(id: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut h);
+        h.finish()
     }
 
     /// Enables anomaly scoring with backfilling from existing data.
@@ -3277,10 +3894,7 @@ impl GraphHunter {
     /// between that type's first and last event is emitted, including
     /// zero-count ones, so callers can distinguish "no events in this
     /// window" from "window truncated" without guessing from gaps.
-    pub fn temporal_heatmap(
-        &self,
-        bucket_size_seconds: Option<i64>,
-    ) -> Vec<(String, Vec<(i64, usize)>, i64)> {
+    pub fn temporal_heatmap(&self, bucket_size_seconds: Option<i64>) -> Vec<HeatmapRow> {
         use std::collections::BTreeMap;
 
         // Clamp: 60s minimum (avoid pathological per-second bucketing),
@@ -3298,7 +3912,7 @@ impl GraphHunter {
                 .or_insert(0) += 1;
         });
 
-        let mut result: Vec<(String, Vec<(i64, usize)>, i64)> = by_type
+        let mut result: Vec<HeatmapRow> = by_type
             .into_iter()
             .map(|(type_name, bins)| {
                 // Densify: fill zero buckets between min_key and max_key
@@ -3324,7 +3938,7 @@ impl GraphHunter {
     }
 
     /// Returns timestamp distribution per entity type for sparkline visualization.
-    pub fn timeline_data(&self) -> Vec<(String, i64, i64, Vec<(i64, usize)>)> {
+    pub fn timeline_data(&self) -> Vec<TimelineRow> {
         use std::collections::BTreeMap;
         let mut type_data: HashMap<String, BTreeMap<i64, usize>> = HashMap::new();
         let mut type_min: HashMap<String, i64> = HashMap::new();
@@ -3339,22 +3953,18 @@ impl GraphHunter {
                     .or_default()
                     .entry(hour)
                     .or_insert(0) += 1;
-                let min = type_min
-                    .entry(type_name.clone())
-                    .or_insert(edge.timestamp);
+                let min = type_min.entry(type_name.clone()).or_insert(edge.timestamp);
                 if edge.timestamp < *min {
                     *min = edge.timestamp;
                 }
-                let max = type_max
-                    .entry(type_name.clone())
-                    .or_insert(edge.timestamp);
+                let max = type_max.entry(type_name.clone()).or_insert(edge.timestamp);
                 if edge.timestamp > *max {
                     *max = edge.timestamp;
                 }
             }
         });
 
-        let mut result: Vec<(String, i64, i64, Vec<(i64, usize)>)> = type_data
+        let mut result: Vec<TimelineRow> = type_data
             .into_iter()
             .map(|(type_name, bins)| {
                 let min = *type_min.get(&type_name).unwrap_or(&0);
@@ -3382,9 +3992,8 @@ impl GraphHunter {
             // SAFETY: StreamEdge is layout-compatible with
             // CompactRelation; copy by transmute since both are
             // 32-byte #[repr(C)] structs with identical fields.
-            let mut compact: CompactRelation = unsafe {
-                std::ptr::read(edge as *const _ as *const CompactRelation)
-            };
+            let mut compact: CompactRelation =
+                unsafe { std::ptr::read(edge as *const _ as *const CompactRelation) };
             // for_each_edge gives us the source from the table key;
             // streaming carries source_sid in the StreamEdge too,
             // but assert agreement defensively.
@@ -3392,7 +4001,13 @@ impl GraphHunter {
             compact.source_sid = src_sid;
             snapshot.push(compact);
         });
-        let mut groups: HashMap<(String, String, String), Vec<Relation>> = HashMap::new();
+        // `Relation` (the materialized domain struct) has no
+        // `ingested_at` field, so the compaction rebuild carries each
+        // edge's original `ingested_at_delta` alongside it in a
+        // parallel `u32` rather than losing it in the Relation
+        // round-trip. Compaction observes/reorganizes existing edges —
+        // it must never invent a new receive-time for them.
+        let mut groups: HashMap<(String, String, String), Vec<(Relation, u32)>> = HashMap::new();
         for compact in &snapshot {
             edges_before += 1;
             let rel = self.materialize_relation(compact);
@@ -3401,22 +4016,29 @@ impl GraphHunter {
                 rel.dest_id.clone(),
                 format!("{}", rel.rel_type),
             );
-            groups.entry(key).or_default().push(rel);
+            groups
+                .entry(key)
+                .or_default()
+                .push((rel, compact.ingested_at_delta));
         }
 
-        let mut summary_edges: Vec<Relation> = Vec::new();
-        let mut keep_edges: Vec<Relation> = Vec::new();
+        let mut summary_edges: Vec<(Relation, u32)> = Vec::new();
+        let mut keep_edges: Vec<(Relation, u32)> = Vec::new();
 
         for ((_src, _dst, _rt), edges) in &groups {
-            let all_old = edges.iter().all(|e| e.timestamp < cutoff);
+            let all_old = edges.iter().all(|(e, _)| e.timestamp < cutoff);
             if all_old && edges.len() > 1 {
-                let earliest = edges.iter().map(|e| e.timestamp).min().unwrap();
-                let latest = edges.iter().map(|e| e.timestamp).max().unwrap();
+                let earliest = edges.iter().map(|(e, _)| e.timestamp).min().unwrap();
+                let latest = edges.iter().map(|(e, _)| e.timestamp).max().unwrap();
                 let count = edges.len();
                 edges_removed += count - 1;
                 groups_compacted += 1;
 
-                let mut summary = edges[0].clone();
+                // Preserve edges[0]'s ingested_at_delta for the summary
+                // edge, mirroring how its other non-timestamp fields
+                // (metadata, dataset) already come from edges[0].
+                let (first_rel, first_delta) = &edges[0];
+                let mut summary = first_rel.clone();
                 summary.timestamp = earliest;
                 summary
                     .metadata
@@ -3424,7 +4046,7 @@ impl GraphHunter {
                 summary
                     .metadata
                     .insert("compacted_latest".to_string(), latest.to_string());
-                summary_edges.push(summary);
+                summary_edges.push((summary, *first_delta));
             } else {
                 keep_edges.extend(edges.iter().cloned());
             }
@@ -3435,8 +4057,8 @@ impl GraphHunter {
         self.reverse_adj.clear();
         self.meta_store = MetadataStore::new();
 
-        let all_edges: Vec<Relation> = keep_edges.into_iter().chain(summary_edges).collect();
-        for rel in all_edges {
+        let all_edges: Vec<(Relation, u32)> = keep_edges.into_iter().chain(summary_edges).collect();
+        for (rel, ingested_at_delta) in all_edges {
             let src_sid = self.interner.intern(&rel.source_id);
             let dst_sid = self.interner.intern(&rel.dest_id);
             let meta_offset = self.append_edge_metadata(&rel.rel_type, &rel.metadata);
@@ -3448,7 +4070,7 @@ impl GraphHunter {
                 timestamp: rel.timestamp,
                 metadata_offset: meta_offset,
                 dataset_tag: ds_tag,
-                ingested_at_delta: 0,
+                ingested_at_delta,
             };
             // Fallible push first: a spill failure must not leave a dangling reverse edge (C3a).
             self.push_to_streaming(&compact)?;
@@ -3533,14 +4155,21 @@ mod tests {
     #[test]
     fn empty_other_rel_type_roundtrips_without_key() {
         let mut g = GraphHunter::new();
-        g.insert_triples(vec![(
-            Entity::new("a", EntityType::IP),
-            Relation::new("a", "b", RelationType::Other(String::new()), 7),
-            Entity::new("b", EntityType::IP),
-        )], None).unwrap();
+        g.insert_triples(
+            vec![(
+                Entity::new("a", EntityType::IP),
+                Relation::new("a", "b", RelationType::Other(String::new()), 7),
+                Entity::new("b", EntityType::IP),
+            )],
+            None,
+        )
+        .unwrap();
         let rels = g.get_relations("a");
         // Other("") injects no _rel_type; round-trips back to Other("").
-        assert!(rels.iter().any(|r| matches!(&r.rel_type, RelationType::Other(n) if n.is_empty())));
+        assert!(
+            rels.iter()
+                .any(|r| matches!(&r.rel_type, RelationType::Other(n) if n.is_empty()))
+        );
         assert!(rels.iter().all(|r| !r.metadata.contains_key("_rel_type")));
     }
 
@@ -3563,6 +4192,31 @@ mod tests {
         assert!(
             rels.iter().all(|r| !r.metadata.contains_key("_rel_type")),
             "builtin injects no _rel_type"
+        );
+    }
+
+    /// Close-the-channel Task 2: `materialize_relation` (via `get_relations`)
+    /// must expose the real `ingested_at` that Task 1 started stamping on
+    /// `CompactRelation` — otherwise the value is stamped but unobservable
+    /// on the primary export/hunt path, and the SOT channel cannot honestly
+    /// close as "full".
+    #[test]
+    fn materialized_relation_exposes_ingestion_time() {
+        let mut g = GraphHunter::new();
+        g.insert_triples(
+            vec![(
+                Entity::new("a", EntityType::IP),
+                Relation::new("a", "b", RelationType::Connect, 100),
+                Entity::new("b", EntityType::IP),
+            )],
+            None,
+        )
+        .unwrap();
+        let rels = g.get_relations("a");
+        assert!(
+            rels[0].ingested_at > crate::relation::INGEST_EPOCH_BASE,
+            "materialized Relation must carry a real ingested_at, got {}",
+            rels[0].ingested_at
         );
     }
 
@@ -3608,7 +4262,10 @@ mod tests {
         let _ = g.search_temporal_pattern(&warmup, None, None);
 
         // Both indexes must be populated after the hunt.
-        assert!(g.nlf.get().is_some(), "NLF must be built after warm-up hunt");
+        assert!(
+            g.nlf.get().is_some(),
+            "NLF must be built after warm-up hunt"
+        );
         assert!(
             g.khop_reach.get().is_some(),
             "khop_reach must be built after warm-up hunt"
@@ -3739,7 +4396,10 @@ mod tests {
         // ds-b tail edge was silently dropped in the rebuild.
         let (entities_removed, relations_removed) =
             g.remove_entities_and_relations_by_dataset("ds-a").unwrap();
-        assert_eq!(relations_removed, 1, "should remove exactly the 1 ds-a edge");
+        assert_eq!(
+            relations_removed, 1,
+            "should remove exactly the 1 ds-a edge"
+        );
         assert!(entities_removed >= 1, "at least one ds-a entity removed");
 
         // After removal, ds-b edges must be intact (both base + tail).
@@ -3812,18 +4472,22 @@ mod tests {
 
         // Three IPs, two Hosts, one User.
         for i in 0..3u32 {
-            g.add_entity(Entity::new(&format!("ip-{}", i), EntityType::IP))
+            g.add_entity(Entity::new(format!("ip-{}", i), EntityType::IP))
                 .expect("ip insert");
         }
         for i in 0..2u32 {
-            g.add_entity(Entity::new(&format!("host-{}", i), EntityType::Host))
+            g.add_entity(Entity::new(format!("host-{}", i), EntityType::Host))
                 .expect("host insert");
         }
         g.add_entity(Entity::new("user-0", EntityType::User))
             .expect("user insert");
 
         // Grand-total node counter must equal 6.
-        assert_eq!(g.entity_count(), 6, "entity_count() must equal total inserted");
+        assert_eq!(
+            g.entity_count(),
+            6,
+            "entity_count() must equal total inserted"
+        );
 
         // Collect the per-type map (sorted by name, so deterministic).
         let counts: std::collections::HashMap<String, usize> =
@@ -3841,7 +4505,50 @@ mod tests {
             .expect("late ip insert");
         let counts2: std::collections::HashMap<String, usize> =
             g.entity_type_counts().into_iter().collect();
-        assert_eq!(counts2.get("IP").copied().unwrap_or(0), 4, "IP count after late insert");
+        assert_eq!(
+            counts2.get("IP").copied().unwrap_or(0),
+            4,
+            "IP count after late insert"
+        );
         assert_eq!(g.entity_count(), 7, "entity_count() after late insert");
+    }
+
+    /// Fase F Task 1: `edge_timestamp_range` must report (min_ts, max_ts)
+    /// across all edges regardless of insertion order.
+    #[test]
+    fn edge_timestamp_range_reports_min_and_max() {
+        fn ev(src: &str, dst: &str, ts: i64) -> crate::parser::RawIngestEvent {
+            crate::parser::RawIngestEvent {
+                src_id: src.into(),
+                src_type: EntityType::User,
+                src_metadata: std::collections::HashMap::new(),
+                dst_id: dst.into(),
+                dst_type: EntityType::Host,
+                dst_metadata: std::collections::HashMap::new(),
+                rel_type: RelationType::Auth,
+                rel_metadata: std::collections::HashMap::new(),
+                timestamp: ts,
+                raw_line: None,
+            }
+        }
+
+        let mut g = GraphHunter::new();
+        // insert 3 events with timestamps 100, 300, 200 (unsorted on purpose)
+        g.insert_raw_events(
+            vec![
+                ev("u1", "h1", 100),
+                ev("u2", "h2", 300),
+                ev("u3", "h3", 200),
+            ],
+            None,
+        )
+        .unwrap();
+        assert_eq!(g.edge_timestamp_range(), Some((100, 300)));
+    }
+
+    #[test]
+    fn edge_timestamp_range_empty_graph_is_none() {
+        let g = GraphHunter::new();
+        assert_eq!(g.edge_timestamp_range(), None);
     }
 }

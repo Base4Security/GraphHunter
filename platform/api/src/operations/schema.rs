@@ -188,6 +188,12 @@ fn known_endpoints() -> Vec<EndpointMeta> {
             "Group IP entities by /24 subnet with aggregates.",
             true,
         ),
+        ep(
+            "/sessions/shared",
+            Get,
+            "Sessions observed under more than one account — a stolen token or shared cookie.",
+            true,
+        ),
         // --- Catalogs ------------------------------------------------
         ep(
             "/catalog",
@@ -264,6 +270,19 @@ fn known_endpoints() -> Vec<EndpointMeta> {
             "Emit session tags as a STIX / MISP / KQL / Sigma feed.",
             true,
         ),
+        // --- Attack-chain reconstruction (TPCSA) ---------------------
+        ep(
+            "/reconstruct_chain",
+            Post,
+            "Reconstruct attack chains from seeds: ranked, verified time-respecting trees with entry point, connectors, ties and an optional MILP certificate.",
+            true,
+        ),
+        ep(
+            "/tpcsa/export",
+            Post,
+            "Export the loaded graph (or a window) as a TPCSA solver instance.",
+            true,
+        ),
         // --- Data quality -------------------------------------------
         ep(
             "/check_invariants",
@@ -305,6 +324,100 @@ fn known_endpoints() -> Vec<EndpointMeta> {
             "/purge_dead_letters",
             Post,
             "Bulk-remove DLQ entries by filter.",
+            false,
+        ),
+        // --- File ingest ---------------------------------------------
+        // All path-taking routes are confined to GRAPHHUNTER_INGEST_ROOT
+        // and return 403 until an operator configures it.
+        ep(
+            "/ingest/preview",
+            Post,
+            "Detect a log file's format and propose a field -> entity mapping, \
+             without ingesting. Path must be inside GRAPHHUNTER_INGEST_ROOT.",
+            true,
+        ),
+        ep(
+            "/ingest/load",
+            Post,
+            "Parse a log file and insert it into the session graph. HTTP 200 is \
+             not success on its own: check zero_triples (rows parsed but no \
+             triples produced, usually a bad mapping) and stopped_early \
+             (truncated by the memory guard). Large files should use streaming.",
+            true,
+        ),
+        ep(
+            "/ingest/load_with_config",
+            Post,
+            "Like /ingest/load but applies an explicit FieldConfig instead of the \
+             auto-built one. Same zero_triples / stopped_early caveats.",
+            true,
+        ),
+        ep(
+            "/ingest/stream",
+            Post,
+            "Start a background streaming ingest for a file too large for the \
+             synchronous path; returns {job_id, dataset_id} immediately. Poll \
+             /ingest/status. 409 when too many ingests are already running.",
+            false,
+        ),
+        ep(
+            "/ingest/status",
+            Get,
+            "Poll one streaming ingest by job_id: state (running|complete|error), \
+             phase, byte counts, and the LoadResult once complete. Byte counts are \
+             0 for EVTX/PCAP/Zeek, where phase is the only progress signal. 404 \
+             means unknown, evicted, or the process restarted.",
+            false,
+        ),
+        ep(
+            "/ingest/jobs",
+            Get,
+            "List recent ingest jobs, newest first — for finding a lost job_id or \
+             a job stalled by a process restart.",
+            false,
+        ),
+        ep(
+            "/sentinel/resume",
+            Post,
+            "Start (or restart) live ingest on the Sentinel connector. The connector              registers PAUSED, so nothing is ingested until this is called -- without              it a client sees a healthy connector and zero rows, with no error.",
+            false,
+        ),
+        ep(
+            "/sentinel/pause",
+            Post,
+            "Stop live ingest without disconnecting. The connector stays registered              and resume picks up from the watermark.",
+            false,
+        ),
+        ep(
+            "/session/current",
+            Get,
+            "The session other calls default to when they omit an explicit handle.              Null when none is selected.",
+            false,
+        ),
+        ep(
+            "/session/load",
+            Post,
+            "Load a saved session from disk and make it current.",
+            true,
+        ),
+        ep(
+            "/session/save",
+            Post,
+            "Persist the current session's graph and datasets to disk.",
+            true,
+        ),
+        ep(
+            "/session/create",
+            Post,
+            "Create an empty session and make it the process-global current one. \
+             Ingest needs a session; pass the returned handle explicitly on later \
+             calls, since 'current' is shared across HTTP clients.",
+            false,
+        ),
+        ep(
+            "/session/list",
+            Get,
+            "List sessions, in-memory plus a scan of the session directory.",
             false,
         ),
         // --- Agentic slow-lane --------------------------------------

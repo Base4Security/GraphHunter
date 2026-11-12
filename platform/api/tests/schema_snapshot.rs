@@ -9,6 +9,7 @@
 //!   1. The constant in platform/api/src/dto/v1/graph_meta.rs
 //!   2. The zod literal in platform/mcp/src/lib/graph-state-client.ts
 //!   3. The fixture at platform/mcp/tests/fixtures/summary.v1.golden.json
+//!
 //! In that order, with the corresponding migration plan documented.
 
 use graph_hunter_api::dto::v1::graph_meta::GraphSummary;

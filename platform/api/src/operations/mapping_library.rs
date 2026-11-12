@@ -106,12 +106,12 @@ impl GraphHunterApi {
             .filter(|m| {
                 req.fingerprint
                     .as_deref()
-                    .map_or(true, |fp| m.fingerprint == fp)
+                    .is_none_or(|fp| m.fingerprint == fp)
             })
             .filter(|m| {
                 req.ocsf_category
                     .as_deref()
-                    .map_or(true, |cat| m.ocsf_category.as_deref() == Some(cat))
+                    .is_none_or(|cat| m.ocsf_category.as_deref() == Some(cat))
             })
             .collect();
 

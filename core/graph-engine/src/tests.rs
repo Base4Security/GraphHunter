@@ -1,6 +1,6 @@
 use super::*;
 
-/// Test helper — convert a `HuntResult` (Vec<Arc<str>>) into Vec<&str>
+/// Test helper â€” convert a `HuntResult` (Vec<Arc<str>>) into Vec<&str>
 /// for `assert_eq!(..., vec!["literal", ...])`. The DFS hot path emits
 /// `Arc<str>` to avoid allocations (D0); tests still want the cheap
 /// literal-array comparison.
@@ -8,7 +8,40 @@ fn path_strs(p: &[std::sync::Arc<str>]) -> Vec<&str> {
     p.iter().map(|s| &**s).collect()
 }
 
-// ── Entity Tests ──
+/// Reads a `demo_data/` fixture, or `None` when it is absent.
+///
+/// `demo_data/` is only partly committed â€” the multi-GB corpora are
+/// downloaded, and several smaller files were never committed at all
+/// (see `demo_data/README.md`). Tests that need them used to `.expect(â€¦)`
+/// and take the suite red for a missing *input* rather than a broken
+/// *behaviour*: five permanently-failing tests that say nothing about the
+/// code, which is exactly how a suite stops being read.
+fn demo_fixture(name: &str) -> Option<String> {
+    std::fs::read_to_string(format!("../../demo_data/{name}")).ok()
+}
+
+/// Loads a `demo_data/` fixture or returns from the test, saying so.
+///
+/// A skipped test is NOT a passing test. The notice names the file and
+/// goes to stderr, because a silent skip is the false-green failure this
+/// codebase has already been bitten by once.
+macro_rules! demo_fixture_or_skip {
+    ($name:expr) => {
+        match demo_fixture($name) {
+            Some(s) => s,
+            None => {
+                eprintln!(
+                    "SKIPPED: demo_data/{} is absent â€” this test did not run. \
+                     See demo_data/README.md.",
+                    $name
+                );
+                return;
+            }
+        }
+    };
+}
+
+// â”€â”€ Entity Tests â”€â”€
 
 #[test]
 fn entity_creation_default() {
@@ -41,7 +74,7 @@ fn entity_equality_by_id() {
     assert_eq!(e1, e2); // Same ID = equal, regardless of score
 }
 
-// ── Relation Tests ──
+// â”€â”€ Relation Tests â”€â”€
 
 #[test]
 fn relation_creation() {
@@ -61,7 +94,7 @@ fn relation_builder_metadata() {
     assert_eq!(r.metadata.get("pid").unwrap(), "4512");
 }
 
-// ── Hypothesis Tests ──
+// â”€â”€ Hypothesis Tests â”€â”€
 
 #[test]
 fn hypothesis_builder() {
@@ -85,6 +118,312 @@ fn hypothesis_builder() {
     assert_eq!(h.name, "Lateral Movement");
     assert_eq!(h.len(), 3);
     assert!(!h.is_empty());
+}
+
+// ── Gap tolerance (g) ──
+
+/// A -Connect-> X -Connect-> B, where the hypothesis only names the two
+/// endpoints. X is the "lost log" between them.
+fn one_gap_chain() -> GraphHunter {
+    let mut g = GraphHunter::new();
+    for id in ["A", "X", "B"] {
+        g.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    g.add_relation(Relation::new("A", "X", RelationType::Connect, 100))
+        .unwrap();
+    g.add_relation(Relation::new("X", "B", RelationType::Connect, 110))
+        .unwrap();
+    g.sort_edges_by_timestamp().unwrap();
+    g
+}
+
+fn a_to_b_connect() -> Hypothesis {
+    Hypothesis::new("a-to-b").add_step(HypothesisStep::new(
+        EntityType::IP,
+        RelationType::Connect,
+        EntityType::IP,
+    ))
+}
+
+/// With g = 0 there is no direct A→B edge, so the strict matcher finds
+/// nothing — the false negative lost logs cause. Uses an explicit `g=0`
+/// rather than the default so a concurrent env-var test cannot perturb
+/// it (the field always wins over `GRAPHHUNTER_MAX_GAP`).
+#[test]
+fn no_gap_misses_a_bridged_chain() {
+    let graph = one_gap_chain();
+    let h = a_to_b_connect().with_max_gap(0);
+    let (paths, _) = graph.search_temporal_pattern(&h, None, None).unwrap();
+    assert!(
+        !paths
+            .iter()
+            .any(|p| &*p[0] == "A" && &*p[p.len() - 1] == "B")
+    );
+}
+
+/// g = 1 bridges the single missing hop and recovers A→B.
+#[test]
+fn one_gap_bridges_one_missing_hop() {
+    let graph = one_gap_chain();
+    let h = a_to_b_connect().with_max_gap(1);
+    let (paths, _) = graph.search_temporal_pattern(&h, None, None).unwrap();
+    let hit: Vec<_> = paths
+        .iter()
+        .filter(|p| &*p[0] == "A" && &*p[1] == "B")
+        .collect();
+    assert_eq!(
+        hit.len(),
+        1,
+        "g=1 must bridge A→X→B into A→B, got {paths:?}"
+    );
+}
+
+/// The bridging vertex X is a match relaxation, not output: the path is
+/// the two anchors, never the three physical vertices.
+#[test]
+fn gap_fill_vertices_are_not_in_the_path() {
+    let graph = one_gap_chain();
+    let h = a_to_b_connect().with_max_gap(1);
+    let (paths, _) = graph.search_temporal_pattern(&h, None, None).unwrap();
+    // The bridged match specifically: A → (gap over X) → B. A→X is also a
+    // valid one-step match, so pick the A…B path deterministically.
+    let bridged = paths
+        .iter()
+        .find(|p| &*p[0] == "A" && &*p[p.len() - 1] == "B")
+        .expect("the A→B bridged match");
+    assert_eq!(
+        bridged.len(),
+        2,
+        "anchors only: A, B — not X. got {bridged:?}"
+    );
+    assert!(
+        !bridged.iter().any(|n| &**n == "X"),
+        "X must not appear: {bridged:?}"
+    );
+}
+
+/// g is a bound: a two-hop hole needs g ≥ 2, and g = 1 must still miss it.
+#[test]
+fn gap_bound_is_enforced() {
+    let mut graph = GraphHunter::new();
+    for id in ["A", "X", "Y", "B"] {
+        graph.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    graph
+        .add_relation(Relation::new("A", "X", RelationType::Connect, 100))
+        .unwrap();
+    graph
+        .add_relation(Relation::new("X", "Y", RelationType::Connect, 110))
+        .unwrap();
+    graph
+        .add_relation(Relation::new("Y", "B", RelationType::Connect, 120))
+        .unwrap();
+    graph.sort_edges_by_timestamp().unwrap();
+
+    let (p1, _) = graph
+        .search_temporal_pattern(&a_to_b_connect().with_max_gap(1), None, None)
+        .unwrap();
+    assert!(
+        !p1.iter().any(|p| &*p[0] == "A" && &*p[p.len() - 1] == "B"),
+        "a 2-hop hole must not be bridged by g=1, got {p1:?}"
+    );
+    let (p2, _) = graph
+        .search_temporal_pattern(&a_to_b_connect().with_max_gap(2), None, None)
+        .unwrap();
+    assert!(
+        p2.iter()
+            .any(|p| p.len() == 2 && &*p[0] == "A" && &*p[1] == "B"),
+        "g=2 must bridge a 2-hop hole, got {p2:?}"
+    );
+}
+
+/// The bridge must be temporally monotone: if the middle edge runs
+/// backward past δ, the gap does not connect.
+#[test]
+fn gap_bridge_respects_temporal_order() {
+    let mut graph = GraphHunter::new();
+    for id in ["A", "X", "B"] {
+        graph.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    // A→X at t=100, X→B at t=50 — B happened before the bridge. Strict.
+    graph
+        .add_relation(Relation::new("A", "X", RelationType::Connect, 100))
+        .unwrap();
+    graph
+        .add_relation(Relation::new("X", "B", RelationType::Connect, 50))
+        .unwrap();
+    graph.sort_edges_by_timestamp().unwrap();
+
+    let h = a_to_b_connect().with_max_gap(1);
+    let (paths, _) = graph.search_temporal_pattern(&h, None, None).unwrap();
+    assert!(
+        !paths
+            .iter()
+            .any(|p| &*p[0] == "A" && &*p[p.len() - 1] == "B"),
+        "a backward bridge edge must not connect, got {paths:?}"
+    );
+}
+
+// The env-var fallback for `g` is covered in the DSL crate's
+// `resolve_*` tests, which run without any concurrent search and so
+// cannot leak a mutated global into the 800 default-path tests here.
+
+// ── Clock-skew tolerance (δ) ──
+
+/// Builds A -Connect-> B -Connect-> C where B→C carries an *earlier*
+/// timestamp than A→B by `skew` seconds — the shape produced when the
+/// second hop's clock runs behind the first's.
+fn skewed_two_hop(skew: i64) -> GraphHunter {
+    let mut g = GraphHunter::new();
+    for id in ["A", "B", "C"] {
+        g.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    g.add_relation(Relation::new("A", "B", RelationType::Connect, 100))
+        .unwrap();
+    g.add_relation(Relation::new("B", "C", RelationType::Connect, 100 - skew))
+        .unwrap();
+    g.sort_edges_by_timestamp().unwrap();
+    g
+}
+
+fn two_hop_connect() -> Hypothesis {
+    Hypothesis::new("two-hop")
+        .add_step(HypothesisStep::new(
+            EntityType::IP,
+            RelationType::Connect,
+            EntityType::IP,
+        ))
+        .add_step(HypothesisStep::new(
+            EntityType::IP,
+            RelationType::Connect,
+            EntityType::IP,
+        ))
+}
+
+/// Strict monotonicity (δ = 0) drops a chain whose second hop fell behind
+/// the first — the true-negative the feature exists to stop being a false
+/// negative. Explicit `δ=0` (not the default) so a concurrent env-var
+/// test cannot perturb it.
+#[test]
+fn strict_monotonicity_drops_a_backward_hop() {
+    let g = skewed_two_hop(5);
+    let h = two_hop_connect().with_skew_tolerance(0);
+    let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
+    assert!(
+        paths.is_empty(),
+        "with δ=0 a 5s-early second hop must not match, got {paths:?}"
+    );
+}
+
+/// A δ at least as wide as the skew recovers the chain.
+#[test]
+fn skew_tolerance_recovers_the_chain() {
+    let g = skewed_two_hop(5);
+    let h = two_hop_connect().with_skew_tolerance(5);
+    let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
+    assert_eq!(paths.len(), 1, "δ=5 must admit a 5s skew, got {paths:?}");
+    assert_eq!(&paths[0][..], &["A".into(), "B".into(), "C".into()][..]);
+}
+
+/// δ narrower than the skew still rejects: the tolerance is a bound, not
+/// an off switch.
+#[test]
+fn skew_tolerance_narrower_than_the_gap_still_rejects() {
+    let g = skewed_two_hop(5);
+    let h = two_hop_connect().with_skew_tolerance(4);
+    let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
+    assert!(
+        paths.is_empty(),
+        "δ=4 must not admit a 5s skew, got {paths:?}"
+    );
+}
+
+/// The tolerance is per-hop, not cumulative. Three hops that each fall 5s
+/// behind the *real* previous timestamp accumulate 10s of backward drift
+/// end-to-end, yet δ=5 admits them — because each hop is measured against
+/// the real timestamp of the one before, never a relaxed floor.
+#[test]
+fn skew_tolerance_is_per_hop_not_cumulative() {
+    let mut g = GraphHunter::new();
+    for id in ["A", "B", "C", "D"] {
+        g.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    // 100 → 95 → 90: each hop 5s before the last, 10s total drift.
+    g.add_relation(Relation::new("A", "B", RelationType::Connect, 100))
+        .unwrap();
+    g.add_relation(Relation::new("B", "C", RelationType::Connect, 95))
+        .unwrap();
+    g.add_relation(Relation::new("C", "D", RelationType::Connect, 90))
+        .unwrap();
+    g.sort_edges_by_timestamp().unwrap();
+
+    let h = Hypothesis::new("three-hop")
+        .add_step(HypothesisStep::new(
+            EntityType::IP,
+            RelationType::Connect,
+            EntityType::IP,
+        ))
+        .add_step(HypothesisStep::new(
+            EntityType::IP,
+            RelationType::Connect,
+            EntityType::IP,
+        ))
+        .add_step(HypothesisStep::new(
+            EntityType::IP,
+            RelationType::Connect,
+            EntityType::IP,
+        ))
+        .with_skew_tolerance(5);
+    let (paths, _) = g.search_temporal_pattern(&h, None, None).unwrap();
+    assert_eq!(
+        paths.len(),
+        1,
+        "each hop is within δ=5 of the real previous ts; total drift is irrelevant, got {paths:?}"
+    );
+
+    // But a single hop that jumps back 6s (> δ) breaks the chain, proving
+    // the bound is enforced at every hop.
+    let mut g2 = GraphHunter::new();
+    for id in ["A", "B", "C"] {
+        g2.add_entity(Entity::new(id, EntityType::IP)).unwrap();
+    }
+    g2.add_relation(Relation::new("A", "B", RelationType::Connect, 100))
+        .unwrap();
+    g2.add_relation(Relation::new("B", "C", RelationType::Connect, 94))
+        .unwrap();
+    g2.sort_edges_by_timestamp().unwrap();
+    let (paths2, _) = g2
+        .search_temporal_pattern(&two_hop_connect().with_skew_tolerance(5), None, None)
+        .unwrap();
+    assert!(
+        paths2.is_empty(),
+        "a single 6s backward hop exceeds δ=5, got {paths2:?}"
+    );
+}
+
+// The env-var fallback for δ is covered in the DSL crate's `resolve_*`
+// tests — kept out of this crate so a mutated global can never leak into
+// the default-path search tests running alongside it.
+
+/// δ must win over the LFTJ planner: even with the operator forced on,
+/// a δ query routes to the DFS, because LFTJ ignores δ and would return
+/// a stricter set than asked. Guards against a silent wrong answer.
+#[test]
+fn skew_tolerance_forces_dfs_over_lftj() {
+    let g = skewed_two_hop(5);
+    // SAFETY: env vars restored before return.
+    unsafe { std::env::set_var("GRAPHHUNTER_LFTJ_PLANNER", "1") };
+    unsafe { std::env::set_var("GRAPHHUNTER_LFTJ_AUTO", "1") };
+    let h = two_hop_connect().with_skew_tolerance(5);
+    let res = g.search_temporal_pattern(&h, None, None);
+    unsafe { std::env::remove_var("GRAPHHUNTER_LFTJ_PLANNER") };
+    unsafe { std::env::remove_var("GRAPHHUNTER_LFTJ_AUTO") };
+    let (paths, _) = res.unwrap();
+    assert_eq!(
+        paths.len(),
+        1,
+        "δ must route to the DFS and admit the skew even with LFTJ enabled, got {paths:?}"
+    );
 }
 
 #[test]
@@ -135,7 +474,7 @@ fn hypothesis_validation_empty() {
     assert!(h.validate().is_err());
 }
 
-// ── Serialization Round-Trip Tests ──
+// â”€â”€ Serialization Round-Trip Tests â”€â”€
 
 #[test]
 fn entity_serde_roundtrip() {
@@ -237,9 +576,9 @@ fn hypothesis_json_structure() {
     assert_eq!(step["dest_type"], "Host");
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 2: GraphHunter Engine Tests ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 2: GraphHunter Engine Tests â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /// Helper: builds a realistic lateral movement graph.
 ///
@@ -294,11 +633,11 @@ fn build_lateral_movement_graph() -> GraphHunter {
     g
 }
 
-// ── Graph Construction Tests ──
+// â”€â”€ Graph Construction Tests â”€â”€
 
 #[test]
 fn graph_new_is_empty() {
-    let mut g = GraphHunter::new();
+    let g = GraphHunter::new();
     assert_eq!(g.entity_count(), 0);
     assert_eq!(g.relation_count(), 0);
 }
@@ -344,21 +683,21 @@ fn graph_add_relation_validates_dest() {
 
 #[test]
 fn graph_relation_count() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     assert_eq!(g.entity_count(), 5);
     assert_eq!(g.relation_count(), 4);
 }
 
 #[test]
 fn graph_get_entity() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     let e = g.get_entity("web-server").unwrap();
     assert_eq!(e.entity_type, EntityType::Host);
 }
 
 #[test]
 fn graph_get_relations() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     let rels = g.get_relations("attacker-ip");
     assert_eq!(rels.len(), 1);
     assert_eq!(rels[0].dest_id, "web-server");
@@ -366,16 +705,16 @@ fn graph_get_relations() {
 
 #[test]
 fn graph_get_relations_empty() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     let rels = g.get_relations("payload.dll"); // leaf node, no outgoing
     assert!(rels.is_empty());
 }
 
-// ── Pattern Search: Positive Tests ──
+// â”€â”€ Pattern Search: Positive Tests â”€â”€
 
 #[test]
 fn search_full_lateral_movement_chain() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let hypothesis = Hypothesis::new("Lateral Movement")
         .add_step(HypothesisStep::new(
@@ -418,7 +757,7 @@ fn search_full_lateral_movement_chain() {
 
 #[test]
 fn search_partial_chain() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     // Only search for the first two steps: IP -> Connect -> Host -> Auth -> User
     let hypothesis = Hypothesis::new("Initial Access")
@@ -446,7 +785,7 @@ fn search_partial_chain() {
 
 #[test]
 fn search_single_step() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let hypothesis = Hypothesis::new("Connection").add_step(HypothesisStep::new(
         EntityType::IP,
@@ -462,11 +801,11 @@ fn search_single_step() {
     assert_eq!(path_strs(&results[0]), vec!["attacker-ip", "web-server"]);
 }
 
-// ── Pattern Search: Negative / Pruning Tests ──
+// â”€â”€ Pattern Search: Negative / Pruning Tests â”€â”€
 
 #[test]
 fn search_no_match_wrong_relation_type() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     // IP -> Auth (wrong: should be Connect) -> Host
     let hypothesis = Hypothesis::new("Wrong Relation").add_step(HypothesisStep::new(
@@ -484,7 +823,7 @@ fn search_no_match_wrong_relation_type() {
 
 #[test]
 fn search_no_match_wrong_dest_type() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     // IP -> Connect -> User (wrong: web-server is a Host, not User)
     let hypothesis = Hypothesis::new("Wrong Dest Type").add_step(HypothesisStep::new(
@@ -502,7 +841,7 @@ fn search_no_match_wrong_dest_type() {
 
 #[test]
 fn search_invalid_hypothesis_returns_error() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     let hypothesis = Hypothesis::new("Empty");
     let err = g
         .search_temporal_pattern(&hypothesis, None, None)
@@ -510,7 +849,7 @@ fn search_invalid_hypothesis_returns_error() {
     assert!(matches!(err, GraphError::InvalidHypothesis(_)));
 }
 
-// ── Causal Monotonicity Tests ──
+// â”€â”€ Causal Monotonicity Tests â”€â”€
 
 #[test]
 fn search_enforces_causal_monotonicity() {
@@ -522,7 +861,7 @@ fn search_enforces_causal_monotonicity() {
     g.add_entity(Entity::new("user-1", EntityType::User))
         .unwrap();
 
-    // Connection at t=500, Auth at t=200 (BEFORE the connection — violates causality)
+    // Connection at t=500, Auth at t=200 (BEFORE the connection â€” violates causality)
     g.add_relation(Relation::new("ip-1", "host-1", RelationType::Connect, 500))
         .unwrap();
     g.add_relation(Relation::new("host-1", "user-1", RelationType::Auth, 200))
@@ -585,11 +924,11 @@ fn search_allows_same_timestamp() {
     assert_eq!(results.len(), 1);
 }
 
-// ── Time Window Tests ──
+// â”€â”€ Time Window Tests â”€â”€
 
 #[test]
 fn search_time_window_includes_match() {
-    let mut g = build_lateral_movement_graph(); // timestamps: 100, 200, 300, 400
+    let g = build_lateral_movement_graph(); // timestamps: 100, 200, 300, 400
 
     let hypothesis = Hypothesis::new("Windowed")
         .add_step(HypothesisStep::new(
@@ -613,7 +952,7 @@ fn search_time_window_includes_match() {
 
 #[test]
 fn search_time_window_excludes_match() {
-    let mut g = build_lateral_movement_graph(); // timestamps: 100, 200, 300, 400
+    let g = build_lateral_movement_graph(); // timestamps: 100, 200, 300, 400
 
     let hypothesis = Hypothesis::new("Windowed Excluded")
         .add_step(HypothesisStep::new(
@@ -637,7 +976,7 @@ fn search_time_window_excludes_match() {
 
 #[test]
 fn search_time_window_partial_chain_cutoff() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let hypothesis = Hypothesis::new("Full Chain Windowed")
         .add_step(HypothesisStep::new(
@@ -669,7 +1008,7 @@ fn search_time_window_partial_chain_cutoff() {
     assert!(results.is_empty());
 }
 
-// ── Cycle Avoidance Tests ──
+// â”€â”€ Cycle Avoidance Tests â”€â”€
 
 #[test]
 fn search_avoids_cycles() {
@@ -701,7 +1040,7 @@ fn search_avoids_cycles() {
     assert_eq!(results.len(), 2); // Two distinct paths, no cycles
 }
 
-// ── Multiple Paths Tests ──
+// â”€â”€ Multiple Paths Tests â”€â”€
 
 #[test]
 fn search_finds_multiple_attack_paths() {
@@ -787,7 +1126,7 @@ fn search_branching_paths() {
     assert_eq!(results.len(), 2);
 }
 
-// ── Complex Realistic Scenario ──
+// â”€â”€ Complex Realistic Scenario â”€â”€
 
 #[test]
 fn search_realistic_apt_scenario() {
@@ -904,15 +1243,15 @@ fn graph_error_display() {
 
 #[test]
 fn graph_default_trait() {
-    let mut g = GraphHunter::default();
+    let g = GraphHunter::default();
     assert_eq!(g.entity_count(), 0);
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 3: Parser & Ingestion Tests ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 3: Parser & Ingestion Tests â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-// ── Sysmon Event 1: Process Create ──
+// â”€â”€ Sysmon Event 1: Process Create â”€â”€
 
 #[test]
 fn sysmon_parse_event1_process_create() {
@@ -958,7 +1297,7 @@ fn sysmon_parse_event1_process_create() {
 #[test]
 fn sysmon_eid1_raw_path_parity_with_legacy() {
     // Fixture: NDJSON with multiple EventID-1 lines that share entity
-    // ids — exercises the dst_metadata-skipped-on-second-emission
+    // ids â€” exercises the dst_metadata-skipped-on-second-emission
     // optimization in `typed_process_create_raw` plus the writer's
     // `insert_raw_events` path. Resulting graph (entity count, relation
     // count, type tags, metadata) must match the legacy path exactly.
@@ -1006,7 +1345,7 @@ fn sysmon_long_tail_raw_path_parity_with_legacy() {
     // Mixed-EID NDJSON exercising the 9 raw-migrated handlers
     // (1, 3, 5, 7, 8, 11, 12, 15, 23) plus a 4624 (WinSec) and
     // 4104 (PowerShell) that intentionally fall through to the
-    // legacy + lift path — confirms the fallback + raw path
+    // legacy + lift path â€” confirms the fallback + raw path
     // produce identical graphs.
     let ndjson = r#"{"EventID":1,"UtcTime":"2024-01-15 14:30:00.000","Image":"C:\\Windows\\cmd.exe","User":"alice","Computer":"H1","ProcessId":100,"ParentImage":"C:\\Windows\\explorer.exe","ParentProcessId":50}
 {"EventID":3,"UtcTime":"2024-01-15 14:30:01.000","Computer":"H1","Image":"C:\\Windows\\svchost.exe","DestinationIp":"10.0.0.5","DestinationPort":"443","Protocol":"tcp"}
@@ -1041,7 +1380,10 @@ fn sysmon_long_tail_raw_path_parity_with_legacy() {
     );
     for (sid, legacy_ent) in g_legacy.entities.iter() {
         let raw_ent = g_raw.entities.get(sid).unwrap_or_else(|| {
-            panic!("raw graph missing entity present in legacy: {}", legacy_ent.id)
+            panic!(
+                "raw graph missing entity present in legacy: {}",
+                legacy_ent.id
+            )
         });
         assert_eq!(legacy_ent.id, raw_ent.id);
         assert_eq!(legacy_ent.entity_type, raw_ent.entity_type);
@@ -1087,7 +1429,10 @@ fn sysmon_winsec_raw_path_parity_with_legacy() {
     );
     for (sid, legacy_ent) in g_legacy.entities.iter() {
         let raw_ent = g_raw.entities.get(sid).unwrap_or_else(|| {
-            panic!("raw graph missing entity present in legacy: {}", legacy_ent.id)
+            panic!(
+                "raw graph missing entity present in legacy: {}",
+                legacy_ent.id
+            )
         });
         assert_eq!(legacy_ent.id, raw_ent.id);
         assert_eq!(legacy_ent.entity_type, raw_ent.entity_type);
@@ -1099,7 +1444,7 @@ fn sysmon_winsec_raw_path_parity_with_legacy() {
     }
 }
 
-// ── Sysmon Event 3: Network Connection ──
+// â”€â”€ Sysmon Event 3: Network Connection â”€â”€
 
 #[test]
 fn sysmon_parse_event3_network_connection() {
@@ -1144,7 +1489,7 @@ fn sysmon_parse_event3_network_connection() {
     assert_eq!(dst2.id, "10.0.0.50");
 }
 
-// ── Sysmon Event 11: File Create ──
+// â”€â”€ Sysmon Event 11: File Create â”€â”€
 
 #[test]
 fn sysmon_parse_event11_file_create() {
@@ -1172,7 +1517,7 @@ fn sysmon_parse_event11_file_create() {
     );
 }
 
-// ── Sysmon Event 22: DNS Query ──
+// â”€â”€ Sysmon Event 22: DNS Query â”€â”€
 
 #[test]
 fn sysmon_parse_event22_dns_query() {
@@ -1198,7 +1543,7 @@ fn sysmon_parse_event22_dns_query() {
     assert_eq!(dst.metadata.get("query_type").unwrap(), "A");
 }
 
-// ── NDJSON Parsing ──
+// â”€â”€ NDJSON Parsing â”€â”€
 
 #[test]
 fn sysmon_parse_ndjson_format() {
@@ -1212,7 +1557,7 @@ fn sysmon_parse_ndjson_format() {
     assert_eq!(triples[1].2.id, "exfil.evil.com");
 }
 
-// ── Malformed / Edge Cases ──
+// â”€â”€ Malformed / Edge Cases â”€â”€
 
 #[test]
 fn sysmon_parse_unknown_event_id_skipped() {
@@ -1224,11 +1569,52 @@ fn sysmon_parse_unknown_event_id_skipped() {
 
 #[test]
 fn sysmon_parse_missing_required_fields_skipped() {
-    // Event 1 without Image field — should produce 0 triples
+    // Event 1 without Image field â€” should produce 0 triples
     let json = r#"[{"EventID": 1, "UtcTime": "2024-01-15 14:30:00", "User": "admin"}]"#;
     let parser = SysmonJsonParser;
     let triples = parser.parse(json);
     assert!(triples.is_empty());
+}
+
+/// Builds NDJSON input (no leading `[`, so `parse_raw_with_stats` takes
+/// the native `par_lines` fast path instead of delegating to the legacy
+/// `parse_with_stats`) with `n` rows that the fast path skips, cycling
+/// through three distinct skip causes so the reservoir sees varied
+/// `reason` strings:
+/// - an unsupported EventID (falls through both typed-scratch matches to
+///   the `Value`-based `parse_event`'s `_ => Vec::new()` arm);
+/// - an EventID 1 row with `Image` but no `User`/`ParentImage` (matches
+///   `typed_process_create_raw`'s EventID but returns `Some(vec![])` â€”
+///   "no mappable entities");
+/// - a non-JSON garbage line (fails every parse attempt).
+fn sysmon_input_with_skips(n: usize) -> String {
+    let rows = [
+        r#"{"EventID": 999, "UtcTime": "2024-01-15 14:30:00"}"#.to_string(),
+        r#"{"EventID": 1, "UtcTime": "2024-01-15 14:30:00", "Image": "C:\\Windows\\cmd.exe", "Computer": "H1"}"#.to_string(),
+        "not json at all!".to_string(),
+    ];
+    (0..n)
+        .map(|i| rows[i % rows.len()].clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn sysmon_fast_path_records_skipped_samples_up_to_cap() {
+    // Build input with 3 skippable rows mixed in; reuses the helper
+    // above rather than the array-literal fixtures used elsewhere in
+    // this file because `parse_raw_with_stats` only exercises the
+    // native `par_lines` fast path for NDJSON input.
+    let input = sysmon_input_with_skips(3);
+    let parser = SysmonJsonParser;
+    let (_, stats) = parser.parse_raw_with_stats(&input);
+
+    assert!(stats.rows_skipped >= 3);
+    // The gap this closes: samples were empty on the fast path before.
+    assert!(!stats.skipped_samples.is_empty());
+    assert!(stats.skipped_samples.len() <= crate::parser::SKIP_SAMPLE_CAP);
+    // Each sample is (raw_row, reason) with a non-empty reason.
+    assert!(stats.skipped_samples.iter().all(|(_, r)| !r.is_empty()));
 }
 
 #[test]
@@ -1252,7 +1638,7 @@ fn sysmon_parse_missing_timestamp_defaults_to_zero() {
     assert_eq!(triples[0].1.timestamp, 0);
 }
 
-// ── Sysmon Event 5: Process Terminated ──
+// â”€â”€ Sysmon Event 5: Process Terminated â”€â”€
 
 #[test]
 fn sysmon_parse_event5_process_terminated() {
@@ -1277,7 +1663,7 @@ fn sysmon_parse_event5_process_terminated() {
     assert_eq!(dst.entity_type, EntityType::Host);
 }
 
-// ── Sysmon Event 7: Image Load ──
+// â”€â”€ Sysmon Event 7: Image Load â”€â”€
 
 #[test]
 fn sysmon_parse_event7_image_load() {
@@ -1306,7 +1692,7 @@ fn sysmon_parse_event7_image_load() {
     assert_eq!(dst.metadata.get("hashes").unwrap(), "SHA256=ABCDEF");
 }
 
-// ── Sysmon Event 10: Process Access ──
+// â”€â”€ Sysmon Event 10: Process Access â”€â”€
 
 #[test]
 fn sysmon_parse_event10_process_access() {
@@ -1336,7 +1722,7 @@ fn sysmon_parse_event10_process_access() {
     assert_eq!(dst.entity_type, EntityType::Process);
 }
 
-// ── Sysmon Event 12: Registry Create/Delete ──
+// â”€â”€ Sysmon Event 12: Registry Create/Delete â”€â”€
 
 #[test]
 fn sysmon_parse_event12_registry_create() {
@@ -1364,7 +1750,7 @@ fn sysmon_parse_event12_registry_create() {
     assert_eq!(dst.entity_type, EntityType::Registry);
 }
 
-// ── Sysmon Event 13: Registry Value Set ──
+// â”€â”€ Sysmon Event 13: Registry Value Set â”€â”€
 
 #[test]
 fn sysmon_parse_event13_registry_value_set() {
@@ -1392,7 +1778,7 @@ fn sysmon_parse_event13_registry_value_set() {
     assert_eq!(dst.entity_type, EntityType::Registry);
 }
 
-// ── Sysmon Event 23: File Delete ──
+// â”€â”€ Sysmon Event 23: File Delete â”€â”€
 
 #[test]
 fn sysmon_parse_event23_file_delete() {
@@ -1419,7 +1805,7 @@ fn sysmon_parse_event23_file_delete() {
     assert_eq!(dst.metadata.get("is_executable").unwrap(), "false");
 }
 
-// ── Sysmon Event 1: Spawn verification ──
+// â”€â”€ Sysmon Event 1: Spawn verification â”€â”€
 
 #[test]
 fn sysmon_event1_parent_child_uses_spawn() {
@@ -1445,7 +1831,7 @@ fn sysmon_event1_parent_child_uses_spawn() {
     assert_eq!(triples[1].2.id, "C:\\malware.exe");
 }
 
-// ── Sysmon Event 3: Process Connect triple ──
+// â”€â”€ Sysmon Event 3: Process Connect triple â”€â”€
 
 #[test]
 fn sysmon_event3_process_connect_triple() {
@@ -1475,7 +1861,7 @@ fn sysmon_event3_process_connect_triple() {
     assert_eq!(triples[1].2.id, "10.0.0.1");
 }
 
-// ── Ingestion Pipeline ──
+// â”€â”€ Ingestion Pipeline â”€â”€
 
 #[test]
 fn ingest_logs_populates_graph() {
@@ -1563,7 +1949,7 @@ fn ingest_logs_metadata_merge() {
     assert_eq!(dest.metadata.get("dest_port").unwrap(), "80");
 }
 
-// ── Full Pipeline: Ingest → Hunt ──
+// â”€â”€ Full Pipeline: Ingest â†’ Hunt â”€â”€
 
 #[test]
 fn full_pipeline_ingest_then_hunt() {
@@ -1741,7 +2127,7 @@ fn full_pipeline_time_windowed_hunt() {
     assert!(results_narrow.is_empty());
 }
 
-// ══ New Sysmon EventIDs ══
+// â•â• New Sysmon EventIDs â•â•
 
 #[test]
 fn sysmon_parse_event2_file_time_changed() {
@@ -1881,7 +2267,7 @@ fn sysmon_parse_event18_pipe_connected() {
     assert_eq!(dst.entity_type, EntityType::File);
 }
 
-// ══ Windows Security Events ══
+// â•â• Windows Security Events â•â•
 
 #[test]
 fn sysmon_parse_security_4624_logon() {
@@ -1907,7 +2293,7 @@ fn sysmon_parse_security_4624_logon() {
     assert_eq!(dst.entity_type, EntityType::Host);
     assert_eq!(rel.metadata.get("logon_type").unwrap(), "10");
     assert_eq!(rel.metadata.get("ip_address").unwrap(), "192.168.1.100");
-    assert!(rel.metadata.get("success").is_none()); // 4624 = success, no explicit flag
+    assert!(!rel.metadata.contains_key("success")); // 4624 = success, no explicit flag
 }
 
 #[test]
@@ -2071,7 +2457,7 @@ fn sysmon_parse_security_5145_network_share() {
     assert_eq!(dst.metadata.get("ip_address").unwrap(), "192.168.1.100");
 }
 
-// ══ PowerShell Events ══
+// â•â• PowerShell Events â•â•
 
 #[test]
 fn sysmon_parse_powershell_4104_script_block() {
@@ -2099,7 +2485,7 @@ fn sysmon_parse_powershell_4104_script_block() {
     assert_eq!(dst.metadata.get("script_block_id").unwrap(), "abc-123");
 }
 
-// ══ Winlogbeat Normalization ══
+// â•â• Winlogbeat Normalization â•â•
 
 #[test]
 fn sysmon_parse_winlogbeat_nested_event_data() {
@@ -2158,12 +2544,11 @@ fn sysmon_parse_iso8601_timestamp() {
     assert_eq!(rel.timestamp, 1557824400);
 }
 
-// ── Demo Data Integration Test ──
+// â”€â”€ Demo Data Integration Test â”€â”€
 
 #[test]
 fn demo_data_all_presets_produce_results() {
-    let demo_json = std::fs::read_to_string("../../demo_data/apt_attack_simulation.json")
-        .expect("Demo data file should exist at demo_data/apt_attack_simulation.json");
+    let demo_json = demo_fixture_or_skip!("apt_attack_simulation.json");
 
     let mut g = GraphHunter::new();
     let (entities, relations) = g.ingest_logs(&demo_json, &SysmonJsonParser, None).unwrap();
@@ -2174,8 +2559,8 @@ fn demo_data_all_presets_produce_results() {
         "Should ingest many relations, got {relations}"
     );
 
-    // ── Preset 1: Lateral Movement ──
-    // User → Execute → Process → Spawn → Process → Write → File
+    // â”€â”€ Preset 1: Lateral Movement â”€â”€
+    // User â†’ Execute â†’ Process â†’ Spawn â†’ Process â†’ Write â†’ File
     let lateral = Hypothesis::new("Lateral Movement")
         .add_step(HypothesisStep::new(
             EntityType::User,
@@ -2196,20 +2581,20 @@ fn demo_data_all_presets_produce_results() {
     let lateral_results = g.search_temporal_pattern(&lateral, None, None).unwrap().0;
     assert!(
         !lateral_results.is_empty(),
-        "Lateral Movement should find paths (PsExec → dropper → file)"
+        "Lateral Movement should find paths (PsExec â†’ dropper â†’ file)"
     );
 
-    // Verify one path goes through the PsExec → dropper chain
+    // Verify one path goes through the PsExec â†’ dropper chain
     let has_psexec_path = lateral_results.iter().any(|path| {
         path.iter().any(|n| n.contains("PsExec")) && path.iter().any(|n| n.contains("dropper"))
     });
     assert!(
         has_psexec_path,
-        "Should find PsExec→dropper lateral movement path"
+        "Should find PsExecâ†’dropper lateral movement path"
     );
 
-    // ── Preset 2: DNS Exfiltration ──
-    // User → Execute → Process → DNS → Domain
+    // â”€â”€ Preset 2: DNS Exfiltration â”€â”€
+    // User â†’ Execute â†’ Process â†’ DNS â†’ Domain
     let dns_exfil = Hypothesis::new("DNS Exfiltration")
         .add_step(HypothesisStep::new(
             EntityType::User,
@@ -2244,8 +2629,8 @@ fn demo_data_all_presets_produce_results() {
         "Should also find benign DNS paths (shows noise)"
     );
 
-    // ── Preset 3: Malware Drop ──
-    // User → Execute → Process → Write → File
+    // â”€â”€ Preset 3: Malware Drop â”€â”€
+    // User â†’ Execute â†’ Process â†’ Write â†’ File
     let malware_drop = Hypothesis::new("Malware Drop")
         .add_step(HypothesisStep::new(
             EntityType::User,
@@ -2285,9 +2670,9 @@ fn demo_data_all_presets_produce_results() {
     println!("Malware Drop: {} paths", drop_results.len());
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 4: Index & Analytics Tests ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 4: Index & Analytics Tests â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn type_index_populated_on_add_entity() {
@@ -2395,7 +2780,7 @@ fn search_entities_empty_query() {
 
 #[test]
 fn get_neighborhood_basic() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let hood = g.get_neighborhood("web-server", 1, 100, None).unwrap();
     assert_eq!(hood.center, "web-server");
@@ -2407,7 +2792,7 @@ fn get_neighborhood_basic() {
 
 #[test]
 fn get_neighborhood_cap() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     // Cap at 2 nodes: center + 1 neighbor
     let hood = g.get_neighborhood("web-server", 2, 2, None).unwrap();
@@ -2417,14 +2802,14 @@ fn get_neighborhood_cap() {
 
 #[test]
 fn get_neighborhood_nonexistent_node() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     assert!(g.get_neighborhood("ghost", 1, 100, None).is_none());
 }
 
 #[test]
 #[ignore = "pre-existing failure: reverse-edge path in analytics doesn't apply entity_types filter"]
 fn get_neighborhood_with_filter() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let filter = analytics::NeighborhoodFilter {
         entity_types: Some(vec![EntityType::User]),
@@ -2475,7 +2860,7 @@ fn compute_scores_high_degree_high_score() {
 
 #[test]
 fn get_node_details_complete() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let details = g.get_node_details("web-server").unwrap();
     assert_eq!(details.id, "web-server");
@@ -2488,19 +2873,19 @@ fn get_node_details_complete() {
 
 #[test]
 fn get_node_details_nonexistent() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
     assert!(g.get_node_details("ghost").is_none());
 }
 
 /// Regression for the FortiGate IPS+traffic ingest pattern: when a
 /// second dataset's edges arrive AFTER the first finalize, those edges
 /// land in the per-vertex tail buffer (not the sorted base list).
-/// `get_node_details` must surface them — both in `out_degree` and in
+/// `get_node_details` must surface them â€” both in `out_degree` and in
 /// the `neighbor_types` / `neighbors` lists. Before the fix `out_degree`
 /// read `streaming.neighbors_arc(sid)` (BASE only) and reported the
 /// pre-finalize count, dropping every post-finalize edge.
 ///
-/// Symptom seen in production: 172.25.15.1 showed out_degree=1602
+/// Symptom seen in production: 10.0.1.31 showed out_degree=1602
 /// (the IPS dataset's contribution) instead of 101,602 (IPS + two
 /// traffic datasets).
 #[test]
@@ -2509,12 +2894,33 @@ fn get_node_details_includes_post_finalize_tail_edges() {
 
     // Pre-finalize "dataset 1" (mimics IPS): 3 edges src -> 3 distinct hosts.
     g.add_entity(Entity::new("src-ip", EntityType::IP)).unwrap();
-    g.add_entity(Entity::new("host-a", EntityType::Host)).unwrap();
-    g.add_entity(Entity::new("host-b", EntityType::Host)).unwrap();
-    g.add_entity(Entity::new("host-c", EntityType::Host)).unwrap();
-    g.add_relation(Relation::new("src-ip", "host-a", RelationType::Connect, 100)).unwrap();
-    g.add_relation(Relation::new("src-ip", "host-b", RelationType::Connect, 110)).unwrap();
-    g.add_relation(Relation::new("src-ip", "host-c", RelationType::Connect, 120)).unwrap();
+    g.add_entity(Entity::new("host-a", EntityType::Host))
+        .unwrap();
+    g.add_entity(Entity::new("host-b", EntityType::Host))
+        .unwrap();
+    g.add_entity(Entity::new("host-c", EntityType::Host))
+        .unwrap();
+    g.add_relation(Relation::new(
+        "src-ip",
+        "host-a",
+        RelationType::Connect,
+        100,
+    ))
+    .unwrap();
+    g.add_relation(Relation::new(
+        "src-ip",
+        "host-b",
+        RelationType::Connect,
+        110,
+    ))
+    .unwrap();
+    g.add_relation(Relation::new(
+        "src-ip",
+        "host-c",
+        RelationType::Connect,
+        120,
+    ))
+    .unwrap();
 
     // Finalize: sorts base, arms the tail buffer for any subsequent appends.
     g.sort_edges_by_timestamp().unwrap();
@@ -2527,16 +2933,24 @@ fn get_node_details_includes_post_finalize_tail_edges() {
     // Post-finalize "dataset 2" (mimics traffic batch): 5 more edges
     // src-ip -> host-a (already a neighbor) + 1 new entity. These all
     // land in the tail buffer because streaming is finalized.
-    g.add_entity(Entity::new("host-d", EntityType::Host)).unwrap();
+    g.add_entity(Entity::new("host-d", EntityType::Host))
+        .unwrap();
     for ts in 200..205 {
-        g.add_relation(Relation::new("src-ip", "host-a", RelationType::Connect, ts)).unwrap();
+        g.add_relation(Relation::new("src-ip", "host-a", RelationType::Connect, ts))
+            .unwrap();
     }
-    g.add_relation(Relation::new("src-ip", "host-d", RelationType::Connect, 210)).unwrap();
+    g.add_relation(Relation::new(
+        "src-ip",
+        "host-d",
+        RelationType::Connect,
+        210,
+    ))
+    .unwrap();
 
     let details = g.get_node_details("src-ip").unwrap();
 
     // Out-degree must reflect base (3) + tail (6) = 9 edges. Before the
-    // fix this was 3 (BASE only — tail-blind via neighbors_arc).
+    // fix this was 3 (BASE only â€” tail-blind via neighbors_arc).
     assert_eq!(
         details.out_degree, 9,
         "out_degree must include post-finalize tail edges (got {}, expected 9)",
@@ -2565,7 +2979,7 @@ fn get_node_details_includes_post_finalize_tail_edges() {
 
     // host-a sees the post-finalize edges as INCOMING. in_degree path
     // goes through reverse_adj (already tail-aware), so this should
-    // already have been correct — assert it explicitly so future
+    // already have been correct â€” assert it explicitly so future
     // refactors don't regress.
     let host_a = g.get_node_details("host-a").unwrap();
     assert_eq!(
@@ -2584,8 +2998,62 @@ fn get_node_details_includes_post_finalize_tail_edges() {
 }
 
 #[test]
+fn finalize_makes_post_finalize_appends_visible_to_neighborhood_readers() {
+    // Regression for the /expand-shows-0-edges bug on graph_build graphs:
+    // get_node_details is tail-aware (reads base+tail), but the
+    // neighborhood/edge readers that /expand and /events_for_node use
+    // (get_neighborhood, get_compact_relations) go through base-only
+    // `neighbors_arc` and silently drop post-finalize tail edges. When a
+    // build appends into an already-finalized session, every such reader
+    // reports 0 edges even though the graph is fully connected.
+    //
+    // `sort_edges_by_timestamp()` merges the tail back into the sorted
+    // base â€” this test pins that as the fix graph_build relies on.
+    let mut g = GraphHunter::new();
+    g.add_entity(Entity::new("src-ip", EntityType::IP)).unwrap();
+    g.add_entity(Entity::new("host-a", EntityType::Host))
+        .unwrap();
+    g.add_relation(Relation::new(
+        "src-ip",
+        "host-a",
+        RelationType::Connect,
+        100,
+    ))
+    .unwrap();
+
+    // Finalize (mimics a restored/prior-built session), then append.
+    g.sort_edges_by_timestamp().unwrap();
+    assert!(g.streaming_is_finalized());
+    g.add_entity(Entity::new("host-b", EntityType::Host))
+        .unwrap();
+    for ts in 200..205 {
+        g.add_relation(Relation::new("src-ip", "host-b", RelationType::Connect, ts))
+            .unwrap();
+    }
+
+    // node_details is already tail-aware (base+tail = 6). `expand` must
+    // agree â€” before the fix, get_neighborhood read base-only and returned
+    // just host-a (the 5 tail edges to host-b were invisible), so /expand
+    // rendered the node as if it had one neighbor.
+    assert_eq!(g.get_node_details("src-ip").unwrap().out_degree, 6);
+
+    let hood = g.get_neighborhood("src-ip", 1, 50, None).unwrap();
+    let neighbor_ids: std::collections::HashSet<&str> =
+        hood.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert!(
+        neighbor_ids.contains("host-a") && neighbor_ids.contains("host-b"),
+        "get_neighborhood must include the post-finalize tail neighbor host-b; got {neighbor_ids:?}"
+    );
+    assert!(
+        hood.edges.len() >= 6,
+        "get_neighborhood must surface base+tail edges (>=6), got {}",
+        hood.edges.len()
+    );
+}
+
+#[test]
 fn get_graph_summary_complete() {
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let summary = g.get_graph_summary();
     assert_eq!(summary.entity_count, 5);
@@ -2597,7 +3065,7 @@ fn get_graph_summary_complete() {
 #[test]
 fn search_temporal_pattern_still_works_with_indices() {
     // Regression: make sure the optimized search_temporal_pattern still produces correct results
-    let mut g = build_lateral_movement_graph();
+    let g = build_lateral_movement_graph();
 
     let hypothesis = Hypothesis::new("Full Chain")
         .add_step(HypothesisStep::new(
@@ -2638,9 +3106,9 @@ fn search_temporal_pattern_still_works_with_indices() {
     );
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 5: Sentinel Parser Tests ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 5: Sentinel Parser Tests â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn sentinel_raw_path_parity_with_legacy() {
@@ -2692,7 +3160,7 @@ fn sentinel_raw_path_parity_with_legacy() {
     }
 }
 
-// ── Per-Table Tests ──
+// â”€â”€ Per-Table Tests â”€â”€
 
 #[test]
 fn sentinel_security_event_4624_auth_success() {
@@ -2969,7 +3437,7 @@ fn sentinel_common_security_log() {
     assert_eq!(dst.metadata.get("dest_port").unwrap(), "53");
 }
 
-// ── Detection Tests ──
+// â”€â”€ Detection Tests â”€â”€
 
 #[test]
 fn sentinel_detect_by_type_field() {
@@ -2991,7 +3459,7 @@ fn sentinel_detect_by_type_field() {
 
 #[test]
 fn sentinel_detect_by_heuristic() {
-    // No Type field — fallback to heuristic (EventID + Computer = SecurityEvent)
+    // No Type field â€” fallback to heuristic (EventID + Computer = SecurityEvent)
     let json = r#"[{
         "TimeGenerated": "2024-01-15T10:00:00Z",
         "EventID": 4624,
@@ -3018,7 +3486,7 @@ fn sentinel_unknown_type_skipped() {
     assert!(triples.is_empty());
 }
 
-// ── Format Tests ──
+// â”€â”€ Format Tests â”€â”€
 
 #[test]
 fn sentinel_ndjson_format() {
@@ -3067,7 +3535,7 @@ fn sentinel_mixed_tables_in_one_file() {
     assert_eq!(triples[2].1.rel_type, RelationType::Connect);
 }
 
-// ── Edge Cases ──
+// â”€â”€ Edge Cases â”€â”€
 
 #[test]
 fn sentinel_missing_required_fields_skipped() {
@@ -3076,7 +3544,7 @@ fn sentinel_missing_required_fields_skipped() {
         "TimeGenerated": "2024-01-15T10:00:00Z",
         "UserPrincipalName": "user@contoso.com"
     }]"#;
-    // Missing IPAddress → should produce 0 triples
+    // Missing IPAddress â†’ should produce 0 triples
     let parser = SentinelJsonParser;
     let triples = parser.parse(json);
     assert!(triples.is_empty());
@@ -3122,7 +3590,7 @@ fn sentinel_iso8601_variants() {
     assert_eq!(ts_offset, 1705329000);
 }
 
-// ── Integration Tests ──
+// â”€â”€ Integration Tests â”€â”€
 
 #[test]
 fn sentinel_ingest_populates_graph() {
@@ -3194,12 +3662,11 @@ fn sentinel_full_pipeline_ingest_then_hunt() {
     assert_eq!(&*path[2], "C:\\Temp\\payload.dll");
 }
 
-// ── Demo Data Test ──
+// â”€â”€ Demo Data Test â”€â”€
 
 #[test]
 fn sentinel_demo_data_ingestion_and_hunt() {
-    let demo_json = std::fs::read_to_string("../../demo_data/sentinel_attack_simulation.json")
-        .expect("Demo data file should exist at demo_data/sentinel_attack_simulation.json");
+    let demo_json = demo_fixture_or_skip!("sentinel_attack_simulation.json");
 
     let mut g = GraphHunter::new();
     let (entities, relations) = g
@@ -3265,9 +3732,9 @@ fn sentinel_demo_data_ingestion_and_hunt() {
     println!("C2 connections: {} paths", c2_results.len());
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 6: GenericParser Tests ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 6: GenericParser Tests â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn generic_user_process_execute_triple() {
@@ -3445,7 +3912,7 @@ fn generic_garbage_input_returns_empty() {
 fn generic_try_parse_surfaces_zero_triple_events_as_err() {
     use crate::parser::{LogParser, ParseError};
     let parser = GenericParser;
-    // JSON object that GenericParser doesn't recognize — parse() drops
+    // JSON object that GenericParser doesn't recognize â€” parse() drops
     // it silently; try_parse must emit a MalformedRow.
     let input = r#"{"unrecognized_key": "value"}"#;
     let results = parser.try_parse(input);
@@ -3462,7 +3929,7 @@ fn generic_try_parse_surfaces_zero_triple_events_as_err() {
 fn sentinel_try_parse_surfaces_decode_failure() {
     use crate::parser::{LogParser, ParseError};
     let parser = SentinelJsonParser;
-    // NDJSON line that's not valid JSON at all — must surface as Encoding
+    // NDJSON line that's not valid JSON at all â€” must surface as Encoding
     // err, not silently dropped.
     let input = "this is not json at all\n";
     let results = parser.try_parse(input);
@@ -3492,9 +3959,9 @@ fn sentinel_try_parse_surfaces_zero_triple_event_as_err() {
     );
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 6b: CsvParser Tests ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 6b: CsvParser Tests â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn csv_basic_produces_correct_triples() {
@@ -3547,8 +4014,7 @@ fn csv_empty_and_malformed_lines_skipped() {
 
 #[test]
 fn csv_demo_data_loads_successfully() {
-    let csv_data = std::fs::read_to_string("../../demo_data/generic_csv_logs.csv")
-        .expect("CSV demo data file should exist at demo_data/generic_csv_logs.csv");
+    let csv_data = demo_fixture_or_skip!("generic_csv_logs.csv");
 
     let parser = CsvParser;
     let triples = parser.parse(&csv_data);
@@ -3571,17 +4037,17 @@ fn csv_demo_data_loads_successfully() {
     );
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 6c: Auto-Detect & Integration Tests ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 6c: Auto-Detect & Integration Tests â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn autodetect_sysmon_json() {
-    // Content with EventID + UtcTime → should be parseable by SysmonJsonParser
+    // Content with EventID + UtcTime â†’ should be parseable by SysmonJsonParser
     let json = r#"[{"EventID": 22, "UtcTime": "2024-01-15 14:45:00", "Image": "cmd.exe", "QueryName": "test.com"}]"#;
     let trimmed = json.trim();
 
-    // Heuristic: starts with [ or {, contains EventID and UtcTime → Sysmon
+    // Heuristic: starts with [ or {, contains EventID and UtcTime â†’ Sysmon
     assert!(trimmed.starts_with('[') || trimmed.starts_with('{'));
     assert!(json.contains("EventID") && json.contains("UtcTime"));
 
@@ -3598,7 +4064,7 @@ fn autodetect_csv_content() {
     let csv = "src_ip,dst_ip,dst_port\n10.0.0.1,8.8.8.8,53";
     let trimmed = csv.trim();
 
-    // Heuristic: doesn't start with [ or { → CSV
+    // Heuristic: doesn't start with [ or { â†’ CSV
     assert!(!trimmed.starts_with('[') && !trimmed.starts_with('{'));
 
     let parser = CsvParser;
@@ -3611,7 +4077,7 @@ fn autodetect_csv_content() {
 
 #[test]
 fn autodetect_generic_json_fallback() {
-    // JSON without Sysmon/Sentinel markers → GenericParser
+    // JSON without Sysmon/Sentinel markers â†’ GenericParser
     let json = r#"[{"src_ip": "10.0.0.1", "dst_ip": "8.8.8.8", "protocol": "UDP"}]"#;
 
     assert!(json.contains("src_ip"));
@@ -3699,9 +4165,9 @@ fn new_relation_type_display() {
     assert_eq!(format!("{}", RelationType::Delete), "Delete");
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 8: ScoredPath & Pagination Tests ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 8: ScoredPath & Pagination Tests â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn score_and_paginate_basic_scoring() {
@@ -3877,7 +4343,7 @@ fn score_and_paginate_sorted_by_max_score_desc() {
     assert_eq!(scored[1].max_score, 50.0);
 }
 
-// ── Phase 9: Field Preview & Configurable Parser Tests ──
+// â”€â”€ Phase 9: Field Preview & Configurable Parser Tests â”€â”€
 
 #[test]
 fn field_preview_discovers_all_fields() {
@@ -3938,18 +4404,20 @@ fn field_preview_limited_parsing() {
 
 #[test]
 fn configurable_parser_promotes_field_to_node() {
+    // "Detection" carries a text label (pure-numeric values like EventID
+    // are no longer promotable â€” they mint one junk node per row).
     let data = r#"[{
         "User": "admin",
         "Image": "cmd.exe",
-        "EventID": "1",
+        "Detection": "CredentialDumping",
         "UtcTime": "2024-01-15 10:00:00.000"
     }]"#;
 
     let config = FieldConfig {
         mappings: vec![FieldMapping {
-            raw_name: "EventID".to_string(),
+            raw_name: "Detection".to_string(),
             role: FieldRole::Node,
-            entity_type: Some("Process".to_string()),
+            entity_type: Some("Signature".to_string()),
             timestamp_format: None,
             locale: None,
         }],
@@ -3958,12 +4426,18 @@ fn configurable_parser_promotes_field_to_node() {
     let parser = ConfigurableParser::new(config);
     let triples = parser.parse(data);
 
-    // Should have standard GenericParser triples PLUS the promoted EventID triple
+    // Should have standard GenericParser triples PLUS the promoted triple
     assert!(!triples.is_empty());
 
-    // Find the promoted EventID entity
-    let has_event_id = triples.iter().any(|(_, _, dst)| dst.id == "EventID:1");
-    assert!(has_event_id, "Should have promoted EventID:1 as a node");
+    // Other-typed promotions keep the column prefix (cross-field value
+    // collision guard); canonical types use the bare value.
+    let has_detection = triples
+        .iter()
+        .any(|(_, _, dst)| dst.id == "Detection:CredentialDumping");
+    assert!(
+        has_detection,
+        "Should have promoted Detection:CredentialDumping as a node"
+    );
 }
 
 #[test]
@@ -4014,22 +4488,25 @@ fn configurable_parser_backwards_compatible() {
 
 #[test]
 fn configurable_parser_integration_ingest_and_hunt() {
+    // Numeric fields (EventID, ports) are no longer promotable â€” text
+    // labels and canonical-typed values are. "SharedIP" proves the
+    // bare-ID merge rule for canonical types.
     let data = r#"[
-        {"User": "attacker", "Image": "mimikatz.exe", "EventID": "1", "TargetPort": "445"},
-        {"User": "attacker", "hostname": "dc01", "EventID": "4624"}
+        {"User": "attacker", "Image": "mimikatz.exe", "Detection": "T1003", "SharedIP": "10.9.9.9"},
+        {"User": "attacker", "hostname": "dc01", "Detection": "T1078"}
     ]"#;
 
     let config = FieldConfig {
         mappings: vec![
             FieldMapping {
-                raw_name: "EventID".to_string(),
+                raw_name: "Detection".to_string(),
                 role: FieldRole::Node,
-                entity_type: Some("Process".to_string()),
+                entity_type: Some("Signature".to_string()),
                 timestamp_format: None,
                 locale: None,
             },
             FieldMapping {
-                raw_name: "TargetPort".to_string(),
+                raw_name: "SharedIP".to_string(),
                 role: FieldRole::Node,
                 entity_type: Some("IP".to_string()),
                 timestamp_format: None,
@@ -4045,20 +4522,22 @@ fn configurable_parser_integration_ingest_and_hunt() {
     assert!(entities > 0, "Should have ingested entities");
     assert!(relations > 0, "Should have ingested relations");
 
-    // Verify promoted fields exist as entities
+    // Other-typed promotion keeps the column prefixâ€¦
     assert!(
-        graph.get_entity("EventID:1").is_some(),
-        "EventID:1 should exist as entity"
+        graph.get_entity("Detection:T1003").is_some(),
+        "Detection:T1003 should exist as entity"
     );
+    // â€¦canonical-typed promotion uses the bare value so it merges with
+    // canonical-path entities.
     assert!(
-        graph.get_entity("TargetPort:445").is_some(),
-        "TargetPort:445 should exist as entity"
+        graph.get_entity("10.9.9.9").is_some(),
+        "promoted IP should exist under its bare id"
     );
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 10: Empirical Benchmark ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 10: Empirical Benchmark â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /// Collects empirical benchmark data for the LaTeX paper:
 /// n, m, type distribution, dmax, beff, search times for L=3,4,5.
@@ -4116,8 +4595,8 @@ fn benchmark_empirical_data_for_paper() {
         let num_rel_types = rel_types_seen.len();
 
         // Predicted beff = dmax * (1/|RT|) * (1/|ET|) * p_temporal * p_cycle
-        // p_temporal ≈ 0.5 (half the edges have ts >= last_ts on average)
-        // p_cycle ≈ (1 - 5/n) for L=5
+        // p_temporal â‰ˆ 0.5 (half the edges have ts >= last_ts on average)
+        // p_cycle â‰ˆ (1 - 5/n) for L=5
         let p_rel = if num_rel_types > 0 {
             1.0 / num_rel_types as f64
         } else {
@@ -4143,9 +4622,8 @@ fn benchmark_empirical_data_for_paper() {
         // CompactRelation references.
         let mut all_edges: Vec<relation::CompactRelation> = Vec::new();
         g.streaming.for_each_edge(|_src, edge| {
-            let compact: relation::CompactRelation = unsafe {
-                std::ptr::read(edge as *const _ as *const relation::CompactRelation)
-            };
+            let compact: relation::CompactRelation =
+                unsafe { std::ptr::read(edge as *const _ as *const relation::CompactRelation) };
             all_edges.push(compact);
         });
         let mut by_source: std::collections::HashMap<usize, Vec<&relation::CompactRelation>> =
@@ -4153,7 +4631,7 @@ fn benchmark_empirical_data_for_paper() {
         for e in &all_edges {
             by_source.entry(e.source_sid.index()).or_default().push(e);
         }
-        for (_sid, edges) in &mut by_source {
+        for edges in by_source.values_mut() {
             edges.sort_by_key(|e| e.timestamp);
             for i in 0..edges.len() {
                 let e = edges[i];
@@ -4323,17 +4801,15 @@ fn benchmark_empirical_data_for_paper() {
     }
 
     // Dataset 1: apt_attack_simulation.json (small, ~11KB)
-    let apt_data = std::fs::read_to_string("../../demo_data/apt_attack_simulation.json")
-        .expect("apt_attack_simulation.json should exist");
+    let apt_data = demo_fixture_or_skip!("apt_attack_simulation.json");
     let r1 = measure_dataset("APT Simulation", &apt_data, &SysmonJsonParser);
 
     // Dataset 2: sentinel_attack_simulation.json (small, ~9KB)
-    let sentinel_data = std::fs::read_to_string("../../demo_data/sentinel_attack_simulation.json")
-        .expect("sentinel_attack_simulation.json should exist");
+    let sentinel_data = demo_fixture_or_skip!("sentinel_attack_simulation.json");
     let r2 = measure_dataset("Sentinel Simulation", &sentinel_data, &SentinelJsonParser);
 
     // Dataset 3: mordor_combined_attacks.json (medium, ~132MB)
-    // This is the large dataset — may take several seconds
+    // This is the large dataset â€” may take several seconds
     let mordor_path = "../../demo_data/mordor_combined_attacks.json";
     let r3_opt = if std::path::Path::new(mordor_path).exists() {
         let mordor_data = std::fs::read_to_string(mordor_path)
@@ -4349,63 +4825,66 @@ fn benchmark_empirical_data_for_paper() {
 
     // Print results in tabular format
     println!(
-        "\n╔══════════════════════════════════════════════════════════════════════════════════╗"
+        "\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
     );
-    println!("║                     EMPIRICAL BENCHMARK RESULTS                                ║");
     println!(
-        "╚══════════════════════════════════════════════════════════════════════════════════╝\n"
+        "â•‘                     EMPIRICAL BENCHMARK RESULTS                                â•‘"
+    );
+    println!(
+        "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n"
     );
 
-    for r in [Some(&r1), Some(&r2), r3_opt.as_ref()] {
-        if let Some(r) = r {
-            println!("── {} ──", r.name);
-            println!("  n = {} entities, m = {} relations", r.n, r.m);
-            println!("  d_max = {}", r.dmax);
-            println!(
-                "  Entity types (|T_V| = {}): {:?}",
-                r.num_ent_types, r.type_dist
-            );
-            println!("  Relation types: |T_E| = {}", r.num_rel_types);
-            println!("  p_temporal (empirical): {:.4}", r.p_temporal_empirical);
-            println!("  b_eff predicted (uniform): {:.4}", r.beff_predicted);
-            println!();
-            println!(
-                "  L=2: {} results from {} starts in {:.3} ms",
-                r.results_l2, r.starts, r.time_l2_ms
-            );
-            println!(
-                "  L=3: {} results from {} starts in {:.3} ms",
-                r.results_l3, r.starts, r.time_l3_ms
-            );
-            println!(
-                "  L=4: {} results from {} starts in {:.3} ms",
-                r.results_l4, r.starts, r.time_l4_ms
-            );
-            println!(
-                "  L=5: {} results from {} starts in {:.3} ms",
-                r.results_l5, r.starts, r.time_l5_ms
-            );
+    for r in [Some(&r1), Some(&r2), r3_opt.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        println!("â”€â”€ {} â”€â”€", r.name);
+        println!("  n = {} entities, m = {} relations", r.n, r.m);
+        println!("  d_max = {}", r.dmax);
+        println!(
+            "  Entity types (|T_V| = {}): {:?}",
+            r.num_ent_types, r.type_dist
+        );
+        println!("  Relation types: |T_E| = {}", r.num_rel_types);
+        println!("  p_temporal (empirical): {:.4}", r.p_temporal_empirical);
+        println!("  b_eff predicted (uniform): {:.4}", r.beff_predicted);
+        println!();
+        println!(
+            "  L=2: {} results from {} starts in {:.3} ms",
+            r.results_l2, r.starts, r.time_l2_ms
+        );
+        println!(
+            "  L=3: {} results from {} starts in {:.3} ms",
+            r.results_l3, r.starts, r.time_l3_ms
+        );
+        println!(
+            "  L=4: {} results from {} starts in {:.3} ms",
+            r.results_l4, r.starts, r.time_l4_ms
+        );
+        println!(
+            "  L=5: {} results from {} starts in {:.3} ms",
+            r.results_l5, r.starts, r.time_l5_ms
+        );
 
-            // Empirical beff: beff = (results/starts)^(1/L) for non-zero
-            for (l, res) in [
-                (2, r.results_l2),
-                (3, r.results_l3),
-                (4, r.results_l4),
-                (5, r.results_l5),
-            ] {
-                if r.starts > 0 && res > 0 {
-                    let beff = (res as f64 / r.starts as f64).powf(1.0 / l as f64);
-                    println!("  b_eff measured (L={}): {:.4}", l, beff);
-                }
+        // Empirical beff: beff = (results/starts)^(1/L) for non-zero
+        for (l, res) in [
+            (2, r.results_l2),
+            (3, r.results_l3),
+            (4, r.results_l4),
+            (5, r.results_l5),
+        ] {
+            if r.starts > 0 && res > 0 {
+                let beff = (res as f64 / r.starts as f64).powf(1.0 / l as f64);
+                println!("  b_eff measured (L={}): {:.4}", l, beff);
             }
-            println!();
         }
+        println!();
     }
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 11: DSL Parser Tests ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 11: DSL Parser Tests â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn dsl_parse_simple_chain() {
@@ -4503,9 +4982,9 @@ fn dsl_whitespace_tolerant() {
     assert_eq!(result.hypothesis.steps.len(), 1);
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 12: Wildcard DFS Search Tests ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 12: Wildcard DFS Search Tests â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn wildcard_entity_search() {
@@ -4516,7 +4995,7 @@ fn wildcard_entity_search() {
     }]"#;
     g.ingest_logs(data, &SysmonJsonParser, None).unwrap();
 
-    // Wildcard origin: * -[Spawn]-> Process should match (parent→child)
+    // Wildcard origin: * -[Spawn]-> Process should match (parentâ†’child)
     let h = Hypothesis::new("wildcard test").add_step(HypothesisStep::new(
         EntityType::Any,
         RelationType::Spawn,
@@ -4545,9 +5024,9 @@ fn wildcard_relation_search() {
     assert!(!results.is_empty(), "Wildcard relation should match");
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 13: ATT&CK Catalog Tests ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 13: ATT&CK Catalog Tests â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn catalog_has_entries() {
@@ -4585,16 +5064,15 @@ fn catalog_entry_fields_non_empty() {
     }
 }
 
-// ══════════════════════════════════════════════════
-// ── Phase 14: Naive DFS Benchmark (speedup comparison) ──
-// ══════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â”€â”€ Phase 14: Naive DFS Benchmark (speedup comparison) â”€â”€
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn benchmark_naive_vs_pruned() {
     use std::time::Instant;
 
-    let apt_data = std::fs::read_to_string("../../demo_data/apt_attack_simulation.json")
-        .expect("apt_attack_simulation.json should exist");
+    let apt_data = demo_fixture_or_skip!("apt_attack_simulation.json");
     let mut g = GraphHunter::new();
     g.ingest_logs(&apt_data, &SysmonJsonParser, None).unwrap();
     g.compute_scores();
@@ -4622,9 +5100,13 @@ fn benchmark_naive_vs_pruned() {
             EntityType::Process,
         ));
 
-    println!("\n╔══════════════════════════════════════════════════════════════════╗");
-    println!("║             NAIVE vs PRUNED DFS COMPARISON                      ║");
-    println!("╚══════════════════════════════════════════════════════════════════╝");
+    println!(
+        "\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—"
+    );
+    println!("â•‘             NAIVE vs PRUNED DFS COMPARISON                      â•‘");
+    println!(
+        "â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+    );
     println!("  Graph: n={}, m={}\n", n, m);
 
     for (label, h) in [("L=2", &h2), ("L=3", &h3)] {
@@ -4706,7 +5188,7 @@ fn benchmark_naive_vs_pruned() {
     }
 }
 
-// ══ Phase: k-Simplicity ══
+// â•â• Phase: k-Simplicity â•â•
 
 #[test]
 fn k_simplicity_default_1_same_as_simple_path() {
@@ -4749,7 +5231,7 @@ fn k_simplicity_default_1_same_as_simple_path() {
 
 #[test]
 fn k_simplicity_2_finds_cycle() {
-    // Process A writes File B, File B executes Process A — a cycle
+    // Process A writes File B, File B executes Process A â€” a cycle
     // With k=1: blocked. With k=2: found.
     let mut graph = GraphHunter::new();
     graph
@@ -4865,7 +5347,7 @@ fn k_simplicity_temporal_monotonicity_still_enforced() {
     graph
         .add_relation(Relation::new("p", "f", RelationType::Write, 200))
         .unwrap();
-    // Timestamp goes backwards — should block the cycle even with k=2
+    // Timestamp goes backwards â€” should block the cycle even with k=2
     graph
         .add_relation(Relation::new("f", "p", RelationType::Execute, 100))
         .unwrap();
@@ -4933,7 +5415,7 @@ fn dsl_k_simplicity_rejects_zero() {
     assert!(result.is_err());
 }
 
-// ══ Phase: Secondary Relation Index ══
+// â•â• Phase: Secondary Relation Index â•â•
 
 #[test]
 fn rel_index_populated_on_add_relation() {
@@ -5059,7 +5541,7 @@ fn rel_index_wildcard_falls_back_to_full_scan() {
     assert_eq!(results.len(), 1);
 }
 
-// ══ Phase: Cyclic Catalog ══
+// â•â• Phase: Cyclic Catalog â•â•
 
 #[test]
 fn catalog_cyclic_entries_have_k_gt_1() {
@@ -5186,9 +5668,9 @@ fn k_simplicity_serde_explicit() {
     assert_eq!(h.k_simplicity, 3);
 }
 
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Phase 2: Merge Policy Tests
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn merge_policy_default_is_first_write() {
@@ -5204,7 +5686,7 @@ fn merge_policy_first_write_wins_preserves() {
     graph
         .ingest_logs_with_policy(json1, &GenericParser, None, &MergePolicy::FirstWriteWins)
         .unwrap();
-    // Second ingest: same entity, different value — should be ignored
+    // Second ingest: same entity, different value â€” should be ignored
     let json2 = r#"[{"user":"alice","hostname":"srv2","timestamp":"2024-01-01T01:00:00Z"}]"#;
     graph
         .ingest_logs_with_policy(json2, &GenericParser, None, &MergePolicy::FirstWriteWins)
@@ -5255,9 +5737,9 @@ fn merge_policy_append_concatenates() {
     assert!(cmdline.contains(", "), "Values should be comma-separated");
 }
 
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Phase 3: Betweenness Centrality Tests
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn betweenness_linear_chain() {
@@ -5362,7 +5844,7 @@ fn betweenness_bridge_node() {
     let c = graph.get_entity("C").unwrap();
     let d = graph.get_entity("D").unwrap();
     let a = graph.get_entity("A").unwrap();
-    // C and D are bridge nodes — should have high betweenness
+    // C and D are bridge nodes â€” should have high betweenness
     assert!(c.betweenness > a.betweenness, "Bridge C should beat leaf A");
     assert!(d.betweenness > a.betweenness, "Bridge D should beat leaf A");
 }
@@ -5393,13 +5875,13 @@ fn betweenness_sampled_approx() {
     assert!(mid.betweenness >= 0.0);
 }
 
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Phase 4: Temporal PageRank Tests
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn pagerank_star_topology() {
-    // All nodes point to center → center gets highest pagerank
+    // All nodes point to center â†’ center gets highest pagerank
     let mut graph = GraphHunter::new();
     graph
         .add_entity(Entity::new("center", EntityType::Host))
@@ -5436,11 +5918,11 @@ fn pagerank_decay_prefers_recent() {
     graph
         .add_entity(Entity::new("C", EntityType::Host))
         .unwrap();
-    // Old edge: A → B at t=100
+    // Old edge: A â†’ B at t=100
     graph
         .add_relation(Relation::new("A", "B", RelationType::Connect, 100))
         .unwrap();
-    // Recent edge: A → C at t=10000
+    // Recent edge: A â†’ C at t=10000
     graph
         .add_relation(Relation::new("A", "C", RelationType::Connect, 10000))
         .unwrap();
@@ -5460,7 +5942,7 @@ fn pagerank_decay_prefers_recent() {
 
 #[test]
 fn pagerank_no_decay_equals_standard() {
-    // With lambda=0, all edges are equal weight — standard PageRank
+    // With lambda=0, all edges are equal weight â€” standard PageRank
     let mut graph = GraphHunter::new();
     graph
         .add_entity(Entity::new("A", EntityType::Host))
@@ -5480,7 +5962,7 @@ fn pagerank_no_decay_equals_standard() {
 
     let a = graph.get_entity("A").unwrap();
     let b = graph.get_entity("B").unwrap();
-    // Symmetric graph → roughly equal scores
+    // Symmetric graph â†’ roughly equal scores
     assert!(
         (a.pagerank_score - b.pagerank_score).abs() < 5.0,
         "Symmetric graph should have near-equal PR: A={}, B={}",
@@ -5535,7 +6017,7 @@ fn pagerank_dangling_nodes() {
     graph
         .add_relation(Relation::new("A", "C", RelationType::Connect, 200))
         .unwrap();
-    // B and C are dangling (no outgoing edges) — should not crash
+    // B and C are dangling (no outgoing edges) â€” should not crash
 
     graph.compute_temporal_pagerank(Some(0.0), Some(0.85), Some(50), Some(1e-8), None);
 
@@ -5545,9 +6027,9 @@ fn pagerank_dangling_nodes() {
     assert!(c.pagerank_score > 0.0);
 }
 
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Phase 5: Composite Scoring Tests
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn composite_degree_only() {
@@ -5574,7 +6056,7 @@ fn composite_degree_only() {
     let a = graph.get_entity("A").unwrap();
     assert_eq!(
         a.score, 100.0,
-        "A has max degree → composite=100 with degree_only"
+        "A has max degree â†’ composite=100 with degree_only"
     );
 }
 
@@ -5640,9 +6122,9 @@ fn composite_normalization() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Phase 6: DFS Parallelization Tests
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn parallel_search_matches_sequential() {
@@ -5748,9 +6230,9 @@ fn parallel_search_deterministic() {
     assert_eq!(r1, r2, "Parallel search should be deterministic");
 }
 
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Phase 7: CEF / LEEF / ECS Tests
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn cef_basic_parse() {
@@ -5817,9 +6299,9 @@ fn generic_mixed_cef_json() {
     assert_eq!(events.len(), 2, "Should parse both CEF and JSON lines");
 }
 
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Phase 8: Snapshot Isolation (Clone) Tests
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn graph_clone_independent() {
@@ -5870,7 +6352,7 @@ fn search_on_clone_matches_original() {
         .add_relation(Relation::new("user1", "host1", RelationType::Auth, 100))
         .unwrap();
 
-    let mut clone = graph.clone();
+    let clone = graph.clone();
 
     let h = Hypothesis::new("Test").add_step(HypothesisStep::new(
         EntityType::User,
@@ -5886,9 +6368,9 @@ fn search_on_clone_matches_original() {
     );
 }
 
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Phase 9: Temporal Compaction Tests
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn compact_all_old() {
@@ -5935,7 +6417,7 @@ fn compact_mixed() {
         .unwrap();
 
     let stats = graph.compact_before(1000).unwrap();
-    // Group has a mix of old and new → NOT compacted (not all < cutoff)
+    // Group has a mix of old and new â†’ NOT compacted (not all < cutoff)
     assert_eq!(stats.groups_compacted, 0);
     assert_eq!(stats.edges_after, 3);
 }
@@ -6035,9 +6517,9 @@ fn compact_index_consistency() {
     assert!(graph.reverse_adj.get(&sid_c).unwrap().contains(&sid_a));
 }
 
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Phase 10: Full Scoring Pipeline Integration
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn scoring_pipeline_full_integration() {
@@ -6103,9 +6585,9 @@ fn scoring_pipeline_full_integration() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // Phase 10: Benchmark & Empirical Evaluation
-// ═══════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #[test]
 fn benchmark_er_graph_generation() {
@@ -6138,7 +6620,7 @@ fn benchmark_ba_graph_generation() {
 #[test]
 fn benchmark_instrumented_search_correctness() {
     // Instrumented search must return same results as normal search
-    let mut g = generate_erdos_renyi(50, 0.1, 1_000_000, 2_000_000, 123);
+    let g = generate_erdos_renyi(50, 0.1, 1_000_000, 2_000_000, 123);
     let h = build_lateral_movement_hypothesis(3);
 
     let normal_results = g.search_temporal_pattern(&h, None, None).unwrap().0;
@@ -6227,11 +6709,11 @@ fn benchmark_scale_test_er() {
     // Verify search completes in reasonable time at scale
     for &n in &[100, 500, 1000] {
         let p = 10.0 / n as f64; // Keep average degree ~10
-        let mut g = generate_erdos_renyi(n, p, 1_000_000, 2_000_000, 42);
+        let g = generate_erdos_renyi(n, p, 1_000_000, 2_000_000, 42);
         let h = build_lateral_movement_hypothesis(3);
 
         let start = std::time::Instant::now();
-        let results = g.search_temporal_pattern(&h, None, None).unwrap().0;
+        let _results = g.search_temporal_pattern(&h, None, None).unwrap().0;
         let elapsed = start.elapsed();
 
         // Should complete in < 1 second for all sizes
@@ -6248,11 +6730,11 @@ fn benchmark_scale_test_er() {
 fn benchmark_scale_test_ba() {
     // BA graphs with power-law degree distribution
     for &n in &[100, 500, 1000] {
-        let mut g = generate_barabasi_albert(n, 3, 1_000_000, 2_000_000, 42);
+        let g = generate_barabasi_albert(n, 3, 1_000_000, 2_000_000, 42);
         let h = build_spawn_chain_hypothesis(3);
 
         let start = std::time::Instant::now();
-        let results = g.search_temporal_pattern(&h, None, None).unwrap().0;
+        let _results = g.search_temporal_pattern(&h, None, None).unwrap().0;
         let elapsed = start.elapsed();
 
         assert!(
@@ -6280,12 +6762,24 @@ fn benchmark_ablation_time_window() {
     );
 }
 
+/// Generates the empirical table for the paper over synthetic ER and BA
+/// graphs. Ignored by default because it takes over an hour in a debug
+/// build and the rest of this crate's ~790 tests finish in 1,4 seconds:
+/// left enabled it makes `cargo test` unusable as a gate, which in
+/// practice means nobody runs the gate. Run it deliberately with
+/// `cargo test -- --ignored benchmark_full_report` when regenerating the
+/// table.
 #[test]
+#[ignore = "paper benchmark: >1h in debug, run explicitly with --ignored"]
 fn benchmark_full_report() {
     // Generate the complete benchmark table for the paper
-    println!("\n══════════════════════════════════════════════════════════════");
-    println!("  EMPIRICAL EVALUATION — Full Benchmark Report");
-    println!("══════════════════════════════════════════════════════════════\n");
+    println!(
+        "\nâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+    );
+    println!("  EMPIRICAL EVALUATION â€” Full Benchmark Report");
+    println!(
+        "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n"
+    );
 
     let configs: Vec<(&str, GraphHunter)> = vec![
         (
@@ -6370,7 +6864,7 @@ fn benchmark_full_report() {
     }
 
     // LaTeX output
-    println!("\n══════ LaTeX Table Rows ══════\n");
+    println!("\nâ•â•â•â•â•â• LaTeX Table Rows â•â•â•â•â•â•\n");
     for (label, g) in &configs {
         for l in [3, 4] {
             let h = build_lateral_movement_hypothesis(l);
@@ -6383,15 +6877,19 @@ fn benchmark_full_report() {
 #[test]
 fn benchmark_real_datasets() {
     // Benchmark on actual demo datasets for the paper
-    println!("\n══════════════════════════════════════════════════════════════");
+    println!(
+        "\nâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•"
+    );
     println!("  REAL DATASET BENCHMARKS");
-    println!("══════════════════════════════════════════════════════════════\n");
+    println!(
+        "â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n"
+    );
 
     // APT Simulation
     if let Ok(data) = std::fs::read_to_string("../../demo_data/apt_attack_simulation.json") {
         let mut g = GraphHunter::new();
         g.ingest_logs(&data, &SysmonJsonParser, None).unwrap();
-        let (n, m, d_max, d_avg, n_et, n_rt) = graph_params(&g);
+        let (n, m, d_max, d_avg, _n_et, _n_rt) = graph_params(&g);
         println!(
             "APT Simulation: n={}, m={}, d_max={}, d_avg={:.1}",
             n, m, d_max, d_avg
@@ -6417,7 +6915,7 @@ fn benchmark_real_datasets() {
     if let Ok(data) = std::fs::read_to_string("../../demo_data/sentinel_attack_simulation.json") {
         let mut g = GraphHunter::new();
         g.ingest_logs(&data, &SentinelJsonParser, None).unwrap();
-        let (n, m, d_max, d_avg, n_et, n_rt) = graph_params(&g);
+        let (n, m, d_max, d_avg, _n_et, _n_rt) = graph_params(&g);
         println!(
             "\nSentinel Simulation: n={}, m={}, d_max={}, d_avg={:.1}",
             n, m, d_max, d_avg
@@ -6443,7 +6941,7 @@ fn benchmark_real_datasets() {
     if let Ok(data) = std::fs::read_to_string("../../demo_data/mordor_combined_attacks.json") {
         let mut g = GraphHunter::new();
         g.ingest_logs(&data, &GenericParser, None).unwrap();
-        let (n, m, d_max, d_avg, n_et, n_rt) = graph_params(&g);
+        let (n, m, d_max, d_avg, _n_et, _n_rt) = graph_params(&g);
         println!(
             "\nMordor Combined: n={}, m={}, d_max={}, d_avg={:.1}",
             n, m, d_max, d_avg
@@ -6470,7 +6968,7 @@ fn benchmark_real_datasets() {
     }
 }
 
-// ══ Phase: Anomaly Scoring ══
+// â•â• Phase: Anomaly Scoring â•â•
 
 /// Helper: build a small graph with 3 nodes and 2 edges, return (graph, scorer).
 fn build_3node_graph() -> GraphHunter {
@@ -6496,14 +6994,14 @@ fn anomaly_trivial_3node_graph() {
     let path = vec!["A".to_string(), "B".to_string(), "C".to_string()];
     let (score, breakdown) = scorer.score_path(&path, &g);
 
-    // With only 3 nodes, each seen once → ER should be 1.0 (ln(1)/ln(1) = 0/0 → freq=1, max=1, ln(1)=0)
+    // With only 3 nodes, each seen once â†’ ER should be 1.0 (ln(1)/ln(1) = 0/0 â†’ freq=1, max=1, ln(1)=0)
     // Actually with the observe calls: each entity appears once (from the relation observer),
-    // but B appears twice (once as dest of A→B, once as src of B→C)
+    // but B appears twice (once as dest of Aâ†’B, once as src of Bâ†’C)
     // So freq(A)=1, freq(B)=2, freq(C)=1, max_freq=2
     // ER(A) = 1 - ln(1)/ln(2) = 1 - 0 = 1.0
     // ER(B) = 1 - ln(2)/ln(2) = 1 - 1 = 0.0
     // ER(C) = 1 - ln(1)/ln(2) = 1 - 0 = 1.0
-    // ER_avg = (1.0 + 0.0 + 1.0) / 3 ≈ 0.667
+    // ER_avg = (1.0 + 0.0 + 1.0) / 3 â‰ˆ 0.667
     assert!(
         (breakdown.entity_rarity - 0.667).abs() < 0.01,
         "ER = {}",
@@ -6511,17 +7009,17 @@ fn anomaly_trivial_3node_graph() {
     );
 
     // Edge Rarity: each edge pair seen once, max_pair=1, ln(1)=0
-    // EdgeR(e) = 1 - ln(1)/ln(1) → log_max_pair_freq = ln(1) = 0, so edge_r = 0.0
+    // EdgeR(e) = 1 - ln(1)/ln(1) â†’ log_max_pair_freq = ln(1) = 0, so edge_r = 0.0
     assert!(
         (breakdown.edge_rarity - 0.0).abs() < 0.01,
         "EdgeR = {}",
         breakdown.edge_rarity
     );
 
-    // NC: A has 1 neighbor type (Host), B has 2 types (IP, Process) → NC(B) < 1
+    // NC: A has 1 neighbor type (Host), B has 2 types (IP, Process) â†’ NC(B) < 1
     // NC(A) = 1.0 (single type), NC(C) = 1.0 (single type)
-    // NC(B): H = -0.5*log2(0.5) - 0.5*log2(0.5) = 1.0, H_max = log2(2) = 1.0 → NC = 1-1 = 0.0
-    // NC_avg = (1.0 + 0.0 + 1.0) / 3 ≈ 0.667
+    // NC(B): H = -0.5*log2(0.5) - 0.5*log2(0.5) = 1.0, H_max = log2(2) = 1.0 â†’ NC = 1-1 = 0.0
+    // NC_avg = (1.0 + 0.0 + 1.0) / 3 â‰ˆ 0.667
     assert!(
         (breakdown.neighborhood_concentration - 0.667).abs() < 0.01,
         "NC = {}",
@@ -6529,7 +7027,7 @@ fn anomaly_trivial_3node_graph() {
     );
 
     // TN: first_seen A=1000, B=1000, C=2000, tau_min=1000, tau_max=2000
-    // TN(A) = 0, TN(B) = 0, TN(C) = 1.0 → avg = 0.333
+    // TN(A) = 0, TN(B) = 0, TN(C) = 1.0 â†’ avg = 0.333
     assert!(
         (breakdown.temporal_novelty - 0.333).abs() < 0.01,
         "TN = {}",
@@ -6542,11 +7040,11 @@ fn anomaly_trivial_3node_graph() {
 
 #[test]
 fn anomaly_symmetric_graph() {
-    // All nodes have same frequency → ER ≈ 0
+    // All nodes have same frequency â†’ ER â‰ˆ 0
     let mut g = GraphHunter::new();
     g.enable_anomaly_scoring(ScoringWeights::default());
     for i in 0..5 {
-        g.add_entity(Entity::new(&format!("N{}", i), EntityType::Host))
+        g.add_entity(Entity::new(format!("N{}", i), EntityType::Host))
             .unwrap();
     }
     // Create a complete graph so all have same frequency
@@ -6554,8 +7052,8 @@ fn anomaly_symmetric_graph() {
         for j in 0..5 {
             if i != j {
                 g.add_relation(Relation::new(
-                    &format!("N{}", i),
-                    &format!("N{}", j),
+                    format!("N{}", i),
+                    format!("N{}", j),
                     RelationType::Connect,
                     1000,
                 ))
@@ -6569,7 +7067,7 @@ fn anomaly_symmetric_graph() {
     let path = vec!["N0".to_string(), "N1".to_string(), "N2".to_string()];
     let (_, breakdown) = scorer.score_path(&path, &g);
 
-    // All entities have same frequency → ER = 1 - ln(max)/ln(max) = 0
+    // All entities have same frequency â†’ ER = 1 - ln(max)/ln(max) = 0
     assert!(
         breakdown.entity_rarity.abs() < 0.01,
         "ER should be ~0 for symmetric graph, got {}",
@@ -6579,7 +7077,7 @@ fn anomaly_symmetric_graph() {
 
 #[test]
 fn anomaly_single_neighbor_nc() {
-    // Node with a single neighbor type → NC = 1.0
+    // Node with a single neighbor type â†’ NC = 1.0
     let mut g = GraphHunter::new();
     g.enable_anomaly_scoring(ScoringWeights::default());
     g.add_entity(Entity::new("center", EntityType::IP)).unwrap();
@@ -6592,9 +7090,9 @@ fn anomaly_single_neighbor_nc() {
     g.finalize_anomaly_scorer();
 
     let scorer = g.anomaly_scorer.as_ref().unwrap();
-    // center's neighbors are all Host → NC = 1.0
+    // center's neighbors are all Host â†’ NC = 1.0
     let nc = scorer
-        .score_path(&vec!["center".to_string()], &g)
+        .score_path(&["center".to_string()], &g)
         .1
         .neighborhood_concentration;
     assert!(
@@ -6606,7 +7104,7 @@ fn anomaly_single_neighbor_nc() {
 
 #[test]
 fn anomaly_uniform_nc() {
-    // Node with equal distribution across many types → NC ≈ 0
+    // Node with equal distribution across many types â†’ NC â‰ˆ 0
     let mut g = GraphHunter::new();
     g.enable_anomaly_scoring(ScoringWeights::default());
     g.add_entity(Entity::new("center", EntityType::IP)).unwrap();
@@ -6632,7 +7130,7 @@ fn anomaly_uniform_nc() {
 
     let scorer = g.anomaly_scorer.as_ref().unwrap();
     let nc = scorer
-        .score_path(&vec!["center".to_string()], &g)
+        .score_path(&["center".to_string()], &g)
         .1
         .neighborhood_concentration;
     assert!(
@@ -6644,18 +7142,18 @@ fn anomaly_uniform_nc() {
 
 #[test]
 fn anomaly_unique_edge() {
-    // A unique edge (pair_freq=1) when max_pair>1 → EdgeR = 1.0
+    // A unique edge (pair_freq=1) when max_pair>1 â†’ EdgeR = 1.0
     let mut g = GraphHunter::new();
     g.enable_anomaly_scoring(ScoringWeights::default());
     g.add_entity(Entity::new("A", EntityType::IP)).unwrap();
     g.add_entity(Entity::new("B", EntityType::Host)).unwrap();
     g.add_entity(Entity::new("C", EntityType::Process)).unwrap();
-    // A→B appears 5 times (simulate repeated connections)
+    // Aâ†’B appears 5 times (simulate repeated connections)
     for i in 0..5 {
         g.add_relation(Relation::new("A", "B", RelationType::Connect, 1000 + i))
             .unwrap();
     }
-    // B→C appears once (unique)
+    // Bâ†’C appears once (unique)
     g.add_relation(Relation::new("B", "C", RelationType::Execute, 2000))
         .unwrap();
     g.finalize_anomaly_scorer();
@@ -6673,7 +7171,7 @@ fn anomaly_unique_edge() {
 
 #[test]
 fn anomaly_temporal_novelty_ordering() {
-    // Last-seen entity should have TN ≈ 1.0
+    // Last-seen entity should have TN â‰ˆ 1.0
     let mut g = GraphHunter::new();
     g.enable_anomaly_scoring(ScoringWeights::default());
     g.add_entity(Entity::new("old", EntityType::IP)).unwrap();
@@ -6688,7 +7186,7 @@ fn anomaly_temporal_novelty_ordering() {
 
     let scorer = g.anomaly_scorer.as_ref().unwrap();
     // Score path with only the "new" entity
-    let (_, breakdown) = scorer.score_path(&vec!["new".to_string()], &g);
+    let (_, breakdown) = scorer.score_path(&["new".to_string()], &g);
     // TN(new) = (5000-1000)/(5000-1000) = 1.0
     assert!(
         (breakdown.temporal_novelty - 1.0).abs() < 0.01,
@@ -6697,7 +7195,7 @@ fn anomaly_temporal_novelty_ordering() {
     );
 
     // Score path with only the "old" entity
-    let (_, breakdown_old) = scorer.score_path(&vec!["old".to_string()], &g);
+    let (_, breakdown_old) = scorer.score_path(&["old".to_string()], &g);
     // TN(old) = (1000-1000)/(5000-1000) = 0.0
     assert!(
         (breakdown_old.temporal_novelty - 0.0).abs() < 0.01,
@@ -6753,7 +7251,7 @@ fn anomaly_score_range_0_to_1() {
     for path in &paths {
         let (score, bd) = scorer.score_path(path, &g);
         assert!(
-            score >= 0.0 && score <= 1.0,
+            (0.0..=1.0).contains(&score),
             "Score {} out of [0,1] for path {:?}",
             score,
             path
@@ -6773,9 +7271,9 @@ fn anomaly_apt_simulation_scoring() {
 
     // Routine entities
     for i in 0..10 {
-        g.add_entity(Entity::new(&format!("user{}", i), EntityType::User))
+        g.add_entity(Entity::new(format!("user{}", i), EntityType::User))
             .unwrap();
-        g.add_entity(Entity::new(&format!("host{}", i), EntityType::Host))
+        g.add_entity(Entity::new(format!("host{}", i), EntityType::Host))
             .unwrap();
     }
     g.add_entity(Entity::new("dc01", EntityType::Host)).unwrap();
@@ -6788,8 +7286,8 @@ fn anomaly_apt_simulation_scoring() {
     for i in 0..10 {
         for _ in 0..20 {
             g.add_relation(Relation::new(
-                &format!("user{}", i),
-                &format!("host{}", i),
+                format!("user{}", i),
+                format!("host{}", i),
                 RelationType::Auth,
                 1000 + i as i64,
             ))
@@ -6842,7 +7340,7 @@ fn anomaly_apt_simulation_scoring() {
 #[test]
 fn anomaly_incremental_ingestion() {
     // Ingest twice, verify scorer updates
-    // Ingest twice, verify scorer updates: rare path C→D should score higher than common A→B
+    // Ingest twice, verify scorer updates: rare path Câ†’D should score higher than common Aâ†’B
     let mut g = GraphHunter::new();
     g.enable_anomaly_scoring(ScoringWeights::default());
 
@@ -6851,21 +7349,21 @@ fn anomaly_incremental_ingestion() {
     g.add_entity(Entity::new("C", EntityType::Process)).unwrap();
     g.add_entity(Entity::new("D", EntityType::File)).unwrap();
 
-    // Make A→B very common
+    // Make Aâ†’B very common
     for _ in 0..20 {
         g.add_relation(Relation::new("A", "B", RelationType::Connect, 1000))
             .unwrap();
     }
-    // C→D is rare (single occurrence, late timestamp)
+    // Câ†’D is rare (single occurrence, late timestamp)
     g.add_relation(Relation::new("C", "D", RelationType::Execute, 5000))
         .unwrap();
     g.finalize_anomaly_scorer();
 
     let scorer = g.anomaly_scorer.as_ref().unwrap();
-    let (common_score, _) = scorer.score_path(&vec!["A".to_string(), "B".to_string()], &g);
-    let (rare_score, _) = scorer.score_path(&vec!["C".to_string(), "D".to_string()], &g);
+    let (common_score, _) = scorer.score_path(&["A".to_string(), "B".to_string()], &g);
+    let (rare_score, _) = scorer.score_path(&["C".to_string(), "D".to_string()], &g);
 
-    // Rare path C→D should have higher anomaly score than common A→B
+    // Rare path Câ†’D should have higher anomaly score than common Aâ†’B
     assert!(
         rare_score > common_score,
         "Rare path ({}) should score higher than common ({})",
@@ -6874,11 +7372,11 @@ fn anomaly_incremental_ingestion() {
     );
 }
 
-// ── F6 — Scoring explicable sin GNN ──────────────────────────────
+// â”€â”€ F6 â€” Scoring explicable sin GNN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // These tests pin the "defendible claim" that GraphHunter produces a
 // stable, fully explainable composite score without any ML/GNN
 // dependency. Paired with docs/spec/scoring-v1.md, this is the
-// evidence the paper's §scoring section cites.
+// evidence the paper's Â§scoring section cites.
 
 /// DoD Fase 6: the shipping default profile must not activate the GNN
 /// component. If someone flips this weight > 0 without a deliberate
@@ -6892,7 +7390,7 @@ fn scoring_v1_default_profile_has_zero_gnn_weight() {
         "default profile must not activate GNN scoring (found w5_gnn_threat={})",
         w.w5_gnn_threat
     );
-    // The other four must be strictly positive — a zero there would
+    // The other four must be strictly positive â€” a zero there would
     // silently disable a documented dimension.
     assert!(w.w1_entity_rarity > 0.0);
     assert!(w.w2_edge_rarity > 0.0);
@@ -6901,7 +7399,7 @@ fn scoring_v1_default_profile_has_zero_gnn_weight() {
 }
 
 /// With `w_gnn=0` (default) and GNN scores injected, the composite
-/// must NOT reflect those scores — the weight renormalization drops
+/// must NOT reflect those scores â€” the weight renormalization drops
 /// the component entirely. This protects the "explainable-without-ML"
 /// guarantee when GraphOS-APT caches are sideloaded.
 #[test]
@@ -6924,7 +7422,7 @@ fn scoring_v1_default_profile_ignores_injected_gnn_scores() {
         (after_bd.gnn_threat - 1.0).abs() < 1e-10,
         "breakdown must surface the raw GNN component even when weighted to 0"
     );
-    // Composite must NOT shift — w5=0 renormalizes the contribution out.
+    // Composite must NOT shift â€” w5=0 renormalizes the contribution out.
     assert!(
         (after_score - base_score).abs() < 1e-10,
         "default composite must ignore injected GNN scores; base={} after={}",
@@ -6942,9 +7440,9 @@ fn scoring_v1_default_profile_ignores_injected_gnn_scores() {
 }
 
 /// Bit-for-bit reproducibility. A deterministic scorer is a prereq
-/// for the paper's snapshot-based evidence (scores cited in §results
+/// for the paper's snapshot-based evidence (scores cited in Â§results
 /// must be reproducible from the fixture alone). Re-building the same
-/// graph twice and scoring the same path MUST yield identical f64s —
+/// graph twice and scoring the same path MUST yield identical f64s â€”
 /// not "within epsilon".
 #[test]
 fn scoring_v1_is_bit_for_bit_reproducible() {
@@ -6982,7 +7480,7 @@ fn scoring_v1_is_bit_for_bit_reproducible() {
 /// miss.
 #[test]
 fn scoring_v1_rarer_entity_raises_entity_rarity() {
-    // Baseline: all entities seen once → ER ≈ max.
+    // Baseline: all entities seen once â†’ ER â‰ˆ max.
     let mut g_base = GraphHunter::new();
     g_base.enable_anomaly_scoring(ScoringWeights::default());
     g_base
@@ -6999,9 +7497,9 @@ fn scoring_v1_rarer_entity_raises_entity_rarity() {
         .anomaly_scorer
         .as_ref()
         .unwrap()
-        .score_path(&vec!["rare".to_string()], &g_base);
+        .score_path(&["rare".to_string()], &g_base);
 
-    // Variant: `common` observed many extra times → `rare` is rarer
+    // Variant: `common` observed many extra times â†’ `rare` is rarer
     // relative to max_freq, so ER(rare) must strictly increase.
     let mut g_var = GraphHunter::new();
     g_var.enable_anomaly_scoring(ScoringWeights::default());
@@ -7027,7 +7525,7 @@ fn scoring_v1_rarer_entity_raises_entity_rarity() {
         .anomaly_scorer
         .as_ref()
         .unwrap()
-        .score_path(&vec!["rare".to_string()], &g_var);
+        .score_path(&["rare".to_string()], &g_var);
 
     assert!(
         bd_var.entity_rarity > bd_base.entity_rarity,
@@ -7037,7 +7535,7 @@ fn scoring_v1_rarer_entity_raises_entity_rarity() {
     );
 }
 
-// ── C2 — AMAC parity tests ───────────────────────────────────────────────
+// â”€â”€ C2 â€” AMAC parity tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // The AMAC scheduler must produce the same SET of paths as the regular
 // DFS for the same hypothesis on the same graph. Emission order is not
@@ -7047,7 +7545,7 @@ fn scoring_v1_rarer_entity_raises_entity_rarity() {
 fn amac_parity_graph_three_hop() -> GraphHunter {
     let mut g = GraphHunter::new();
     // Build a deliberately branchy graph so AMAC's K=8 contexts get
-    // exercised: 4 starts × 3 mid-hops × 2 dest-hops = 24 candidate paths
+    // exercised: 4 starts Ã— 3 mid-hops Ã— 2 dest-hops = 24 candidate paths
     // before predicate filtering.
     for i in 0..4 {
         g.add_entity(Entity::new(format!("u{i}"), EntityType::User))
@@ -7115,12 +7613,15 @@ fn amac_parity_two_hop() {
         ));
 
     let (regular, _) = g.search_temporal_pattern(&h, None, Some(10_000)).unwrap();
-    let (amac, _) = g.search_temporal_pattern_amac(&h, None, Some(10_000)).unwrap();
+    let (amac, _) = g
+        .search_temporal_pattern_amac(&h, None, Some(10_000))
+        .unwrap();
 
     let regular_set = paths_as_set(&regular);
     let amac_set = paths_as_set(&amac);
     assert_eq!(
-        regular_set, amac_set,
+        regular_set,
+        amac_set,
         "AMAC/DFS divergence on 2-hop\n  only_dfs:  {:?}\n  only_amac: {:?}",
         regular_set.difference(&amac_set).collect::<Vec<_>>(),
         amac_set.difference(&regular_set).collect::<Vec<_>>(),
@@ -7137,7 +7638,9 @@ fn amac_parity_one_hop_with_wildcard() {
     ));
 
     let (regular, _) = g.search_temporal_pattern(&h, None, Some(10_000)).unwrap();
-    let (amac, _) = g.search_temporal_pattern_amac(&h, None, Some(10_000)).unwrap();
+    let (amac, _) = g
+        .search_temporal_pattern_amac(&h, None, Some(10_000))
+        .unwrap();
 
     assert_eq!(paths_as_set(&regular), paths_as_set(&amac));
 }
@@ -7178,7 +7681,9 @@ fn amac_parity_palindromic_chain() {
         ));
 
     let (regular, _) = g.search_temporal_pattern(&h, None, Some(10_000)).unwrap();
-    let (amac, _) = g.search_temporal_pattern_amac(&h, None, Some(10_000)).unwrap();
+    let (amac, _) = g
+        .search_temporal_pattern_amac(&h, None, Some(10_000))
+        .unwrap();
 
     assert_eq!(paths_as_set(&regular), paths_as_set(&amac));
 }
@@ -7202,7 +7707,7 @@ fn amac_parity_with_time_window() {
     assert_eq!(paths_as_set(&regular), paths_as_set(&amac));
 }
 
-// ── D2-lite — semi-join parity tests ───────────────────────────────
+// â”€â”€ D2-lite â€” semi-join parity tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[test]
 fn semijoin_parity_two_hop() {

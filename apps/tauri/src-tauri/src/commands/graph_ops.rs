@@ -1,18 +1,15 @@
 use std::sync::Arc;
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::dto::entity::{NodeScopedRequest, SessionOnly};
 use graph_hunter_api::dto::graph_ops::{
     ComputeScoresRequest, EventsForNodeRequest, EventsPaginatedRequest, ExpandNodeRequest,
     PreviewFieldsRequest, SearchEntitiesRequest, SubgraphRequest,
 };
 use graph_hunter_api::dto::hunt::{
-    DiffHuntsRequest, GetHuntPageRequest, RunHuntBatchRequest, RunHuntBatchResponse,
-    RunHuntRequest,
+    DiffHuntsRequest, GetHuntPageRequest, RunHuntBatchRequest, RunHuntBatchResponse, RunHuntRequest,
 };
-use graph_hunter_api::GraphHunterApi;
-use graph_hunter_core::{
-    DedupMode, FieldConfig, FieldInfo, Hypothesis, Neighborhood,
-};
+use graph_hunter_core::{DedupMode, FieldConfig, FieldInfo, Hypothesis, Neighborhood};
 use tauri::State;
 
 use crate::error::CommandError;
@@ -67,6 +64,7 @@ pub fn cmd_run_hunt(
         truncated: resp.truncated,
         diagnostic: resp.diagnostic,
         live_tail_coverage: resp.live_tail_coverage,
+        coverage: resp.coverage,
     })
 }
 
@@ -327,11 +325,15 @@ pub fn cmd_load_data_with_config(
     path: String,
     config: FieldConfig,
 ) -> Result<LoadResult, CommandError> {
-    api.load_data_with_config(graph_hunter_api::dto::ingestion::LoadDataWithConfigRequest {
-        session: None,
-        path,
-        config,
-    })
+    api.load_data_with_config(
+        graph_hunter_api::dto::ingestion::LoadDataWithConfigRequest {
+            session: None,
+            path,
+            config,
+        },
+        // User-chosen path from the desktop file dialog.
+        &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+    )
     .map_err(CommandError::from)
 }
 

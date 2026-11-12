@@ -1,10 +1,10 @@
 //! Graph query endpoints: search, expand, subgraph, events, schema lookups.
 
 use axum::{
+    Json,
     extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -20,9 +20,9 @@ use super::helpers::{
 };
 
 pub(super) async fn handler_entity_types(State(api): State<Arc<GraphHunterApi>>) -> Response {
-    api_response(api.get_entity_types_in_graph(
-        graph_hunter_api::dto::entity::SessionOnly::default(),
-    ))
+    api_response(
+        api.get_entity_types_in_graph(graph_hunter_api::dto::entity::SessionOnly::default()),
+    )
 }
 
 pub(super) async fn handler_relation_schema(State(api): State<Arc<GraphHunterApi>>) -> Response {
@@ -34,9 +34,9 @@ pub(super) async fn handler_relation_schema(State(api): State<Arc<GraphHunterApi
     // Claude distinguish cached from uncached calls without having to
     // run the request twice.
     let start = std::time::Instant::now();
-    match api.get_relation_schema_with_cache_info(
-        graph_hunter_api::dto::entity::SessionOnly::default(),
-    ) {
+    match api
+        .get_relation_schema_with_cache_info(graph_hunter_api::dto::entity::SessionOnly::default())
+    {
         Ok((entries, cache_hit)) => {
             let compute_ms = start.elapsed().as_millis() as u64;
             ok_json(serde_json::json!({
@@ -48,8 +48,8 @@ pub(super) async fn handler_relation_schema(State(api): State<Arc<GraphHunterApi
             }))
         }
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -81,16 +81,16 @@ pub(super) async fn handler_search(
     }) {
         Ok(v) => {
             let node_ids: Vec<String> = v.iter().map(|r| r.id.clone()).collect();
-            if !node_ids.is_empty() {
-                if let Ok(sg) = build_subgraph_for_ids(api.as_ref(), &node_ids) {
-                    mcp_emit_view(state.as_ref(), sg);
-                }
+            if !node_ids.is_empty()
+                && let Ok(sg) = build_subgraph_for_ids(api.as_ref(), &node_ids)
+            {
+                mcp_emit_view(state.as_ref(), sg);
             }
             ok_json(v)
         }
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -143,7 +143,11 @@ pub(super) async fn handler_expand(
             api.expand_node_live(req),
         )
         .await
-        .unwrap_or_else(|_| Err(graph_hunter_api::ApiError::Internal("expand (live) timed out".into())));
+        .unwrap_or_else(|_| {
+            Err(graph_hunter_api::ApiError::Internal(
+                "expand (live) timed out".into(),
+            ))
+        });
         return match result {
             Ok(hood) => {
                 let sg = neighborhood_to_subgraph(&hood);
@@ -180,8 +184,8 @@ pub(super) async fn handler_expand(
             ok_json(hood)
         }
         Ok(Ok(Err(e))) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
@@ -239,10 +243,10 @@ pub(super) async fn handler_node_details(
     match result {
         Ok(Ok(Ok(v))) => ok_json(v),
         Ok(Ok(Err(e))) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
-        },
+        }
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
         Err(_) => err_json("Node details timed out after 30 seconds"),
     }
@@ -281,8 +285,8 @@ pub(super) async fn handler_subgraph(
             ok_json(sg)
         }
         Ok(Ok(Err(e))) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
@@ -336,8 +340,8 @@ pub(super) async fn handler_events_for_node(
             ok_json(edges)
         }
         Ok(Ok(Err(e))) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Ok(Err(e)) => err_json(format!("Task error: {}", e)),
@@ -346,21 +350,17 @@ pub(super) async fn handler_events_for_node(
 }
 
 pub(super) async fn handler_graph_summary(State(api): State<Arc<GraphHunterApi>>) -> Response {
-    api_response(api.get_graph_summary(
-        graph_hunter_api::dto::geoip::GraphSummaryRequest::default(),
-    ))
+    api_response(
+        api.get_graph_summary(graph_hunter_api::dto::geoip::GraphSummaryRequest::default()),
+    )
 }
 
 pub(super) async fn handler_entity_type_counts(State(api): State<Arc<GraphHunterApi>>) -> Response {
-    api_response(api.get_entity_type_counts(
-        graph_hunter_api::dto::entity::SessionOnly::default(),
-    ))
+    api_response(api.get_entity_type_counts(graph_hunter_api::dto::entity::SessionOnly::default()))
 }
 
 pub(super) async fn handler_path_nodes(State(api): State<Arc<GraphHunterApi>>) -> Response {
-    api_response(api.get_path_nodes(
-        graph_hunter_api::dto::entity::SessionOnly::default(),
-    ))
+    api_response(api.get_path_nodes(graph_hunter_api::dto::entity::SessionOnly::default()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -394,8 +394,8 @@ pub(super) async fn handler_events_paginated(
     match result {
         Ok(Ok(Ok(v))) => ok_json(v),
         Ok(Ok(Err(e))) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Ok(Err(e)) => err_json(format!("Task error: {e}")),
@@ -417,12 +417,14 @@ pub(super) async fn handler_heavy_edges(
     State(api): State<Arc<GraphHunterApi>>,
     Query(q): Query<HeavyEdgesQuery>,
 ) -> Response {
-    api_response(api.graph_heavy_edges(graph_hunter_api::dto::graph_ops::HeavyEdgesRequest {
-        session: None,
-        top_n: q.top_n,
-        min_count: q.min_count,
-        rel_type: q.rel_type,
-    }))
+    api_response(
+        api.graph_heavy_edges(graph_hunter_api::dto::graph_ops::HeavyEdgesRequest {
+            session: None,
+            top_n: q.top_n,
+            min_count: q.min_count,
+            rel_type: q.rel_type,
+        }),
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -478,8 +480,8 @@ pub(super) async fn handler_expand_grouped(
     match result {
         Ok(Ok(Ok(v))) => ok_json(v),
         Ok(Ok(Err(e))) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
         Ok(Err(e)) => err_json(format!("Task error: {e}")),

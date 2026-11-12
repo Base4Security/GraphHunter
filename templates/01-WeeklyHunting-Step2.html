@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Threat Hunting · Fase 2 — Formulación y Ejecución de Hipótesis · [FECHA_EMISION] · BASE4 Security</title>
+<link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,300;0,400;0,700;0,900;1,400&display=swap" rel="stylesheet">
+<style>
+:root{--or:#F1912D;--or2:#DC780F;--or3:#7C4409;--bk:#282828;--w:#fff;--g1:#404040;--g2:#5A5A5A;--g3:#747474;--g4:#A8A8A8;--g5:#DCDCDC;--cr:#8B0000;--hi:#C0392B;--me:#D68910;--lo:#1E8449;--nav-w:240px;--page:1100px}
+*{box-sizing:border-box;margin:0;padding:0}html{background:#1a1a1a}
+body{font-family:'Lato',sans-serif;background:#1a1a1a;color:var(--bk);line-height:1.6;font-size:14px}
+.doc-wrap{max-width:var(--page);margin:32px auto;background:var(--w);box-shadow:0 4px 40px rgba(0,0,0,.5)}
+.page-header{background:var(--bk);padding:18px 48px;display:flex;align-items:center;justify-content:space-between;border-bottom:3px solid var(--or)}
+.ph-logo{display:flex;align-items:center}
+.ph-logo img{display:block;height:72px;width:auto;max-width:220px}
+.ph-right{font-size:11px;color:var(--g4);text-align:right;line-height:1.5}
+.cover{background:var(--bk);padding:56px 48px 48px;position:relative;overflow:hidden}
+.cover-stripe{position:absolute;top:0;right:0;width:6px;height:100%;background:linear-gradient(to bottom,var(--or),var(--or3))}
+.cover>*{position:relative;z-index:1}
+.cover-date{font-size:12px;color:var(--g4);letter-spacing:1px;margin-bottom:28px}
+.cover-title{font-family:'Lato',sans-serif;font-weight:900;font-size:32px;color:var(--w);line-height:1.15;margin-bottom:8px}
+.cover-sub{font-size:14px;color:var(--g4);font-weight:300;margin-bottom:4px}
+.cover-phase{font-size:13px;color:var(--or);font-weight:700;margin-bottom:36px}
+.cover-divider{width:56px;height:3px;background:linear-gradient(90deg,var(--or),var(--or3));margin-bottom:28px}
+.cover-meta{display:grid;grid-template-columns:1fr 1fr;border:1px solid rgba(255,255,255,.1)}
+.cm-k{padding:9px 16px;font-size:11px;color:var(--g4);font-weight:700;letter-spacing:.5px;text-transform:uppercase;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)}
+.cm-v{padding:9px 16px;font-size:12px;color:var(--w);border-bottom:1px solid rgba(255,255,255,.08);border-left:1px solid rgba(255,255,255,.08)}
+.doc-layout{display:grid;grid-template-columns:var(--nav-w) 1fr;align-items:start}
+.side-nav{position:sticky;top:0;align-self:start;min-height:100vh;background:var(--bk);padding:28px 0 32px;border-right:3px solid var(--or);overflow-y:auto;max-height:100vh}
+.side-nav-inner{padding:0 18px}
+.side-nav-title{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--g4);margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,.12)}
+.side-nav ul{list-style:none}
+.side-nav li{margin:0}
+.side-nav a{display:block;padding:7px 10px;font-size:12px;line-height:1.35;color:var(--g4);text-decoration:none;border-left:2px solid transparent;transition:color .15s,border-color .15s}
+.side-nav a:hover,.side-nav a:focus{color:var(--w);border-left-color:var(--or);outline:none}
+.side-nav .nav-section>a{font-weight:700;color:var(--w);margin-top:10px}
+.side-nav .nav-section:first-child>a{margin-top:0}
+.side-nav .nav-sub a{padding-left:22px;font-size:11px}
+.doc-main{padding:48px 40px 64px;min-width:0}
+.sec{margin-bottom:44px;scroll-margin-top:16px}
+.hypothesis{scroll-margin-top:16px;margin-bottom:36px}
+.sec-title{font-family:'Lato',sans-serif;font-weight:900;font-size:18px;color:var(--bk);padding:0 0 10px;border-bottom:3px solid var(--or);margin-bottom:18px}
+.sec-sub{font-weight:700;font-size:13px;color:var(--bk);margin:18px 0 8px}
+.para{font-size:13px;color:var(--g1);line-height:1.7;margin-bottom:10px}
+.para strong{color:var(--bk)}
+.placeholder{color:var(--g3);font-style:italic}
+.hyp-title{font-size:16px;font-weight:900;color:var(--bk);margin-bottom:4px}
+.hyp-title span{color:var(--or)}
+.hyp-meta{font-size:12px;margin-bottom:8px;padding:6px 12px;background:#f9f9f9;border-left:3px solid var(--or)}
+.hyp-meta strong{color:var(--bk)}
+.hyp-clean{border-left-color:var(--lo)!important}
+.hyp-susp{border-left-color:var(--me)!important}
+.hyp-esc{border-left-color:var(--cr)!important}
+.hyp-divider{border:none;border-top:1px solid var(--g5);margin:8px 0 12px}
+.sub-label{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--g3);margin:14px 0 6px}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px}
+thead tr{background:var(--bk);color:var(--w)}
+thead th{padding:8px 12px;text-align:left;font-weight:700;font-size:11px;letter-spacing:.3px;border:1px solid var(--bk)}
+tbody tr:nth-child(even){background:#f7f7f7}
+tbody td{padding:7px 12px;border:1px solid #e0e0e0;color:var(--g1);vertical-align:top}
+tbody td:first-child{font-weight:700;color:var(--g2)}
+.pill{display:inline-block;padding:2px 8px;border-radius:2px;font-size:10px;font-weight:700;letter-spacing:.5px;color:var(--w)}
+.p-crit{background:var(--cr)}.p-high{background:var(--hi)}.p-med{background:var(--me)}.p-low{background:var(--lo)}
+.p-pass{background:var(--lo)}.p-fail{background:var(--hi)}.p-na{background:var(--g3);color:var(--bk)}
+.p-clean{background:var(--lo)}.p-susp{background:var(--me)}.p-esc{background:var(--cr)}
+.blist{padding-left:0;list-style:none;margin-bottom:10px}
+.blist li{padding:5px 0 5px 20px;position:relative;font-size:13px;color:var(--g1);line-height:1.55;border-bottom:1px dotted var(--g5)}
+.blist li::before{content:"›";position:absolute;left:0;color:var(--or);font-weight:700;font-size:16px;line-height:1.3}
+.blist li strong{color:var(--bk)}
+.mitre-tag{display:inline-block;padding:2px 6px;margin:1px 3px 1px 0;font-size:10px;font-weight:700;background:var(--g1);color:var(--w);border-radius:2px;letter-spacing:.3px}
+.kql{background:#1e1e1e;color:#dcdcdc;font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;font-size:11.5px;line-height:1.55;padding:14px 16px;border-left:3px solid var(--or);overflow-x:auto;white-space:pre;margin:6px 0 12px}
+.kql .kw{color:#569cd6}
+.kql .str{color:#ce9178}
+.kql .com{color:#6a9955;font-style:italic}
+.kql .num{color:#b5cea8}
+.reliability{display:flex;align-items:center;gap:14px;margin-top:6px;padding:10px 14px;background:#fafafa;border-left:4px solid var(--or)}
+.rel-bar{flex:1;height:8px;background:var(--g5);border-radius:2px;overflow:hidden;position:relative}
+.rel-fill{height:100%;background:linear-gradient(90deg,var(--or3),var(--or));border-radius:2px;width:calc(var(--rel-pct,0) * 1%)}
+.rel-val{font-size:13px;font-weight:900;color:var(--bk);min-width:60px;text-align:right}
+.pivot-block{background:#fafafa;border:1px solid var(--g5);border-left:4px solid var(--or2);padding:12px 16px;margin:8px 0 12px}
+.page-footer{background:var(--bk);padding:14px 48px;display:flex;justify-content:space-between;align-items:center;border-top:2px solid var(--or3)}
+.pf-left{font-size:11px;color:var(--g4)}.pf-right{font-size:11px;color:var(--g4);text-align:right}
+.pf-right span{color:var(--or)}
+@media (max-width:900px){.doc-layout{grid-template-columns:1fr}.side-nav{position:relative;min-height:auto;max-height:none;border-right:none;border-bottom:3px solid var(--or)}.side-nav ul{display:flex;flex-wrap:wrap;gap:4px}.side-nav .nav-section,.side-nav .nav-sub{display:inline}.side-nav a,.side-nav .nav-section>a,.side-nav .nav-sub a{padding:6px 10px;margin:0;border-left:none;border-radius:2px;background:rgba(255,255,255,.06)}}
+@media print{.doc-wrap{max-width:100%;margin:0;box-shadow:none}body{background:white}.side-nav{display:none}.doc-layout{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<!--
+  Plantilla — Informe de Threat Hunting (Fase 2: Formulación y Ejecución de Hipótesis)
+  Mapea al prompt: 01-WeeklyHunting-Step2.md
+  Uso: duplicar este archivo por ciclo (ej. hunt-phase2-W23-2026.html).
+  Sustituir todos los marcadores [ENTRE_CORCHETES].
+  Duplicar bloques .hypothesis y entradas en .side-nav (nav-sub) según número de hipótesis.
+  Aplicar la clase .hyp-clean / .hyp-susp / .hyp-esc al .hyp-meta para reflejar Current Risk Status.
+-->
+<div class="doc-wrap">
+<header class="page-header">
+  <div class="ph-logo">
+    <img src="https://base4sec.com/wp-content/uploads/2025/05/Logo_Slogan.png" alt="BASE4 Security — Your cyber ally" width="220" height="72" />
+  </div>
+  <div class="ph-right">Threat Hunting · Fase 2 · [FECHA_EMISION]<br>Clasificación: [CLASIFICACION]</div>
+</header>
+
+<div class="cover">
+  <div class="cover-stripe"></div>
+  <div class="cover-date">[FECHA_EMISION]</div>
+  <h1 class="cover-title">Formulación y Ejecución de Hipótesis</h1>
+  <div class="cover-sub">Escenario investigado: [ESCENARIO_SELECCIONADO]</div>
+  <div class="cover-phase">Fase 2 · Ejecución de queries, triage y pivoteo táctico</div>
+  <div class="cover-divider"></div>
+  <div class="cover-meta">
+    <div class="cm-k">Cliente / Entorno</div><div class="cm-v">[CLIENTE_ENTORNO]</div>
+    <div class="cm-k">Fecha de emisión</div><div class="cm-v">[FECHA_EMISION]</div>
+    <div class="cm-k">Clasificación</div><div class="cm-v">[CLASIFICACION]</div>
+    <div class="cm-k">Escenario</div><div class="cm-v">[ESCENARIO_ID] · [ESCENARIO_TITULO]</div>
+    <div class="cm-k">Hipótesis ejecutadas</div><div class="cm-v" style="color:var(--or);font-weight:700">[N_HIPOTESIS]</div>
+    <div class="cm-k">Ventana investigada</div><div class="cm-v">[VENTANA_TEMPORAL]</div>
+    <div class="cm-k">Informe ID</div><div class="cm-v">[INFORME_ID]</div>
+  </div>
+</div>
+
+<div class="doc-layout">
+<nav class="side-nav" aria-label="Índice del informe">
+  <div class="side-nav-inner">
+    <div class="side-nav-title">Índice · Fase 2</div>
+    <ul>
+      <li class="nav-section"><a href="#sec-contexto">1. Contexto del ciclo</a></li>
+      <li class="nav-section"><a href="#sec-resumen">2. Resumen de ejecución</a></li>
+      <li class="nav-section"><a href="#sec-hipotesis">3. Hipótesis ejecutadas</a></li>
+      <!-- Duplicar li.nav-sub por cada hipótesis; sincronizar id en .hypothesis -->
+      <li class="nav-sub"><a href="#hyp-01">H-01 · [H-01_TITULO_CORTO]</a></li>
+      <li class="nav-sub"><a href="#hyp-02">H-02 · [H-02_TITULO_CORTO]</a></li>
+      <li class="nav-sub"><a href="#hyp-03">H-03 · [H-03_TITULO_CORTO]</a></li>
+      <li class="nav-section"><a href="#sec-pivots">4. Pivot history</a></li>
+      <li class="nav-section"><a href="#sec-riesgo">5. Current Risk Status</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="doc-main">
+
+<!-- ═══ 1. CONTEXTO DEL CICLO ═══ -->
+<div class="sec" id="sec-contexto">
+<h2 class="sec-title">1. Contexto del ciclo</h2>
+<p class="para placeholder">[CONTEXTO_PARRAFO_1 — Escenario seleccionado desde la Fase 1 y objetivo táctico de la investigación.]</p>
+<p class="para placeholder">[CONTEXTO_PARRAFO_2 — Tablas y entidades de la Visibility Matrix utilizadas como base de las queries.]</p>
+</div>
+
+<!-- ═══ 2. RESUMEN DE EJECUCIÓN ═══ -->
+<div class="sec" id="sec-resumen">
+<h2 class="sec-title">2. Resumen de ejecución</h2>
+<table>
+  <thead><tr><th style="width:54px">ID</th><th>Hipótesis</th><th style="width:140px">Resultado</th><th style="width:110px">Confianza</th></tr></thead>
+  <tbody>
+    <tr><td>H-01</td><td class="placeholder">[H-01_RESUMEN_TABLA]</td><td><span class="pill p-clean">Clean</span></td><td>[CONFIANZA_1]%</td></tr>
+    <tr><td>H-02</td><td class="placeholder">[H-02_RESUMEN_TABLA]</td><td><span class="pill p-susp">Suspicious</span></td><td>[CONFIANZA_2]%</td></tr>
+    <tr><td>H-03</td><td class="placeholder">[H-03_RESUMEN_TABLA]</td><td><span class="pill p-esc">Needs Escalation</span></td><td>[CONFIANZA_3]%</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ═══ 3. HIPÓTESIS (duplicar bloque .hypothesis) ═══ -->
+<div class="sec" id="sec-hipotesis">
+<h2 class="sec-title">3. Hipótesis ejecutadas</h2>
+
+<div class="hypothesis" id="hyp-01">
+  <div class="hyp-title"><span>H-01 —</span> [H-01_TITULO]</div>
+  <div class="hyp-meta hyp-clean"><strong>What &amp; Why:</strong> [H-01_QUE_Y_PORQUE].&nbsp;&nbsp;<strong>MITRE:</strong> <span class="mitre-tag">[TACTICA]</span><span class="mitre-tag">[T1XXX]</span></div>
+  <hr class="hyp-divider">
+
+  <div class="sub-label">Enunciado técnico</div>
+  <p class="para placeholder">[H-01_ENUNCIADO — "Si [Actor] está [Tactic], deberíamos ver [Event ID / patrón] en [Table] con [Attribute] anómalo."]</p>
+
+  <div class="sub-label">KQL ejecutada vía Graphhunter MCP</div>
+<pre class="kql"><span class="com">// [H-01_KQL_COMENTARIO — propósito de la query]</span>
+<span class="kw">[TABLA]</span>
+| <span class="kw">where</span> TimeGenerated <span class="kw">&gt;</span> <span class="kw">ago</span>(<span class="num">[VENTANA]</span>)
+| <span class="kw">where</span> [CAMPO] <span class="kw">==</span> <span class="str">"[VALOR]"</span>
+| <span class="kw">summarize</span> count() <span class="kw">by</span> [ENTIDAD]
+| <span class="kw">where</span> count_ <span class="kw">&gt;</span> <span class="num">[UMBRAL]</span></pre>
+
+  <div class="sub-label">Explicación de filtros</div>
+  <ul class="blist">
+    <li class="placeholder"><strong>[FILTRO_1]:</strong> [POR_QUE_SE_APLICA].</li>
+    <li class="placeholder"><strong>[FILTRO_2]:</strong> [POR_QUE_SE_APLICA — relación con long-tail / outliers estadísticos].</li>
+  </ul>
+
+  <div class="sub-label">Observaciones vs Evidencia</div>
+  <table>
+    <thead><tr><th style="width:42%">Observación</th><th>Evidencia (registros / entidades)</th></tr></thead>
+    <tbody>
+      <tr><td class="placeholder">[OBS_1]</td><td class="placeholder">[EVIDENCIA_1]</td></tr>
+      <tr><td class="placeholder">[OBS_2]</td><td class="placeholder">[EVIDENCIA_2]</td></tr>
+    </tbody>
+  </table>
+
+  <div class="sub-label">Triage</div>
+  <ul class="blist">
+    <li class="placeholder"><strong>Falsos positivos identificados:</strong> [FP_DETALLE — cuentas de servicio, scheduled tasks, etc.].</li>
+    <li class="placeholder"><strong>Anomalías verdaderas aisladas:</strong> [TP_DETALLE].</li>
+    <li class="placeholder"><strong>Hallazgo negativo (si aplica):</strong> [NEGATIVE_FINDING — prueba de efectividad del control].</li>
+  </ul>
+</div>
+
+<div class="hypothesis" id="hyp-02">
+  <div class="hyp-title"><span>H-02 —</span> [H-02_TITULO]</div>
+  <div class="hyp-meta hyp-susp"><strong>What &amp; Why:</strong> [H-02_QUE_Y_PORQUE].&nbsp;&nbsp;<strong>MITRE:</strong> <span class="mitre-tag">[TACTICA]</span><span class="mitre-tag">[T1XXX]</span></div>
+  <hr class="hyp-divider">
+  <div class="sub-label">Enunciado técnico</div>
+  <p class="para placeholder">[H-02_ENUNCIADO]</p>
+  <div class="sub-label">KQL ejecutada</div>
+<pre class="kql"><span class="com">// [H-02_KQL_COMENTARIO]</span>
+<span class="kw">[TABLA]</span>
+| <span class="kw">where</span> TimeGenerated <span class="kw">&gt;</span> <span class="kw">ago</span>(<span class="num">[VENTANA]</span>)
+| ...</pre>
+  <div class="sub-label">Explicación de filtros</div>
+  <ul class="blist">
+    <li class="placeholder"><strong>[FILTRO_1]:</strong> [POR_QUE_SE_APLICA].</li>
+  </ul>
+  <div class="sub-label">Triage</div>
+  <ul class="blist">
+    <li class="placeholder">[TRIAGE_DETALLE]</li>
+  </ul>
+</div>
+
+<div class="hypothesis" id="hyp-03">
+  <div class="hyp-title"><span>H-03 —</span> [H-03_TITULO]</div>
+  <div class="hyp-meta hyp-esc"><strong>What &amp; Why:</strong> [H-03_QUE_Y_PORQUE].&nbsp;&nbsp;<strong>MITRE:</strong> <span class="mitre-tag">[TACTICA]</span><span class="mitre-tag">[T1XXX]</span></div>
+  <hr class="hyp-divider">
+  <div class="sub-label">Enunciado técnico</div>
+  <p class="para placeholder">[H-03_ENUNCIADO]</p>
+  <div class="sub-label">KQL ejecutada</div>
+<pre class="kql"><span class="com">// [H-03_KQL_COMENTARIO]</span>
+<span class="kw">[TABLA]</span>
+| ...</pre>
+  <div class="sub-label">Triage</div>
+  <ul class="blist">
+    <li class="placeholder">[TRIAGE_DETALLE]</li>
+  </ul>
+</div>
+<!-- Duplicar bloque .hypothesis y entrada en .side-nav para hipótesis adicionales. -->
+</div>
+
+<!-- ═══ 4. PIVOT HISTORY ═══ -->
+<div class="sec" id="sec-pivots">
+<h2 class="sec-title">4. Pivot history</h2>
+<p class="para placeholder">[PIVOTS_INTRO — Búsquedas secundarias realizadas para expandir contexto de IPs, procesos padre no estándar, user-agents raros, etc.]</p>
+
+<div class="pivot-block">
+  <div class="sub-label">Pivot #1 — desde H-0X</div>
+  <p class="para placeholder"><strong>Entidad pivotada:</strong> [ENTIDAD] (ej. IP 10.0.0.1, ParentProcess powershell.exe).&nbsp;&nbsp;<strong>Motivo:</strong> [MOTIVO_PIVOT]</p>
+<pre class="kql"><span class="com">// Expansión de contexto sobre [ENTIDAD]</span>
+<span class="kw">[TABLA]</span>
+| <span class="kw">where</span> [ENTIDAD] <span class="kw">==</span> <span class="str">"[VALOR]"</span>
+| ...</pre>
+  <p class="para placeholder"><strong>Resultado:</strong> [HALLAZGO_PIVOT]</p>
+</div>
+
+<div class="pivot-block">
+  <div class="sub-label">Pivot #2 — desde H-0X</div>
+  <p class="para placeholder"><strong>Entidad pivotada:</strong> [ENTIDAD].&nbsp;&nbsp;<strong>Motivo:</strong> [MOTIVO_PIVOT]</p>
+  <p class="para placeholder"><strong>Resultado:</strong> [HALLAZGO_PIVOT]</p>
+</div>
+<!-- Duplicar .pivot-block según necesidad. -->
+</div>
+
+<!-- ═══ 5. CURRENT RISK STATUS ═══ -->
+<div class="sec" id="sec-riesgo">
+<h2 class="sec-title">5. Current Risk Status</h2>
+<table>
+  <thead><tr><th>Hipótesis</th><th style="width:140px">Estado</th><th>Justificación</th></tr></thead>
+  <tbody>
+    <tr><td>H-01 · [H-01_TITULO_CORTO]</td><td><span class="pill p-clean">Clean</span></td><td class="placeholder">[JUSTIF_H01]</td></tr>
+    <tr><td>H-02 · [H-02_TITULO_CORTO]</td><td><span class="pill p-susp">Suspicious</span></td><td class="placeholder">[JUSTIF_H02]</td></tr>
+    <tr><td>H-03 · [H-03_TITULO_CORTO]</td><td><span class="pill p-esc">Needs Escalation</span></td><td class="placeholder">[JUSTIF_H03]</td></tr>
+  </tbody>
+</table>
+
+<div class="sec-sub">Reliability metric global</div>
+<p class="para placeholder">[RELIABILITY_NARRATIVA — ¿Qué tan certero es el equipo de que la actividad observada es maliciosa? Sustento basado en corroboración, fuentes y aislamiento de FP.]</p>
+<!-- Sustituir el valor de --rel-pct (entero 0-100) y el [RELIABILITY_PCT] de .rel-val por la misma cifra. -->
+<div class="reliability" style="--rel-pct:0">
+  <div class="rel-bar"><div class="rel-fill"></div></div>
+  <div class="rel-val">[RELIABILITY_PCT]%</div>
+</div>
+
+<div class="sec-sub">Próximos pasos hacia Fase 3</div>
+<ul class="blist">
+  <li class="placeholder"><strong>[PROX_1]</strong> Hipótesis que requiere validación cruzada en Fase 3.</li>
+  <li class="placeholder"><strong>[PROX_2]</strong> Entidades a las que aplicar Blast Radius (±60 min).</li>
+  <li class="placeholder"><strong>[PROX_3]</strong> IOCs/anomalías a enriquecer con threat intel interno.</li>
+</ul>
+</div>
+
+</main>
+</div>
+
+<footer class="page-footer">
+  <div class="pf-left">© [AÑO] BASE4 Security S.A. · Todos los derechos reservados<br>Documento confidencial — [USO_DOCUMENTO]</div>
+  <div class="pf-right">info@base4sec.com<br>LATAM · USA · España &nbsp;|&nbsp; <span>Tu ciber aliado.</span></div>
+</footer>
+</div>
+</body>
+</html>

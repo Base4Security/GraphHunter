@@ -117,9 +117,9 @@ impl CommandHandler {
         // Optional user-supplied FieldConfig override. When present, the
         // ConfigurableParser replaces the per-format parser and applies user
         // field → entity mappings plus any timestamp-format hints.
-        let user_config: Option<FieldConfig> = params.get("config").and_then(|v| {
-            serde_json::from_value::<FieldConfig>(v.clone()).ok()
-        });
+        let user_config: Option<FieldConfig> = params
+            .get("config")
+            .and_then(|v| serde_json::from_value::<FieldConfig>(v.clone()).ok());
 
         let ingest_result = if let Some(cfg) = user_config {
             let parser = ConfigurableParser::new(cfg);
@@ -142,84 +142,84 @@ impl CommandHandler {
             )
         } else {
             match resolved.as_str() {
-            "sysmon" => session.graph.ingest_logs_chunked(
-                &contents,
-                &SysmonJsonParser,
-                dataset_id,
-                chunk_size,
-                |processed, total, entities, relations| {
-                    emit(&Response::progress(
-                        &req_id,
-                        json!({
-                            "processed": processed,
-                            "total": total,
-                            "entities": entities,
-                            "relations": relations,
-                        }),
+                "sysmon" => session.graph.ingest_logs_chunked(
+                    &contents,
+                    &SysmonJsonParser,
+                    dataset_id,
+                    chunk_size,
+                    |processed, total, entities, relations| {
+                        emit(&Response::progress(
+                            &req_id,
+                            json!({
+                                "processed": processed,
+                                "total": total,
+                                "entities": entities,
+                                "relations": relations,
+                            }),
+                        ));
+                    },
+                ),
+                "sentinel" => session.graph.ingest_logs_chunked(
+                    &contents,
+                    &SentinelJsonParser,
+                    dataset_id,
+                    chunk_size,
+                    |processed, total, entities, relations| {
+                        emit(&Response::progress(
+                            &req_id,
+                            json!({
+                                "processed": processed,
+                                "total": total,
+                                "entities": entities,
+                                "relations": relations,
+                            }),
+                        ));
+                    },
+                ),
+                "generic" => session.graph.ingest_logs_chunked(
+                    &contents,
+                    &GenericParser,
+                    dataset_id,
+                    chunk_size,
+                    |processed, total, entities, relations| {
+                        emit(&Response::progress(
+                            &req_id,
+                            json!({
+                                "processed": processed,
+                                "total": total,
+                                "entities": entities,
+                                "relations": relations,
+                            }),
+                        ));
+                    },
+                ),
+                "csv" => session.graph.ingest_logs_chunked(
+                    &contents,
+                    &CsvParser,
+                    dataset_id,
+                    chunk_size,
+                    |processed, total, entities, relations| {
+                        emit(&Response::progress(
+                            &req_id,
+                            json!({
+                                "processed": processed,
+                                "total": total,
+                                "entities": entities,
+                                "relations": relations,
+                            }),
+                        ));
+                    },
+                ),
+                other => {
+                    emit(&Response::error(
+                        id,
+                        format!(
+                            "unsupported format: '{}'. Use 'auto', 'sysmon', 'sentinel', 'generic', or 'csv'.",
+                            other
+                        ),
                     ));
-                },
-            ),
-            "sentinel" => session.graph.ingest_logs_chunked(
-                &contents,
-                &SentinelJsonParser,
-                dataset_id,
-                chunk_size,
-                |processed, total, entities, relations| {
-                    emit(&Response::progress(
-                        &req_id,
-                        json!({
-                            "processed": processed,
-                            "total": total,
-                            "entities": entities,
-                            "relations": relations,
-                        }),
-                    ));
-                },
-            ),
-            "generic" => session.graph.ingest_logs_chunked(
-                &contents,
-                &GenericParser,
-                dataset_id,
-                chunk_size,
-                |processed, total, entities, relations| {
-                    emit(&Response::progress(
-                        &req_id,
-                        json!({
-                            "processed": processed,
-                            "total": total,
-                            "entities": entities,
-                            "relations": relations,
-                        }),
-                    ));
-                },
-            ),
-            "csv" => session.graph.ingest_logs_chunked(
-                &contents,
-                &CsvParser,
-                dataset_id,
-                chunk_size,
-                |processed, total, entities, relations| {
-                    emit(&Response::progress(
-                        &req_id,
-                        json!({
-                            "processed": processed,
-                            "total": total,
-                            "entities": entities,
-                            "relations": relations,
-                        }),
-                    ));
-                },
-            ),
-            other => {
-                emit(&Response::error(
-                    id,
-                    format!(
-                        "unsupported format: '{}'. Use 'auto', 'sysmon', 'sentinel', 'generic', or 'csv'.",
-                        other
-                    ),
-                ));
-                return;
-            }
+                    return;
+                }
             }
         };
         let (new_entities, new_relations) = match ingest_result {
@@ -256,7 +256,10 @@ impl CommandHandler {
         let source = match params.get("source").and_then(|v| v.as_str()) {
             Some(s) => s,
             None => {
-                emit(&Response::error(id, "missing param: source (sentinel | elastic)"));
+                emit(&Response::error(
+                    id,
+                    "missing param: source (sentinel | elastic)",
+                ));
                 return;
             }
         };
@@ -281,10 +284,7 @@ impl CommandHandler {
                         return;
                     }
                 };
-                let query = params
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
                 let auth = match (
                     params.get("azure_tenant_id").and_then(|v| v.as_str()),
                     params.get("azure_client_id").and_then(|v| v.as_str()),
@@ -322,15 +322,14 @@ impl CommandHandler {
                     .get("index")
                     .and_then(|v| v.as_str())
                     .unwrap_or("_all");
-                let query = params
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}");
-                let size = params.get("size").and_then(|v| v.as_u64()).map(|n| n as u32);
+                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("{}");
+                let size = params
+                    .get("size")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
                 let search_after = params.get("search_after").and_then(|v| v.as_array());
-                let search_after_ref: Option<&[serde_json::Value]> = search_after
-                    .as_ref()
-                    .map(|a| a.as_slice());
+                let search_after_ref: Option<&[serde_json::Value]> =
+                    search_after.as_ref().map(|a| a.as_slice());
                 let auth = match (
                     params.get("elastic_api_key").and_then(|v| v.as_str()),
                     params.get("elastic_user").and_then(|v| v.as_str()),
@@ -357,9 +356,9 @@ impl CommandHandler {
                     auth,
                 ) {
                     Ok(res) => {
-                        let next = res.next_search_after.map(|v| {
-                            serde_json::json!({ "next_search_after": v })
-                        });
+                        let next = res
+                            .next_search_after
+                            .map(|v| serde_json::json!({ "next_search_after": v }));
                         (res.data, "sentinel", next)
                     }
                     Err(e) => {
@@ -371,7 +370,10 @@ impl CommandHandler {
             _ => {
                 emit(&Response::error(
                     id,
-                    format!("unsupported source: '{}'. Use 'sentinel' or 'elastic'.", source),
+                    format!(
+                        "unsupported source: '{}'. Use 'sentinel' or 'elastic'.",
+                        source
+                    ),
                 ));
                 return;
             }
@@ -414,7 +416,10 @@ impl CommandHandler {
             "total_relations": session.graph.relation_count(),
         });
         if let Some(ref state) = next_state {
-            result.as_object_mut().unwrap().insert("pagination".to_string(), state.clone());
+            result
+                .as_object_mut()
+                .unwrap()
+                .insert("pagination".to_string(), state.clone());
         }
         emit(&Response::result(id, result));
     }

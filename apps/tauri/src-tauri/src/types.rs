@@ -25,6 +25,17 @@ pub struct HuntResults {
     pub diagnostic: Option<graph_hunter_core::HuntDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_tail_coverage: Option<graph_hunter_core::LiveTailCoverage>,
+    // Fase D/E: carry the core's answer-coverage across the transport so
+    // the GUI's primary single-hunt path sees Fase F's
+    // missing_sources/source_watermarks (symmetric to the HTTP handler's
+    // `RunHuntResponse::coverage`). Default coverage is omitted -> byte-
+    // identical wire when the flag is off.
+    #[serde(skip_serializing_if = "is_default_hunt_coverage")]
+    pub coverage: graph_hunter_api::coverage::AnswerCoverage,
+}
+
+fn is_default_hunt_coverage(c: &graph_hunter_api::coverage::AnswerCoverage) -> bool {
+    *c == graph_hunter_api::coverage::AnswerCoverage::default()
 }
 
 #[derive(Serialize)]
@@ -218,12 +229,7 @@ mod tests {
     fn node_preserves_metadata() {
         let mut meta = HashMap::new();
         meta.insert("key".to_string(), "value".to_string());
-        let node = SubgraphNode::new(
-            "10.0.0.1".to_string(),
-            "IP".to_string(),
-            99.5,
-            meta,
-        );
+        let node = SubgraphNode::new("10.0.0.1".to_string(), "IP".to_string(), 99.5, meta);
         assert_eq!(node.score, 99.5);
         assert_eq!(node.metadata.get("key").map(|s| s.as_str()), Some("value"));
     }

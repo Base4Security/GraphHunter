@@ -27,5 +27,7 @@ pub mod mapping_library;
 pub mod schema;
 pub mod sentinel;
 pub mod session;
+pub mod session_analytics;
 pub mod sigma;
 pub mod ticket;
+pub mod tpcsa;

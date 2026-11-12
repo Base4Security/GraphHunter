@@ -126,36 +126,36 @@ pub fn build_sigma_from_hypothesis(
         }
         (ips, ds, us, fs)
     };
-    if let Some(ip_field) = fields.ip_field {
-        if !ip_iocs.is_empty() {
-            out.push_str(&format!("    {ip_field}:\n"));
-            for ip in &ip_iocs {
-                out.push_str(&format!("      - '{ip}'\n"));
-            }
+    if let Some(ip_field) = fields.ip_field
+        && !ip_iocs.is_empty()
+    {
+        out.push_str(&format!("    {ip_field}:\n"));
+        for ip in &ip_iocs {
+            out.push_str(&format!("      - '{ip}'\n"));
         }
     }
-    if let Some(domain_field) = fields.domain_field {
-        if !domain_iocs.is_empty() {
-            out.push_str(&format!("    {domain_field}:\n"));
-            for d in &domain_iocs {
-                out.push_str(&format!("      - '{d}'\n"));
-            }
+    if let Some(domain_field) = fields.domain_field
+        && !domain_iocs.is_empty()
+    {
+        out.push_str(&format!("    {domain_field}:\n"));
+        for d in &domain_iocs {
+            out.push_str(&format!("      - '{d}'\n"));
         }
     }
-    if let Some(user_field) = fields.user_field {
-        if !user_iocs.is_empty() {
-            out.push_str(&format!("    {user_field}:\n"));
-            for u in &user_iocs {
-                out.push_str(&format!("      - '{u}'\n"));
-            }
+    if let Some(user_field) = fields.user_field
+        && !user_iocs.is_empty()
+    {
+        out.push_str(&format!("    {user_field}:\n"));
+        for u in &user_iocs {
+            out.push_str(&format!("      - '{u}'\n"));
         }
     }
-    if let Some(file_field) = fields.file_field {
-        if !file_iocs.is_empty() {
-            out.push_str(&format!("    {file_field}:\n"));
-            for f in &file_iocs {
-                out.push_str(&format!("      - '{f}'\n"));
-            }
+    if let Some(file_field) = fields.file_field
+        && !file_iocs.is_empty()
+    {
+        out.push_str(&format!("    {file_field}:\n"));
+        for f in &file_iocs {
+            out.push_str(&format!("      - '{f}'\n"));
         }
     }
 
@@ -380,9 +380,9 @@ fn deterministic_uuid(title: &str) -> String {
     format!(
         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
         (hash >> 32) as u32,
-        (hash >> 16) as u16 & 0xffff,
-        (hash as u16) & 0xffff,
-        (hash >> 48) as u16 & 0xffff,
+        ((hash >> 16) as u16),
+        (hash as u16),
+        ((hash >> 48) as u16),
         hash & 0xffff_ffff_ffff,
     )
 }

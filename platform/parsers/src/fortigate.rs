@@ -126,7 +126,6 @@ impl FortiGateParser {
         }
         out
     }
-
 }
 
 impl LogParser for FortiGateParser {
@@ -175,14 +174,30 @@ pub fn looks_like_fortigate(contents: &str) -> bool {
     if has_kv_marker {
         return true;
     }
+    // FortiOS *event* logs (SSL-VPN, system) carry no session IPs at all,
+    // so the `srcip`/`dstip` probe above misses them entirely and the file
+    // slid down to the generic `csv` fallback.
+    //
+    // `logid=` has no underscore; FortiWeb writes `log_id=`. Pairing it
+    // with a FortiOS-only companion field keeps this off both FortiWeb
+    // logs and unrelated syslog that merely mentions a log id.
+    let has_fortios_event = probe.contains("logid=")
+        && (probe.contains("remip=")
+            || probe.contains("devname=")
+            || probe.contains("tunneltype=")
+            || probe.contains("logdesc="));
+    if has_fortios_event {
+        return true;
+    }
     // CSV-header shape: first line has both `srcip` and `dstip` as
     // comma-separated headers. Pinning to BOTH keeps generic CSVs that
     // happen to mention `srcip` from sliding into this branch.
-    if let Some(first) = probe.lines().find(|l| !l.trim().is_empty()) {
-        if first.contains(',') && !first.contains('=') {
-            let lower = first.to_ascii_lowercase();
-            return lower.contains("srcip") && lower.contains("dstip");
-        }
+    if let Some(first) = probe.lines().find(|l| !l.trim().is_empty())
+        && first.contains(',')
+        && !first.contains('=')
+    {
+        let lower = first.to_ascii_lowercase();
+        return lower.contains("srcip") && lower.contains("dstip");
     }
     false
 }
@@ -199,6 +214,15 @@ pub fn looks_like_fortigate(contents: &str) -> bool {
 /// * `srcip -[Triggered]-> attack` if an `attack` field is present (IPS event).
 fn parse_kv_line(line: &str) -> Vec<ParsedTriple> {
     let kv = extract_kv_pairs(line);
+    // SSL-VPN events carry no `srcip`/`dstip` at all — the remote peer is
+    // `remip` and the subject is `user`. Before this branch they fell out
+    // of the `srcip`/`dstip` guard below and produced ZERO triples with no
+    // error: a 670 MB VPN log ingested as an empty graph. Handle them
+    // first, since the firewall-session fields they lack are exactly what
+    // that guard tests for.
+    if let Some(vpn) = parse_vpn_line(&kv) {
+        return vpn;
+    }
     let srcip = match kv.get("srcip") {
         Some(v) if !v.is_empty() => v.clone(),
         _ => return Vec::new(),
@@ -220,17 +244,17 @@ fn parse_kv_line(line: &str) -> Vec<ParsedTriple> {
     triples.push((src.clone(), rel, dst));
 
     // Satellite triple: srcip -[SNAT]-> transip (only on source NAT).
-    if kv.get("trandisp").map(|d| d == "snat").unwrap_or(false) {
-        if let Some(transip) = kv.get("transip").filter(|v| !v.is_empty()) {
-            let egress = Entity::new(transip, EntityType::IP);
-            let rel_snat = Relation::new(
-                &srcip,
-                transip,
-                RelationType::Other("SNAT".to_string()),
-                timestamp,
-            );
-            triples.push((src.clone(), rel_snat, egress));
-        }
+    if kv.get("trandisp").map(|d| d == "snat").unwrap_or(false)
+        && let Some(transip) = kv.get("transip").filter(|v| !v.is_empty())
+    {
+        let egress = Entity::new(transip, EntityType::IP);
+        let rel_snat = Relation::new(
+            &srcip,
+            transip,
+            RelationType::Other("SNAT".to_string()),
+            timestamp,
+        );
+        triples.push((src.clone(), rel_snat, egress));
     }
 
     // Satellite triple: dstip -[Exposes]-> Service("dstip:port").
@@ -285,14 +309,94 @@ fn parse_kv_line(line: &str) -> Vec<ParsedTriple> {
     triples
 }
 
+/// FortiOS `action` verbs that mean the SSL-VPN authentication failed.
+const VPN_FAILURE_ACTIONS: &[&str] = &[
+    "ssl-login-fail",
+    "ssl-exit-error",
+    "tunnel-down",
+    "error",
+    "ssl-alert",
+];
+
+/// Parse an SSL-VPN event (`subtype="vpn"`), or `None` when the line is
+/// not one.
+///
+/// Emits, anchored on the remote peer:
+///
+/// * `remip -[Auth]-> User(user)` — who was tried from where;
+/// * `remip -[Connect]-> Host(dst_host)` — the internal host reached, on
+///   the events that name one.
+///
+/// Outcome travels as an `outcome` edge-metadata key (`success` /
+/// `failure`) derived from the FortiOS `action` verb, rather than as a
+/// separate relation type. That keeps every existing `Auth` query working
+/// while still letting a hunt separate 92 k `ssl-login-fail` attempts from
+/// the handful of real `tunnel-up` logins without knowing FortiOS verbs.
+///
+/// Records whose `user` is the `N/A` placeholder still emit nothing for
+/// the user edge: minting a `User("N/A")` node would give every anonymous
+/// alert a shared hub and wreck centrality on the whole graph.
+fn parse_vpn_line(kv: &HashMap<String, String>) -> Option<Vec<ParsedTriple>> {
+    let is_vpn = kv.get("subtype").map(|s| s == "vpn").unwrap_or(false);
+    let remip = kv.get("remip").filter(|v| !v.is_empty())?;
+    if !is_vpn {
+        return None;
+    }
+    // A VPN record that also carries firewall-session fields is better
+    // served by the main path, which knows about NAT and policies.
+    if kv.contains_key("srcip") && kv.contains_key("dstip") {
+        return None;
+    }
+
+    let timestamp = derive_timestamp(kv);
+    let mut edge_meta = collect_edge_metadata(kv);
+    for extra in ["tunneltype", "reason", "level", "logdesc", "group", "msg"] {
+        if let Some(v) = kv.get(extra).filter(|v| !v.is_empty() && *v != "N/A") {
+            edge_meta.insert(extra.to_string(), v.clone());
+        }
+    }
+    let action = kv.get("action").map(String::as_str).unwrap_or("");
+    let outcome = if VPN_FAILURE_ACTIONS.contains(&action) {
+        "failure"
+    } else {
+        "success"
+    };
+    edge_meta.insert("outcome".into(), outcome.into());
+
+    let mut triples = Vec::new();
+    let peer = Entity::new(remip, EntityType::IP);
+
+    if let Some(user) = kv.get("user").filter(|v| !v.is_empty() && *v != "N/A") {
+        let mut rel = Relation::new(remip, user, RelationType::Auth, timestamp);
+        rel.metadata = edge_meta.clone();
+        let mut user_node = Entity::new(user, EntityType::User);
+        if let Some(g) = kv.get("group").filter(|v| !v.is_empty() && *v != "N/A") {
+            user_node.metadata.insert("group".into(), g.clone());
+        }
+        triples.push((peer.clone(), rel, user_node));
+    }
+
+    if let Some(host) = kv.get("dst_host").filter(|v| !v.is_empty() && *v != "N/A") {
+        let mut rel = Relation::new(remip, host, RelationType::Connect, timestamp);
+        rel.metadata = edge_meta;
+        triples.push((peer, rel, Entity::new(host, EntityType::Host)));
+    }
+
+    // A VPN line we recognised but that named neither a user nor a host
+    // still belongs to this branch: returning `Some(vec![])` stops the
+    // caller falling through to the srcip/dstip path, which would only
+    // return empty anyway.
+    Some(triples)
+}
+
 /// Pull the configured edge-metadata fields off a parsed KV map.
 fn collect_edge_metadata(kv: &HashMap<String, String>) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for field in EDGE_METADATA_FIELDS {
-        if let Some(v) = kv.get(*field) {
-            if !v.is_empty() {
-                out.insert((*field).into(), v.clone());
-            }
+        if let Some(v) = kv.get(*field)
+            && !v.is_empty()
+        {
+            out.insert((*field).into(), v.clone());
         }
     }
     // Preserve the raw timestamp shape if either component is present
@@ -308,7 +412,7 @@ fn collect_edge_metadata(kv: &HashMap<String, String>) -> HashMap<String, String
 /// Derive the Relation::timestamp (epoch seconds) from a FortiGate KV
 /// map. Tries, in order:
 ///  1. `timestamp=` already-numeric epoch (handles `s`, `ms`, `us`, `ns`),
-///  1b. `timestamp=` as ISO 8601 string (FortiGate `.final.csv` shape),
+///     1b. `timestamp=` as ISO 8601 string (FortiGate `.final.csv` shape),
 ///  2. `eventtime=` (FortiOS 6.x+ ns-since-epoch), numeric then ISO,
 ///  3. `date=YYYY-MM-DD` + `time=HH:MM:SS` combined as naive UTC,
 ///  4. 0 + `eprintln!` warn (parser never errors / drops the row;
@@ -341,7 +445,11 @@ fn derive_timestamp(kv: &HashMap<String, String>) -> i64 {
     // 3. Combined `date=` + `time=`.
     if let (Some(d), Some(t)) = (kv.get("date"), kv.get("time")) {
         let combined = format!("{d} {t}");
-        for fmt in &["%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
+        for fmt in &[
+            "%Y-%m-%d %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+        ] {
             if let Ok(dt) = NaiveDateTime::parse_from_str(&combined, fmt) {
                 return dt.and_utc().timestamp();
             }
@@ -457,11 +565,7 @@ fn extract_kv_pairs(line: &str) -> HashMap<String, String> {
             v.to_string()
         } else {
             let v_start = i;
-            while i < bytes.len()
-                && bytes[i] != b' '
-                && bytes[i] != b'\t'
-                && bytes[i] != b','
-            {
+            while i < bytes.len() && bytes[i] != b' ' && bytes[i] != b'\t' && bytes[i] != b',' {
                 i += 1;
             }
             line[v_start..i].to_string()
@@ -535,7 +639,7 @@ mod tests {
 
     const KV_LINE_WITH_ATTACK: &str = concat!(
         r#"date="2026-05-28" time="14:14:20" devname="FW-CORE-01" "#,
-        r#"srcip="172.25.15.1" dstip="192.168.53.96" srcport="51920" dstport="443" "#,
+        r#"srcip="10.0.1.31" dstip="10.0.1.32" srcport="51920" dstport="443" "#,
         r#"action="dropped" severity="high" service="HTTPS" proto="6" "#,
         r#"policyid="42" policyname="DENY_GUEST_TO_DC" sentbyte="1024" rcvdbyte="0" "#,
         r#"sentpkt="4" attack="FortiOS.SSL.VPN.Custom.Information.Disclosure""#,
@@ -546,6 +650,96 @@ mod tests {
         r#"srcip="10.0.0.5" dstip="10.0.0.10" dstport="80" "#,
         r#"action="close" severity="low" service="HTTP""#,
     );
+
+    // ── SSL-VPN events (no srcip/dstip) ─────────────────────────
+
+    const VPN_FAIL: &str = "date=2026-08-24 time=23:59:57 eventtime=1787626798373509651 tz=\"-0300\" logid=\"0101039426\" type=\"event\" subtype=\"vpn\" level=\"alert\" vd=\"root\" logdesc=\"SSL VPN login fail\" action=\"ssl-login-fail\" tunneltype=\"ssl-web\" tunnelid=0 remip=203.0.113.193 user=\"accounts\" group=\"N/A\" dst_host=\"N/A\" reason=\"sslvpn_login_permission_denied\" msg=\"SSL user failed to logged in\"";
+
+    const VPN_UP: &str = "date=2026-08-24 time=12:00:00 eventtime=1787626798373509651 logid=\"0101039947\" type=\"event\" subtype=\"vpn\" level=\"information\" vd=\"root\" logdesc=\"SSL VPN tunnel up\" action=\"tunnel-up\" tunneltype=\"ssl-tunnel\" remip=200.1.2.3 user=\"jdoe\" group=\"vpn-users\" dst_host=\"srv-files\" reason=\"N/A\" msg=\"SSL tunnel established\"";
+
+    /// The regression this branch exists for: before it, a VPN log line
+    /// produced ZERO triples and raised no error, so a 670 MB SSL-VPN
+    /// export ingested as an empty graph.
+    #[test]
+    fn vpn_line_emits_auth_edge_instead_of_nothing() {
+        let triples = FortiGateParser::new().parse(VPN_FAIL);
+        assert!(!triples.is_empty(), "VPN line produced no triples");
+        let (src, rel, dst) = &triples[0];
+        assert_eq!(src.id, "203.0.113.193");
+        assert_eq!(src.entity_type, EntityType::IP);
+        assert_eq!(rel.rel_type, RelationType::Auth);
+        assert_eq!(dst.id, "accounts");
+        assert_eq!(dst.entity_type, EntityType::User);
+    }
+
+    /// 92 k failures and 13 successes live in the same file; a hunt has to
+    /// separate them without knowing FortiOS action verbs.
+    #[test]
+    fn vpn_outcome_distinguishes_failure_from_success() {
+        let fail = FortiGateParser::new().parse(VPN_FAIL);
+        assert_eq!(
+            fail[0].1.metadata.get("outcome").map(String::as_str),
+            Some("failure")
+        );
+        let up = FortiGateParser::new().parse(VPN_UP);
+        assert_eq!(
+            up[0].1.metadata.get("outcome").map(String::as_str),
+            Some("success")
+        );
+    }
+
+    /// `user="N/A"` is an absence marker. A `User("N/A")` node would be a
+    /// hub every anonymous alert points at, distorting centrality.
+    #[test]
+    fn vpn_placeholder_user_and_host_are_not_entities() {
+        let anon = "date=2026-08-24 time=23:59:59 logid=\"0101039944\" type=\"event\" subtype=\"vpn\" action=\"ssl-alert\" tunneltype=\"ssl\" remip=203.0.113.193 user=\"N/A\" group=\"N/A\" dst_host=\"N/A\" reason=\"warning\"";
+        let triples = FortiGateParser::new().parse(anon);
+        assert!(
+            triples.is_empty(),
+            "placeholder values became entities: {:?}",
+            triples.iter().map(|(_, _, d)| &d.id).collect::<Vec<_>>()
+        );
+    }
+
+    /// A tunnel-up names an internal host as well as the user.
+    #[test]
+    fn vpn_tunnel_up_emits_user_and_host() {
+        let triples = FortiGateParser::new().parse(VPN_UP);
+        assert_eq!(triples.len(), 2);
+        assert_eq!(triples[1].2.id, "srv-files");
+        assert_eq!(triples[1].2.entity_type, EntityType::Host);
+        assert_eq!(
+            triples[0].2.metadata.get("group").map(String::as_str),
+            Some("vpn-users")
+        );
+    }
+
+    /// Auto-detection must claim the VPN log; falling through to `csv`
+    /// is what routed a 670 MB file into the whole-file size guard.
+    #[test]
+    fn looks_like_fortigate_recognizes_vpn_event() {
+        assert!(looks_like_fortigate(VPN_FAIL));
+        assert!(looks_like_fortigate(VPN_UP));
+    }
+
+    /// FortiWeb's comma-KV uses `log_id=` (underscored) and must not be
+    /// claimed here — it has its own parser.
+    #[test]
+    fn looks_like_fortigate_rejects_fortiweb() {
+        let fweb = "v015xxxxdate=2026-08-01,time=22:34:07,log_id=20000008,device_id=FWBVMSTM00000001,type=attack,src=198.51.100.5,dst=10.0.9.10,http_host=\"x.com\"";
+        assert!(!looks_like_fortigate(fweb));
+    }
+
+    /// A firewall session that happens to be subtype=vpn still belongs to
+    /// the main path, which understands NAT and policies.
+    #[test]
+    fn vpn_subtype_with_session_ips_uses_the_firewall_path() {
+        let session = "date=2026-08-24 time=10:00:00 logid=\"0000000013\" type=\"traffic\" subtype=\"vpn\" remip=1.2.3.4 srcip=10.0.0.5 dstip=10.0.0.9 dstport=443 action=\"accept\"";
+        let triples = FortiGateParser::new().parse(session);
+        assert!(triples.iter().any(|(s, r, d)| s.id == "10.0.0.5"
+            && d.id == "10.0.0.9"
+            && r.rel_type == RelationType::Connect));
+    }
 
     #[test]
     fn looks_like_fortigate_recognizes_kv_line() {
@@ -570,30 +764,42 @@ mod tests {
         );
 
         // Connect triple: srcip -[Connect]-> dstip.
-        let (ref src, ref rel, ref dst) = triples
+        let (src, rel, dst) = triples
             .iter()
             .find(|(_, r, _)| r.rel_type == RelationType::Connect)
             .map(|(a, b, c)| (a, b, c))
             .expect("Connect triple must be present");
-        assert_eq!(src.id, "172.25.15.1");
+        assert_eq!(src.id, "10.0.1.31");
         assert_eq!(src.entity_type, EntityType::IP);
-        assert_eq!(dst.id, "192.168.53.96");
+        assert_eq!(dst.id, "10.0.1.32");
         assert_eq!(dst.entity_type, EntityType::IP);
         assert_eq!(rel.rel_type, RelationType::Connect);
         // Edge metadata must surface the policy verdict + severity.
-        assert_eq!(rel.metadata.get("action").map(|s| s.as_str()), Some("dropped"));
-        assert_eq!(rel.metadata.get("severity").map(|s| s.as_str()), Some("high"));
+        assert_eq!(
+            rel.metadata.get("action").map(|s| s.as_str()),
+            Some("dropped")
+        );
+        assert_eq!(
+            rel.metadata.get("severity").map(|s| s.as_str()),
+            Some("high")
+        );
         assert_eq!(rel.metadata.get("dstport").map(|s| s.as_str()), Some("443"));
-        assert_eq!(rel.metadata.get("policyname").map(|s| s.as_str()), Some("DENY_GUEST_TO_DC"));
-        assert_eq!(rel.metadata.get("devname").map(|s| s.as_str()), Some("FW-CORE-01"));
+        assert_eq!(
+            rel.metadata.get("policyname").map(|s| s.as_str()),
+            Some("DENY_GUEST_TO_DC")
+        );
+        assert_eq!(
+            rel.metadata.get("devname").map(|s| s.as_str()),
+            Some("FW-CORE-01")
+        );
 
         // Triggered triple: srcip -[Triggered]-> attack (Signature).
-        let (ref src2, ref rel2, ref dst2) = triples
+        let (src2, rel2, dst2) = triples
             .iter()
             .find(|(_, r, _)| r.rel_type == RelationType::Other("Triggered".to_string()))
             .map(|(a, b, c)| (a, b, c))
             .expect("Triggered triple must be present");
-        assert_eq!(src2.id, "172.25.15.1");
+        assert_eq!(src2.id, "10.0.1.31");
         assert_eq!(dst2.id, "FortiOS.SSL.VPN.Custom.Information.Disclosure");
         assert_eq!(
             dst2.entity_type,
@@ -671,7 +877,10 @@ mod tests {
             .iter()
             .find(|(_, r, _)| r.rel_type == RelationType::Connect)
             .expect("Connect triple");
-        assert_eq!(rel.metadata.get("devname").map(|s| s.as_str()), Some("FW-CORE-01"));
+        assert_eq!(
+            rel.metadata.get("devname").map(|s| s.as_str()),
+            Some("FW-CORE-01")
+        );
     }
 
     #[test]
@@ -682,13 +891,10 @@ mod tests {
         assert_eq!(triples.len(), 2);
         let ts = triples[0].1.timestamp;
         // Expected epoch is computed from chrono — no magic constants.
-        let expected = NaiveDateTime::parse_from_str(
-            "2026-05-28T14:14:21",
-            "%Y-%m-%dT%H:%M:%S",
-        )
-        .unwrap()
-        .and_utc()
-        .timestamp();
+        let expected = NaiveDateTime::parse_from_str("2026-05-28T14:14:21", "%Y-%m-%dT%H:%M:%S")
+            .unwrap()
+            .and_utc()
+            .timestamp();
         assert_eq!(ts, expected);
         assert_ne!(ts, 0, "bug #69 regression: ts must not fall back to 0");
     }
@@ -699,24 +905,28 @@ mod tests {
     /// ISO-string branch picks it up.
     #[test]
     fn timestamp_iso_string_in_timestamp_field() {
-        let line = r#"timestamp="2026-05-21T23:18:25" devname="FW-CORE-01" srcip="172.25.15.1" dstip="192.168.53.96" dstport="443" action="dropped""#;
+        let line = r#"timestamp="2026-05-21T23:18:25" devname="FW-CORE-01" srcip="10.0.1.31" dstip="10.0.1.32" dstport="443" action="dropped""#;
         let parser = FortiGateParser::new();
         let triples = parser.parse(line);
         // dstport="443" → Connect + Exposes = 2 triples.
         assert_eq!(triples.len(), 2, "expected Connect + Exposes triples");
         let ts = triples[0].1.timestamp;
-        let expected = NaiveDateTime::parse_from_str(
-            "2026-05-21T23:18:25",
-            "%Y-%m-%dT%H:%M:%S",
-        )
-        .unwrap()
-        .and_utc()
-        .timestamp();
+        let expected = NaiveDateTime::parse_from_str("2026-05-21T23:18:25", "%Y-%m-%dT%H:%M:%S")
+            .unwrap()
+            .and_utc()
+            .timestamp();
         assert_eq!(ts, expected);
-        assert_ne!(ts, 0, "bug #69 regression: ISO timestamp must parse, not fall back to 0");
+        assert_ne!(
+            ts, 0,
+            "bug #69 regression: ISO timestamp must parse, not fall back to 0"
+        );
         // metadata.timestamp_raw should still carry the original ISO string for analyst inspection.
         assert_eq!(
-            triples[0].1.metadata.get("timestamp_raw").map(|s| s.as_str()),
+            triples[0]
+                .1
+                .metadata
+                .get("timestamp_raw")
+                .map(|s| s.as_str()),
             Some("2026-05-21T23:18:25")
         );
     }
@@ -724,13 +934,11 @@ mod tests {
     /// Defensive: accept `Z`, millisecond, and offset suffixes too.
     #[test]
     fn timestamp_iso_defensive_variants_all_parse() {
-        let expected_naive = NaiveDateTime::parse_from_str(
-            "2026-05-21T23:18:25",
-            "%Y-%m-%dT%H:%M:%S",
-        )
-        .unwrap()
-        .and_utc()
-        .timestamp();
+        let expected_naive =
+            NaiveDateTime::parse_from_str("2026-05-21T23:18:25", "%Y-%m-%dT%H:%M:%S")
+                .unwrap()
+                .and_utc()
+                .timestamp();
 
         let parser = FortiGateParser::new();
         // (a) trailing Z
@@ -763,18 +971,30 @@ mod tests {
         // (b) malformed ISO string
         let line_bad = r#"timestamp="not-a-date" srcip="1.1.1.1" dstip="2.2.2.2""#;
         let triples_bad = parser.parse(line_bad);
-        assert_eq!(triples_bad.len(), 1, "row must NOT be dropped on malformed ts");
+        assert_eq!(
+            triples_bad.len(),
+            1,
+            "row must NOT be dropped on malformed ts"
+        );
         assert_eq!(triples_bad[0].1.timestamp, 0);
         // (c) empty-string timestamp (chrono parsers all reject empty → 0 fallback)
         let line_empty = r#"timestamp="" srcip="1.1.1.1" dstip="2.2.2.2""#;
         let triples_empty = parser.parse(line_empty);
-        assert_eq!(triples_empty.len(), 1, "row must NOT be dropped on empty ts");
+        assert_eq!(
+            triples_empty.len(),
+            1,
+            "row must NOT be dropped on empty ts"
+        );
         assert_eq!(triples_empty[0].1.timestamp, 0);
         // (d) date-only ISO ("YYYY-MM-DD") — no time component, all chrono
         // parsers fail because they require HH:MM:SS → 0 fallback preserves row.
         let line_date_only = r#"timestamp="2026-05-21" srcip="1.1.1.1" dstip="2.2.2.2""#;
         let triples_date_only = parser.parse(line_date_only);
-        assert_eq!(triples_date_only.len(), 1, "row must NOT be dropped on date-only ts");
+        assert_eq!(
+            triples_date_only.len(),
+            1,
+            "row must NOT be dropped on date-only ts"
+        );
         assert_eq!(triples_date_only[0].1.timestamp, 0);
     }
 
@@ -783,13 +1003,23 @@ mod tests {
     /// derived from a single parse of the line.
     #[test]
     fn timestamp_shared_across_connect_and_triggered_emissions() {
-        let line = r#"timestamp="2026-05-21T23:18:25" devname="FW-CORE-01" srcip="172.25.15.1" dstip="192.168.53.96" dstport="443" action="dropped" attack="FortiOS.SSL.VPN.Custom.Information.Disclosure""#;
+        let line = r#"timestamp="2026-05-21T23:18:25" devname="FW-CORE-01" srcip="10.0.1.31" dstip="10.0.1.32" dstport="443" action="dropped" attack="FortiOS.SSL.VPN.Custom.Information.Disclosure""#;
         let parser = FortiGateParser::new();
         let triples = parser.parse(line);
         // dstport="443" + attack → Connect + Exposes + Triggered = 3 triples.
-        assert_eq!(triples.len(), 3, "expected Connect + Exposes + Triggered triples");
-        let connect_triple = triples.iter().find(|(_, r, _)| r.rel_type == RelationType::Connect).expect("Connect triple");
-        let triggered_triple = triples.iter().find(|(_, r, _)| r.rel_type == RelationType::Other("Triggered".to_string())).expect("Triggered triple");
+        assert_eq!(
+            triples.len(),
+            3,
+            "expected Connect + Exposes + Triggered triples"
+        );
+        let connect_triple = triples
+            .iter()
+            .find(|(_, r, _)| r.rel_type == RelationType::Connect)
+            .expect("Connect triple");
+        let triggered_triple = triples
+            .iter()
+            .find(|(_, r, _)| r.rel_type == RelationType::Other("Triggered".to_string()))
+            .expect("Triggered triple");
         let ts_connect = connect_triple.1.timestamp;
         let ts_triggered = triggered_triple.1.timestamp;
         assert_ne!(ts_connect, 0, "Connect ts must be parsed, not 0");
@@ -809,15 +1039,23 @@ mod tests {
     #[test]
     fn missing_srcip_or_dstip_skips_event() {
         let parser = FortiGateParser::new();
-        assert!(parser.parse(r#"date="2026-05-28" srcip="1.2.3.4" action="allow""#).is_empty());
-        assert!(parser.parse(r#"date="2026-05-28" dstip="1.2.3.4" action="allow""#).is_empty());
+        assert!(
+            parser
+                .parse(r#"date="2026-05-28" srcip="1.2.3.4" action="allow""#)
+                .is_empty()
+        );
+        assert!(
+            parser
+                .parse(r#"date="2026-05-28" dstip="1.2.3.4" action="allow""#)
+                .is_empty()
+        );
     }
 
     #[test]
     fn csv_with_headers_path() {
         let csv = concat!(
             "date,time,srcip,dstip,dstport,action,severity\n",
-            "2026-05-28,14:14:20,172.25.15.1,192.168.53.96,443,dropped,high\n",
+            "2026-05-28,14:14:20,10.0.1.31,10.0.1.32,443,dropped,high\n",
             "2026-05-28,14:14:21,10.0.0.5,10.0.0.10,80,close,low\n",
         );
         let parser = FortiGateParser::new();
@@ -825,10 +1063,13 @@ mod tests {
         // 2 CSV rows, each with dstport → Connect + Exposes per row = 4 total.
         assert_eq!(triples.len(), 4);
         let (ref src, ref rel, ref dst) = triples[0];
-        assert_eq!(src.id, "172.25.15.1");
-        assert_eq!(dst.id, "192.168.53.96");
+        assert_eq!(src.id, "10.0.1.31");
+        assert_eq!(dst.id, "10.0.1.32");
         assert_eq!(rel.rel_type, RelationType::Connect);
-        assert_eq!(rel.metadata.get("action").map(|s| s.as_str()), Some("dropped"));
+        assert_eq!(
+            rel.metadata.get("action").map(|s| s.as_str()),
+            Some("dropped")
+        );
         assert_eq!(rel.metadata.get("dstport").map(|s| s.as_str()), Some("443"));
     }
 
@@ -878,50 +1119,97 @@ mod tests {
 
     #[test]
     fn snat_flow_emits_all_satellite_nodes() {
-        let line = r#"date=2026-05-28 time=14:14:20 devname="FW_FGT_VPN" srcip="172.25.15.1" dstip="192.168.53.96" dstport=9699 action=close policyid=348 policyname="MIGRACION TELECARGA" service="TELECARGA" trandisp="snat" transip="128.36.11.249""#;
+        let line = r#"date=2026-05-28 time=14:14:20 devname="FGT_EJEMPLO_VPN" srcip="10.0.1.31" dstip="10.0.1.32" dstport=9699 action=close policyid=348 policyname="POLITICA EJEMPLO" service="SERVICIO_EJEMPLO" trandisp="snat" transip="203.0.113.249""#;
         let triples = parse_kv_line(line);
 
-        let connect = triples.iter().find(|(_, r, _)| r.rel_type == RelationType::Connect).expect("Connect edge");
-        assert_eq!(connect.0.id, "172.25.15.1");
-        assert_eq!(connect.2.id, "192.168.53.96");
+        let connect = triples
+            .iter()
+            .find(|(_, r, _)| r.rel_type == RelationType::Connect)
+            .expect("Connect edge");
+        assert_eq!(connect.0.id, "10.0.1.31");
+        assert_eq!(connect.2.id, "10.0.1.32");
 
-        let snat = triples.iter().find(|(_, r, _)| r.rel_type == RelationType::Other("SNAT".to_string())).expect("SNAT edge");
-        assert_eq!(snat.0.id, "172.25.15.1");
-        assert_eq!(snat.2.id, "128.36.11.249");
+        let snat = triples
+            .iter()
+            .find(|(_, r, _)| r.rel_type == RelationType::Other("SNAT".to_string()))
+            .expect("SNAT edge");
+        assert_eq!(snat.0.id, "10.0.1.31");
+        assert_eq!(snat.2.id, "203.0.113.249");
         assert_eq!(snat.2.entity_type, EntityType::IP);
 
-        let exp = triples.iter().find(|(_, r, _)| r.rel_type == RelationType::Other("Exposes".to_string())).expect("Exposes edge");
-        assert_eq!(exp.0.id, "192.168.53.96");
-        assert_eq!(exp.2.id, "192.168.53.96:9699");
+        let exp = triples
+            .iter()
+            .find(|(_, r, _)| r.rel_type == RelationType::Other("Exposes".to_string()))
+            .expect("Exposes edge");
+        assert_eq!(exp.0.id, "10.0.1.32");
+        assert_eq!(exp.2.id, "10.0.1.32:9699");
         assert_eq!(exp.2.entity_type, EntityType::Service);
         assert_eq!(exp.2.metadata.get("port").map(String::as_str), Some("9699"));
-        assert_eq!(exp.2.metadata.get("service").map(String::as_str), Some("TELECARGA"));
+        assert_eq!(
+            exp.2.metadata.get("service").map(String::as_str),
+            Some("SERVICIO_EJEMPLO")
+        );
 
-        let pol = triples.iter().find(|(_, r, _)| r.rel_type == RelationType::Other("MatchedPolicy".to_string())).expect("MatchedPolicy edge");
-        assert_eq!(pol.0.id, "172.25.15.1");
-        assert_eq!(pol.2.id, "MIGRACION TELECARGA");
+        let pol = triples
+            .iter()
+            .find(|(_, r, _)| r.rel_type == RelationType::Other("MatchedPolicy".to_string()))
+            .expect("MatchedPolicy edge");
+        assert_eq!(pol.0.id, "10.0.1.31");
+        assert_eq!(pol.2.id, "POLITICA EJEMPLO");
         assert_eq!(pol.2.entity_type, EntityType::Other("Policy".to_string()));
-        assert_eq!(pol.2.metadata.get("policyid").map(String::as_str), Some("348"));
+        assert_eq!(
+            pol.2.metadata.get("policyid").map(String::as_str),
+            Some("348")
+        );
 
-        assert_eq!(triples.len(), 4, "SNAT flow with dstport+policyname+snat => Connect+SNAT+Exposes+MatchedPolicy");
+        assert_eq!(
+            triples.len(),
+            4,
+            "SNAT flow with dstport+policyname+snat => Connect+SNAT+Exposes+MatchedPolicy"
+        );
     }
 
     #[test]
     fn noop_flow_emits_no_snat_edge() {
-        let line = r#"date=2026-05-28 time=14:14:13 devname="FW_FGT_INTERNO" srcip="172.25.15.1" dstip="192.168.53.96" dstport=9181 action=close policyid=1710 policyname="SGDC-551684_I" trandisp="noop""#;
+        let line = r#"date=2026-05-28 time=14:14:13 devname="FGT_EJEMPLO_INT" srcip="10.0.1.31" dstip="10.0.1.32" dstport=9181 action=close policyid=1710 policyname="SGDC-551684_I" trandisp="noop""#;
         let triples = parse_kv_line(line);
-        assert!(triples.iter().all(|(_, r, _)| r.rel_type != RelationType::Other("SNAT".to_string())), "noop flow must not emit a SNAT edge");
-        assert!(triples.iter().any(|(_, r, _)| r.rel_type == RelationType::Other("Exposes".to_string())));
-        assert!(triples.iter().any(|(_, r, _)| r.rel_type == RelationType::Other("MatchedPolicy".to_string())));
-        assert!(triples.iter().any(|(_, r, _)| r.rel_type == RelationType::Connect));
+        assert!(
+            triples
+                .iter()
+                .all(|(_, r, _)| r.rel_type != RelationType::Other("SNAT".to_string())),
+            "noop flow must not emit a SNAT edge"
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|(_, r, _)| r.rel_type == RelationType::Other("Exposes".to_string()))
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|(_, r, _)| r.rel_type == RelationType::Other("MatchedPolicy".to_string()))
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|(_, r, _)| r.rel_type == RelationType::Connect)
+        );
     }
 
     #[test]
     fn missing_policy_emits_no_policy_edge() {
         let line = r#"srcip="10.0.0.1" dstip="10.0.0.2" dstport=443 action=close trandisp="noop""#;
         let triples = parse_kv_line(line);
-        assert!(triples.iter().all(|(_, r, _)| r.rel_type != RelationType::Other("MatchedPolicy".to_string())), "no policyname -> no MatchedPolicy edge");
-        let exp = triples.iter().find(|(_, r, _)| r.rel_type == RelationType::Other("Exposes".to_string())).expect("Exposes edge");
+        assert!(
+            triples
+                .iter()
+                .all(|(_, r, _)| r.rel_type != RelationType::Other("MatchedPolicy".to_string())),
+            "no policyname -> no MatchedPolicy edge"
+        );
+        let exp = triples
+            .iter()
+            .find(|(_, r, _)| r.rel_type == RelationType::Other("Exposes".to_string()))
+            .expect("Exposes edge");
         assert_eq!(exp.2.id, "10.0.0.2:443");
     }
 

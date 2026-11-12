@@ -67,6 +67,35 @@ pub struct DatasetInfo {
     /// "unknown" rather than "zero".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingest_stats: Option<ParseStats>,
+    /// Resolved parser/format name frozen at ingest time for datasets
+    /// *without* a `field_config` (e.g. `"sysmon"`, `"fortigate"`,
+    /// `"sentinel"`, `"configurable"`). Lets export stamp a real
+    /// `builtin:{parser}` provenance identity instead of falling back to
+    /// `builtin:unknown`. `None` for legacy sessions written before this
+    /// field existed, or ingest paths not yet wired to populate it — export
+    /// falls back to `"unknown"` in that case (same as before this field
+    /// existed, never a crash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parser: Option<String>,
+    /// FROZEN mapping identity, set ONCE at ingest and never mutated
+    /// afterward — this is what export's `provenance.mapping_hash` is
+    /// derived from, deliberately kept separate from the mutable
+    /// `field_config` above. `field_config` can legitimately change after
+    /// ingest (e.g. `promote_field_config_to_latest_dataset` stamps a
+    /// negotiated/approved config onto it for UI/replay display), but
+    /// `mapping_hash` must not: if export read `field_config` directly, a
+    /// post-ingest mapping edit would retroactively relabel the
+    /// provenance of edges that were created under the OLD config — the
+    /// `mapping_edit` contamination this field exists to prevent.
+    /// `Some("cfg:<sha256>")` for datasets ingested with a `FieldConfig`
+    /// (see `graph_hunter_canonical::ProvenanceCtx::mapping_hash_for_config`,
+    /// the same hash `for_configurable` produces); `None` for builtin
+    /// (hand-written-parser) datasets, which use the frozen `parser`
+    /// field above (`builtin:{parser}`) instead. Additive session-
+    /// metadata JSON, not the bincode `Relation` body — no
+    /// `BODY_FORMAT_VERSION` bump required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapping_hash: Option<String>,
 }
 
 /// Serializable session file format for disk persistence. Holds the

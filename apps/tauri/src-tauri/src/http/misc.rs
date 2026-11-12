@@ -1,10 +1,10 @@
 //! Root / health / metrics / datasets endpoints.
 
 use axum::{
+    Json,
     extract::{Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -82,16 +82,17 @@ pub(super) async fn handler_metrics(State(api): State<Arc<GraphHunterApi>>) -> R
         .unwrap_or_else(|e| format!("# drift_metrics_text join error: {e}\n"));
     (
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
         .into_response()
 }
 
 pub(super) async fn handler_list_datasets(State(api): State<Arc<GraphHunterApi>>) -> Response {
-    api_response(api.list_datasets(
-        graph_hunter_api::dto::dataset::ListDatasetsRequest::default(),
-    ))
+    api_response(api.list_datasets(graph_hunter_api::dto::dataset::ListDatasetsRequest::default()))
 }
 
 /// Fallback for unmatched routes: return 404 with JSON body so MCP/client can show path and method.

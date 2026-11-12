@@ -1,10 +1,10 @@
 //! Anomaly scoring, heatmap, subnet analysis, IP enrichment.
 
 use axum::{
+    Json,
     extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -33,7 +33,8 @@ pub(super) async fn handler_temporal_heatmap(
 }
 
 pub(super) async fn handler_subnet_analysis(State(api): State<Arc<GraphHunterApi>>) -> Response {
-    match api.get_subnet_analysis(graph_hunter_api::dto::enrichment::SubnetAnalysisRequest::default())
+    match api
+        .get_subnet_analysis(graph_hunter_api::dto::enrichment::SubnetAnalysisRequest::default())
     {
         Ok(v) => ok_json(v),
         Err(e) => {
@@ -42,6 +43,24 @@ pub(super) async fn handler_subnet_analysis(State(api): State<Arc<GraphHunterApi
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct SharedSessionsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+pub(super) async fn handler_shared_sessions(
+    State(api): State<Arc<GraphHunterApi>>,
+    Query(q): Query<SharedSessionsQuery>,
+) -> Response {
+    api_response(api.get_shared_sessions(
+        graph_hunter_api::dto::session_analytics::SharedSessionsRequest {
+            session: None,
+            limit: q.limit,
+        },
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,21 +81,23 @@ pub(super) async fn handler_enrich_ip(
     {
         Ok(v) => ok_json(v),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
 }
 
-pub(super) async fn handler_enable_anomaly_scoring(State(api): State<Arc<GraphHunterApi>>) -> Response {
+pub(super) async fn handler_enable_anomaly_scoring(
+    State(api): State<Arc<GraphHunterApi>>,
+) -> Response {
     match api.enable_anomaly_scoring(
         graph_hunter_api::dto::anomaly::EnableAnomalyScoringRequest::default(),
     ) {
         Ok(()) => ok_json(serde_json::json!({ "enabled": true })),
         Err(e) => {
-            let code = StatusCode::from_u16(e.status_code())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let code =
+                StatusCode::from_u16(e.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             (code, Json(serde_json::json!({ "error": e.to_string() }))).into_response()
         }
     }
@@ -90,7 +111,7 @@ pub(super) async fn handler_compute_scores(State(api): State<Arc<GraphHunterApi>
             api_clone
                 .compute_scores(graph_hunter_api::dto::graph_ops::ComputeScoresRequest::default())
                 .map(|()| serde_json::json!({ "computed": true }))
-                .map_err(|e| crate::error::CommandError::from(e))
+                .map_err(crate::error::CommandError::from)
         }),
     )
     .await;

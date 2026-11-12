@@ -29,8 +29,8 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream;
 use futures::StreamExt;
+use futures::stream;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,27 +40,25 @@ use graph_hunter_core::{
     // Core types
     Entity,
     EntityType,
+    // Graph (for EnrichmentEngine's graph_access fixture)
+    GraphHunter,
     LogParser,
+    // Ingest primitives
+    ParsedBatch,
     ParsedTriple,
+    Priority,
     RawIngestEvent,
     Relation,
     RelationType,
-    // Ingest primitives
-    ParsedBatch,
-    Priority,
-    // Graph (for EnrichmentEngine's graph_access fixture)
-    GraphHunter,
 };
 
 // Phase 5: QuotaLimiter
 use graph_hunter_core::sources::quota::QuotaLimiter;
 // Phase 5: DataCoverage
-use graph_hunter_core::ingest::coverage::{DataCoverage, DEFAULT_BUCKET_SECONDS};
+use graph_hunter_core::ingest::coverage::{DEFAULT_BUCKET_SECONDS, DataCoverage};
 // Phase 6: TokenStorage
 use graph_hunter_core::sources::token_cache::TokenKey;
-use graph_hunter_core::sources::token_storage::{
-    InMemoryTokenStorage, StoredToken, TokenStorage,
-};
+use graph_hunter_core::sources::token_storage::{InMemoryTokenStorage, StoredToken, TokenStorage};
 // Phase 7: EnrichmentEngine + cache
 use graph_hunter_core::ingest::enrichment::{EnrichmentEngine, EnrichmentRequest};
 use graph_hunter_core::ingest::enrichment_cache::EnrichmentCache;
@@ -167,7 +165,9 @@ pub struct OverflowReport {
 /// delegate through the canonical API because it exercises core
 /// primitives directly; migrating it would defeat its purpose as a
 /// cross-crate integration check.
-#[deprecated(note = "Intended for one-shot smoke testing during Phase 5-9 integration. Real Tauri commands cover production workflows; this command can be removed when the Phase 5-9 audit trail is no longer useful.")]
+#[deprecated(
+    note = "Intended for one-shot smoke testing during Phase 5-9 integration. Real Tauri commands cover production workflows; this command can be removed when the Phase 5-9 audit trail is no longer useful."
+)]
 #[tauri::command]
 pub async fn cmd_azure_streaming_smoke_test() -> Result<SmokeTestReport, String> {
     let start = std::time::Instant::now();
@@ -218,11 +218,7 @@ fn test_data_coverage(errors: &mut Vec<String>) -> DataCoverageReport {
 
     let buckets = cov.buckets_in_range("smoke:la", 0, i64::MAX);
     let count = cov.count_in_range("smoke:la", 0, i64::MAX);
-    let gaps = cov.gaps(
-        "smoke:la",
-        base,
-        base + 10 * DEFAULT_BUCKET_SECONDS,
-    );
+    let gaps = cov.gaps("smoke:la", base, base + 10 * DEFAULT_BUCKET_SECONDS);
 
     let ok = buckets.len() == 6 && count == 55 && !gaps.is_empty();
     if !ok {
@@ -524,10 +520,7 @@ fn test_overflow(errors: &mut Vec<String>) -> OverflowReport {
     .with_dataset_id("smoke-dataset")
     .with_priority(Priority::Normal);
 
-    let batch_b = ParsedBatch::new(
-        "smoke:xdr",
-        vec![mk_smoke_triple("bob", "proc-c", 300)],
-    );
+    let batch_b = ParsedBatch::new("smoke:xdr", vec![mk_smoke_triple("bob", "proc-c", 300)]);
 
     if let Err(e) = store.write_batch(&batch_a) {
         errors.push(format!("overflow: write_batch a: {e}"));
@@ -555,9 +548,7 @@ fn test_overflow(errors: &mut Vec<String>) -> OverflowReport {
     };
     let batches_read = pending.len();
     let first = pending.first();
-    let first_source_id = first
-        .map(|(_, b)| b.source_id.clone())
-        .unwrap_or_default();
+    let first_source_id = first.map(|(_, b)| b.source_id.clone()).unwrap_or_default();
     let first_triple_count = first.map(|(_, b)| b.events.len()).unwrap_or(0);
 
     // Consume the first batch.
@@ -627,6 +618,7 @@ fn mk_smoke_triple(src_id: &str, dst_id: &str, ts: i64) -> RawIngestEvent {
         rel_type: RelationType::Auth,
         rel_metadata: HashMap::new(),
         timestamp: ts,
+        raw_line: None,
     }
 }
 
@@ -655,7 +647,13 @@ impl LogParser for SmokeParser {
 
     fn parse_raw(&self, _data: &str) -> Vec<RawIngestEvent> {
         (0..self.triples_per_call)
-            .map(|i| mk_smoke_triple(&format!("smoke-u-{i}"), &format!("smoke-p-{i}"), 100 + i as i64))
+            .map(|i| {
+                mk_smoke_triple(
+                    &format!("smoke-u-{i}"),
+                    &format!("smoke-p-{i}"),
+                    100 + i as i64,
+                )
+            })
             .collect()
     }
 }

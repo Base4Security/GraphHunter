@@ -9,11 +9,10 @@ use std::sync::Arc;
 
 use tauri::State;
 
-use graph_hunter_api::dto::session::{
-    CreateSessionRequest, DeleteSessionRequest, LoadSessionRequest, SaveSessionRequest,
-    SessionInfo,
-};
 use graph_hunter_api::GraphHunterApi;
+use graph_hunter_api::dto::session::{
+    CreateSessionRequest, DeleteSessionRequest, LoadSessionRequest, SaveSessionRequest, SessionInfo,
+};
 
 use crate::error::CommandError;
 use crate::state::AppState;

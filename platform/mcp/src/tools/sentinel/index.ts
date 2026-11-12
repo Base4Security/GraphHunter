@@ -3,6 +3,7 @@ import { sentinelSeed } from "./seed.js";
 import { schemaDiscover, sentinelSchema } from "./schema.js";
 import { sentinelQuery } from "./query.js";
 import { sentinelStatus } from "./status.js";
+import { sentinelControl } from "./control.js";
 
 export const sentinelTools: Tool[] = [
   sentinelSeed,
@@ -10,4 +11,5 @@ export const sentinelTools: Tool[] = [
   sentinelSchema, // deprecated alias for schema_discover
   sentinelQuery,
   sentinelStatus,
+  sentinelControl,
 ];

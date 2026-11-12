@@ -323,8 +323,7 @@ impl KHopReach {
         // Track which vertex indices we've already processed so the
         // cascade is a BFS — every vertex pays at most one
         // re-build step.
-        let mut visited: std::collections::HashSet<u32> =
-            std::collections::HashSet::new();
+        let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut frontier: Vec<StrId> = vec![u];
         visited.insert(u.index() as u32);
 
@@ -345,11 +344,7 @@ impl KHopReach {
                 if x_idx >= self.bits.len() {
                     continue;
                 }
-                let x_rank_raw = self
-                    .rank
-                    .get(x_idx)
-                    .copied()
-                    .unwrap_or(NO_RANK);
+                let x_rank_raw = self.rank.get(x_idx).copied().unwrap_or(NO_RANK);
 
                 // Walk x's outgoing edges via the streaming
                 // backend (which already has the just-appended
@@ -465,7 +460,7 @@ impl KHopReach {
     /// M2 — time-aware predicate. Returns `true` iff `sid` can reach
     /// every label in `required_mask` *and*, when a `time_window` is
     /// provided, at least one structural path's first edge could plausibly
-    /// fall inside `[lo, hi)`. When `time_window` is `None` this reduces
+    /// fall inside `[lo, hi]`. When `time_window` is `None` this reduces
     /// to `can_reach`. Out-of-range `sid` conservatively passes; vertices
     /// with no rank (no outgoing edges) also pass — they have no
     /// temporal info to refute the predicate.
@@ -507,7 +502,8 @@ impl KHopReach {
                 if l >= NLF_TYPE_COUNT {
                     continue;
                 }
-                if mins[l] >= hi || maxs[l] < lo {
+                // Inclusive on both ends, like the DFS's window.
+                if mins[l] > hi || maxs[l] < lo {
                     return false;
                 }
             }
@@ -534,10 +530,13 @@ pub fn end_type_mask(hypothesis: &Hypothesis) -> u16 {
 }
 
 /// Skip the prune pass when the requirement is trivial (zero mask, or
-/// hypothesis is single-step — NLF B2 already handles 1-hop).
+/// hypothesis is single-step — NLF B2 already handles 1-hop) or when
+/// the hypothesis is deeper than `MAX_DEPTH`: the bitmap only covers
+/// types reachable within `MAX_DEPTH` hops, so a final type first
+/// reachable further out would be pruned wrongly.
 #[inline]
 pub fn is_trivial(mask: u16, hypothesis: &Hypothesis) -> bool {
-    mask == 0 || hypothesis.steps.len() <= 1
+    mask == 0 || hypothesis.steps.len() <= 1 || hypothesis.steps.len() > MAX_DEPTH
 }
 
 #[cfg(test)]
@@ -553,7 +552,8 @@ mod tests {
         let mut g = GraphHunter::new();
         g.add_entity(Entity::new("u1", EntityType::User)).unwrap();
         g.add_entity(Entity::new("h1", EntityType::Host)).unwrap();
-        g.add_entity(Entity::new("p1", EntityType::Process)).unwrap();
+        g.add_entity(Entity::new("p1", EntityType::Process))
+            .unwrap();
         g.add_entity(Entity::new("ip1", EntityType::IP)).unwrap();
         g.add_relation(Relation::new("u1", "h1", RelationType::Auth, 100))
             .unwrap();
@@ -779,13 +779,11 @@ mod tests {
 
         for sid_str in ["u1", "h1", "p1", "ip1"] {
             let sid = g.interner.get(sid_str).unwrap();
-            let rebuilt_bits =
-                rebuilt.bits.get(sid.index()).copied().unwrap_or(0);
+            let rebuilt_bits = rebuilt.bits.get(sid.index()).copied().unwrap_or(0);
             let fresh_bits = fresh.bits.get(sid.index()).copied().unwrap_or(0);
             // Rebuilt index must be bit-equivalent to a fresh build.
             assert_eq!(
-                rebuilt_bits,
-                fresh_bits,
+                rebuilt_bits, fresh_bits,
                 "{sid_str}: rebuilt bits 0x{rebuilt_bits:x} must equal fresh bits 0x{fresh_bits:x}",
             );
         }
@@ -833,17 +831,15 @@ mod tests {
         // Star: 200 hosts all pointing at the same IP, plus a Process node that
         // will be wired in post-finalize.
         for i in 0..200 {
-            g.add_entity(Entity::new(
-                &format!("h{i}"),
-                EntityType::Host,
-            ))
-            .unwrap();
+            g.add_entity(Entity::new(format!("h{i}"), EntityType::Host))
+                .unwrap();
         }
         g.add_entity(Entity::new("ip1", EntityType::IP)).unwrap();
-        g.add_entity(Entity::new("p1", EntityType::Process)).unwrap();
+        g.add_entity(Entity::new("p1", EntityType::Process))
+            .unwrap();
         for i in 0..200 {
             g.add_relation(Relation::new(
-                &format!("h{i}"),
+                format!("h{i}"),
                 "ip1",
                 RelationType::Connect,
                 100 + i,
@@ -853,7 +849,10 @@ mod tests {
         // Finalize (sort) and build the k-hop index.
         g.sort_edges_by_timestamp().unwrap();
         let _ = g.ensure_khop_reach();
-        assert!(g.khop_reach_is_built(), "khop_reach must be built after ensure_khop_reach");
+        assert!(
+            g.khop_reach_is_built(),
+            "khop_reach must be built after ensure_khop_reach"
+        );
 
         // Post-finalize append via the production path: add_relation fires
         // on_streaming_edge_appended → finalized-gate → OnceLock reset.

@@ -53,6 +53,7 @@
 - [Core Engine Details](#core-engine-details)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
+- [Maintainers & Support](#maintainers--support)
 - [License](#license)
 
 ---
@@ -351,6 +352,13 @@ cycle end-to-end against a live/test workspace.
 | **AI Analysis** — AI-assisted threat hunting; natural-language hunts | ![AI Analysis](docs/images/screenshot-aianalysis.png) |
 
 ---
+
+## Maintainers & Support
+
+- **Maintained by:** Base4 Security R&D — [idi@base4security.com](mailto:idi@base4security.com).
+- **Security issues:** report privately, see [SECURITY.md](SECURITY.md). Do not open public issues.
+- **Builds:** the desktop app is built with `npm run tauri build` from `apps/tauri` (see [Installation](#installation)). There is no hosted service to deploy.
+- **Development standard:** changes go through pull requests against `main` and must pass the CI checks in [.github/workflows](.github/workflows) (tests, lint, secret scanning, dependency audit, SAST). Context for AI coding assistants lives in [CLAUDE.md](CLAUDE.md); the system record (owner, scope level, controls) in [FICHA.md](FICHA.md).
 
 ## License
 
