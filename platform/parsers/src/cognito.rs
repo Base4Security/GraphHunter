@@ -232,9 +232,7 @@ fn extract_py_dict_value(dict_str: &str, key: &str) -> Option<String> {
         let value_start = start + unquoted.len();
         let rest = &dict_str[value_start..];
         // Value ends at comma, closing brace, or end of string
-        let end = rest
-            .find(|c: char| c == ',' || c == '}')
-            .unwrap_or(rest.len());
+        let end = rest.find([',', '}']).unwrap_or(rest.len());
         let value = rest[..end].trim();
         if value != "None" && !value.is_empty() {
             return Some(value.to_string());
@@ -263,11 +261,7 @@ fn parse_cloudwatch_json(data: &str) -> Vec<ParsedTriple> {
             .trim_start_matches(',')
             .trim();
         if line.starts_with('{') {
-            let json_str = if line.ends_with(',') {
-                &line[..line.len() - 1]
-            } else {
-                line
-            };
+            let json_str = line.strip_suffix(',').unwrap_or(line);
             let json_str = json_str.trim_end_matches(']');
             if let Ok(v) = serde_json::from_str::<Value>(json_str) {
                 entries.push(v);
@@ -276,10 +270,10 @@ fn parse_cloudwatch_json(data: &str) -> Vec<ParsedTriple> {
     }
 
     // Fallback: if line-by-line found nothing, try full array parse (for tests/small files)
-    if entries.is_empty() {
-        if let Ok(arr) = serde_json::from_str::<Vec<Value>>(trimmed) {
-            entries = arr;
-        }
+    if entries.is_empty()
+        && let Ok(arr) = serde_json::from_str::<Vec<Value>>(trimmed)
+    {
+        entries = arr;
     }
 
     for entry in &entries {

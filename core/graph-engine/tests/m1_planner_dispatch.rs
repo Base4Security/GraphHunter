@@ -1,20 +1,26 @@
 //! M1 — end-to-end integration test for the planner-driven dispatch.
 //!
-//! S3 already covers the legacy name-marker route via
-//! `tests/k4_lftj_dispatch.rs`. M1 adds a *structural* route gated by
-//! `GRAPHHUNTER_LFTJ_PLANNER=1`: a six-step homogeneous hypothesis
-//! routes to the K4 LFTJ enumerator without needing the `k4-clique`
-//! name marker. This test verifies:
+//! **Revised: shape alone no longer dispatches.** This file originally
+//! asserted that a six-step homogeneous hypothesis routes to the K4 LFTJ
+//! enumerator *without* the `k4-clique` marker — i.e. purely on shape.
+//! That behaviour was the bug: a homogeneous 6-step chain is the ordinary
+//! way to author "a 6-hop path", and it merely happens to share an edge
+//! count with a 4-clique. With `GRAPHHUNTER_LFTJ_PLANNER=1` (which both
+//! shipped apps set at startup) such a hypothesis silently came back with
+//! cliques instead of paths. See `tests/lftj_dfs_parity.rs` for the
+//! demonstration and `planner.rs::structural_dispatch` for the fix.
+//!
+//! The structural route still exists, but now requires the author's
+//! explicit marker in addition to the shape. This test verifies:
 //!
 //! 1. With the planner env var off, a six-step Host→Connect→Host
-//!    hypothesis runs through DFS-Match and returns the regular
-//!    "single-edge path per match" semantics.
-//! 2. With the planner env var on, the *same* hypothesis dispatches to
-//!    the LFTJ enumerator and returns one K4 tuple
-//!    (`["a","b","c","d"]`).
-//! 3. The structural detector is conservative: a hypothesis with five
-//!    steps does NOT dispatch even with the env var on — confirms we
-//!    don't accidentally route arbitrary chains.
+//!    hypothesis runs through DFS-Match.
+//! 2. With the planner env var on but NO marker, it still runs through
+//!    DFS-Match — the author asked for a path and gets paths.
+//! 3. With the planner env var on AND the `k4-clique` marker, it
+//!    dispatches to the LFTJ enumerator and returns one K4 tuple.
+//! 4. The structural detector is conservative: a five-step hypothesis
+//!    does NOT dispatch even when marked and enabled.
 
 use graph_hunter_core::{
     Entity, EntityType, GraphHunter, Hypothesis, HypothesisStep, Relation, RelationType,
@@ -94,11 +100,40 @@ fn structural_route_off_by_default_falls_back_to_dfs() {
     );
 }
 
+/// An UNMARKED six-step chain must stay on the DFS even with the planner
+/// enabled — the author wrote a path query, not a clique query. This is
+/// the regression guard for the shape-is-not-intent fix.
 #[test]
-fn structural_route_dispatches_when_env_set() {
+fn unmarked_six_step_chain_stays_on_dfs_even_with_planner_on() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let g = k4_graph();
     let h = six_homogeneous_steps("plain six-step probe (no marker)");
+    unsafe {
+        std::env::remove_var("GRAPHHUNTER_K4_LFTJ");
+        std::env::set_var("GRAPHHUNTER_LFTJ_PLANNER", "1");
+    }
+    let (results, _truncated) = g.search_temporal_pattern(&h, None, None).unwrap();
+    unsafe {
+        std::env::remove_var("GRAPHHUNTER_LFTJ_PLANNER");
+    }
+    // The K4 enumerator would return exactly one 4-tuple ["a","b","c","d"].
+    // The DFS finds no 6-hop chronological chain through only 4 vertices.
+    assert_ne!(
+        results.len(),
+        1,
+        "an unmarked six-step chain must NOT be routed to the clique \
+         enumerator; getting exactly one K4 tuple means shape-based routing \
+         came back"
+    );
+}
+
+/// The complement: WITH the marker, the structural route still works and
+/// still reaches the fast operator. Narrowing must not disable the feature.
+#[test]
+fn marked_six_step_chain_dispatches_when_env_set() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let g = k4_graph();
+    let h = six_homogeneous_steps("k4-clique probe");
     unsafe {
         std::env::remove_var("GRAPHHUNTER_K4_LFTJ");
         std::env::set_var("GRAPHHUNTER_LFTJ_PLANNER", "1");
@@ -111,7 +146,7 @@ fn structural_route_dispatches_when_env_set() {
     assert_eq!(
         results.len(),
         1,
-        "structural route should dispatch to K4 LFTJ → exactly one K4 tuple"
+        "a marked k4-clique hypothesis should dispatch to K4 LFTJ → one tuple"
     );
     let tuple: Vec<&str> = results[0].iter().map(|s| &**s).collect();
     assert_eq!(tuple, vec!["a", "b", "c", "d"]);

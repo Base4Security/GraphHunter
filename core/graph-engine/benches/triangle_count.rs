@@ -60,10 +60,10 @@ fn bench_triangles(c: &mut Criterion) {
     // overlap size.
     let cases: &[(usize, f64)] = if big {
         &[
-            (1_000, 0.005),  // ~5K edges,  sparse
-            (1_000, 0.02),   // ~20K edges, mid
-            (1_000, 0.05),   // ~50K edges, dense
-            (2_000, 0.01),   // ~40K edges, mid at larger n
+            (1_000, 0.005), // ~5K edges,  sparse
+            (1_000, 0.02),  // ~20K edges, mid
+            (1_000, 0.05),  // ~50K edges, dense
+            (2_000, 0.01),  // ~40K edges, mid at larger n
         ]
     } else {
         &[
@@ -86,21 +86,15 @@ fn bench_triangles(c: &mut Criterion) {
         let label = format!("V={n},E={},T={}", trie.edge_count(), naive);
 
         let mut group = c.benchmark_group("triangle-count");
-        group.bench_with_input(
-            BenchmarkId::new("naive", &label),
-            &trie,
-            |b, t| b.iter(|| black_box(count_triangles_naive(black_box(t)))),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("lftj", &label),
-            &trie,
-            |b, t| b.iter(|| black_box(count_triangles_lftj(black_box(t)))),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("lftj+simd", &label),
-            &trie,
-            |b, t| b.iter(|| black_box(count_triangles_lftj_simd(black_box(t)))),
-        );
+        group.bench_with_input(BenchmarkId::new("naive", &label), &trie, |b, t| {
+            b.iter(|| black_box(count_triangles_naive(black_box(t))))
+        });
+        group.bench_with_input(BenchmarkId::new("lftj", &label), &trie, |b, t| {
+            b.iter(|| black_box(count_triangles_lftj(black_box(t))))
+        });
+        group.bench_with_input(BenchmarkId::new("lftj+simd", &label), &trie, |b, t| {
+            b.iter(|| black_box(count_triangles_lftj_simd(black_box(t))))
+        });
         // Canonical chain a<b<c on StrIds. On bidirectional fixtures
         // canonical * 6 == naive (verified at the unit-test level on
         // the bidirectional triangle); on directed ER each ordering
@@ -115,9 +109,7 @@ fn bench_triangles(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("lftj+simd+canonical+par", &label),
             &trie,
-            |b, t| {
-                b.iter(|| black_box(count_triangles_canonical_lftj_simd_par(black_box(t))))
-            },
+            |b, t| b.iter(|| black_box(count_triangles_canonical_lftj_simd_par(black_box(t)))),
         );
         group.finish();
     }

@@ -264,6 +264,84 @@ pub type ChunkStream = BoxStream<'static, Result<RawChunk, SourceError>>;
 /// after successfully processing it.
 pub type PollStream = BoxStream<'static, Result<(RawChunk, Watermark), SourceError>>;
 
+/// What a source can and cannot promise about the data it yields. Declared,
+/// not inferred: a connector states these so the upper layers never assume a
+/// guarantee (append-only, ordering, stable ids, backfill) the source can't
+/// actually keep. The conservative `Default` assumes no guarantees.
+///
+/// SOT context: this is the "capabilities" the ADR
+/// (`docs/adr/ADR-SOT-source-independent-ingestion.md`, Clase de realización R)
+/// and the design spec §6 require each connector to declare. It closes the
+/// S6 assessment gap (`docs/architecture/sot-integration-assessment.md`): the
+/// trait previously had no runtime capability surface, only `available_tables()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCapabilities {
+    /// The source only ever adds records; it never rewrites history in place.
+    pub append_only: bool,
+    /// The source can emit corrected versions of previously-emitted records.
+    pub supports_corrections: bool,
+    /// The source can signal that a previously-emitted record was deleted.
+    pub supports_deletions: bool,
+    /// Records arrive in a stable order (e.g. non-decreasing event time).
+    pub guarantees_order: bool,
+    /// Every record carries a stable, source-native unique id.
+    pub stable_event_ids: bool,
+    /// The source supports paged retrieval of a result set.
+    pub supports_pagination: bool,
+    /// The source supports server-side filtering by time range.
+    pub supports_time_filter: bool,
+    /// The source supports server-side filtering by field/column value.
+    pub supports_field_filter: bool,
+    /// The source supports fetching a bounded historical range on demand.
+    pub supports_backfill: bool,
+    /// The source distinguishes event time from ingestion time per record.
+    pub provides_event_and_ingestion_time: bool,
+    /// A known upper bound on how stale the source can be, if any.
+    pub max_known_lag: Option<Duration>,
+    /// The resume checkpoint is opaque (a string the upper layer must not
+    /// interpret) rather than a structured, interpretable cursor.
+    pub opaque_checkpoints: bool,
+}
+
+impl Default for SourceCapabilities {
+    fn default() -> Self {
+        // Conservative: promise nothing. An undeclared source is treated as
+        // unordered, id-less, correction-less, non-backfillable.
+        SourceCapabilities {
+            append_only: false,
+            supports_corrections: false,
+            supports_deletions: false,
+            guarantees_order: false,
+            stable_event_ids: false,
+            supports_pagination: false,
+            supports_time_filter: false,
+            supports_field_filter: false,
+            supports_backfill: false,
+            provides_event_and_ingestion_time: false,
+            max_known_lag: None,
+            opaque_checkpoints: true,
+        }
+    }
+}
+
+impl SourceCapabilities {
+    /// Preset for a KQL query API (Log Analytics / Data Lake v2 / Defender
+    /// XDR): an append-only log queryable with server-side time and field
+    /// filters and pagination, backfillable by widening the time range, with
+    /// no stable per-row id and no correction/deletion semantics.
+    pub fn kql_query_source() -> Self {
+        SourceCapabilities {
+            append_only: true,
+            supports_pagination: true,
+            supports_time_filter: true,
+            supports_field_filter: true,
+            supports_backfill: true,
+            opaque_checkpoints: true,
+            ..SourceCapabilities::default()
+        }
+    }
+}
+
 /// The log source trait implemented by every Azure connector. Object-safe
 /// via `#[async_trait]` — callers can hold `Vec<Arc<dyn LogSource>>` and
 /// iterate to dispatch across all connected sources.
@@ -271,6 +349,10 @@ pub type PollStream = BoxStream<'static, Result<(RawChunk, Watermark), SourceErr
 /// Implementations must be `Send + Sync` because connector tasks spawn
 /// them on the tokio multi-thread runtime. State that needs interior
 /// mutation should live behind `Mutex` or `RwLock`.
+// `async_trait` tags every generated method with `#[must_use]` even though
+// the returned `Pin<Box<dyn Future>>` already is; the lint fires on the
+// macro expansion, not on code written here.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait LogSource: Send + Sync {
     /// Stable identifier for this source instance. Typically a combination
@@ -286,6 +368,13 @@ pub trait LogSource: Send + Sync {
     /// table a workspace has, just the ones GraphHunter knows how to
     /// parse into `ParsedTriple`s.
     fn available_tables(&self) -> &[&'static str];
+
+    /// What this source can and cannot promise. Declared per-connector so the
+    /// upper layers never assume an unbacked guarantee. The default is the
+    /// conservative "promise nothing"; real sources override it.
+    fn capabilities(&self) -> SourceCapabilities {
+        SourceCapabilities::default()
+    }
 
     /// Credential freshness probe. Should NOT actually hit a data
     /// endpoint — just verify the token is valid (token cache lookup +
@@ -505,5 +594,44 @@ mod tests {
         assert_eq!(format!("{e}"), "throttled, retry after 30s");
         let e = SourceError::Schema("unknown field Foo".to_string());
         assert_eq!(format!("{e}"), "schema drift: unknown field Foo");
+    }
+
+    #[test]
+    fn default_capabilities_are_conservative() {
+        // The conservative default: assume the worst (no guarantees) so a
+        // source that hasn't declared its capabilities can never be treated
+        // as append-only, ordered, or stable-id'd by mistake.
+        let c = SourceCapabilities::default();
+        assert!(!c.append_only);
+        assert!(!c.guarantees_order);
+        assert!(!c.stable_event_ids);
+        assert!(!c.supports_backfill);
+        assert!(c.opaque_checkpoints);
+        assert!(c.max_known_lag.is_none());
+    }
+
+    #[test]
+    fn kql_query_source_preset_declares_pagination_and_time_filter() {
+        let c = SourceCapabilities::kql_query_source();
+        assert!(c.supports_pagination);
+        assert!(c.supports_time_filter);
+        assert!(c.supports_field_filter);
+        assert!(c.supports_backfill);
+        // KQL query APIs are append-only logs with no stable per-row id and
+        // no correction/deletion semantics.
+        assert!(c.append_only);
+        assert!(!c.supports_corrections);
+        assert!(!c.supports_deletions);
+        assert!(!c.stable_event_ids);
+    }
+
+    #[test]
+    fn trait_default_capabilities_matches_struct_default() {
+        let m = MockSource {
+            id: "cap".to_string(),
+            tables: vec!["SecurityEvent"],
+        };
+        // MockSource does NOT override capabilities(), so it gets the default.
+        assert_eq!(m.capabilities(), SourceCapabilities::default());
     }
 }

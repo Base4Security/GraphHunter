@@ -47,11 +47,6 @@ use graph_hunter_dsl::types::RelationType;
 use crate::graph::{GraphHunter, HuntResult};
 use crate::interner::StrId;
 
-#[inline]
-fn rel_tag_matches(pattern: &RelationType, tag: u8) -> bool {
-    *pattern == RelationType::Any || pattern.to_u8() == tag
-}
-
 /// A variable in the hypergraph view of a hypothesis.
 ///
 /// One `VarId` per *distinct* vertex position. For a linear chain
@@ -129,9 +124,7 @@ impl Hypergraph {
         // its own unique var; explicit bindings are the only
         // mechanism that ties positions together.
         let mut position_to_var: Vec<u32> = match hypothesis.shape {
-            graph_hunter_dsl::hypothesis::HypothesisShape::Chain => {
-                (0..=n_steps as u32).collect()
-            }
+            graph_hunter_dsl::hypothesis::HypothesisShape::Chain => (0..=n_steps as u32).collect(),
             graph_hunter_dsl::hypothesis::HypothesisShape::Graph => {
                 // Two unique slots per step: one for origin, one
                 // for dest. Total = 2 * n_steps positions. We map
@@ -245,6 +238,7 @@ impl Hypergraph {
 ///     "ear" — its non-shared endpoint);
 ///   * remove that hyperedge;
 ///   * repeat.
+///
 /// All hyperedges eliminated ⇒ α-acyclic. Some hyperedges remain
 /// with all endpoints of degree ≥ 2 ⇒ the primal graph contains a
 /// cycle ⇒ not α-acyclic. The returned `Vec<usize>` is the
@@ -266,8 +260,7 @@ pub fn gyo_reduce(g: &Hypergraph) -> Option<Vec<usize>> {
         }
 
         // Vertex degree count over the alive edges.
-        let mut degree: std::collections::HashMap<VarId, usize> =
-            std::collections::HashMap::new();
+        let mut degree: std::collections::HashMap<VarId, usize> = std::collections::HashMap::new();
         for &i in &alive_edges {
             let (a, b) = g.edges[i].endpoints();
             *degree.entry(a).or_insert(0) += 1;
@@ -282,12 +275,10 @@ pub fn gyo_reduce(g: &Hypergraph) -> Option<Vec<usize>> {
             degree.get(&a) == Some(&1) || degree.get(&b) == Some(&1)
         });
 
-        match ear {
-            Some(idx) => {
-                order.push(idx);
-                alive[idx] = false;
-            }
-            None => return None,
+        {
+            let idx = ear?;
+            order.push(idx);
+            alive[idx] = false;
         }
     }
 
@@ -371,15 +362,118 @@ impl JoinTree {
         // Reverse iterate: skip the root (already pushed).
         for &edge_idx in elimination.iter().rev().skip(1) {
             let (a, b) = g.edges[edge_idx].endpoints();
-            // Find the existing tree node sharing a variable.
+            // Parent = an already-placed node sharing a variable. A
+            // DISCONNECTED hypergraph (α-acyclic but with independent
+            // components — e.g. a Graph-shape hypothesis with no shared
+            // bindings) has ears that share a var with NOTHING placed yet;
+            // such an ear is its own component root. Previously this was an
+            // `.expect(...)` that PANICKED on that case — a latent crash for
+            // any disconnected Graph hypothesis reaching this function.
+            // Falling back to self-as-root (position `nodes.len()`, the slot
+            // this node is about to occupy) makes `build` total.
             let parent_pos = nodes
                 .iter()
                 .position(|&n_idx| g.edges[n_idx].contains(a) || g.edges[n_idx].contains(b))
-                .expect("GYO invariant: every non-root ear shares a var with the surviving core");
+                .unwrap_or(nodes.len());
             nodes.push(edge_idx);
             parent.push(parent_pos);
         }
         Some(Self { nodes, parent })
+    }
+}
+
+/// Selectivity-greedy connected visitation order for the tree-walk
+/// enumerator — variable ordering (RI/DAF-style) applied to the one shape
+/// that actually has the freedom for it.
+///
+/// A temporal *chain* carries a cross-edge ordering constraint
+/// (monotone timestamps), so its steps cannot be permuted. A Graph/tree
+/// hypothesis does not: [`enumerate_tree`] is atemporal (see its doc), so
+/// its branches may be visited in any order. This function orders them
+/// smallest-bag-first, keeping each next branch connected to the already-
+/// placed prefix, so every non-seed node has a bound endpoint and becomes
+/// an indexed lookup instead of the full-bag `(None, None)` scan.
+///
+/// **Correctness is not at stake here, only speed.** `enumerate_tree`
+/// computes the same natural join in any node order — a mis-ordered
+/// (disconnected) pick merely hits the full-bag branch and still filters
+/// to the identical join. So this is a pure heuristic; a bug in it can
+/// slow a query but can never change the returned set. The replaced
+/// [`JoinTree::build`] order was the GYO elimination order, which is
+/// structural and cardinality-blind.
+///
+/// Returns a [`JoinTree`] whose `nodes` is a permutation of the edge
+/// indices `0..n` and whose `parent` is a consistent connected parent
+/// pointer over that order (component roots point at themselves).
+/// `parent` is kept consistent for struct hygiene even though
+/// `enumerate_tree` never reads it.
+fn selectivity_join_tree(g: &Hypergraph, bags: &[Bag]) -> JoinTree {
+    seeded_join_tree(g, bags, None)
+}
+
+/// [`selectivity_join_tree`], optionally seeded on a clause that touches
+/// `seed`: the walk then starts where a pre-bound variable is, so its first
+/// step is an indexed lookup instead of a full-bag scan.
+fn seeded_join_tree(g: &Hypergraph, bags: &[Bag], seed: Option<VarId>) -> JoinTree {
+    let n = g.edges.len();
+    if n == 0 {
+        return JoinTree {
+            nodes: Vec::new(),
+            parent: Vec::new(),
+        };
+    }
+
+    let mut placed: Vec<usize> = Vec::with_capacity(n);
+    let mut used = vec![false; n];
+    let mut covered: std::collections::HashSet<VarId> = std::collections::HashSet::new();
+
+    // Seed the smallest bag overall; ties break to the lowest index
+    // (min_by_key returns the first minimum) so the order is deterministic.
+    let seed = (0..n)
+        .filter(|&i| seed.is_none_or(|v| g.edges[i].contains(v)))
+        .min_by_key(|&i| bags[i].len())
+        .or_else(|| (0..n).min_by_key(|&i| bags[i].len()))
+        .unwrap();
+    placed.push(seed);
+    used[seed] = true;
+    covered.insert(g.edges[seed].origin);
+    covered.insert(g.edges[seed].dest);
+
+    while placed.len() < n {
+        // Prefer the smallest unplaced bag that shares a variable with
+        // the placed prefix (the running-intersection guard that keeps
+        // it an indexed lookup). If none do — a disconnected component —
+        // restart from the smallest remaining bag (Cartesian product;
+        // still correct, just no shared key to prune on).
+        let next = (0..n)
+            .filter(|&i| !used[i])
+            .filter(|&i| covered.contains(&g.edges[i].origin) || covered.contains(&g.edges[i].dest))
+            .min_by_key(|&i| bags[i].len())
+            .or_else(|| (0..n).filter(|&i| !used[i]).min_by_key(|&i| bags[i].len()));
+        let pick = next.expect("placed.len() < n guarantees an unused edge");
+        placed.push(pick);
+        used[pick] = true;
+        covered.insert(g.edges[pick].origin);
+        covered.insert(g.edges[pick].dest);
+    }
+
+    // Parent = position of the first earlier-placed edge sharing a var;
+    // a component root (none earlier shares) points at itself. O(n²), and
+    // n is the step count (≤ a handful).
+    let mut parent = vec![0usize; n];
+    for p in 0..n {
+        let e = &g.edges[placed[p]];
+        parent[p] = (0..p)
+            .find(|&q| {
+                let pe = &g.edges[placed[q]];
+                pe.contains(e.origin) || pe.contains(e.dest)
+            })
+            .unwrap_or(p);
+    }
+
+    JoinTree {
+        nodes: placed,
+        parent,
     }
 }
 
@@ -426,18 +520,13 @@ impl Bag {
 /// O(|E|) per step; identical work to what the DFS does inline,
 /// just batched up-front so the semi-join reducer can prune dead
 /// rows before enumeration runs.
-pub fn materialize_bag(
-    graph: &GraphHunter,
-    step: &HypothesisStep,
-    t_lo: i64,
-    t_hi: i64,
-) -> Bag {
+pub fn materialize_bag(graph: &GraphHunter, step: &HypothesisStep, t_lo: i64, t_hi: i64) -> Bag {
     let mut rows = Vec::new();
     graph.streaming.for_each_edge(|src_sid, edge| {
         if edge.timestamp < t_lo || edge.timestamp > t_hi {
             return;
         }
-        if !rel_tag_matches(&step.relation_type, edge.rel_type_tag) {
+        if !graph.edge_rel_matches(&step.relation_type, edge.rel_type_tag, edge.metadata_offset) {
             return;
         }
         if !graph.fast_type_matches(&step.origin_type, src_sid) {
@@ -452,10 +541,8 @@ pub fn materialize_bag(
             } else {
                 std::collections::HashMap::new()
             };
-            if !graph_hunter_dsl::hypothesis::all_predicates_match(
-                &step.edge_predicates,
-                &metadata,
-            ) {
+            if !graph_hunter_dsl::hypothesis::all_predicates_match(&step.edge_predicates, &metadata)
+            {
                 return;
             }
         }
@@ -490,7 +577,7 @@ pub fn materialize_bag(
 /// whose `origin` does not appear as `dest` in `bag[i-1]`.
 ///
 /// After both passes every surviving row participates in at least
-/// one structural full join. Temporal strictness (`t_i < t_{i+1}`)
+/// one structural full join. Temporal order (`t_i <= t_{i+1}`)
 /// is *not* enforced here — that's a per-row constraint applied
 /// during enumeration. Conservative: we keep rows that the temporal
 /// filter might still drop, but never drop rows that could survive.
@@ -504,8 +591,7 @@ pub fn semijoin_reduce_chain(bags: &mut [Bag]) {
     // Bottom-up pass: each bag[i] keeps only rows whose dest is
     // some origin in bag[i+1].
     for i in (0..n - 1).rev() {
-        let live_origins: HashSet<StrId> =
-            bags[i + 1].rows.iter().map(|r| r.origin).collect();
+        let live_origins: HashSet<StrId> = bags[i + 1].rows.iter().map(|r| r.origin).collect();
         bags[i].rows.retain(|r| live_origins.contains(&r.dest));
     }
 
@@ -518,12 +604,12 @@ pub fn semijoin_reduce_chain(bags: &mut [Bag]) {
 }
 
 /// Enumerate every full path through the (already-reduced) chain
-/// of bags, respecting strict temporal ordering and `k_simplicity`.
+/// of bags, respecting non-strict temporal ordering and `k_simplicity`.
 /// Returns up to `cap` paths as resolved `HuntResult` (one
 /// `Arc<str>` per visited vertex, length = `n_steps + 1`).
 ///
 /// Algorithm: for each row in `bag[0]`, walk the chain looking for
-/// `bag[i+1]` rows where `origin == prev.dest` and `timestamp >
+/// `bag[i+1]` rows where `origin == prev.dest` and `timestamp >=
 /// prev.timestamp`. Standard depth-first chain enumeration; the
 /// reducer's pruning means we never expand a row that has no live
 /// continuation.
@@ -539,7 +625,7 @@ pub fn enumerate_chain(
 /// L2 stage 3b — resumable chain enumerator. Caller can pass a
 /// `starting` slice of partial paths (each pair: full
 /// `Vec<StrId>` of vertices visited so far + the timestamp of
-/// the most recent edge, so the strictly-increasing temporal
+/// the most recent edge, so the non-decreasing temporal
 /// constraint holds across the resume boundary) and a
 /// `start_depth` denoting which step to walk next. When
 /// `start_depth == 0` and `starting.is_empty()` the function
@@ -589,6 +675,9 @@ pub fn enumerate_chain_from_prefix(
         true
     }
 
+    // Recursive enumeration state passed explicitly; a context struct
+    // would add indirection on the hot path without improving clarity.
+    #[allow(clippy::too_many_arguments)]
     fn recurse(
         graph: &GraphHunter,
         bags: &[Bag],
@@ -612,13 +701,16 @@ pub fn enumerate_chain_from_prefix(
             out.push(result);
             return;
         }
-        let last = *path_sids.last().expect("path always has the chain start before recursing");
+        let last = *path_sids
+            .last()
+            .expect("path always has the chain start before recursing");
         let candidates = match by_origin[step_idx].get(&last) {
             Some(v) => v,
             None => return,
         };
         for row in candidates {
-            if row.timestamp <= last_ts {
+            // Non-strict, like the DFS: same-second steps match.
+            if row.timestamp < last_ts {
                 continue;
             }
             if !k_simplicity_ok(path_sids, row.dest, k_simplicity) {
@@ -747,8 +839,9 @@ pub fn compute_prefix_snapshot(
         true
     }
 
+    // Same explicit recursive state as `recurse` above.
+    #[allow(clippy::too_many_arguments)]
     fn recurse_prefix(
-        bags: &[Bag],
         by_origin: &[std::collections::HashMap<StrId, Vec<&BagRow>>],
         path_sids: &mut Vec<StrId>,
         last_ts: i64,
@@ -771,7 +864,8 @@ pub fn compute_prefix_snapshot(
             None => return,
         };
         for row in candidates {
-            if row.timestamp <= last_ts {
+            // Non-strict, like the DFS: same-second steps match.
+            if row.timestamp < last_ts {
                 continue;
             }
             if !k_ok(path_sids, row.dest, k) {
@@ -779,7 +873,6 @@ pub fn compute_prefix_snapshot(
             }
             path_sids.push(row.dest);
             recurse_prefix(
-                bags,
                 by_origin,
                 path_sids,
                 row.timestamp,
@@ -798,8 +891,6 @@ pub fn compute_prefix_snapshot(
 
     let mut out: Vec<(Vec<StrId>, i64)> = Vec::new();
     let mut path_sids: Vec<StrId> = Vec::with_capacity(depth + 1);
-    let _ = bags;
-    let bags_ref: &[Bag] = bags;
     for row in &bags[0].rows {
         if !k_ok(&path_sids, row.origin, k_simplicity) {
             continue;
@@ -808,7 +899,6 @@ pub fn compute_prefix_snapshot(
         if k_ok(&path_sids, row.dest, k_simplicity) {
             path_sids.push(row.dest);
             recurse_prefix(
-                bags_ref,
                 &by_origin,
                 &mut path_sids,
                 row.timestamp,
@@ -855,6 +945,7 @@ fn enumerate_tree(
     bags: &[Bag],
     cap: usize,
     k_simplicity: usize,
+    window: Option<i64>,
 ) -> Vec<HuntResult> {
     if join_tree.nodes.is_empty() || cap == 0 {
         return Vec::new();
@@ -862,58 +953,33 @@ fn enumerate_tree(
     let n_vars = hypergraph.n_vars;
     let n_nodes = join_tree.nodes.len();
 
-    // Per-bag indexes, both directions. Joining can come from
-    // either side: a child bag whose origin-var is shared with
-    // the parent looks up by origin; a child whose dest-var is
-    // shared looks up by dest. Building both indexes upfront
-    // keeps the recursion branchless beyond a single match.
-    let by_origin: Vec<std::collections::HashMap<StrId, Vec<&BagRow>>> = bags
-        .iter()
-        .map(|b| {
-            let mut m: std::collections::HashMap<StrId, Vec<&BagRow>> =
-                std::collections::HashMap::new();
-            for row in &b.rows {
-                m.entry(row.origin).or_default().push(row);
-            }
-            m
-        })
-        .collect();
-    let by_dest: Vec<std::collections::HashMap<StrId, Vec<&BagRow>>> = bags
-        .iter()
-        .map(|b| {
-            let mut m: std::collections::HashMap<StrId, Vec<&BagRow>> =
-                std::collections::HashMap::new();
-            for row in &b.rows {
-                m.entry(row.dest).or_default().push(row);
-            }
-            m
-        })
-        .collect();
+    // Rows grouped by node pair, in first-seen order so the walk stays
+    // deterministic. The walk binds nodes, so a pair observed many times is
+    // one candidate; its timestamps (sorted, distinct) only matter under a
+    // WITHIN window, which picks one of them. Indexed both ways: a child
+    // bag joins its parent on its origin or on its dest.
+    let index: Vec<PairIndex> = bags.iter().map(PairIndex::of).collect();
 
     let mut binding: Vec<Option<StrId>> = vec![None; n_vars];
     let mut out: Vec<HuntResult> = Vec::new();
+    let mut seen: std::collections::HashSet<Vec<StrId>> = std::collections::HashSet::new();
 
     fn k_ok(binding: &[Option<StrId>], candidate: StrId, k: usize) -> bool {
         let mut count = 0usize;
         for slot in binding {
-            if let Some(s) = slot {
-                if *s == candidate {
-                    count += 1;
-                    if count >= k {
-                        return false;
-                    }
+            if let Some(s) = slot
+                && *s == candidate
+            {
+                count += 1;
+                if count >= k {
+                    return false;
                 }
             }
         }
         true
     }
 
-    fn try_bind(
-        binding: &mut [Option<StrId>],
-        var: VarId,
-        value: StrId,
-        k: usize,
-    ) -> bool {
+    fn try_bind(binding: &mut [Option<StrId>], var: VarId, value: StrId, k: usize) -> bool {
         // Existing-binding check first. A separate scope releases
         // the &mut before we run the k_ok &-borrow.
         if let Some(existing) = binding[var.0 as usize] {
@@ -932,32 +998,41 @@ fn enumerate_tree(
         }
     }
 
+    // Recursive enumeration state passed explicitly; a context struct
+    // would add indirection on the hot path without improving clarity.
+    #[allow(clippy::too_many_arguments)]
     fn recurse(
         graph: &GraphHunter,
         hypergraph: &Hypergraph,
         join_tree: &JoinTree,
-        bags: &[Bag],
-        by_origin: &[std::collections::HashMap<StrId, Vec<&BagRow>>],
-        by_dest: &[std::collections::HashMap<StrId, Vec<&BagRow>>],
+        index: &[PairIndex],
         binding: &mut Vec<Option<StrId>>,
         node_idx: usize,
+        span: Option<(i64, i64)>,
+        window: Option<i64>,
         cap: usize,
         k_simplicity: usize,
         out: &mut Vec<HuntResult>,
+        seen: &mut std::collections::HashSet<Vec<StrId>>,
+        // Polled per frame and per candidate; see `crate::cancel`. A
+        // pattern whose clauses share no selective node can walk a cross
+        // product long before it reaches `cap` results.
+        cancel: &std::sync::atomic::AtomicBool,
     ) {
-        if out.len() >= cap {
+        if out.len() >= cap || cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
         if node_idx == join_tree.nodes.len() {
-            // All vars must be bound at this point — emit.
-            let result: HuntResult = binding
+            // All vars are bound: emit, once. Under a window the same
+            // binding can be reached through different timestamps of the
+            // first pair.
+            let key: Vec<StrId> = binding
                 .iter()
-                .map(|sid| {
-                    let s = sid.expect("all vars bound when tree is fully walked");
-                    graph.interner.resolve_arc(s)
-                })
+                .map(|sid| sid.expect("all vars bound when tree is fully walked"))
                 .collect();
-            out.push(result);
+            if seen.insert(key.clone()) {
+                out.push(key.iter().map(|&s| graph.interner.resolve_arc(s)).collect());
+            }
             return;
         }
 
@@ -965,81 +1040,356 @@ fn enumerate_tree(
         let edge = &hypergraph.edges[step];
         let origin_bound = binding[edge.origin.0 as usize];
         let dest_bound = binding[edge.dest.0 as usize];
+        let idx = &index[step];
 
-        // Collect compatible rows in a small Vec so the recursive
-        // call can mutate `binding` freely. The bag is already
-        // pruned by the matcher's predicates and time window;
-        // rows-per-bag is bounded by graph size and typically tiny.
-        let mut candidates: Vec<&BagRow> = Vec::new();
-        match (origin_bound, dest_bound) {
-            (Some(o), _) => {
-                if let Some(rows) = by_origin[step].get(&o) {
-                    candidates.extend(rows.iter().copied());
-                }
-            }
-            (None, Some(d)) => {
-                if let Some(rows) = by_dest[step].get(&d) {
-                    candidates.extend(rows.iter().copied());
-                }
-            }
-            (None, None) => {
-                candidates.extend(bags[step].rows.iter());
-            }
-        }
+        // Collect compatible pairs in a small Vec so the recursive
+        // call can mutate `binding` freely.
+        let candidates: Vec<usize> = match (origin_bound, dest_bound) {
+            (Some(o), _) => idx.by_origin.get(&o).cloned().unwrap_or_default(),
+            (None, Some(d)) => idx.by_dest.get(&d).cloned().unwrap_or_default(),
+            (None, None) => (0..idx.pairs.len()).collect(),
+        };
 
-        for row in candidates {
+        let mut spans: Vec<Option<(i64, i64)>> = Vec::new();
+        for i in candidates {
+            let ((origin, dest), stamps) = &idx.pairs[i];
+            let (origin, dest) = (*origin, *dest);
             // Filter by dest when both sides are pre-bound.
-            if let Some(d) = dest_bound {
-                if row.dest != d {
-                    continue;
-                }
+            if let Some(d) = dest_bound
+                && dest != d
+            {
+                continue;
+            }
+            spans.clear();
+            time_branches(stamps, span, window, &mut spans);
+            if spans.is_empty() {
+                continue;
             }
             let origin_was = binding[edge.origin.0 as usize].is_some();
             let dest_was = binding[edge.dest.0 as usize].is_some();
-            if !try_bind(binding, edge.origin, row.origin, k_simplicity) {
+            if !try_bind(binding, edge.origin, origin, k_simplicity) {
                 continue;
             }
-            if !try_bind(binding, edge.dest, row.dest, k_simplicity) {
+            if !try_bind(binding, edge.dest, dest, k_simplicity) {
                 unbind(binding, edge.origin, origin_was);
                 continue;
             }
-            recurse(
-                graph,
-                hypergraph,
-                join_tree,
-                bags,
-                by_origin,
-                by_dest,
-                binding,
-                node_idx + 1,
-                cap,
-                k_simplicity,
-                out,
-            );
+            for &next in &spans {
+                recurse(
+                    graph,
+                    hypergraph,
+                    join_tree,
+                    index,
+                    binding,
+                    node_idx + 1,
+                    next,
+                    window,
+                    cap,
+                    k_simplicity,
+                    out,
+                    seen,
+                    cancel,
+                );
+            }
             unbind(binding, edge.dest, dest_was);
             unbind(binding, edge.origin, origin_was);
-            if out.len() >= cap {
+            if out.len() >= cap || cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
         }
     }
 
     let _ = n_nodes;
-    let _ = n_vars;
+    // This walk runs on the caller's thread, so the token is read here.
+    let cancel_token = crate::cancel::current();
+    if let Some((pivot, values)) = pivot_values(hypergraph, &index) {
+        let tree = seeded_join_tree(hypergraph, bags, Some(pivot));
+        for value in values {
+            binding[pivot.0 as usize] = Some(value);
+            recurse(
+                graph,
+                hypergraph,
+                &tree,
+                &index,
+                &mut binding,
+                0,
+                None,
+                window,
+                cap,
+                k_simplicity,
+                &mut out,
+                &mut seen,
+                cancel_token.flag(),
+            );
+            binding[pivot.0 as usize] = None;
+            if out.len() >= cap
+                || cancel_token
+                    .flag()
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                break;
+            }
+        }
+        return out;
+    }
     recurse(
         graph,
         hypergraph,
         join_tree,
-        bags,
-        &by_origin,
-        &by_dest,
+        &index,
         &mut binding,
         0,
+        None,
+        window,
         cap,
         k_simplicity,
         &mut out,
+        &mut seen,
+        cancel_token.flag(),
     );
     out
+}
+
+/// The grouping variable of [`pivot_values`] and the breadth-first tree
+/// from it: variables in visiting order, and for each one the clause that
+/// reaches it (`None` for the pivot). `None` when the pattern is not one
+/// tree of distinct variables.
+fn pivot_tree(g: &Hypergraph) -> Option<(VarId, Vec<VarId>, Vec<Option<usize>>)> {
+    let n = g.edges.len();
+    if n < 2 || g.n_vars != n + 1 || g.edges.iter().any(|e| e.origin == e.dest) {
+        return None;
+    }
+    let mut degree = vec![0usize; g.n_vars];
+    for e in &g.edges {
+        degree[e.origin.0 as usize] += 1;
+        degree[e.dest.0 as usize] += 1;
+    }
+    // Most clauses wins; ties go to the variable declared first.
+    let pivot = (0..g.n_vars).max_by_key(|&v| (degree[v], std::cmp::Reverse(v)))?;
+    let pivot = VarId(pivot as u32);
+
+    // Breadth-first from the pivot: every other variable is reached through
+    // exactly one clause, its parent. With n clauses over n + 1 variables a
+    // connected pattern is a tree, so this covers every clause once.
+    let mut parent_clause: Vec<Option<usize>> = vec![None; g.n_vars];
+    let mut reached = vec![false; g.n_vars];
+    reached[pivot.0 as usize] = true;
+    let mut order = vec![pivot];
+    let mut next = 0;
+    while next < order.len() {
+        let v = order[next];
+        next += 1;
+        for (c, e) in g.edges.iter().enumerate() {
+            let other = match (e.origin == v, e.dest == v) {
+                (true, _) => e.dest,
+                (_, true) => e.origin,
+                _ => continue,
+            };
+            if !reached[other.0 as usize] {
+                reached[other.0 as usize] = true;
+                parent_clause[other.0 as usize] = Some(c);
+                order.push(other);
+            }
+        }
+    }
+    if order.len() != g.n_vars {
+        return None;
+    }
+    Some((pivot, order, parent_clause))
+}
+
+/// Position, in a graph-shaped result, of the node the tree walk groups on
+/// (one result node per binding, in binding order; see [`pivot_values`]).
+/// Under a cap the groups come smallest first, so the last result's value
+/// here names the group the cap cut: every group before it is complete.
+/// `None` for chains and for patterns walked ungrouped.
+pub fn grouping_index(hypothesis: &Hypothesis) -> Option<usize> {
+    if hypothesis.shape != graph_hunter_dsl::hypothesis::HypothesisShape::Graph {
+        return None;
+    }
+    pivot_tree(&Hypergraph::of(hypothesis)).map(|(pivot, _, _)| pivot.0 as usize)
+}
+
+/// One clause of a graph-shaped pattern, as positions in its results: a
+/// result holds one node per binding, and this clause is the edge from
+/// `path[origin]` to `path[dest]` of type `relation`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinedClause {
+    pub origin: usize,
+    pub dest: usize,
+    pub relation: RelationType,
+}
+
+/// The clauses of a graph-shaped pattern in its result positions. A joined
+/// result is not a chain: its consecutive nodes are bindings, not edges,
+/// so anything that reads edges off a result (times, sources, edge rarity)
+/// needs these. `None` for chains, whose edges are consecutive nodes.
+pub fn joined_clauses(hypothesis: &Hypothesis) -> Option<Vec<JoinedClause>> {
+    if hypothesis.shape != graph_hunter_dsl::hypothesis::HypothesisShape::Graph {
+        return None;
+    }
+    let g = Hypergraph::of(hypothesis);
+    Some(
+        g.edges
+            .iter()
+            .map(|e| JoinedClause {
+                origin: e.origin.0 as usize,
+                dest: e.dest.0 as usize,
+                relation: hypothesis.steps[e.step_idx].relation_type.clone(),
+            })
+            .collect(),
+    )
+}
+
+/// The variable the walk is grouped on, and its values rarest first.
+///
+/// Under a result cap the walk order decides which matches come back.
+/// Taken as they come, a busy value (an office address that hundreds of
+/// sessions go through) fills the cap with copies of one finding before a
+/// rare value is reached. Grouping on the variable the most clauses share
+/// and walking its values by ascending match count returns every smaller
+/// group whole before any larger one is started. Only the order changes:
+/// each match has exactly one value of the variable, so without a cap the
+/// result set is the same.
+///
+/// The counts are exact for the join but ignore k-simplicity and `WITHIN`,
+/// which can only remove matches: they order the walk, and a value counted
+/// zero is skipped because it has no match at all. `None` when the pattern
+/// is not one tree of distinct variables (a self-loop clause, two clauses
+/// on the same pair, disconnected parts); the plain walk is used then.
+fn pivot_values(g: &Hypergraph, index: &[PairIndex]) -> Option<(VarId, Vec<StrId>)> {
+    let (pivot, order, parent_clause) = pivot_tree(g)?;
+
+    // Leaves up: a variable's value weighs the product of what its child
+    // clauses send it (1 for a leaf), and sends its parent the sum over the
+    // pairs of its parent clause. The pivot's value weighs its match count.
+    let mut inbox: Vec<Vec<std::collections::HashMap<StrId, f64>>> = vec![Vec::new(); g.n_vars];
+    for &v in order.iter().rev() {
+        let Some(c) = parent_clause[v.0 as usize] else {
+            continue;
+        };
+        let e = &g.edges[c];
+        let v_is_origin = e.origin == v;
+        let mut message: std::collections::HashMap<StrId, f64> = std::collections::HashMap::new();
+        for ((origin, dest), _) in &index[c].pairs {
+            let (own, theirs) = if v_is_origin {
+                (*origin, *dest)
+            } else {
+                (*dest, *origin)
+            };
+            let weight: f64 = inbox[v.0 as usize]
+                .iter()
+                .map(|m| m.get(&own).copied().unwrap_or(0.0))
+                .product();
+            if weight > 0.0 {
+                *message.entry(theirs).or_default() += weight;
+            }
+        }
+        let parent = if v_is_origin { e.dest } else { e.origin };
+        inbox[parent.0 as usize].push(message);
+    }
+    let at_pivot = &inbox[pivot.0 as usize];
+    let mut values: Vec<(f64, StrId)> = at_pivot
+        .first()?
+        .keys()
+        .map(|&x| {
+            let count: f64 = at_pivot
+                .iter()
+                .map(|m| m.get(&x).copied().unwrap_or(0.0))
+                .product();
+            (count, x)
+        })
+        .filter(|(count, _)| *count > 0.0)
+        .collect();
+    values.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    Some((pivot, values.into_iter().map(|(_, x)| x).collect()))
+}
+
+/// One bag's rows grouped by `(origin, dest)` in first-seen order, each
+/// pair with its distinct timestamps sorted ascending.
+struct PairIndex {
+    pairs: Vec<((StrId, StrId), Vec<i64>)>,
+    by_origin: std::collections::HashMap<StrId, Vec<usize>>,
+    by_dest: std::collections::HashMap<StrId, Vec<usize>>,
+}
+
+impl PairIndex {
+    fn of(bag: &Bag) -> Self {
+        let mut at: std::collections::HashMap<(StrId, StrId), usize> =
+            std::collections::HashMap::new();
+        let mut pairs: Vec<((StrId, StrId), Vec<i64>)> = Vec::new();
+        for row in &bag.rows {
+            let key = (row.origin, row.dest);
+            let i = *at.entry(key).or_insert_with(|| {
+                pairs.push((key, Vec::new()));
+                pairs.len() - 1
+            });
+            pairs[i].1.push(row.timestamp);
+        }
+        let mut by_origin: std::collections::HashMap<StrId, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut by_dest: std::collections::HashMap<StrId, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, ((origin, dest), stamps)) in pairs.iter_mut().enumerate() {
+            stamps.sort_unstable();
+            stamps.dedup();
+            by_origin.entry(*origin).or_default().push(i);
+            by_dest.entry(*dest).or_default().push(i);
+        }
+        PairIndex {
+            pairs,
+            by_origin,
+            by_dest,
+        }
+    }
+}
+
+/// The time spans a walk can continue with after taking one pair, given the
+/// span `[lo, hi]` of the edges taken so far. Without a window there is one
+/// way and time does not matter. With `WITHIN w` every edge taken must lie
+/// within `w` of every other, so a timestamp `t` of the pair is usable when
+/// `max(hi, t) - min(lo, t) <= w`.
+///
+/// Only the narrowest results are kept: a span inside another can extend to
+/// everything the wider one can. So a stamp inside `[lo, hi]` takes the pair
+/// at no cost, and otherwise the nearest stamp below and the nearest above
+/// are the only two worth trying. For the first edge every stamp starts its
+/// own span. An atemporal edge (`timestamp == 0`, a standing fact) is free.
+fn time_branches(
+    stamps: &[i64],
+    span: Option<(i64, i64)>,
+    window: Option<i64>,
+    out: &mut Vec<Option<(i64, i64)>>,
+) {
+    let Some(w) = window else {
+        out.push(span);
+        return;
+    };
+    if stamps.binary_search(&0).is_ok() {
+        out.push(span);
+        return;
+    }
+    let Some((lo, hi)) = span else {
+        out.extend(stamps.iter().map(|&t| Some((t, t))));
+        return;
+    };
+    let first_at_or_after_lo = stamps.partition_point(|&t| t < lo);
+    if stamps.get(first_at_or_after_lo).is_some_and(|&t| t <= hi) {
+        out.push(span);
+        return;
+    }
+    if let Some(&t) = first_at_or_after_lo
+        .checked_sub(1)
+        .and_then(|i| stamps.get(i))
+        && hi - t <= w
+    {
+        out.push(Some((t, hi)));
+    }
+    if let Some(&t) = stamps.get(first_at_or_after_lo)
+        && t - lo <= w
+    {
+        out.push(Some((lo, t)));
+    }
 }
 
 /// End-to-end Yannakakis-style matcher. Materializes every step's
@@ -1118,10 +1468,18 @@ pub fn search_temporal_pattern_yannakakis_with_bags(
             // enumerator filters on demand via the shared-var
             // bindings, which is equivalent to a per-walk
             // semi-join.
-            let tree = match JoinTree::build(&g) {
-                Some(t) => t,
-                None => return (Vec::new(), false),
-            };
+            // α-acyclicity is already gated above by `is_alpha_acyclic`, so
+            // we build the visitation order directly with a selectivity-
+            // greedy connected order (variable ordering, increment 1) instead
+            // of the GYO order `JoinTree::build` produces. `selectivity_join_
+            // tree` is total (handles disconnected components without panic,
+            // unlike the old build path), and the join is order-invariant
+            // (see its doc), so this only changes speed, never the result set
+            // — the end-to-end star test and the parity test pin that.
+            //
+            // `WITHIN` is enforced here, over the edges each match takes,
+            // and not after the cap: see `time_branches`.
+            let tree = selectivity_join_tree(&g, &bags);
             enumerate_tree(
                 graph,
                 &g,
@@ -1129,6 +1487,7 @@ pub fn search_temporal_pattern_yannakakis_with_bags(
                 &bags,
                 cap,
                 hypothesis.k_simplicity.max(1),
+                hypothesis.window_seconds,
             )
         }
     };
@@ -1200,25 +1559,13 @@ mod tests {
         //   step 1: B(b) -> C(c)      origin=b, dest=c   (b shared)
         //   step 2: C(c) -> A(a)      origin=c, dest=a   (a, c shared)
         // Variables collapse to {a, b, c}; edges {(a,b), (b,c), (c,a)}.
-        let mut step0 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step0 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step0.origin_binding = Some("a".into());
         step0.dest_binding = Some("b".into());
-        let mut step1 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step1 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step1.origin_binding = Some("b".into());
         step1.dest_binding = Some("c".into());
-        let mut step2 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step2 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step2.origin_binding = Some("c".into());
         step2.dest_binding = Some("a".into());
         let h = Hypothesis {
@@ -1226,7 +1573,10 @@ mod tests {
             ..Hypothesis::new("test")
         };
         let g = Hypergraph::of(&h);
-        assert_eq!(g.n_vars, 3, "triangle should collapse to 3 vars via bindings");
+        assert_eq!(
+            g.n_vars, 3,
+            "triangle should collapse to 3 vars via bindings"
+        );
         assert_eq!(g.edges.len(), 3);
         assert!(!is_alpha_acyclic(&g), "K_3 is the canonical cyclic example");
         assert!(JoinTree::build(&g).is_none());
@@ -1239,25 +1589,13 @@ mod tests {
         // HypothesisShape::Graph the auto-chain default is dropped,
         // so the three (c, leaf_i) pairs become three independent
         // hyperedges sharing the variable `c`.
-        let mut step0 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step0 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step0.origin_binding = Some("c".into());
         step0.dest_binding = Some("l0".into());
-        let mut step1 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step1 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step1.origin_binding = Some("c".into());
         step1.dest_binding = Some("l1".into());
-        let mut step2 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step2 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step2.origin_binding = Some("c".into());
         step2.dest_binding = Some("l2".into());
         let h = Hypothesis {
@@ -1275,8 +1613,7 @@ mod tests {
             assert_eq!(e.origin, center, "all star edges share center vertex");
         }
         // The three dest variables are pairwise distinct (l0, l1, l2).
-        let dests: std::collections::BTreeSet<VarId> =
-            g.edges.iter().map(|e| e.dest).collect();
+        let dests: std::collections::BTreeSet<VarId> = g.edges.iter().map(|e| e.dest).collect();
         assert_eq!(dests.len(), 3);
         // Star is α-acyclic and produces a 3-edge join tree.
         assert!(is_alpha_acyclic(&g));
@@ -1294,7 +1631,9 @@ mod tests {
         // result is still α-acyclic.
         let h = Hypothesis {
             steps: (0..3)
-                .map(|_| HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User))
+                .map(|_| {
+                    HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User)
+                })
                 .collect(),
             shape: graph_hunter_dsl::hypothesis::HypothesisShape::Graph,
             ..Hypothesis::new("disconnected")
@@ -1313,18 +1652,10 @@ mod tests {
         // The hypergraph collapses to two variables {a, b} with two
         // edges {(a,b), (b,a)} — degree-2 on both ends, so the GYO
         // step finds no ear and the result is correctly cyclic.
-        let mut step0 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step0 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step0.origin_binding = Some("a".into());
         step0.dest_binding = Some("b".into());
-        let mut step1 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step1 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step1.origin_binding = Some("b".into());
         step1.dest_binding = Some("a".into());
         let h = Hypothesis {
@@ -1405,8 +1736,7 @@ mod tests {
     fn yannakakis_chain_finds_3hop_path() {
         let g = small_chain_graph();
         let h = user_auth_chain(3);
-        let (paths, truncated) =
-            search_temporal_pattern_yannakakis(&g, &h, None, Some(10));
+        let (paths, truncated) = search_temporal_pattern_yannakakis(&g, &h, None, Some(10));
         assert!(!truncated);
         assert_eq!(paths.len(), 1, "exactly one 3-hop chain in the fixture");
         let p = &paths[0];
@@ -1435,7 +1765,10 @@ mod tests {
             .into_iter()
             .map(|p| p.iter().map(|s| s.to_string()).collect())
             .collect();
-        assert_eq!(yanni_set, dfs_set, "Yannakakis and DFS must enumerate the same path set");
+        assert_eq!(
+            yanni_set, dfs_set,
+            "Yannakakis and DFS must enumerate the same path set"
+        );
     }
 
     #[test]
@@ -1460,25 +1793,13 @@ mod tests {
             .unwrap();
         g.sort_edges_by_timestamp().unwrap();
 
-        let mut step0 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step0 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step0.origin_binding = Some("c".into());
         step0.dest_binding = Some("l0".into());
-        let mut step1 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step1 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step1.origin_binding = Some("c".into());
         step1.dest_binding = Some("l1".into());
-        let mut step2 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step2 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step2.origin_binding = Some("c".into());
         step2.dest_binding = Some("l2".into());
         // Default k_simplicity = 1 forces all bound vertices to be
@@ -1495,8 +1816,7 @@ mod tests {
             ..Hypothesis::new("star")
         };
 
-        let (paths, truncated) =
-            search_temporal_pattern_yannakakis(&g, &h, None, Some(100));
+        let (paths, truncated) = search_temporal_pattern_yannakakis(&g, &h, None, Some(100));
         assert!(!truncated);
         // The star has one unordered match {c, a, b, d}; the
         // enumerator's bindings can pair (l0, l1, l2) with any
@@ -1507,12 +1827,191 @@ mod tests {
         // which is the center "c".
         for p in &paths {
             assert_eq!(p.len(), 4);
-            let unique: std::collections::HashSet<&str> =
-                p.iter().map(|s| &**s).collect();
+            let unique: std::collections::HashSet<&str> = p.iter().map(|s| &**s).collect();
             assert_eq!(unique.len(), 4);
             assert!(unique.contains("c"));
             assert!(!unique.contains("extra"), "decoy must not appear");
         }
+    }
+
+    // ── Variable ordering (increment 1): selectivity-greedy join-tree ──
+
+    /// A skewed 3-branch star whose branches have DIFFERENT type
+    /// signatures, so their bags have different cardinalities and the
+    /// selectivity order genuinely differs from the GYO/step order.
+    /// Center `c` (an IP) fans out to a Host, a User and a Process.
+    fn skewed_star() -> (GraphHunter, Hypothesis) {
+        use crate::entity::Entity;
+        use crate::relation::Relation;
+        let mut g = GraphHunter::new();
+        g.add_entity(Entity::new("ip1", EntityType::IP)).unwrap();
+        g.add_entity(Entity::new("ip2", EntityType::IP)).unwrap();
+        g.add_entity(Entity::new("h1", EntityType::Host)).unwrap();
+        for u in ["u1", "u2", "u3"] {
+            g.add_entity(Entity::new(u, EntityType::User)).unwrap();
+        }
+        for p in ["p1", "p2"] {
+            g.add_entity(Entity::new(p, EntityType::Process)).unwrap();
+        }
+        // Connect branch: 2 rows (one is a decoy from ip2).
+        g.add_relation(Relation::new("ip1", "h1", RelationType::Connect, 100))
+            .unwrap();
+        g.add_relation(Relation::new("ip2", "h1", RelationType::Connect, 101))
+            .unwrap();
+        // Auth branch: 3 rows from ip1.
+        for (u, t) in [("u1", 110i64), ("u2", 111), ("u3", 112)] {
+            g.add_relation(Relation::new("ip1", u, RelationType::Auth, t))
+                .unwrap();
+        }
+        // Execute branch: 2 rows from ip1.
+        for (p, t) in [("p1", 120i64), ("p2", 121)] {
+            g.add_relation(Relation::new("ip1", p, RelationType::Execute, t))
+                .unwrap();
+        }
+        g.sort_edges_by_timestamp().unwrap();
+
+        let mut s0 = HypothesisStep::new(EntityType::IP, RelationType::Connect, EntityType::Host);
+        s0.origin_binding = Some("c".into());
+        s0.dest_binding = Some("l0".into());
+        let mut s1 = HypothesisStep::new(EntityType::IP, RelationType::Auth, EntityType::User);
+        s1.origin_binding = Some("c".into());
+        s1.dest_binding = Some("l1".into());
+        let mut s2 =
+            HypothesisStep::new(EntityType::IP, RelationType::Execute, EntityType::Process);
+        s2.origin_binding = Some("c".into());
+        s2.dest_binding = Some("l2".into());
+        let h = Hypothesis {
+            steps: vec![s0, s1, s2],
+            shape: graph_hunter_dsl::hypothesis::HypothesisShape::Graph,
+            ..Hypothesis::new("skewed-star")
+        };
+        (g, h)
+    }
+
+    fn bags_for(g: &GraphHunter, h: &Hypothesis) -> Vec<Bag> {
+        h.steps
+            .iter()
+            .map(|s| materialize_bag(g, s, i64::MIN, i64::MAX))
+            .collect()
+    }
+
+    fn norm(paths: &[HuntResult]) -> Vec<Vec<String>> {
+        let mut v: Vec<Vec<String>> = paths
+            .iter()
+            .map(|p| p.iter().map(|s| s.to_string()).collect())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// THE GATE: `enumerate_tree` must return the identical result SET
+    /// under the GYO order, the selectivity order, and a hand-reversed
+    /// order. If reordering could ever change the set, this fails.
+    #[test]
+    fn reordering_the_join_tree_preserves_the_result_set() {
+        let (g, h) = skewed_star();
+        let hg = Hypergraph::of(&h);
+        let bags = bags_for(&g, &h);
+        let k = h.k_simplicity.max(1);
+
+        let gyo = JoinTree::build(&hg).unwrap();
+        let sel = selectivity_join_tree(&hg, &bags);
+        // A hand-made reversed order (still a valid permutation).
+        let mut rev_nodes = gyo.nodes.clone();
+        rev_nodes.reverse();
+        let rev = JoinTree {
+            parent: vec![0; rev_nodes.len()],
+            nodes: rev_nodes,
+        };
+
+        let r_gyo = norm(&enumerate_tree(&g, &hg, &gyo, &bags, 1000, k, None));
+        let r_sel = norm(&enumerate_tree(&g, &hg, &sel, &bags, 1000, k, None));
+        let r_rev = norm(&enumerate_tree(&g, &hg, &rev, &bags, 1000, k, None));
+
+        assert_eq!(r_gyo, r_sel, "selectivity order changed the result set");
+        assert_eq!(r_gyo, r_rev, "reversed order changed the result set");
+        // Sanity: the star really does match (3 users × 2 processes).
+        assert_eq!(
+            r_sel.len(),
+            6,
+            "expected 6 star matches, got {}",
+            r_sel.len()
+        );
+    }
+
+    /// The order is a valid permutation, seeds the smallest bag, and is
+    /// connected (every non-seed shares a var with the placed prefix) —
+    /// the mechanism that turns each non-seed node into an indexed lookup.
+    #[test]
+    fn selectivity_order_is_a_connected_permutation() {
+        let (g, h) = skewed_star();
+        let hg = Hypergraph::of(&h);
+        let bags = bags_for(&g, &h);
+        let tree = selectivity_join_tree(&hg, &bags);
+
+        // Permutation of 0..n.
+        let mut sorted = tree.nodes.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..hg.edges.len()).collect::<Vec<_>>());
+
+        // Seed = a min-cardinality bag (Connect or Execute, both 2 rows;
+        // tie breaks to the lower step index → Connect = step 0).
+        let min_card = (0..bags.len()).map(|i| bags[i].len()).min().unwrap();
+        assert_eq!(bags[tree.nodes[0]].len(), min_card);
+
+        // Connected: every non-seed node shares a var with the prefix.
+        let mut covered = std::collections::HashSet::new();
+        covered.insert(hg.edges[tree.nodes[0]].origin);
+        covered.insert(hg.edges[tree.nodes[0]].dest);
+        for &node in &tree.nodes[1..] {
+            let e = &hg.edges[node];
+            assert!(
+                covered.contains(&e.origin) || covered.contains(&e.dest),
+                "node {node} is disconnected from the placed prefix",
+            );
+            covered.insert(e.origin);
+            covered.insert(e.dest);
+        }
+    }
+
+    /// A disconnected Graph hypothesis (no shared vars) must still order
+    /// without panic and enumerate the identical (Cartesian) set as GYO.
+    #[test]
+    fn selectivity_order_handles_a_disconnected_graph() {
+        use crate::entity::Entity;
+        use crate::relation::Relation;
+        let mut g = GraphHunter::new();
+        for n in ["a", "b", "c", "d"] {
+            g.add_entity(Entity::new(n, EntityType::User)).unwrap();
+        }
+        g.add_relation(Relation::new("a", "b", RelationType::Auth, 100))
+            .unwrap();
+        g.add_relation(Relation::new("c", "d", RelationType::Auth, 110))
+            .unwrap();
+        g.sort_edges_by_timestamp().unwrap();
+
+        // Two independent steps, no bindings → disconnected hypergraph.
+        let h = Hypothesis {
+            steps: (0..2)
+                .map(|_| {
+                    HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User)
+                })
+                .collect(),
+            shape: graph_hunter_dsl::hypothesis::HypothesisShape::Graph,
+            ..Hypothesis::new("disconnected")
+        };
+        let hg = Hypergraph::of(&h);
+        let bags = bags_for(&g, &h);
+        let k = h.k_simplicity.max(1);
+
+        let sel = selectivity_join_tree(&hg, &bags);
+        assert_eq!(sel.nodes.len(), 2);
+        let gyo = JoinTree::build(&hg).unwrap();
+        assert_eq!(
+            norm(&enumerate_tree(&g, &hg, &gyo, &bags, 1000, k, None)),
+            norm(&enumerate_tree(&g, &hg, &sel, &bags, 1000, k, None)),
+            "disconnected reorder changed the Cartesian result set",
+        );
     }
 
     #[test]
@@ -1525,8 +2024,7 @@ mod tests {
         let h = user_auth_chain(2);
         let (paths, _) = search_temporal_pattern_yannakakis(&g, &h, None, Some(10));
         assert_eq!(paths.len(), 2);
-        let starts: std::collections::HashSet<&str> =
-            paths.iter().map(|p| &*p[0]).collect();
+        let starts: std::collections::HashSet<&str> = paths.iter().map(|p| &*p[0]).collect();
         // Crucially, u1 → u5 (the decoy) cannot start a 2-hop, so
         // u5 never appears in any emitted path.
         for p in &paths {
@@ -1541,18 +2039,10 @@ mod tests {
         // free-connex requires α-acyclic AND head coverage.
         // Empty head trivially covered, but the alpha-acyclic
         // gate must still fail on cycles.
-        let mut step0 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step0 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step0.origin_binding = Some("a".into());
         step0.dest_binding = Some("b".into());
-        let mut step1 = HypothesisStep::new(
-            EntityType::User,
-            RelationType::Auth,
-            EntityType::User,
-        );
+        let mut step1 = HypothesisStep::new(EntityType::User, RelationType::Auth, EntityType::User);
         step1.origin_binding = Some("b".into());
         step1.dest_binding = Some("a".into());
         let h = Hypothesis {

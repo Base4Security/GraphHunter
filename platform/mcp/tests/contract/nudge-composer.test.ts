@@ -14,7 +14,7 @@ test("sentinel_query with overlap > 0 suggests node_expand on top entity", () =>
           type: "IP",
           degree: 47,
           top_neighbor: {
-            entity: "lasoto@telecarga.cl",
+            entity: "analyst@example.com",
             type: "User",
             edge_count: 12,
           },
@@ -27,7 +27,7 @@ test("sentinel_query with overlap > 0 suggests node_expand on top entity", () =>
   assert.match(n, /1 entit/);
   assert.match(n, /203\.0\.113\.42/);
   assert.match(n, /node_expand/);
-  assert.match(n, /lasoto@telecarga\.cl/);
+  assert.match(n, /analyst@example\.com/);
 });
 
 test("sentinel_query with overlap=0 suggests ingest=true", () => {

@@ -40,7 +40,7 @@ fn build_layered_graph(layers: usize, nodes_per_layer: usize, branching: usize) 
     // Seed entities
     for (layer_idx, t) in types.iter().take(layers).enumerate() {
         for n in 0..nodes_per_layer {
-            g.add_entity(Entity::new(&format!("L{layer_idx}_N{n}"), t.clone()))
+            g.add_entity(Entity::new(format!("L{layer_idx}_N{n}"), t.clone()))
                 .unwrap();
         }
     }
@@ -53,8 +53,8 @@ fn build_layered_graph(layers: usize, nodes_per_layer: usize, branching: usize) 
             for k in 0..branching {
                 let dst = (src * branching + k) % nodes_per_layer;
                 let _ = g.add_relation(Relation::new(
-                    &format!("L{layer_idx}_N{src}"),
-                    &format!("L{}_N{dst}", layer_idx + 1),
+                    format!("L{layer_idx}_N{src}"),
+                    format!("L{}_N{dst}", layer_idx + 1),
                     rel.clone(),
                     ts,
                 ));

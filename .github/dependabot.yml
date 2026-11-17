@@ -135,6 +135,18 @@ updates:
     open-pull-requests-limit: 5
 
   - package-ecosystem: cargo
+    directory: /platform/server
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
     directory: /platform/siem
     schedule:
       interval: weekly

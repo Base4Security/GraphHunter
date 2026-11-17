@@ -1,0 +1,6 @@
+id: cat-032
+name: Account Sessions and Their Origins
+mitre_id: T1078
+description: "Triage pivot: every session of an account and the address it was opened from. Not an anomaly on its own — run it against a known-compromised account to enumerate the sessions to revoke and the addresses to block. Answers in one pattern what previously took a join across raw events."
+dsl_pattern: "User -[Uses]-> Session -[From]-> IP"
+k_simplicity: 1

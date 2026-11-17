@@ -38,5 +38,3 @@ pub fn fresh_api_with_session() -> (GraphHunterApi, String) {
 
 // Re-export integration-test cases at the crate level so `cargo test
 // --test parity <pattern>` can filter them by name.
-pub use parity::dto_shapes::*;
-pub use parity::scenarios::*;

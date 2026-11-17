@@ -208,6 +208,12 @@ pub fn format_hypothesis(h: &Hypothesis) -> String {
     if let Some(secs) = h.window_seconds {
         out.push_str(&format!(" WITHIN {}s", secs));
     }
+    if let Some(secs) = h.skew_tolerance_seconds {
+        out.push_str(&format!(" SKEW {}s", secs));
+    }
+    if let Some(g) = h.max_gap {
+        out.push_str(&format!(" GAP {}", g));
+    }
     if h.k_simplicity > 1 {
         out.push_str(&format!(" {{k={}}}", h.k_simplicity));
     }
@@ -378,7 +384,7 @@ impl<'a> Cursor<'a> {
         // If the identifier is a reserved trailing keyword, it's NOT a
         // binding — rewind and let the outer parser handle it.
         let up = candidate.to_ascii_uppercase();
-        if up == "HAVING" || up == "WITHIN" {
+        if up == "HAVING" || up == "WITHIN" || up == "SKEW" || up == "GAP" {
             self.pos = save;
             return Ok((et, None));
         }
@@ -713,8 +719,7 @@ impl<'a> Cursor<'a> {
                         .or_insert_with(|| step.dest_type.clone());
                 }
             }
-            let (clause_type, clause_binding) =
-                self.parse_clause_head(&binding_to_type)?;
+            let (clause_type, clause_binding) = self.parse_clause_head(&binding_to_type)?;
             prev_type = clause_type;
             prev_binding = clause_binding;
         }
@@ -730,7 +735,8 @@ impl<'a> Cursor<'a> {
         // Optional `HAVING` / `WITHIN` clauses BEFORE the k-simplicity suffix.
         // Grammar note: these are whitespace-separated and may appear in either
         // order; we peek for the keyword and consume it if present.
-        let (aggregations, window_seconds) = self.parse_trailing_clauses(&steps)?;
+        let (aggregations, window_seconds, skew_tolerance_seconds, max_gap) =
+            self.parse_trailing_clauses(&steps)?;
 
         // Parse optional {k=N} suffix for k-simplicity
         let k_simplicity = self.try_parse_k_suffix()?;
@@ -741,6 +747,8 @@ impl<'a> Cursor<'a> {
             k_simplicity,
             aggregations,
             window_seconds,
+            skew_tolerance_seconds,
+            max_gap,
             shape,
         })
     }
@@ -916,12 +924,15 @@ impl<'a> Cursor<'a> {
     /// Parse zero or more `HAVING ...` / `WITHIN ...` clauses appearing
     /// after the arrow-chain but before any `{k=N}` suffix. The order is
     /// not fixed — analysts write what feels natural.
+    #[allow(clippy::type_complexity)]
     fn parse_trailing_clauses(
         &mut self,
         steps: &[HypothesisStep],
-    ) -> Result<(Vec<AggClause>, Option<i64>), DslError> {
+    ) -> Result<(Vec<AggClause>, Option<i64>, Option<i64>, Option<usize>), DslError> {
         let mut aggregations = Vec::new();
         let mut window_seconds: Option<i64> = None;
+        let mut skew_tolerance_seconds: Option<i64> = None;
+        let mut max_gap: Option<usize> = None;
 
         loop {
             self.skip_whitespace();
@@ -950,6 +961,31 @@ impl<'a> Cursor<'a> {
                     }
                     window_seconds = Some(self.parse_duration_seconds()?);
                 }
+                // `SKEW 5s` relaxes causal monotonicity by δ to absorb
+                // clock disagreement between log sources. Reuses the same
+                // duration grammar as WITHIN.
+                "SKEW" => {
+                    if skew_tolerance_seconds.is_some() {
+                        return Err(DslError {
+                            message: "Duplicate SKEW clause".into(),
+                            position: save,
+                        });
+                    }
+                    skew_tolerance_seconds = Some(self.parse_duration_seconds()?);
+                }
+                // `GAP n` tolerates up to n wildcard edges bridging lost
+                // logs between consecutive steps. A plain count, not a
+                // duration — it counts edges, not seconds.
+                "GAP" => {
+                    if max_gap.is_some() {
+                        return Err(DslError {
+                            message: "Duplicate GAP clause".into(),
+                            position: save,
+                        });
+                    }
+                    self.skip_whitespace();
+                    max_gap = Some(self.parse_usize()?);
+                }
                 _ => {
                     // Not a known keyword — rewind so `try_parse_k_suffix`
                     // (or the outer error path) can deal with it.
@@ -959,7 +995,12 @@ impl<'a> Cursor<'a> {
             }
         }
 
-        Ok((aggregations, window_seconds))
+        Ok((
+            aggregations,
+            window_seconds,
+            skew_tolerance_seconds,
+            max_gap,
+        ))
     }
 
     /// Parse `count(distinct <col>) [>=|>] <N>`. Only `count(distinct ...)`
@@ -1093,6 +1134,27 @@ impl<'a> Cursor<'a> {
         };
         Ok(n.saturating_mul(multiplier))
     }
+
+    /// Parses a bare unsigned integer (no unit). Used by `GAP`, which
+    /// counts edges rather than seconds.
+    fn parse_usize(&mut self) -> Result<usize, DslError> {
+        let num_start = self.pos;
+        while self.pos < self.input.len() && self.input.as_bytes()[self.pos].is_ascii_digit() {
+            self.pos += 1;
+        }
+        if self.pos == num_start {
+            return Err(DslError {
+                message: "Expected an integer in GAP clause".into(),
+                position: self.pos,
+            });
+        }
+        self.input[num_start..self.pos]
+            .parse()
+            .map_err(|_| DslError {
+                message: "Invalid integer in GAP clause".into(),
+                position: num_start,
+            })
+    }
 }
 
 #[cfg(test)]
@@ -1181,7 +1243,10 @@ mod parser_tests {
     #[test]
     fn legacy_chain_stays_chain_shape() {
         let r = parse_dsl("User u -[Auth]-> Host h -[Connect]-> IP i", None).unwrap();
-        assert_eq!(r.hypothesis.shape, crate::hypothesis::HypothesisShape::Chain);
+        assert_eq!(
+            r.hypothesis.shape,
+            crate::hypothesis::HypothesisShape::Chain
+        );
         assert_eq!(r.hypothesis.steps.len(), 2);
     }
 
@@ -1194,7 +1259,10 @@ mod parser_tests {
             None,
         )
         .unwrap();
-        assert_eq!(r.hypothesis.shape, crate::hypothesis::HypothesisShape::Graph);
+        assert_eq!(
+            r.hypothesis.shape,
+            crate::hypothesis::HypothesisShape::Graph
+        );
         assert_eq!(r.hypothesis.steps.len(), 3);
         // Every step's origin_binding is "c" (declared in clause 1, referenced in 2 and 3).
         for (i, step) in r.hypothesis.steps.iter().enumerate() {
@@ -1214,12 +1282,11 @@ mod parser_tests {
     fn semicolon_clause_inherits_referenced_binding_type() {
         // The second clause's bare `c` reference resolves to `User`
         // because clause 1 declared `User c`.
-        let r = parse_dsl(
-            "User c -[Auth]-> Host h1; c -[Auth]-> Process p",
-            None,
-        )
-        .unwrap();
-        assert_eq!(r.hypothesis.shape, crate::hypothesis::HypothesisShape::Graph);
+        let r = parse_dsl("User c -[Auth]-> Host h1; c -[Auth]-> Process p", None).unwrap();
+        assert_eq!(
+            r.hypothesis.shape,
+            crate::hypothesis::HypothesisShape::Graph
+        );
         assert_eq!(r.hypothesis.steps.len(), 2);
         assert_eq!(r.hypothesis.steps[1].origin_type, EntityType::User);
         assert_eq!(r.hypothesis.steps[1].dest_type, EntityType::Process);
@@ -1227,11 +1294,7 @@ mod parser_tests {
 
     #[test]
     fn semicolon_unknown_binding_errors_with_hint() {
-        let err = parse_dsl(
-            "User c -[Auth]-> Host h1; q -[Auth]-> Process p",
-            None,
-        )
-        .unwrap_err();
+        let err = parse_dsl("User c -[Auth]-> Host h1; q -[Auth]-> Process p", None).unwrap_err();
         assert!(
             err.message.contains("'q'") && err.message.contains("declared bindings"),
             "error should name the unknown binding and list known ones: {}",
@@ -1244,12 +1307,11 @@ mod parser_tests {
         // `;User u` after a `;` is allowed: declares a brand-new
         // User vertex with binding `u`, distinct from anything in
         // the prior clause.
-        let r = parse_dsl(
-            "User c -[Auth]-> Host h1; User u -[Auth]-> Host h2",
-            None,
-        )
-        .unwrap();
-        assert_eq!(r.hypothesis.shape, crate::hypothesis::HypothesisShape::Graph);
+        let r = parse_dsl("User c -[Auth]-> Host h1; User u -[Auth]-> Host h2", None).unwrap();
+        assert_eq!(
+            r.hypothesis.shape,
+            crate::hypothesis::HypothesisShape::Graph
+        );
         assert_eq!(r.hypothesis.steps.len(), 2);
         assert_eq!(r.hypothesis.steps[1].origin_binding.as_deref(), Some("u"));
         // u was declared fresh in clause 2 — it's NOT the same vertex

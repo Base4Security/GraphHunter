@@ -3,7 +3,8 @@ name = "graph_hunter_gnn"
 version = "0.1.0"
 edition = "2024"
 description = "GNN inference + training-corpus adapters extracted from graph_hunter_core per F2.14. Bundles gnn_bridge (feature extraction), npu_scorer (ONNX Runtime inference), and aad_training_export. The v1/, common/, v2/ subfolders are placeholders for the ADR-003 split; right now the active implementation is flat at the crate root (see lib.rs)."
-license = "GPL-3.0"
+license = "GPL-3.0-only"
+publish = false
 
 [lib]
 name = "graph_hunter_gnn"

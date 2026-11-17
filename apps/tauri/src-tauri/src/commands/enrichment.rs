@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use tauri::State;
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::dto::enrichment::{SubnetAnalysisRequest, SubnetGroup};
 use graph_hunter_api::dto::geoip::EnrichIpRequest;
-use graph_hunter_api::GraphHunterApi;
+use graph_hunter_api::dto::session_analytics::{SharedSessionsRequest, SharedSessionsResponse};
 use graph_hunter_core::geoip::GeoIpResult;
 
 use crate::error::CommandError;
@@ -33,4 +34,19 @@ pub fn cmd_get_subnet_analysis(
 ) -> Result<Vec<SubnetGroup>, CommandError> {
     api.get_subnet_analysis(SubnetAnalysisRequest::default())
         .map_err(CommandError::from)
+}
+
+/// Sessions observed under more than one account — a stolen token or a
+/// shared cookie. Same operation the HTTP `/sessions/shared` route and
+/// the `session_shared_accounts` MCP tool call.
+#[tauri::command]
+pub fn cmd_get_shared_sessions(
+    api: State<Arc<GraphHunterApi>>,
+    limit: Option<usize>,
+) -> Result<SharedSessionsResponse, CommandError> {
+    api.get_shared_sessions(SharedSessionsRequest {
+        session: None,
+        limit,
+    })
+    .map_err(CommandError::from)
 }

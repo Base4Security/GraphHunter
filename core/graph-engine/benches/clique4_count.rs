@@ -19,8 +19,8 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use graph_hunter_core::generate_erdos_renyi;
 use graph_hunter_core::lftj::{
     MaterializedCsrTrie, count_4cliques_canonical_lftj_simd,
-    count_4cliques_canonical_lftj_simd_par, count_4cliques_lftj_simd,
-    count_4cliques_lftj_simd_par, count_4cliques_naive,
+    count_4cliques_canonical_lftj_simd_par, count_4cliques_lftj_simd, count_4cliques_lftj_simd_par,
+    count_4cliques_naive,
 };
 
 fn build_trie(n: usize, p: f64, seed: u64) -> MaterializedCsrTrie {
@@ -47,11 +47,7 @@ fn bench_clique4(c: &mut Criterion) {
         // Dense end (p=0.05) goes into BENCH_LARGE — naive at that
         // density is minutes per sample, the asymptotic story is
         // already visible at p=0.02.
-        &[
-            (1_000, 0.005),
-            (1_000, 0.01),
-            (1_000, 0.02),
-        ]
+        &[(1_000, 0.005), (1_000, 0.01), (1_000, 0.02)]
     };
 
     for &(n, p) in cases {
@@ -82,16 +78,12 @@ fn bench_clique4(c: &mut Criterion) {
         let label = format!("V={n},E={},K4={}", trie.edge_count(), naive_count);
 
         let mut group = c.benchmark_group("clique4-count");
-        group.bench_with_input(
-            BenchmarkId::new("naive", &label),
-            &&trie,
-            |b, &trie| b.iter(|| black_box(count_4cliques_naive(black_box(trie)))),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("lftj+simd", &label),
-            &&trie,
-            |b, &trie| b.iter(|| black_box(count_4cliques_lftj_simd(black_box(trie)))),
-        );
+        group.bench_with_input(BenchmarkId::new("naive", &label), &&trie, |b, &trie| {
+            b.iter(|| black_box(count_4cliques_naive(black_box(trie))))
+        });
+        group.bench_with_input(BenchmarkId::new("lftj+simd", &label), &&trie, |b, &trie| {
+            b.iter(|| black_box(count_4cliques_lftj_simd(black_box(trie))))
+        });
         group.bench_with_input(
             BenchmarkId::new("lftj+simd+par", &label),
             &&trie,
@@ -100,17 +92,13 @@ fn bench_clique4(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("lftj+simd+canonical", &label),
             &&trie,
-            |b, &trie| {
-                b.iter(|| black_box(count_4cliques_canonical_lftj_simd(black_box(trie))))
-            },
+            |b, &trie| b.iter(|| black_box(count_4cliques_canonical_lftj_simd(black_box(trie)))),
         );
         group.bench_with_input(
             BenchmarkId::new("lftj+simd+canonical+par", &label),
             &&trie,
             |b, &trie| {
-                b.iter(|| {
-                    black_box(count_4cliques_canonical_lftj_simd_par(black_box(trie)))
-                })
+                b.iter(|| black_box(count_4cliques_canonical_lftj_simd_par(black_box(trie))))
             },
         );
         group.finish();

@@ -349,16 +349,14 @@ mod tests {
     /// against unseen nodes (which used to silently contaminate
     /// the IoC export).
     fn seed_users(api: &GraphHunterApi, node_ids: &[&str]) {
-        if let Some(session) = api.sessions().current_session() {
-            if let Ok(mut graph) = session.graph.write() {
-                for id in node_ids {
-                    use graph_hunter_core::EntityType;
-                    let entity = graph_hunter_core::entity::Entity::new(
-                        id.to_string(),
-                        EntityType::User,
-                    );
-                    let _ = graph.add_entity(entity);
-                }
+        if let Some(session) = api.sessions().current_session()
+            && let Ok(mut graph) = session.graph.write()
+        {
+            for id in node_ids {
+                use graph_hunter_core::EntityType;
+                let entity =
+                    graph_hunter_core::entity::Entity::new(id.to_string(), EntityType::User);
+                let _ = graph.add_entity(entity);
             }
         }
     }
@@ -510,7 +508,10 @@ mod tests {
                 tag: "x".to_string(),
             })
             .unwrap();
-        assert_eq!(removed, 0, "untag for nonexistent pair must report 0 removed");
+        assert_eq!(
+            removed, 0,
+            "untag for nonexistent pair must report 0 removed"
+        );
     }
 
     /// 2026-05-06: tag_entity must reject node_ids absent from the

@@ -24,8 +24,13 @@ pub fn cmd_preview_ingest(
     path: String,
     format: String,
 ) -> Result<PreviewIngestResult, CommandError> {
-    api.preview_ingest(graph_hunter_api::dto::ingestion::PreviewIngestRequest { path, format })
-        .map_err(CommandError::from)
+    api.preview_ingest(
+        graph_hunter_api::dto::ingestion::PreviewIngestRequest { path, format },
+        // The path came from the user's own native file dialog in their
+        // own desktop session; containment applies to remote callers.
+        &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+    )
+    .map_err(CommandError::from)
 }
 
 /// PCAP / PCAPNG offline preview. Separate from `cmd_preview_ingest`
@@ -39,8 +44,11 @@ pub fn cmd_pcap_preview(
     api: State<Arc<graph_hunter_api::GraphHunterApi>>,
     path: String,
 ) -> Result<PcapPreviewResult, CommandError> {
-    api.pcap_preview(graph_hunter_api::dto::ingestion::PcapPreviewRequest { path })
-        .map_err(CommandError::from)
+    api.pcap_preview(
+        graph_hunter_api::dto::ingestion::PcapPreviewRequest { path },
+        &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+    )
+    .map_err(CommandError::from)
 }
 
 /// Reads a file from disk and ingests its log events into the
@@ -51,11 +59,14 @@ pub fn cmd_load_data(
     path: String,
     format: String,
 ) -> Result<LoadResult, CommandError> {
-    api.load_data(graph_hunter_api::dto::ingestion::LoadDataRequest {
-        session: None,
-        path,
-        format,
-    })
+    api.load_data(
+        graph_hunter_api::dto::ingestion::LoadDataRequest {
+            session: None,
+            path,
+            format,
+        },
+        &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+    )
     .map_err(CommandError::from)
 }
 
@@ -89,13 +100,16 @@ pub fn cmd_load_data_streaming(
     date_from: Option<String>,
     date_to: Option<String>,
 ) -> Result<IngestJobStarted, CommandError> {
-    api.load_data_streaming(graph_hunter_api::dto::ingestion::LoadDataStreamingRequest {
-        session: None,
-        path,
-        format,
-        config,
-        date_from,
-        date_to,
-    })
+    api.load_data_streaming(
+        graph_hunter_api::dto::ingestion::LoadDataStreamingRequest {
+            session: None,
+            path,
+            format,
+            config,
+            date_from,
+            date_to,
+        },
+        &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+    )
     .map_err(CommandError::from)
 }

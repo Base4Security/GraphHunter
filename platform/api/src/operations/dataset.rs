@@ -70,10 +70,10 @@ impl GraphHunterApi {
                 .write()
                 .map_err(|e| ApiError::Internal(format!("notes lock poisoned: {e}")))?;
             for note in notes.iter_mut() {
-                if let Some(nid) = &note.node_id {
-                    if removed_set.contains(nid.as_str()) {
-                        note.node_id = None;
-                    }
+                if let Some(nid) = &note.node_id
+                    && removed_set.contains(nid.as_str())
+                {
+                    note.node_id = None;
                 }
             }
         }

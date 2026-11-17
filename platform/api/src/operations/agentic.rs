@@ -619,6 +619,18 @@ mod tests {
         // The mock backend returns an empty `vrl_source`. The op must
         // not let an empty refinement clobber the deterministic
         // output. Regression guard for the fallback policy.
+        //
+        // NOT HERMETIC as written: `optimization_hint = "fidelity"` is the
+        // one path that actually calls the LLM, and `default_backend()`
+        // only yields the mock when the `candle` feature is off or no
+        // model file is present. On a machine that has a GGUF,
+        // `cargo test --all-features` runs real CPU inference here — over
+        // five hours for this single test, against seconds for the other
+        // ~529 in this crate. Run the suite with
+        // `GRAPHHUNTER_LLM_FORCE_MOCK=1` (see
+        // `graph_hunter_local_llm::FORCE_MOCK_ENV`) to pin the backend.
+        // The real fix is injecting the backend rather than resolving a
+        // process-wide singleton.
         let api = make_api();
         let resp = api
             .parser_generate(ParserGenerateRequest {

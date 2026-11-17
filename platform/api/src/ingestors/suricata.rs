@@ -166,10 +166,7 @@ pub(crate) fn is_known_suricata_event(s: &str) -> bool {
 
 /// Parse a single Suricata record. Returns `None` for event types
 /// we don't map (e.g. `stats`, `fileinfo`).
-pub(crate) fn parse_record(
-    v: &serde_json::Value,
-    source_file: &str,
-) -> Option<RawIngestEvent> {
+pub(crate) fn parse_record(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent> {
     let evt = v.get("event_type").and_then(|x| x.as_str())?;
     match evt {
         "flow" => parse_flow(v, source_file),
@@ -218,6 +215,7 @@ fn parse_flow(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -251,6 +249,7 @@ fn parse_alert(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEven
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -286,6 +285,7 @@ fn parse_dns(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent>
         rel_type: RelationType::DNS,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -321,6 +321,7 @@ fn parse_http(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -365,6 +366,7 @@ fn parse_tls(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent>
         rel_type: RelationType::Connect,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -406,6 +408,7 @@ fn parse_krb5(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent
         rel_type: RelationType::Auth,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -456,6 +459,7 @@ fn parse_smb(v: &serde_json::Value, source_file: &str) -> Option<RawIngestEvent>
         rel_type: RelationType::Auth,
         rel_metadata: md,
         timestamp: ts,
+        raw_line: None,
     })
 }
 
@@ -772,7 +776,10 @@ mod tests {
         assert_eq!(e.rel_type, RelationType::Auth);
         let m = &e.rel_metadata;
         assert_eq!(m.get("kerberos_kind").map(String::as_str), Some("AS-REQ"));
-        assert_eq!(m.get("kerberos_realm").map(String::as_str), Some("EXAMPLE.COM"));
+        assert_eq!(
+            m.get("kerberos_realm").map(String::as_str),
+            Some("EXAMPLE.COM")
+        );
         assert_eq!(
             m.get("kerberos_service").map(String::as_str),
             Some("krbtgt/EXAMPLE.COM"),

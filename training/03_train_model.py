@@ -63,11 +63,21 @@ class ThreatClassifierMLP(nn.Module):
 # ══════════════════════════════════════════════════════════════════════════
 
 def compute_class_weights(y: np.ndarray) -> torch.Tensor:
-    """Inverse frequency weighting to handle class imbalance."""
+    """Inverse frequency weighting to handle class imbalance.
+
+    Absent classes get weight 0, not 1/1. The old floor gave a class with
+    zero samples the LARGEST weight in the vector (1/1 against 1/64285 for
+    the majority class), so a handful of stragglers from a class the data
+    cannot really support would dominate the loss by four orders of
+    magnitude. On this corpus that matters: the CADETS ground truth marks
+    files rather than processes, so three of the five threat classes have
+    0-3 samples between them.
+    """
     counts = np.bincount(y, minlength=NUM_CLASSES).astype(np.float64)
-    counts = np.maximum(counts, 1.0)  # avoid division by zero
-    weights = 1.0 / counts
-    weights = weights / weights.sum() * NUM_CLASSES  # normalize
+    present = counts > 0
+    weights = np.zeros(NUM_CLASSES, dtype=np.float64)
+    weights[present] = 1.0 / counts[present]
+    weights = weights / weights.sum() * present.sum()
     return torch.tensor(weights, dtype=torch.float32)
 
 
@@ -122,12 +132,39 @@ def evaluate(model, loader, criterion, device):
 #  ONNX Export
 # ══════════════════════════════════════════════════════════════════════════
 
+# Filled in by main() before export; the gate needs the real validation
+# accuracy and the labels the corpus could actually support.
+_VAL_ACC = [0.0]
+_CLASS_LABELS = [[]]
+_MODEL_NOTES = [
+    "BINARY detector wearing a 5-logit head. The CADETS ground truth marks "
+    "the FILES an attack touched, not the processes that ran it, so 99.7% of "
+    "malicious entities are File nodes and the Process/User-keyed threat "
+    "taxonomy collapses: only Benign and Exfiltration have support. The other "
+    "three logits are never activated. Read the threat SCORE "
+    "(1 - P(benign)), not the class label.",
+    "Accuracy measures separability of attack-touched files from RANDOMLY "
+    "SAMPLED benign nodes -- an easier problem than detection in the wild, "
+    "where the negatives are ambiguous rather than random. Do not quote it "
+    "as a detection rate.",
+]
+
+
 def export_onnx(model, output_path: Path, device):
     """Export trained model to ONNX format compatible with npu_scorer.rs."""
     model.eval()
 
     dummy_input = torch.randn(1, GNN_INPUT_DIM, device=device)
 
+    # `external_data=False` keeps the 435k weights INSIDE the .onnx.
+    #
+    # torch 2.13's exporter defaults to spilling them into a sibling
+    # `.onnx.data`, leaving a 2.3 KB graph file that looks like a model and
+    # loads like one right up until inference. npu_scorer.rs resolves the
+    # path it is given, so copying just the .onnx into place -- the obvious
+    # thing to do with a file called provenance_gcn.onnx -- yields a
+    # runtime failure or, worse, uninitialised weights. One self-contained
+    # 1.8 MB artefact is what the deployment story assumes.
     torch.onnx.export(
         model,
         dummy_input,
@@ -141,7 +178,11 @@ def export_onnx(model, output_path: Path, device):
             "input": {0: "batch_size"},
             "output": {0: "batch_size"},
         },
+        external_data=False,
     )
+    stale = Path(str(output_path) + ".data")
+    if stale.exists():
+        stale.unlink()
     print(f"\n  ONNX exported -> {output_path}")
 
     # Verify with onnxruntime
@@ -188,7 +229,23 @@ def main():
 
     data = np.load(npz_file)
     X, y = data["X"], data["y"]
-    print(f"  Loaded {X.shape[0]:,} samples, {X.shape[1]} features, {NUM_CLASSES} classes")
+    # Drop classes the corpus cannot support. CADETS ground truth labels
+    # the FILES an attack touched, not the processes that ran it, so the
+    # Process/User-keyed threat taxonomy collapses: 99.7% of malicious
+    # entities are File nodes and land in the default bucket. Training on
+    # the 3-sample remnants of the other classes teaches nothing and
+    # skews the weighting; drop them and be explicit that this model is
+    # a benign/malicious detector wearing a 5-logit head.
+    counts = np.bincount(y, minlength=NUM_CLASSES)
+    viable = {c for c in range(NUM_CLASSES) if counts[c] >= 100}
+    keep = np.isin(y, list(viable))
+    dropped = int((~keep).sum())
+    if dropped:
+        print(f"  Dropping {dropped} sample(s) from classes with <100 examples: "
+              f"{[int(c) for c in range(NUM_CLASSES) if c not in viable and counts[c]]}")
+        X, y = X[keep], y[keep]
+    print(f"  Loaded {X.shape[0]:,} samples, {X.shape[1]} features, "
+          f"{len(viable)} viable class(es) of {NUM_CLASSES} output logits")
 
     # ── Train/val/test split ───────────────────────────────────────────
     X_train, X_test, y_train, y_test = train_test_split(
@@ -259,7 +316,20 @@ def main():
     print(f"  Test Accuracy: {test_acc:.4f}")
 
     print(f"\n  Classification Report:")
-    print(classification_report(labels, preds, target_names=THREAT_NAMES, zero_division=0))
+    # Report only the classes the corpus actually supports. Passing all
+    # five names when the data holds two is an error, not a cosmetic
+    # mismatch -- and the model genuinely has two.
+    present = sorted(set(labels.tolist()) | set(preds.tolist()))
+    print(classification_report(
+        labels, preds,
+        labels=present,
+        target_names=[THREAT_NAMES[i] for i in present],
+        digits=4,
+        zero_division=0,
+    ))
+    from sklearn.metrics import confusion_matrix
+    print("  Confusion matrix (rows=true, cols=pred):")
+    print(confusion_matrix(labels, preds, labels=present))
 
     print(f"  Confusion Matrix:")
     cm = confusion_matrix(labels, preds)
@@ -277,6 +347,8 @@ def main():
         onnx_path = Path(__file__).parent.parent / "models" / "provenance_gcn.onnx"
 
     onnx_path.parent.mkdir(exist_ok=True)
+    _VAL_ACC[0] = float(test_acc)
+    _CLASS_LABELS[0] = [THREAT_NAMES[i] for i in sorted(viable)]
     export_onnx(model, onnx_path, device)
 
     # File size

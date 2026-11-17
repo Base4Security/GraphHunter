@@ -9,13 +9,13 @@ use std::sync::Arc;
 
 use tauri::State;
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::dto::entity::{
     CreateNoteRequest, CreatedNote, DeleteNoteRequest, EntitiesByTypeRequest, EntityTypeCount,
     ListTaggedRequest, NodeIdsByRelationRequest, NodeScopedRequest, PaginatedEntities,
     PaginatedEntitiesByTypeRequest, PathNodeMutateRequest, SessionOnly, TagEntityRequest,
     UntagEntityRequest, UpdateNoteRequest,
 };
-use graph_hunter_api::GraphHunterApi;
 use graph_hunter_core::{ExplainedScore, RelSchemaEntry};
 
 use crate::error::CommandError;
@@ -122,9 +122,7 @@ pub fn cmd_get_node_ids_by_relation_type(
 // ── Path nodes ───────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn cmd_get_path_nodes(
-    api: State<Arc<GraphHunterApi>>,
-) -> Result<Vec<String>, CommandError> {
+pub fn cmd_get_path_nodes(api: State<Arc<GraphHunterApi>>) -> Result<Vec<String>, CommandError> {
     api.get_path_nodes(SessionOnly::default())
         .map_err(CommandError::from)
 }

@@ -128,18 +128,22 @@ pub fn is_trivial(hypothesis: &Hypothesis) -> bool {
     if hypothesis.steps.len() < 2 {
         return true;
     }
-    let all_any = hypothesis.steps.iter().all(|s| {
+
+    hypothesis.steps.iter().all(|s| {
         matches!(s.origin_type, EntityType::Any)
             && matches!(s.dest_type, EntityType::Any)
             && matches!(s.relation_type, RelationType::Any)
-    });
-    all_any
+    })
 }
 
 /// Run the bidirectional semi-join, refining `cands` in place. Returns
 /// the surviving candidate count for position 0 (the start set the DFS
 /// will iterate over).
-pub fn refine(graph: &crate::graph::GraphHunter, hypothesis: &Hypothesis, cands: &mut CandidateSets) {
+pub fn refine(
+    graph: &crate::graph::GraphHunter,
+    hypothesis: &Hypothesis,
+    cands: &mut CandidateSets,
+) {
     let steps = &hypothesis.steps;
     let n = steps.len();
     if n == 0 {
@@ -151,7 +155,13 @@ pub fn refine(graph: &crate::graph::GraphHunter, hypothesis: &Hypothesis, cands:
     for i in 1..=n {
         let step = &steps[i - 1];
         let mut next = Bitset::with_capacity(cands.candidates[i].len);
-        forward_step(graph, step, &cands.candidates[i - 1], &cands.candidates[i], &mut next);
+        forward_step(
+            graph,
+            step,
+            &cands.candidates[i - 1],
+            &cands.candidates[i],
+            &mut next,
+        );
         cands.candidates[i] = next;
     }
 
@@ -160,7 +170,13 @@ pub fn refine(graph: &crate::graph::GraphHunter, hypothesis: &Hypothesis, cands:
     for i in (0..n).rev() {
         let step = &steps[i];
         let mut prev = Bitset::with_capacity(cands.candidates[i].len);
-        backward_step(graph, step, &cands.candidates[i], &cands.candidates[i + 1], &mut prev);
+        backward_step(
+            graph,
+            step,
+            &cands.candidates[i],
+            &cands.candidates[i + 1],
+            &mut prev,
+        );
         cands.candidates[i] = prev;
     }
 }
@@ -186,7 +202,8 @@ fn forward_step(
         };
         let g = arc.read();
         for edge in g.as_slice() {
-            if !relation_tag_matches(&step.relation_type, edge.rel_type_tag) {
+            if !graph.edge_rel_matches(&step.relation_type, edge.rel_type_tag, edge.metadata_offset)
+            {
                 continue;
             }
             let dst_idx = edge.dest_sid.index();
@@ -215,7 +232,11 @@ fn backward_step(
         if let Some(arc) = graph.streaming.neighbors_arc(sid) {
             let g = arc.read();
             for edge in g.as_slice() {
-                if !relation_tag_matches(&step.relation_type, edge.rel_type_tag) {
+                if !graph.edge_rel_matches(
+                    &step.relation_type,
+                    edge.rel_type_tag,
+                    edge.metadata_offset,
+                ) {
                     continue;
                 }
                 if next.contains(edge.dest_sid.index()) {
@@ -227,14 +248,6 @@ fn backward_step(
         if keep {
             out.set(u_idx);
         }
-    }
-}
-
-#[inline]
-fn relation_tag_matches(pattern: &RelationType, tag: u8) -> bool {
-    match pattern {
-        RelationType::Any => true,
-        _ => pattern.to_u8() == tag,
     }
 }
 

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value};
 use tokio::sync::RwLock;
 
-use super::sentinel::{parse_query_stats, SentinelAuth, SentinelQueryResult};
+use super::sentinel::{SentinelAuth, SentinelQueryResult, parse_query_stats};
 
 // ── Token response ──
 
@@ -64,6 +64,12 @@ impl HttpSentinelTransport {
                 .build()
                 .expect("reqwest client"),
         }
+    }
+}
+
+impl Default for HttpSentinelTransport {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -185,24 +191,23 @@ impl SentinelTokenCache {
         // Fast path: read lock
         {
             let guard = self.inner.read().await;
-            if let Some(cached) = guard.as_ref() {
-                if Instant::now() < cached.expires_at {
-                    return Ok(cached.access_token.clone());
-                }
+            if let Some(cached) = guard.as_ref()
+                && Instant::now() < cached.expires_at
+            {
+                return Ok(cached.access_token.clone());
             }
         }
         // Slow path: write lock, double-check
         let mut guard = self.inner.write().await;
-        if let Some(cached) = guard.as_ref() {
-            if Instant::now() < cached.expires_at {
-                return Ok(cached.access_token.clone());
-            }
+        if let Some(cached) = guard.as_ref()
+            && Instant::now() < cached.expires_at
+        {
+            return Ok(cached.access_token.clone());
         }
         let resp = transport
             .acquire_token(&auth.tenant_id, &auth.client_id, &auth.client_secret)
             .await?;
-        let expires_at =
-            Instant::now() + Duration::from_secs(resp.expires_in.saturating_sub(60));
+        let expires_at = Instant::now() + Duration::from_secs(resp.expires_in.saturating_sub(60));
         let token = resp.access_token.clone();
         *guard = Some(CachedToken {
             access_token: resp.access_token,
@@ -218,6 +223,12 @@ impl SentinelTokenCache {
     }
 }
 
+impl Default for SentinelTokenCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── KQL query builder ──
 
 pub struct KqlQueryBuilder;
@@ -225,19 +236,30 @@ pub struct KqlQueryBuilder;
 impl KqlQueryBuilder {
     /// Builds a KQL query for a Sentinel table.
     ///
-    /// Resolution order for the `where TimeGenerated ...` clause:
-    ///   1. `watermark` set → `> datetime({watermark})` (incremental
-    ///      polling — wins over any caller-supplied window).
-    ///   2. `time_window_filter` set → use the caller's pre-rendered
-    ///      filter verbatim. Phase L: the api crate renders this from
-    ///      its `TimeWindow` DTO via `kql_filter()`; siem stays
-    ///      DTO-free so the dep direction (api → siem, not the
-    ///      reverse) is preserved.
-    ///   3. Neither set → legacy `ago(24h)` fallback for callers that
-    ///      haven't migrated.
+    /// Cursors on `ingestion_time()` — monotonic w.r.t. when a row became
+    /// queryable — rather than `TimeGenerated` (event time). Log Analytics
+    /// ingests rows minutes after their event time, so a `TimeGenerated >
+    /// watermark` cursor silently drops any row whose event time falls
+    /// before the watermark but that ingests after it (late-arriving /
+    /// out-of-order logs). `ingestion_time()` never skips a late arrival.
     ///
-    /// Back-compat: callers that don't pass a time window get the same
-    /// behavior they had before this change.
+    /// `coalesce(ingestion_time(), TimeGenerated)` degrades gracefully for
+    /// tables without an ingestion-time policy (those rows fall back to
+    /// event time). `_ingest_ts` is an added column — every row keeps its
+    /// original `TimeGenerated` for the parser.
+    ///
+    /// Resolution order for the `where ...` clause:
+    ///   1. `watermark` set → `where _ingest_ts > datetime({watermark})`
+    ///      (incremental polling — wins over any caller-supplied window).
+    ///   2. `time_window_filter` set → use the caller's pre-rendered
+    ///      event-time filter verbatim (first-poll backfill). Phase L: the
+    ///      api crate renders this from its `TimeWindow` DTO via
+    ///      `kql_filter()`; siem stays DTO-free so the dep direction
+    ///      (api → siem, not the reverse) is preserved. The result is
+    ///      still ordered by `_ingest_ts` so the watermark captured after
+    ///      this poll is an ingestion-time value.
+    ///   3. Neither set → `where _ingest_ts > ago(24h)` fallback for
+    ///      callers that haven't migrated.
     pub fn build(
         table: &str,
         watermark: Option<&str>,
@@ -245,12 +267,12 @@ impl KqlQueryBuilder {
         time_window_filter: Option<&str>,
     ) -> String {
         let time_filter = match (watermark, time_window_filter) {
-            (Some(w), _) => format!("where TimeGenerated > datetime({})", w),
+            (Some(w), _) => format!("where _ingest_ts > datetime({})", w),
             (None, Some(tw)) => tw.to_string(),
-            (None, None) => "where TimeGenerated > ago(24h)".to_string(),
+            (None, None) => "where _ingest_ts > ago(24h)".to_string(),
         };
         format!(
-            "{} | {} | order by TimeGenerated asc | take {}",
+            "{} | extend _ingest_ts = coalesce(ingestion_time(), TimeGenerated) | {} | order by _ingest_ts asc | take {}",
             table, time_filter, batch_size
         )
     }
@@ -279,6 +301,12 @@ impl SentinelWatermarkStore {
     }
 }
 
+impl Default for SentinelWatermarkStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Normalize response (async-friendly re-export of existing logic) ──
 
 /// Converts Log Analytics response to a `SentinelQueryResult`.
@@ -301,6 +329,12 @@ pub fn normalize_response(raw: &Value) -> Result<SentinelQueryResult, String> {
             .filter_map(|c| c.get("name").and_then(|n| n.as_str()))
             .collect();
         let time_col = col_names.iter().position(|&n| n == "TimeGenerated");
+        let ingest_ts_col = col_names.iter().position(|&n| n == "_ingest_ts");
+        // Per-table decision: prefer `_ingest_ts` (ingestion-time watermark)
+        // when this table's response projected it; otherwise fall back to
+        // `TimeGenerated` so the sync hydration path (which never projects
+        // `_ingest_ts`) keeps advancing its watermark unchanged.
+        let watermark_col = ingest_ts_col.or(time_col);
         let rows = table
             .get("rows")
             .and_then(|r| r.as_array())
@@ -312,16 +346,14 @@ pub fn normalize_response(raw: &Value) -> Result<SentinelQueryResult, String> {
             for (i, cell) in arr.iter().enumerate() {
                 if let Some(&name) = col_names.get(i) {
                     let value = cell.clone();
-                    if Some(i) == time_col {
-                        if let Value::String(s) = &value {
-                            if last_time
-                                .as_ref()
-                                .map(|t| s.as_str() > t.as_str())
-                                .unwrap_or(true)
-                            {
-                                last_time = Some(s.clone());
-                            }
-                        }
+                    if Some(i) == watermark_col
+                        && let Value::String(s) = &value
+                        && last_time
+                            .as_ref()
+                            .map(|t| s.as_str() > t.as_str())
+                            .unwrap_or(true)
+                    {
+                        last_time = Some(s.clone());
                     }
                     obj.insert(name.to_string(), value);
                 }
@@ -364,23 +396,29 @@ mod tests {
         let q = KqlQueryBuilder::build("SecurityEvent", Some("2024-01-15T14:30:00Z"), 10000, None);
         assert_eq!(
             q,
-            "SecurityEvent | where TimeGenerated > datetime(2024-01-15T14:30:00Z) | order by TimeGenerated asc | take 10000"
+            "SecurityEvent | extend _ingest_ts = coalesce(ingestion_time(), TimeGenerated) \
+             | where _ingest_ts > datetime(2024-01-15T14:30:00Z) \
+             | order by _ingest_ts asc | take 10000"
         );
     }
 
     #[test]
-    fn kql_without_watermark() {
+    fn kql_without_watermark_uses_ingestion_time_default() {
         let q = KqlQueryBuilder::build("SigninLogs", None, 5000, None);
         assert_eq!(
             q,
-            "SigninLogs | where TimeGenerated > ago(24h) | order by TimeGenerated asc | take 5000"
+            "SigninLogs | extend _ingest_ts = coalesce(ingestion_time(), TimeGenerated) \
+             | where _ingest_ts > ago(24h) \
+             | order by _ingest_ts asc | take 5000"
         );
     }
 
-    /// Phase L: caller supplies a pre-rendered time-window filter and
-    /// the builder uses it verbatim instead of the legacy 24h default.
+    /// Phase L / Sentinel Task 1: no watermark yet, so the caller's
+    /// event-time backfill filter is used verbatim — but the query still
+    /// projects + orders by `_ingest_ts` so the first watermark captured
+    /// is an ingestion_time value (subsequent polls are ingestion-cursored).
     #[test]
-    fn kql_with_time_window_filter_overrides_default() {
+    fn kql_first_poll_uses_caller_window_then_orders_by_ingest_ts() {
         let q = KqlQueryBuilder::build(
             "SigninLogs",
             None,
@@ -389,7 +427,9 @@ mod tests {
         );
         assert_eq!(
             q,
-            "SigninLogs | where TimeGenerated > ago(7d) | order by TimeGenerated asc | take 5000"
+            "SigninLogs | extend _ingest_ts = coalesce(ingestion_time(), TimeGenerated) \
+             | where TimeGenerated > ago(7d) \
+             | order by _ingest_ts asc | take 5000"
         );
     }
 
@@ -404,12 +444,12 @@ mod tests {
             Some("where TimeGenerated > ago(7d)"),
         );
         assert!(
-            q.contains("datetime(2024-01-15T14:30:00Z)"),
-            "watermark must win over time_window: {q}"
+            q.contains("_ingest_ts > datetime(2024-01-15T14:30:00Z)"),
+            "watermark must win: {q}"
         );
         assert!(
             !q.contains("ago(7d)"),
-            "time_window leaked through despite watermark: {q}"
+            "time_window leaked despite watermark: {q}"
         );
     }
 
@@ -421,5 +461,36 @@ mod tests {
         assert_eq!(store.get("SecurityEvent").unwrap(), "2024-01-15T14:30:00Z");
         assert_eq!(store.get("SigninLogs").unwrap(), "2024-01-15T15:00:00Z");
         assert!(store.get("DeviceProcessEvents").is_none());
+    }
+
+    #[test]
+    fn normalize_advances_watermark_on_ingest_ts_when_present() {
+        let raw = serde_json::json!({
+            "tables": [{
+                "columns": [
+                    {"name": "TimeGenerated", "type": "datetime"},
+                    {"name": "_ingest_ts", "type": "datetime"}
+                ],
+                "rows": [
+                    ["2024-01-15T10:00:00Z", "2024-01-15T10:05:00Z"],
+                    ["2024-01-15T09:00:00Z", "2024-01-15T10:07:00Z"]  // late event, later ingest
+                ]
+            }]
+        });
+        let r = normalize_response(&raw).unwrap();
+        // Watermark = max ingestion time, NOT max event time.
+        assert_eq!(r.next_query_start.as_deref(), Some("2024-01-15T10:07:00Z"));
+    }
+
+    #[test]
+    fn normalize_falls_back_to_timegenerated_without_ingest_ts() {
+        let raw = serde_json::json!({
+            "tables": [{
+                "columns": [{"name": "TimeGenerated", "type": "datetime"}],
+                "rows": [["2024-01-15T10:00:00Z"], ["2024-01-15T10:30:00Z"]]
+            }]
+        });
+        let r = normalize_response(&raw).unwrap();
+        assert_eq!(r.next_query_start.as_deref(), Some("2024-01-15T10:30:00Z"));
     }
 }

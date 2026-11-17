@@ -85,6 +85,7 @@ test(
       "/entity_type_counts",
       "/relation_schema",
       "/subnet_analysis",
+      "/sessions/shared",
       "/temporal_heatmap",
       "/datasets",
       "/path_nodes",
@@ -103,6 +104,8 @@ test(
       "/run_hunt",
       "/hunt_results",
       "/diff_hunts",
+      "/reconstruct_chain",
+      "/tpcsa/export",
       // /enable_anomaly_scoring is no longer hit by any MCP tool —
       // the v2 follow-up wired per-call `scoring` into RunHuntRequest
       // / RunHuntBody so hunt.run(scoring=anomaly|gnn) finalizes the

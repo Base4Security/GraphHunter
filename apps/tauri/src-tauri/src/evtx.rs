@@ -10,6 +10,6 @@
 //! session (see Task #3 notes).
 
 pub use graph_hunter_api::evtx::{
-    evtx_ingest_streaming, evtx_preview_sample, evtx_record_to_sysmon_like,
-    evtx_to_sysmon_ndjson, file_looks_like_evtx, path_is_evtx,
+    evtx_ingest_streaming, evtx_preview_sample, evtx_record_to_sysmon_like, evtx_to_sysmon_ndjson,
+    file_looks_like_evtx, path_is_evtx,
 };

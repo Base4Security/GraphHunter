@@ -141,7 +141,10 @@ impl MappingDiff {
 pub enum NegotiationOutcome {
     /// Heuristic produced a confident config (≥1 Node mapping). No LLM
     /// call made. Use the embedded config as-is.
-    HeuristicOk { config: FieldConfig, confidence: f32 },
+    HeuristicOk {
+        config: FieldConfig,
+        confidence: f32,
+    },
     /// Heuristic was weak; LLM produced a non-empty refinement that
     /// differs meaningfully from the heuristic. Hot-path callers must
     /// **not** insert triples until the analyst chooses between the
@@ -198,13 +201,14 @@ pub fn negotiate_field_config(
     // Sentinel, clean CSV) have 5+ recognized fields, so requiring
     // `>= 2` Nodes / `>= 3` total mappings still keeps them on the
     // fast path.
-    if let Some(cfg) = &heuristic_cfg {
-        if node_count >= 2 && total_count >= 3 {
-            return NegotiationOutcome::HeuristicOk {
-                config: cfg.clone(),
-                confidence: HEURISTIC_TRUST_THRESHOLD,
-            };
-        }
+    if let Some(cfg) = &heuristic_cfg
+        && node_count >= 2
+        && total_count >= 3
+    {
+        return NegotiationOutcome::HeuristicOk {
+            config: cfg.clone(),
+            confidence: HEURISTIC_TRUST_THRESHOLD,
+        };
     }
 
     // Heuristic was weak (zero Nodes or `None`). Ask the LLM for a refinement.
@@ -439,9 +443,7 @@ mod tests {
     impl ReplayBackend {
         fn new(replies: Vec<&str>, id: &'static str) -> Self {
             Self {
-                replies: parking_lot::Mutex::new(
-                    replies.into_iter().map(str::to_string).collect(),
-                ),
+                replies: parking_lot::Mutex::new(replies.into_iter().map(str::to_string).collect()),
                 id,
             }
         }
@@ -452,6 +454,22 @@ mod tests {
                 .lock()
                 .pop()
                 .ok_or_else(|| LocalLlmError::InferenceFailed("no more replies".into()))
+        }
+        // Must mirror `infer`: with the `xgrammar` feature on AND a model
+        // + tokenizer present on the box, `infer_with_optional_json_schema`
+        // routes to the constrained sampler and calls THIS, not `infer`.
+        // Without this override the default trait impl returns
+        // "backend does not support constrained decode", so the dispatcher
+        // tests failed on `--all-features` machines that happen to have a
+        // Phi-3 sitting in models/. A replay mock has no logits to mask,
+        // so the masker is ignored and the canned reply is returned — the
+        // dispatcher behaviour under test is identical on both paths.
+        fn infer_constrained(
+            &self,
+            spec: &PromptSpec,
+            _masker: &mut dyn crate::local_llm::LogitsMasker,
+        ) -> LocalLlmResult<String> {
+            self.infer(spec)
         }
         fn backend_id(&self) -> &'static str {
             self.id
@@ -491,10 +509,8 @@ mod tests {
         // `supports_configurable` set — heuristic returns `None`
         // unconditionally, forcing the dispatcher onto the LLM path.
         let sample = "#Fields: date time c-ip cs-method\n2024-01-01 00:00:00 10.0.0.1 GET\n";
-        let backend = ReplayBackend::new(
-            vec!["{\"mappings\":[],\"confidence\":0.5}"],
-            "test-empty",
-        );
+        let backend =
+            ReplayBackend::new(vec!["{\"mappings\":[],\"confidence\":0.5}"], "test-empty");
         let outcome = negotiate_field_config("iis", sample, &backend);
         match outcome {
             NegotiationOutcome::LlmUnavailable { reason, .. } => {

@@ -132,6 +132,16 @@ pub struct InvariantReport {
     pub treewidth_estimate: Option<TreewidthEstimate>,
 }
 
+/// Relation-count ceiling above which the full invariant check is skipped.
+/// Every predicate runs over a `Vec<Relation>` snapshot of the whole graph
+/// (`graph.to_snapshot()`), and the scope filter clones it again — each
+/// `Relation` is ~144 B (owned `String` ids + metadata `HashMap`). A 40M-
+/// relation graph needs ~6 GB per copy, so the snapshot + clone aborts the
+/// process with `memory allocation of N bytes failed`. Past this ceiling,
+/// callers return [`InvariantReport::skipped_too_large`] instead. The
+/// streaming ingest itself is unaffected — it never materializes `Relation`.
+pub const MAX_INVARIANT_RELATIONS: usize = 5_000_000;
+
 impl InvariantReport {
     pub fn all_passed(&self) -> bool {
         self.results.iter().all(|r| r.passed)
@@ -139,6 +149,32 @@ impl InvariantReport {
 
     pub fn total_violations(&self) -> usize {
         self.results.iter().map(|r| r.violated).sum()
+    }
+
+    /// Report returned when the graph exceeds [`MAX_INVARIANT_RELATIONS`].
+    /// Every predicate is marked skipped (with the size as the reason) and
+    /// the real entity/relation counts are reported so the UI badge still
+    /// shows scale. Avoids the whole-graph `Vec<Relation>` materialization
+    /// that would otherwise OOM.
+    pub fn skipped_too_large(scope: Scope, entity_count: usize, relation_count: usize) -> Self {
+        let reason = format!(
+            "graph too large for invariant check ({relation_count} relations > {MAX_INVARIANT_RELATIONS} limit); \
+             skipped to avoid out-of-memory — the full check snapshots the whole graph as Vec<Relation>"
+        );
+        let results = vec![
+            PredicateResult::skipped(PredicateId::P1CausalMonotonicity, reason.clone()),
+            PredicateResult::skipped(PredicateId::P2TypeShapePlausibility, reason.clone()),
+            PredicateResult::skipped(PredicateId::P3IdentityCoherence, reason.clone()),
+            PredicateResult::skipped(PredicateId::P4ReferentialClosure, reason.clone()),
+            PredicateResult::skipped(PredicateId::P5RaritySanity, reason),
+        ];
+        InvariantReport {
+            scope,
+            entity_count,
+            relation_count,
+            results,
+            treewidth_estimate: None,
+        }
     }
 }
 
@@ -195,36 +231,33 @@ pub fn check_invariants(
 
     let catalog = default_shape_catalog();
 
-    let mut results = Vec::new();
-    results.push(predicates::check_p1_causal_monotonicity(
-        &scoped_relations,
-        &scope,
-        DEFAULT_SAMPLE_CAP,
-    ));
-    results.push(predicates::check_p2_type_shape_plausibility(
-        &scoped_entities,
-        &scoped_relations,
-        &scope,
-        catalog,
-        DEFAULT_SAMPLE_CAP,
-    ));
-    results.push(predicates::check_p3_identity_coherence(
-        &scoped_relations,
-        &scope,
-        Some(catalog),
-        DEFAULT_SAMPLE_CAP,
-    ));
-    results.push(predicates::check_p4_referential_closure(
-        &scoped_entities,
-        &scoped_relations,
-        &scope,
-        DEFAULT_SAMPLE_CAP,
-    ));
-    // P5 comes later; skipped with reason.
-    results.push(PredicateResult::skipped(
-        PredicateId::P5RaritySanity,
-        "pending: rarity vs degree regression (deferred)",
-    ));
+    let results = vec![
+        predicates::check_p1_causal_monotonicity(&scoped_relations, &scope, DEFAULT_SAMPLE_CAP),
+        predicates::check_p2_type_shape_plausibility(
+            &scoped_entities,
+            &scoped_relations,
+            &scope,
+            catalog,
+            DEFAULT_SAMPLE_CAP,
+        ),
+        predicates::check_p3_identity_coherence(
+            &scoped_relations,
+            &scope,
+            Some(catalog),
+            DEFAULT_SAMPLE_CAP,
+        ),
+        predicates::check_p4_referential_closure(
+            &scoped_entities,
+            &scoped_relations,
+            &scope,
+            DEFAULT_SAMPLE_CAP,
+        ),
+        // P5 comes later; skipped with reason.
+        PredicateResult::skipped(
+            PredicateId::P5RaritySanity,
+            "pending: rarity vs degree regression (deferred)",
+        ),
+    ];
 
     let tw = estimate_treewidth(&scoped_entities, &scoped_relations);
 

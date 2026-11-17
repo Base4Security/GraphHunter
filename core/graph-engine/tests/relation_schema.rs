@@ -7,9 +7,18 @@
 
 use graph_hunter_core::{Entity, EntityType, GraphHunter, Relation, RelationType};
 
+/// `(src, dst, rel_type, timestamp, metadata)`.
+type EdgeSpec<'a> = (
+    &'a str,
+    &'a str,
+    RelationType,
+    i64,
+    &'a [(&'a str, &'a str)],
+);
+
 fn schema_of(
     entities: &[(&str, EntityType)],
-    edges: &[(&str, &str, RelationType, i64, &[(&str, &str)])],
+    edges: &[EdgeSpec<'_>],
 ) -> Vec<graph_hunter_core::RelSchemaEntry> {
     let mut g = GraphHunter::new();
     for (id, et) in entities {

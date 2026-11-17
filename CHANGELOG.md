@@ -6,6 +6,75 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Headless server and path soundness
+
+#### Changed — `Process` node identity (breaking for saved sessions)
+
+- A `Process` id is now `host|guid|image` when the source identifies the
+  process instance (Sysmon `ProcessGuid`) and `host|image` when it does not. It
+  used to be the image path alone, which made `powershell.exe` one node for the
+  whole network: a hunt could chain real edges from different hosts into a path
+  nobody ran. On the `scripts/eval/` benchmark the old scheme attributed a
+  planted C2 lookup to the wrong user; the new one names the right one.
+  `process_identity::image_of(id)` recovers the image.
+- **Sessions saved before this change keep the old ids.** New data ingested
+  into them will not join their existing `Process` nodes. Re-ingest the source
+  logs into a new session.
+- The `host|image` fallback is sound across hosts but still merges the
+  executions of different users on one host.
+- A `Spawn` edge no longer crosses hosts; movement between machines shows up as
+  the `Connect` edge.
+- Rarity (structural and anomaly scoring) is computed per image, summed over
+  its instances, so one-off tools still rank above the many runs of `cmd.exe`.
+- `ProcessGuid` / `ProcessId` and their parent/source/target variants are no
+  longer offered as node fields by the automatic field mapping.
+
+#### Added
+
+- `graph-hunter-server` (`platform/server`): the HTTP API without the desktop
+  app. The app embeds the same router. `platform/mcp` starts it on demand when
+  `GRAPHHUNTER_SERVER_BIN` is set.
+- Cooperative cancellation of pattern searches (`graph_hunter_core::cancel`).
+  A hunt that exceeds its deadline is stopped and answers `504`.
+- `Domain -[Resolve]-> IP` edges from DNS query events: the join between what
+  an endpoint logs (a name) and what a firewall logs (an address).
+- `GRAPHHUNTER_DOMAIN_ALIASES=CORP=corp.example`: opt-in equivalence so
+  `CORP\user` and `user@corp.example` are one `User` node. Unlisted domains
+  keep their ids.
+- `scripts/eval/`: reproducible benchmark against a DuckDB baseline, written up
+  in `docs/evaluacion/2026-11-16-utilidad-graph-hunter.md`.
+- `npm run pack` (`platform/mcp`): self-contained MCP bundle per platform —
+  the MCP server in one file plus `graph-hunter-server` — as a folder and as a
+  `.mcpb` for Claude Desktop. The MCP server finds the binary beside itself and
+  runs it on a free port with its own token (private mode); naming an API with
+  `GRAPHHUNTER_API_URL`/`GRAPHHUNTER_API_TOKEN` attaches to it instead.
+- MCP tool groups. Only `core` (21 tools, ~4k tokens of definitions) loads by
+  default instead of all 66 (~18k); `GRAPHHUNTER_MCP_TOOLS=<group>,...|full`
+  adds `analysis`, `report`, `sentinel`, `ingest-advanced`. **A client that
+  relied on a non-core tool must now ask for its group.**
+- `graph-hunter-server --exit-with-stdin`: exits when its parent goes away, so
+  a killed MCP client does not leave a server behind.
+
+#### Fixed
+
+- A timed-out hunt kept running under the graph lock and could leave the whole
+  API unresponsive, `/health` included.
+- `hunt_results` served the previous hunt's paths after a hunt failed.
+- The MCP graph-context footer never authenticated, so it always read
+  "(unavailable)"; and the summary behind it stayed stale for up to 30s after
+  an ingest.
+- The `non_discriminating` warning computed by `run_hunt` was dropped by the
+  HTTP response.
+- Patterns joined by bindings (`A a -[R]-> B b; C c -[S]-> B b`) were rejected
+  with "type mismatch": validation applied the chain rule to every pattern.
+  They now run, always on the operator that models them.
+- DNS answers and record types (`QueryResults`, `QueryType`) were ingested as
+  `Domain` nodes, which also mistyped every resolved address for later sources.
+- The automatic field mapping was built from the first ~200 events, so a field
+  that first appears later was dropped for the whole file.
+- `relation_schema` listed user-defined relations with an empty name.
+- Entity search truncated an unsorted list; the exact match now comes first.
+
 ### Graph-cycle intermediation (design doc §3–§5)
 
 Turns the four-phase graph cycle from a design proposal into working tools, so

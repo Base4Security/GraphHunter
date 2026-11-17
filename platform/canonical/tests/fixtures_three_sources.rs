@@ -10,24 +10,24 @@
 //!
 //! The 6 variants per source:
 //!   1. **valid**            — happy-path row; must yield ≥1 triple that
-//!                             projects to a schema-valid OCSF event.
+//!      projects to a schema-valid OCSF event.
 //!   2. **bad timestamp**    — garbled/empty timestamp field; parser
-//!                             skips or falls back cleanly (no panic;
-//!                             triples either empty or annotated).
+//!      skips or falls back cleanly (no panic;
+//!      triples either empty or annotated).
 //!   3. **missing field**    — a row missing a key identifier the
-//!                             parser needs; produces zero triples
-//!                             instead of fabricating an empty-string
-//!                             node.
+//!      parser needs; produces zero triples
+//!      instead of fabricating an empty-string
+//!      node.
 //!   4. **wrong type**       — a field with the wrong JSON type (e.g.
-//!                             number where the parser reads a string);
-//!                             parser skips without panicking.
+//!      number where the parser reads a string);
+//!      parser skips without panicking.
 //!   5. **unmappable**       — syntactically valid but semantically
-//!                             unsupported (unknown EventID for
-//!                             Sysmon/Sentinel, or an empty report for
-//!                             Forti); yields no data triples.
+//!      unsupported (unknown EventID for
+//!      Sysmon/Sentinel, or an empty report for
+//!      Forti); yields no data triples.
 //!   6. **metadata preserved** — raw fields that carry into entity /
-//!                             relation metadata survive the round-trip
-//!                             into the OCSF projection.
+//!      relation metadata survive the round-trip
+//!      into the OCSF projection.
 //!
 //! Forti's "empty" case ships a single self-loop ReportContext per the
 //! `empty_report_still_emits_context_entity` contract in its unit

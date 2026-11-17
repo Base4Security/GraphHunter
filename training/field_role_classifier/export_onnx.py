@@ -27,12 +27,14 @@ def main() -> None:
         print(f"checkpoint missing: {args.checkpoint}", file=sys.stderr)
         sys.exit(2)
 
-    # Real implementation:
+    # Real implementation (transformers 5 dropped `transformers.onnx`, so
+    # the export goes through torch directly):
     #   from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    #   from transformers.onnx import export
     #   tok = AutoTokenizer.from_pretrained(args.checkpoint)
-    #   mdl = AutoModelForSequenceClassification.from_pretrained(args.checkpoint)
-    #   export(tok, mdl, args.out, opset=args.opset, ...)
+    #   mdl = AutoModelForSequenceClassification.from_pretrained(args.checkpoint).eval()
+    #   enc = tok("field ||| sample", return_tensors="pt")
+    #   torch.onnx.export(mdl, (enc["input_ids"], enc["attention_mask"]), args.out,
+    #                     opset_version=args.opset, ...)
     print(
         f"stub: would export {args.checkpoint} → {args.out} (opset={args.opset})"
     )

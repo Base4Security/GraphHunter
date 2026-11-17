@@ -193,7 +193,7 @@ pub fn group_by_subnet(ips: &[&str]) -> Vec<(String, Vec<String>)> {
         }
     }
     let mut result: Vec<_> = groups.into_iter().collect();
-    result.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    result.sort_by_key(|g| std::cmp::Reverse(g.1.len()));
     result
 }
 

@@ -273,16 +273,16 @@ fn looks_like_datetime(s: &str) -> bool {
         }
     }
     // Unix epoch seconds in the 2001-2100 range
-    if let Ok(n) = s.parse::<i64>() {
-        if (1_000_000_000..4_000_000_000).contains(&n) {
-            return true;
-        }
+    if let Ok(n) = s.parse::<i64>()
+        && (1_000_000_000..4_000_000_000).contains(&n)
+    {
+        return true;
     }
     // Unix epoch millis in the 2001-2100 range
-    if let Ok(n) = s.parse::<i64>() {
-        if (1_000_000_000_000..4_000_000_000_000).contains(&n) {
-            return true;
-        }
+    if let Ok(n) = s.parse::<i64>()
+        && (1_000_000_000_000..4_000_000_000_000).contains(&n)
+    {
+        return true;
     }
     false
 }
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(classify_value(&Value::Null), FieldTypeTag::Null);
         assert_eq!(classify_value(&json!(true)), FieldTypeTag::Bool);
         assert_eq!(classify_value(&json!(42)), FieldTypeTag::Integer);
-        assert_eq!(classify_value(&json!(3.14)), FieldTypeTag::Float);
+        assert_eq!(classify_value(&json!(2.5)), FieldTypeTag::Float);
     }
 
     #[test]

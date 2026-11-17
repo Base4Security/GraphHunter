@@ -19,7 +19,12 @@ export function composeFooter(summary: Summary | null): string {
 
   const nodes = compact(summary.totals.nodes);
   const edges = compact(summary.totals.edges);
+  // Only sources with a known last ingest. The backend lists every
+  // registered format and, until it tracks ingests per source, most come
+  // back with `last_ingest: null`; printing those spends tokens on every
+  // tool response to say nothing.
   const sources = summary.sources
+    .filter((s) => s.last_ingest)
     .map((s) => `${s.name}(${freshness(s.last_ingest)})`)
     .join(", ");
   lines.push(

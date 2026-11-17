@@ -1,6 +1,6 @@
 id: cat-021
 name: Impossible Travel
 mitre_id: T1078.004
-description: "User authenticates from 2+ distinct IPs inside a short window — heuristic for geo-impossible travel before enrichment lands."
+description: "User authenticates from 2+ distinct IPs inside a short window - heuristic for geo-impossible travel before enrichment lands. KNOWN NOISY: on a 4.627-user corpus this returned 4.996 paths and was recorded as a systemic false positive, because authenticating from several addresses in six hours is ordinary behaviour (mobile handoff, VPN, an office and a phone). Prefer cat-031, which asks the same question of a single session rather than of an account. Keep this one only for sources that carry no session id."
 dsl_pattern: "User -[Auth]-> IP HAVING count(distinct IP) >= 2 WITHIN 6h"
 k_simplicity: 1

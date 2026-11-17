@@ -90,6 +90,50 @@ pub struct LoadResult {
     /// ingested triples.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// True if this ingest stopped before consuming all input (e.g. Windows
+    /// critical-memory guard mid-file). Surfaced so a downstream answer over
+    /// this data can be marked possibly_incomplete (ingest_completeness). The
+    /// underlying signal was previously a dropped local (S5).
+    #[serde(default)]
+    pub stopped_early: bool,
+}
+
+/// Poll-able state of a background streaming ingest.
+///
+/// The only completion signal a non-Tauri client has: progress otherwise
+/// travels through the `EventEmitter`, which the desktop build routes to
+/// the webview and a headless build drops. Recorded by
+/// [`crate::jobs::JobScopedEmitter`].
+///
+/// `state == "complete"` does **not** mean the ingest was useful —
+/// `result.zero_triples` (rows parsed, no triples produced, i.e. a wrong
+/// mapping) and `result.stopped_early` (truncated by the memory guard)
+/// both have to be checked.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IngestJobSnapshot {
+    pub job_id: String,
+    pub dataset_id: String,
+    /// `"running"` | `"complete"` | `"error"`.
+    pub state: String,
+    /// `reading` | `parsing` | `inserting` | `scoring` while running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Both are 0 for the registry ingestors (EVTX, PCAP, Zeek), which
+    /// report no byte counts — there `phase` is the only progress signal.
+    pub bytes_read: u64,
+    pub bytes_total: u64,
+    pub entities: usize,
+    pub relations: usize,
+    pub started_at: i64,
+    /// Unix seconds of the last update. A `running` job whose
+    /// `updated_at` is far in the past means the process restarted and
+    /// took the detached ingest thread with it.
+    pub updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<LoadResult>,
+    /// Caller-relative paths only — never a resolved absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,4 +250,23 @@ pub struct IngestLlmProposal {
     pub diff: serde_json::Value,
     pub confidence: f32,
     pub backend_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_result_carries_stopped_early_default_false() {
+        // Backward compatible: deserializing an old LoadResult without the field defaults false.
+        let json = r#"{"new_entities":1,"new_relations":1,"total_entities":1,"total_relations":1,"zero_triples":false,"warnings":[]}"#;
+        let r: LoadResult = serde_json::from_str(json).unwrap();
+        assert!(!r.stopped_early);
+        // and a constructed one round-trips.
+        let mut r2 = r.clone();
+        r2.stopped_early = true;
+        let s = serde_json::to_string(&r2).unwrap();
+        let back: LoadResult = serde_json::from_str(&s).unwrap();
+        assert!(back.stopped_early);
+    }
 }

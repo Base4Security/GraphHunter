@@ -304,16 +304,49 @@ fn anomaly_enable_then_config_roundtrips() {
 
 // ── Catalog YAML loader (P2-C) ──────────────────────────────────────
 
+/// The API's catalog surface must be a faithful pass-through: same
+/// entries, same order, nothing filtered or dropped on the way out.
+///
+/// Counted off the loaded catalog rather than a literal. This assertion
+/// used to read `cat.len() == 30` and went stale the moment cat-031 and
+/// cat-032 landed. `core` had already moved its own copies onto a
+/// derived count for exactly that reason — "the literal count made every
+/// catalog addition break three unrelated tests, which trains people to
+/// edit the number instead of reading the failure"
+/// (`catalog/loader.rs`) — but this copy lives in another crate and was
+/// missed.
+///
+/// The literal was fragile a second way the sibling test below already
+/// admits: a developer machine with user YAMLs in `~/.graphhunter/catalog`
+/// merges them into the catalog, so any fixed number is wrong there.
+/// Comparing the two views is true on every machine.
+///
+/// What actually guards against *losing* a built-in is the
+/// file-registration parity check in `catalog::loader`; this one guards
+/// the API boundary.
 #[test]
-fn get_catalog_returns_30_builtin_entries() {
+fn get_catalog_passes_through_every_catalog_entry() {
     let (api, _id) = fresh_api_with_session();
     let cat = api.get_catalog();
-    assert_eq!(cat.len(), 30, "built-in catalog must have 30 entries");
-    // Spot-check a couple of ids across the spectrum of categories.
-    assert!(cat.iter().any(|e| e.id == "cat-001"));
-    assert!(cat.iter().any(|e| e.id == "cat-017"));
-    assert!(cat.iter().any(|e| e.id == "cat-029"));
-    assert!(cat.iter().any(|e| e.id == "cat-030"));
+    let loaded = graph_hunter_core::get_catalog();
+
+    let api_ids: Vec<&str> = cat.iter().map(|e| e.id.as_str()).collect();
+    let loaded_ids: Vec<&str> = loaded.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(
+        api_ids, loaded_ids,
+        "the API dropped, added or reordered catalog entries"
+    );
+    assert!(!cat.is_empty(), "catalog came back empty");
+
+    // Spot-check ids across the spectrum of categories. These do not go
+    // stale when a pattern is added — only when one is removed, which is
+    // the thing worth being told about.
+    for id in ["cat-001", "cat-017", "cat-029", "cat-030", "cat-032"] {
+        assert!(
+            cat.iter().any(|e| e.id == id),
+            "{id} disappeared from the built-in catalog"
+        );
+    }
 }
 
 #[test]

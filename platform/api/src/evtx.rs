@@ -47,10 +47,10 @@ pub fn evtx_to_sysmon_ndjson(path: &str) -> Result<String, String> {
     for record in parser.records_json_value() {
         let serialized = record.map_err(|e| format!("EVTX record error: {e}"))?;
         let ev = &serialized.data;
-        if let Some(obj) = evtx_record_to_sysmon_like(ev) {
-            if let Ok(s) = serde_json::to_string(&obj) {
-                lines.push(s);
-            }
+        if let Some(obj) = evtx_record_to_sysmon_like(ev)
+            && let Ok(s) = serde_json::to_string(&obj)
+        {
+            lines.push(s);
         }
     }
     Ok(lines.join("\n"))
@@ -86,10 +86,10 @@ pub fn evtx_ingest_streaming(
             Ok(r) => r,
             Err(_) => continue,
         };
-        if let Some(obj) = evtx_record_to_sysmon_like(&serialized.data) {
-            if let Ok(s) = serde_json::to_string(&obj) {
-                batch_lines.push(s);
-            }
+        if let Some(obj) = evtx_record_to_sysmon_like(&serialized.data)
+            && let Ok(s) = serde_json::to_string(&obj)
+        {
+            batch_lines.push(s);
         }
         records_processed += 1;
 
@@ -156,10 +156,10 @@ pub fn evtx_preview_sample(path: &str, max_records: usize) -> Result<String, Str
             Ok(r) => r,
             Err(_) => continue,
         };
-        if let Some(obj) = evtx_record_to_sysmon_like(&serialized.data) {
-            if let Ok(s) = serde_json::to_string(&obj) {
-                lines.push(s);
-            }
+        if let Some(obj) = evtx_record_to_sysmon_like(&serialized.data)
+            && let Ok(s) = serde_json::to_string(&obj)
+        {
+            lines.push(s);
         }
     }
     Ok(lines.join("\n"))

@@ -99,11 +99,17 @@ fn run_hunt_request_shape() {
 #[test]
 fn run_hunt_response_shape_with_inline_paths() {
     let resp = hunt::RunHuntResponse {
+        truncated_in_group: None,
         paths: vec![vec!["a".into(), "b".into()]],
         path_count: 1,
         truncated: false,
         diagnostic: None,
         live_tail_coverage: None,
+        coverage: graph_hunter_api::coverage::AnswerCoverage::default(),
+        // Absent on a discriminating pattern, which is the normal case —
+        // so the wire stays byte-identical to the pre-guard contract and
+        // the field's presence is itself the warning.
+        non_discriminating: None,
     };
     assert_keys(&resp, &["paths", "path_count", "truncated"]);
 }

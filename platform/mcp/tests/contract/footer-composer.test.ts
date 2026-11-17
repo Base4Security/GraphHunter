@@ -73,3 +73,24 @@ test("includes recent pivot with expanded flag", () => {
 test("unavailable when summary is null", () => {
   assert.match(composeFooter(null), /\(unavailable\)/);
 });
+
+test("omits sources whose last ingest is unknown", () => {
+  const f = composeFooter({
+    ...baseSummary,
+    sources: [
+      { name: "sysmon", last_ingest: null, rows_lifetime: 0 },
+      { name: "Sentinel", last_ingest: minutesAgo(30), rows_lifetime: 1 },
+    ],
+  });
+  assert.match(f, /Sentinel\(30m\)/);
+  assert.doesNotMatch(f, /sysmon/);
+  assert.doesNotMatch(f, /unknown/);
+});
+
+test("drops the sources segment when none has a known ingest", () => {
+  const f = composeFooter({
+    ...baseSummary,
+    sources: [{ name: "sysmon", last_ingest: null, rows_lifetime: 0 }],
+  });
+  assert.doesNotMatch(f, /sources:/);
+});

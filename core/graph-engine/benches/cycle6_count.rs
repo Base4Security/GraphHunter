@@ -15,9 +15,8 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use graph_hunter_core::generate_erdos_renyi;
 use graph_hunter_core::lftj::{
-    MaterializedCsrTrie, count_6cycles_canonical_lftj_simd,
-    count_6cycles_canonical_lftj_simd_par, count_6cycles_lftj_simd,
-    count_6cycles_lftj_simd_par, count_6cycles_naive,
+    MaterializedCsrTrie, count_6cycles_canonical_lftj_simd, count_6cycles_canonical_lftj_simd_par,
+    count_6cycles_lftj_simd, count_6cycles_lftj_simd_par, count_6cycles_naive,
 };
 
 struct Fixture {
@@ -73,35 +72,25 @@ fn bench_cycle6(c: &mut Criterion) {
         let label = format!("V={n},E={},C6={}", fx.fwd.edge_count(), naive_count);
 
         let mut group = c.benchmark_group("cycle6-count");
-        group.bench_with_input(
-            BenchmarkId::new("naive", &label),
-            &&fx,
-            |b, &fx| b.iter(|| black_box(count_6cycles_naive(black_box(&fx.fwd)))),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("lftj+simd", &label),
-            &&fx,
-            |b, &fx| {
-                b.iter(|| {
-                    black_box(count_6cycles_lftj_simd(
-                        black_box(&fx.fwd),
-                        black_box(&fx.rev),
-                    ))
-                })
-            },
-        );
-        group.bench_with_input(
-            BenchmarkId::new("lftj+simd+par", &label),
-            &&fx,
-            |b, &fx| {
-                b.iter(|| {
-                    black_box(count_6cycles_lftj_simd_par(
-                        black_box(&fx.fwd),
-                        black_box(&fx.rev),
-                    ))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("naive", &label), &&fx, |b, &fx| {
+            b.iter(|| black_box(count_6cycles_naive(black_box(&fx.fwd))))
+        });
+        group.bench_with_input(BenchmarkId::new("lftj+simd", &label), &&fx, |b, &fx| {
+            b.iter(|| {
+                black_box(count_6cycles_lftj_simd(
+                    black_box(&fx.fwd),
+                    black_box(&fx.rev),
+                ))
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("lftj+simd+par", &label), &&fx, |b, &fx| {
+            b.iter(|| {
+                black_box(count_6cycles_lftj_simd_par(
+                    black_box(&fx.fwd),
+                    black_box(&fx.rev),
+                ))
+            })
+        });
         group.bench_with_input(
             BenchmarkId::new("lftj+simd+canonical", &label),
             &&fx,

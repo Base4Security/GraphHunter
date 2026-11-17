@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn auto_picks_netflow_over_generic_formats() {
         let mut buf = vec![0u8, 9u8]; // version 9
-        buf.extend(std::iter::repeat(0u8).take(64));
+        buf.extend(std::iter::repeat_n(0u8, 64));
         let p = std::env::temp_dir().join("graphhunter_precedence_netflow.bin");
         std::fs::write(&p, &buf).unwrap();
         assert_eq!(
@@ -323,9 +323,7 @@ mod tests {
     #[test]
     fn cross_source_domain_entity_merges_across_zeek_and_pcap() {
         use crate::ingestors::zeek::{ZeekLogKind, parse_record};
-        use graph_hunter_core::{
-            EntityType, GraphHunter, RawIngestEvent, RelationType,
-        };
+        use graph_hunter_core::{EntityType, GraphHunter, RawIngestEvent, RelationType};
         use serde_json::json;
         use std::collections::HashMap;
 
@@ -373,6 +371,7 @@ mod tests {
             rel_type: RelationType::DNS,
             rel_metadata: pcap_md,
             timestamp: 2,
+            raw_line: None,
         };
         let (p_e, p_r) = graph
             .insert_raw_events(vec![pcap_edge], Some("pcap-ds"))
@@ -395,7 +394,8 @@ mod tests {
     /// directions.
     #[test]
     fn auto_distinguishes_zeek_from_suricata_on_first_byte() {
-        let zeek = r#"{"ts":1.0,"uid":"CAbc","id.orig_h":"10.0.0.1","id.resp_h":"1.1.1.1","proto":"tcp"}"#;
+        let zeek =
+            r#"{"ts":1.0,"uid":"CAbc","id.orig_h":"10.0.0.1","id.resp_h":"1.1.1.1","proto":"tcp"}"#;
         let suri = r#"{"timestamp":"2024-01-15T12:00:00.000+0000","event_type":"flow","src_ip":"10.0.0.1","dest_ip":"1.1.1.1","proto":"TCP"}"#;
 
         let zp = std::env::temp_dir().join("graphhunter_precedence_zeek.log");

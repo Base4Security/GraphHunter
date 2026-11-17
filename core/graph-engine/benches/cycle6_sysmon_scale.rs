@@ -98,23 +98,19 @@ fn bench_cycle6_sysmon_scale(c: &mut Criterion) {
                 ))
             })
         });
-        group.bench_with_input(
-            BenchmarkId::new("lftj+simd+par", &label),
-            &&fx,
-            |b, &fx| {
-                b.iter(|| {
-                    black_box(enumerate_6cycles_lftj_simd_par(
-                        black_box(&fx.graph),
-                        black_box(&fx.forward),
-                        black_box(&fx.reverse),
-                        black_box(&fx.ts_map),
-                        i64::MIN,
-                        i64::MAX,
-                        1_000_000,
-                    ))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("lftj+simd+par", &label), &&fx, |b, &fx| {
+            b.iter(|| {
+                black_box(enumerate_6cycles_lftj_simd_par(
+                    black_box(&fx.graph),
+                    black_box(&fx.forward),
+                    black_box(&fx.reverse),
+                    black_box(&fx.ts_map),
+                    i64::MIN,
+                    i64::MAX,
+                    1_000_000,
+                ))
+            })
+        });
         group.finish();
     }
 
@@ -137,23 +133,19 @@ fn bench_cycle6_sysmon_scale(c: &mut Criterion) {
                 ))
             })
         });
-        group.bench_with_input(
-            BenchmarkId::new("lftj+simd+par", &label),
-            &&fx,
-            |b, &fx| {
-                b.iter(|| {
-                    black_box(enumerate_6cycles_lftj_simd_par(
-                        black_box(&fx.graph),
-                        black_box(&fx.forward),
-                        black_box(&fx.reverse),
-                        black_box(&fx.ts_map),
-                        i64::MIN,
-                        i64::MAX,
-                        1_000_000,
-                    ))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("lftj+simd+par", &label), &&fx, |b, &fx| {
+            b.iter(|| {
+                black_box(enumerate_6cycles_lftj_simd_par(
+                    black_box(&fx.graph),
+                    black_box(&fx.forward),
+                    black_box(&fx.reverse),
+                    black_box(&fx.ts_map),
+                    i64::MIN,
+                    i64::MAX,
+                    1_000_000,
+                ))
+            })
+        });
         group.finish();
 
         // Tier 3: V=1M, LFTJ-only. Naive infeasible (hours per sample).
@@ -165,23 +157,19 @@ fn bench_cycle6_sysmon_scale(c: &mut Criterion) {
         let label = format!("V=1000000,E={},m=3", fx.edge_count);
         let mut group = c.benchmark_group("cycle6-sysmon-scale-1M");
         group.sample_size(10);
-        group.bench_with_input(
-            BenchmarkId::new("lftj+simd+par", &label),
-            &&fx,
-            |b, &fx| {
-                b.iter(|| {
-                    black_box(enumerate_6cycles_lftj_simd_par(
-                        black_box(&fx.graph),
-                        black_box(&fx.forward),
-                        black_box(&fx.reverse),
-                        black_box(&fx.ts_map),
-                        i64::MIN,
-                        i64::MAX,
-                        1_000_000,
-                    ))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("lftj+simd+par", &label), &&fx, |b, &fx| {
+            b.iter(|| {
+                black_box(enumerate_6cycles_lftj_simd_par(
+                    black_box(&fx.graph),
+                    black_box(&fx.forward),
+                    black_box(&fx.reverse),
+                    black_box(&fx.ts_map),
+                    i64::MIN,
+                    i64::MAX,
+                    1_000_000,
+                ))
+            })
+        });
         group.finish();
     }
 }

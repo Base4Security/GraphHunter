@@ -79,6 +79,12 @@ export interface Tool<I = unknown, O = unknown> {
   readonly outputSchema: ZodSchema<O>;
   readonly deprecated?: DeprecationNotice;
   readonly resultFormat?: ResultFormat;
+  /**
+   * Marks this tool as a raw-source escape hatch (design spec §14): not a
+   * causal graph search, must not be used internally by hunt/graph flows.
+   * Absent/false for ordinary tools.
+   */
+  readonly escapeHatch?: boolean;
 
   execute(ctx: ToolContext, input: I): Promise<O>;
 }

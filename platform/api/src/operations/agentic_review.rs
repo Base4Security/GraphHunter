@@ -236,6 +236,8 @@ mod tests {
             relation_count: 0,
             field_config: None,
             ingest_stats: None,
+            parser: None,
+            mapping_hash: None,
         });
         drop(datasets);
         api
@@ -273,6 +275,17 @@ mod tests {
         assert!(
             datasets[0].field_config.is_some(),
             "approval should have stamped the FieldConfig onto ds-1"
+        );
+        // The frozen mapping identity must NOT move just because the
+        // mutable `field_config` display copy did — that's the whole
+        // point of keeping them separate (see `DatasetInfo::mapping_hash`).
+        // `ds-1` was never ingested with a `FieldConfig` (started `None`
+        // in `make_api_with_dataset`), so its frozen identity is `None`
+        // (builtin) both before and after promotion.
+        assert!(
+            datasets[0].mapping_hash.is_none(),
+            "promote_field_config_to_latest_dataset must not set mapping_hash \
+             (it only stamps the mutable field_config for UI/replay display)"
         );
     }
 

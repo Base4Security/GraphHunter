@@ -143,11 +143,7 @@ fn report_graph_ram(g: &GraphHunter, label: &str) {
         }
         sampled += 1;
     }
-    let avg_entity_heap = if sampled > 0 {
-        heap_sample / sampled
-    } else {
-        0
-    };
+    let avg_entity_heap = heap_sample.checked_div(sampled).unwrap_or(0);
     let entities_heap_est = avg_entity_heap * n;
     let entities_total = entities_inline + entities_heap_est;
     println!(
@@ -222,7 +218,7 @@ fn report_graph_ram(g: &GraphHunter, label: &str) {
         "  interner.strings  ~{}  (n={}, avg_str={})",
         fmt_bytes(interner_bytes),
         n,
-        if n > 0 { interner_bytes / n } else { 0 }
+        interner_bytes.checked_div(n).unwrap_or(0)
     );
 
     let estimated_total =

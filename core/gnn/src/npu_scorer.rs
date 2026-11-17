@@ -12,9 +12,9 @@
 pub mod scorer {
     use std::path::Path;
 
+    use crate::gnn_bridge::{GNN_INPUT_DIM, SubgraphFeatures};
     use ahash::HashMapExt;
     use graph_hunter_core::anomaly::ThreatClass;
-    use crate::gnn_bridge::{SubgraphFeatures, GNN_INPUT_DIM};
 
     /// GNN scorer that wraps an ONNX Runtime session.
     pub struct NpuScorer {
@@ -83,12 +83,13 @@ pub mod scorer {
             debug_assert_eq!(input_tensor.len(), GNN_INPUT_DIM);
 
             // Create input as [1, GNN_INPUT_DIM] tensor
-            let input_array =
-                ndarray::Array2::from_shape_vec((1, GNN_INPUT_DIM), input_tensor)
-                    .map_err(|e| NpuError::Inference(format!("Input shape error: {}", e)))?;
+            let input_array = ndarray::Array2::from_shape_vec((1, GNN_INPUT_DIM), input_tensor)
+                .map_err(|e| NpuError::Inference(format!("Input shape error: {}", e)))?;
 
             // Get output name before running (avoids borrow conflict with session.run)
-            let output_name = self.session.outputs()
+            let output_name = self
+                .session
+                .outputs()
                 .first()
                 .map(|o| o.name().to_string())
                 .ok_or_else(|| NpuError::InvalidOutput("Model has no outputs".to_string()))?;
@@ -127,10 +128,7 @@ pub mod scorer {
         }
 
         /// Convenience: classify and return a threat score in [0, 1].
-        pub fn threat_score(
-            &mut self,
-            features: &SubgraphFeatures,
-        ) -> Result<f64, NpuError> {
+        pub fn threat_score(&mut self, features: &SubgraphFeatures) -> Result<f64, NpuError> {
             let logits = self.classify_subgraph(features)?;
             Ok(ThreatClass::threat_score_from_logits(&logits))
         }
@@ -176,8 +174,8 @@ pub mod scorer {
 /// Provides a no-op NpuScorer that always returns None.
 #[cfg(not(feature = "ml-scoring"))]
 pub mod scorer {
-    use ahash::HashMapExt;
     use crate::gnn_bridge::SubgraphFeatures;
+    use ahash::HashMapExt;
 
     /// Placeholder scorer when ML feature is disabled.
     pub struct NpuScorer;
@@ -189,7 +187,10 @@ pub mod scorer {
 
     impl std::fmt::Display for NpuError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "ML scoring not available (feature 'ml-scoring' not enabled)")
+            write!(
+                f,
+                "ML scoring not available (feature 'ml-scoring' not enabled)"
+            )
         }
     }
 
@@ -200,10 +201,7 @@ pub mod scorer {
             Err(NpuError::NotAvailable)
         }
 
-        pub fn threat_score(
-            &mut self,
-            _features: &SubgraphFeatures,
-        ) -> Result<f64, NpuError> {
+        pub fn threat_score(&mut self, _features: &SubgraphFeatures) -> Result<f64, NpuError> {
             Err(NpuError::NotAvailable)
         }
 

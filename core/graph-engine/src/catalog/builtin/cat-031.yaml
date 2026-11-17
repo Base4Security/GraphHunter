@@ -1,0 +1,6 @@
+id: cat-031
+name: Session Roaming Across Addresses
+mitre_id: T1563
+description: "One session used from three or more addresses. Sharper than cat-021: a user authenticating from several addresses over hours is ordinary (mobile handoff, VPN, travel), but a single session jumping addresses points at a stolen token or a shared cookie. The threshold is 3, not 2, on purpose — reverse proxies and backend-for-frontend tiers appear as a second address on nearly every session, so 2 is the normal case, not the finding."
+dsl_pattern: "Session -[From]-> IP HAVING count(distinct IP) >= 3"
+k_simplicity: 1

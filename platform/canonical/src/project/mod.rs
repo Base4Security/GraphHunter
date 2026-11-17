@@ -41,9 +41,26 @@ pub fn triple_to_ocsf(
             actor_user: Some(user_ref(source)),
             dst_endpoint: Some(endpoint_ref(dest, None)),
             auth_protocol: relation.metadata.get("auth_protocol").cloned(),
-            status: relation.metadata.get("status").cloned(),
+            status: auth_status(relation),
+            logon_type_id: logon_type_id(relation),
             provenance,
         }),
+
+        (User, RelationType::Other(kind), Host) | (User, RelationType::Other(kind), IP)
+            if kind == "Logoff" =>
+        {
+            OcsfEvent::Authentication(AuthenticationEvent {
+                class_uid: class_uid::AUTHENTICATION,
+                activity_id: activity_id::authentication::LOGOFF,
+                time,
+                actor_user: Some(user_ref(source)),
+                dst_endpoint: Some(endpoint_ref(dest, None)),
+                auth_protocol: None,
+                status: None,
+                logon_type_id: logon_type_id(relation),
+                provenance,
+            })
+        }
 
         (User, Execute, Process) => OcsfEvent::ProcessActivity(ProcessActivityEvent {
             class_uid: class_uid::PROCESS_ACTIVITY,
@@ -52,6 +69,7 @@ pub fn triple_to_ocsf(
             actor_user: Some(user_ref(source)),
             parent_process: None,
             process: process_ref(dest),
+            device: process_device(dest),
             provenance,
         }),
 
@@ -62,6 +80,7 @@ pub fn triple_to_ocsf(
             actor_user: None,
             parent_process: Some(process_ref(source)),
             process: process_ref(dest),
+            device: process_device(dest),
             provenance,
         }),
 
@@ -154,6 +173,28 @@ pub fn triple_to_ocsf(
     }
 }
 
+/// Outcome of an `Auth` relation. Sentinel and the IdP parsers write
+/// `status`; the Sysmon/Security parser historically flagged only
+/// failures with `success = "false"`. `status` wins when both exist.
+fn auth_status(relation: &Relation) -> Option<String> {
+    if let Some(status) = relation.metadata.get("status") {
+        return Some(status.clone());
+    }
+    match relation.metadata.get("success").map(String::as_str) {
+        Some("false") => Some("Failure".to_string()),
+        Some("true") => Some("Success".to_string()),
+        _ => None,
+    }
+}
+
+/// Windows `LogonType` values 2–5 and 7–13 share their number with OCSF
+/// `logon_type_id`. Anything else (0, 6, text, garbage) is left out
+/// rather than guessed.
+fn logon_type_id(relation: &Relation) -> Option<u32> {
+    let n: u32 = relation.metadata.get("logon_type")?.trim().parse().ok()?;
+    matches!(n, 2..=5 | 7..=13).then_some(n)
+}
+
 /// Projects a canonical OCSF event back into a graph triple. Returns
 /// `None` when the event lacks the observables required to rebuild both
 /// endpoints (e.g. a `ProcessActivity` with neither `parent_process` nor
@@ -166,7 +207,12 @@ pub fn ocsf_to_triple(event: &OcsfEvent) -> Option<ParsedTriple> {
             let (dst_id, dst_type) = endpoint_identity(ep)?;
             let source = Entity::new(user.name.clone(), EntityType::User);
             let dest = Entity::new(dst_id.clone(), dst_type);
-            let relation = Relation::new(user.name.clone(), dst_id, RelationType::Auth, e.time);
+            let kind = if e.activity_id == activity_id::authentication::LOGOFF {
+                RelationType::Other("Logoff".into())
+            } else {
+                RelationType::Auth
+            };
+            let relation = Relation::new(user.name.clone(), dst_id, kind, e.time);
             Some((source, relation, dest))
         }
 
@@ -278,6 +324,15 @@ fn process_ref(e: &Entity) -> ProcessRef {
         cmd_line: e.metadata.get("cmdline").cloned(),
         file: None,
     }
+}
+
+/// The parsers record the host of a process entity as `computer` metadata.
+fn process_device(e: &Entity) -> Option<EndpointRef> {
+    e.metadata.get("computer").map(|h| EndpointRef {
+        ip: None,
+        hostname: Some(h.clone()),
+        port: None,
+    })
 }
 
 fn endpoint_ref(e: &Entity, port: Option<u16>) -> EndpointRef {
@@ -579,6 +634,101 @@ mod tests {
                 assert_eq!(e.auth_protocol.as_deref(), Some("Kerberos"));
             }
             _ => panic!("expected Authentication"),
+        }
+    }
+
+    #[test]
+    fn authentication_carries_logon_type_id() {
+        let src = Entity::new("alice", EntityType::User);
+        let dst = Entity::new("ws-01", EntityType::Host);
+        let mut rel = Relation::new("alice", "ws-01", RelationType::Auth, 0);
+        rel.metadata
+            .insert("logon_type".to_string(), "10".to_string());
+        match triple_to_ocsf(&src, &rel, &dst, &prov()) {
+            OcsfEvent::Authentication(e) => assert_eq!(e.logon_type_id, Some(10)),
+            _ => panic!("expected Authentication"),
+        }
+    }
+
+    #[test]
+    fn authentication_drops_unmapped_logon_type() {
+        let src = Entity::new("alice", EntityType::User);
+        let dst = Entity::new("ws-01", EntityType::Host);
+        for raw in ["0", "6", "14", "Interactive", ""] {
+            let mut rel = Relation::new("alice", "ws-01", RelationType::Auth, 0);
+            rel.metadata
+                .insert("logon_type".to_string(), raw.to_string());
+            match triple_to_ocsf(&src, &rel, &dst, &prov()) {
+                OcsfEvent::Authentication(e) => assert_eq!(e.logon_type_id, None, "{raw}"),
+                _ => panic!("expected Authentication"),
+            }
+        }
+    }
+
+    #[test]
+    fn authentication_status_falls_back_to_success_flag() {
+        let src = Entity::new("alice", EntityType::User);
+        let dst = Entity::new("ws-01", EntityType::Host);
+        let mut rel = Relation::new("alice", "ws-01", RelationType::Auth, 0);
+        rel.metadata
+            .insert("success".to_string(), "false".to_string());
+        match triple_to_ocsf(&src, &rel, &dst, &prov()) {
+            OcsfEvent::Authentication(e) => assert_eq!(e.status.as_deref(), Some("Failure")),
+            _ => panic!("expected Authentication"),
+        }
+
+        // An explicit status wins over the legacy flag.
+        rel.metadata
+            .insert("status".to_string(), "Success".to_string());
+        match triple_to_ocsf(&src, &rel, &dst, &prov()) {
+            OcsfEvent::Authentication(e) => assert_eq!(e.status.as_deref(), Some("Success")),
+            _ => panic!("expected Authentication"),
+        }
+    }
+
+    #[test]
+    fn logoff_projects_to_authentication_logoff_and_back() {
+        let src = Entity::new("alice", EntityType::User);
+        let dst = Entity::new("ws-01", EntityType::Host);
+        let rel = Relation::new("alice", "ws-01", RelationType::Other("Logoff".into()), 7);
+        let ev = triple_to_ocsf(&src, &rel, &dst, &prov());
+        match &ev {
+            OcsfEvent::Authentication(e) => {
+                assert_eq!(e.activity_id, activity_id::authentication::LOGOFF);
+                assert_eq!(e.status, None);
+            }
+            _ => panic!("expected Authentication"),
+        }
+        let (_, back, _) = ocsf_to_triple(&ev).expect("round trip");
+        assert_eq!(back.rel_type, RelationType::Other("Logoff".into()));
+    }
+
+    #[test]
+    fn other_relations_do_not_become_logoffs() {
+        let src = Entity::new("alice", EntityType::User);
+        let dst = Entity::new("ws-01", EntityType::Host);
+        let rel = Relation::new("alice", "ws-01", RelationType::Other("Consent".into()), 0);
+        assert!(!matches!(
+            triple_to_ocsf(&src, &rel, &dst, &prov()),
+            OcsfEvent::Authentication(_)
+        ));
+    }
+
+    #[test]
+    fn process_carries_its_host_as_device() {
+        let src = Entity::new("CORP\\alice", EntityType::User);
+        let mut dst = Entity::new("C:\\Windows\\notepad.exe", EntityType::Process);
+        dst.metadata
+            .insert("computer".into(), "ws-01.corp.example".into());
+        let rel = Relation::new(&src.id, &dst.id, RelationType::Execute, 0);
+        match triple_to_ocsf(&src, &rel, &dst, &prov()) {
+            OcsfEvent::ProcessActivity(e) => {
+                assert_eq!(
+                    e.device.and_then(|d| d.hostname).as_deref(),
+                    Some("ws-01.corp.example")
+                )
+            }
+            _ => panic!("expected ProcessActivity"),
         }
     }
 

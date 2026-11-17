@@ -1,3 +1,4 @@
+use crate::process_identity::{ProcessRef, process_id};
 use chrono::NaiveDateTime;
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,7 +10,7 @@ use crate::types::{EntityType, RelationType};
 
 /// Typed Sysmon event row used by the direct-typed fast path
 /// (`SysmonJsonParser::try_parse_typed_with_scratch`). Every field is `Option`
-/// + `borrow`ed from the input scratch buffer for zero-copy
+/// and `borrow`ed from the input scratch buffer for zero-copy
 /// deserialization through `simd_json::serde::from_slice`. The
 /// fields cover the union of what every implemented EventID needs
 /// — fields not relevant to the active EventID stay `None` and
@@ -34,6 +35,20 @@ struct SysmonEventTyped<'a> {
     computer: Option<&'a str>,
     #[serde(rename = "ProcessId", default)]
     process_id: Option<u64>,
+    // Instance identifiers, used only to build process ids
+    // (`crate::process_identity`).
+    #[serde(rename = "ProcessGuid", default, borrow)]
+    process_guid: Option<&'a str>,
+    #[serde(rename = "ParentProcessGuid", default, borrow)]
+    parent_process_guid: Option<&'a str>,
+    #[serde(rename = "SourceProcessGuid", default, borrow)]
+    source_process_guid: Option<&'a str>,
+    #[serde(rename = "TargetProcessGuid", default, borrow)]
+    target_process_guid: Option<&'a str>,
+    #[serde(rename = "SourceProcessId", default)]
+    source_process_id: Option<u64>,
+    #[serde(rename = "TargetProcessId", default)]
+    target_process_id: Option<u64>,
     #[serde(rename = "ParentImage", default, borrow)]
     parent_image: Option<&'a str>,
     #[serde(rename = "ParentProcessId", default)]
@@ -95,6 +110,8 @@ struct SysmonEventTyped<'a> {
     target_user_name: Option<&'a str>,
     #[serde(rename = "TargetDomainName", default, borrow)]
     target_domain_name: Option<&'a str>,
+    #[serde(rename = "TargetUserSid", default, borrow)]
+    target_user_sid: Option<&'a str>,
     #[serde(rename = "LogonType", default)]
     logon_type: Option<LogonTypeField<'a>>,
     #[serde(rename = "IpAddress", default, borrow)]
@@ -189,6 +206,8 @@ impl LogonTypeField<'_> {
 /// |----------|----------------------|-----------------------------------------------------------|
 /// | 4624     | Logon Success        | User -[Auth]-> Host                                       |
 /// | 4625     | Logon Failure        | User -[Auth]-> Host                                       |
+/// | 4634     | Logoff               | User -[Logoff]-> Host (`RelationType::Other`)             |
+/// | 4647     | User-initiated logoff| User -[Logoff]-> Host (`RelationType::Other`)             |
 /// | 4688     | Process Create       | User -[Execute]-> Process, Process -[Spawn]-> Process     |
 /// | 4689     | Process Terminated   | Process -[Delete]-> Host                                  |
 /// | 4663     | Object Access        | Process -[Read]-> File/Registry                           |
@@ -213,6 +232,36 @@ impl LogonTypeField<'_> {
 /// Timestamps are tried in order: `UtcTime` → `EventTime` → `@timestamp`.
 pub struct SysmonJsonParser;
 
+/// Which process of an event an image belongs to; selects the fields that
+/// carry its instance identifiers.
+#[derive(Clone, Copy)]
+enum ProcRole {
+    /// `Image` — the process the event is about.
+    Own,
+    /// `ParentImage`.
+    Parent,
+    /// `SourceImage` (events 8, 10).
+    Source,
+    /// `TargetImage` (events 8, 10).
+    Target,
+    /// A process named by a field with no guid/pid companion (Security
+    /// log events, the synthetic `powershell.exe` of script-block logs).
+    Bare,
+}
+
+impl ProcRole {
+    /// `(guid field, pid field)` in a Sysmon event.
+    fn keys(self) -> (Option<&'static str>, Option<&'static str>) {
+        match self {
+            ProcRole::Own => (Some("ProcessGuid"), Some("ProcessId")),
+            ProcRole::Parent => (Some("ParentProcessGuid"), Some("ParentProcessId")),
+            ProcRole::Source => (Some("SourceProcessGuid"), Some("SourceProcessId")),
+            ProcRole::Target => (Some("TargetProcessGuid"), Some("TargetProcessId")),
+            ProcRole::Bare => (None, None),
+        }
+    }
+}
+
 impl SysmonJsonParser {
     /// Parses a timestamp string into Unix epoch seconds.
     ///
@@ -228,6 +277,54 @@ impl SysmonJsonParser {
             .or_else(|_| NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%SZ"))
             .map(|dt| dt.and_utc().timestamp())
             .ok()
+    }
+
+    /// Node id of a process seen in `event` (generic JSON path). The typed
+    /// fast path has its own twin, [`Self::typed_proc_id`]; both must feed
+    /// `process_identity::process_id` the same fields or the two paths
+    /// would mint different ids for one process.
+    fn proc_id(event: &Value, image: &str, role: ProcRole) -> String {
+        let host = Self::extract_str(event, "Computer")
+            .or_else(|| Self::extract_str(event, "Hostname"))
+            .map(str::to_lowercase);
+        let (guid_key, pid_key) = role.keys();
+        let guid = guid_key.and_then(|k| Self::extract_str(event, k));
+        let pid = pid_key
+            .and_then(|k| event.get(k))
+            .and_then(|v| v.as_u64())
+            .map(|n| n.to_string());
+        process_id(&ProcessRef {
+            host: host.as_deref(),
+            image,
+            guid,
+            pid: pid.as_deref(),
+        })
+    }
+
+    fn proc_entity(event: &Value, image: &str, role: ProcRole) -> Entity {
+        Entity::new(Self::proc_id(event, image, role), EntityType::Process)
+    }
+
+    fn typed_proc_id(event: &SysmonEventTyped<'_>, image: &str, role: ProcRole) -> String {
+        let host = event.computer.or(event.hostname).map(str::to_lowercase);
+        let (guid, pid) = match role {
+            ProcRole::Own => (event.process_guid, event.process_id),
+            ProcRole::Parent => (event.parent_process_guid, event.parent_process_id),
+            ProcRole::Source => (event.source_process_guid, event.source_process_id),
+            ProcRole::Target => (event.target_process_guid, event.target_process_id),
+            ProcRole::Bare => (None, None),
+        };
+        let pid = pid.map(|n| n.to_string());
+        process_id(&ProcessRef {
+            host: host.as_deref(),
+            image,
+            guid,
+            pid: pid.as_deref(),
+        })
+    }
+
+    fn typed_proc_entity(event: &SysmonEventTyped<'_>, image: &str, role: ProcRole) -> Entity {
+        Entity::new(Self::typed_proc_id(event, image, role), EntityType::Process)
     }
 
     /// Extracts a non-empty string from a JSON value, returning None for
@@ -271,14 +368,13 @@ impl SysmonJsonParser {
                 merged.insert(k.clone(), v.clone());
             }
             // Propagate hostname variants
-            if !merged.contains_key("Computer") {
-                if let Some(host) = event
+            if !merged.contains_key("Computer")
+                && let Some(host) = event
                     .get("computer_name")
                     .or_else(|| event.get("Hostname"))
                     .or_else(|| event.get("host_name"))
-                {
-                    merged.insert("Computer".to_string(), host.clone());
-                }
+            {
+                merged.insert("Computer".to_string(), host.clone());
             }
             Some((event_id, std::borrow::Cow::Owned(Value::Object(merged))))
         } else {
@@ -319,7 +415,7 @@ impl SysmonJsonParser {
             22 => Self::parse_dns_query(ev, timestamp),
             23 => Self::parse_file_delete(ev, timestamp),
             // Windows Security events
-            4624 | 4625 => Self::parse_security_logon(ev, event_id, timestamp),
+            4624 | 4625 | 4634 | 4647 => Self::parse_security_logon(ev, event_id, timestamp),
             4688 => Self::parse_security_process_create(ev, timestamp),
             4689 => Self::parse_security_process_terminated(ev, timestamp),
             4663 => Self::parse_security_object_access(ev, timestamp),
@@ -349,7 +445,7 @@ impl SysmonJsonParser {
         };
 
         // Build child process entity with metadata
-        let mut child = Entity::new(image, EntityType::Process);
+        let mut child = Self::proc_entity(event, image, ProcRole::Own);
         if let Some(pid) = event.get("ProcessId").and_then(|v| v.as_u64()) {
             child.metadata.insert("pid".into(), pid.to_string());
         }
@@ -369,7 +465,7 @@ impl SysmonJsonParser {
 
         // Triple 2: ParentProcess -[Spawn]-> ChildProcess
         if let Some(parent_image) = Self::extract_str(event, "ParentImage") {
-            let mut parent = Entity::new(parent_image, EntityType::Process);
+            let mut parent = Self::proc_entity(event, parent_image, ProcRole::Parent);
             if let Some(ppid) = event.get("ParentProcessId").and_then(|v| v.as_u64()) {
                 parent.metadata.insert("pid".into(), ppid.to_string());
             }
@@ -393,7 +489,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::proc_entity(event, image, ProcRole::Own);
         let file = Entity::new(target, EntityType::File);
         let mut rel = Relation::new(&process.id, &file.id, RelationType::Modify, timestamp);
         if let Some(creation) = Self::extract_str(event, "CreationUtcTime") {
@@ -454,7 +550,7 @@ impl SysmonJsonParser {
 
         // Triple 2: Process -[Connect]-> IP
         if let Some(image) = Self::extract_str(event, "Image") {
-            let process = Entity::new(image, EntityType::Process);
+            let process = Self::proc_entity(event, image, ProcRole::Own);
             let rel2 = Relation::new(&process.id, &dest.id, RelationType::Connect, timestamp);
             triples.push((process, rel2, dest));
         }
@@ -475,7 +571,7 @@ impl SysmonJsonParser {
             .or_else(|| Self::extract_str(event, "Hostname"))
             .unwrap_or("unknown-host");
 
-        let mut process = Entity::new(image, EntityType::Process);
+        let mut process = Self::proc_entity(event, image, ProcRole::Own);
         if let Some(pid) = event.get("ProcessId").and_then(|v| v.as_u64()) {
             process.metadata.insert("pid".into(), pid.to_string());
         }
@@ -497,7 +593,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::proc_entity(event, image, ProcRole::Own);
         let mut file = Entity::new(image_loaded, EntityType::File);
         if let Some(signed) = Self::extract_str(event, "Signed") {
             file.metadata.insert("signed".into(), signed.into());
@@ -527,8 +623,8 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let source = Entity::new(source_image, EntityType::Process);
-        let target = Entity::new(target_image, EntityType::Process);
+        let source = Self::proc_entity(event, source_image, ProcRole::Source);
+        let target = Self::proc_entity(event, target_image, ProcRole::Target);
         let mut rel = Relation::new(&source.id, &target.id, RelationType::Execute, timestamp);
         if let Some(addr) = Self::extract_str(event, "StartAddress") {
             rel.metadata.insert("start_address".into(), addr.into());
@@ -555,7 +651,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::proc_entity(event, image, ProcRole::Own);
         let file = Entity::new(device, EntityType::File);
         let rel = Relation::new(&process.id, &file.id, RelationType::Read, timestamp);
         vec![(process, rel, file)]
@@ -574,8 +670,8 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let source = Entity::new(source_image, EntityType::Process);
-        let target = Entity::new(target_image, EntityType::Process);
+        let source = Self::proc_entity(event, source_image, ProcRole::Source);
+        let target = Self::proc_entity(event, target_image, ProcRole::Target);
         let mut rel = Relation::new(&source.id, &target.id, RelationType::Read, timestamp);
         if let Some(access) = Self::extract_str(event, "GrantedAccess") {
             rel.metadata.insert("granted_access".into(), access.into());
@@ -600,7 +696,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::proc_entity(event, image, ProcRole::Own);
         let mut file = Entity::new(target, EntityType::File);
         if let Some(hash) = Self::extract_str(event, "Hashes") {
             file.metadata.insert("hashes".into(), hash.into());
@@ -623,7 +719,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::proc_entity(event, image, ProcRole::Own);
         let registry = Entity::new(target_object, EntityType::Registry);
         let mut rel = Relation::new(&process.id, &registry.id, RelationType::Modify, timestamp);
         if let Some(event_type) = Self::extract_str(event, "EventType") {
@@ -649,7 +745,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::proc_entity(event, image, ProcRole::Own);
         let mut file = Entity::new(target, EntityType::File);
         if let Some(hash) = Self::extract_str(event, "Hash") {
             file.metadata.insert("hash".into(), hash.into());
@@ -671,7 +767,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::proc_entity(event, image, ProcRole::Own);
         let file = Entity::new(pipe_name, EntityType::File);
         let rel = Relation::new(&process.id, &file.id, RelationType::Write, timestamp);
         vec![(process, rel, file)]
@@ -690,7 +786,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::proc_entity(event, image, ProcRole::Own);
         let file = Entity::new(pipe_name, EntityType::File);
         let rel = Relation::new(&process.id, &file.id, RelationType::Connect, timestamp);
         vec![(process, rel, file)]
@@ -709,7 +805,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::proc_entity(event, image, ProcRole::Own);
         let mut domain = Entity::new(query_name, EntityType::Domain);
         if let Some(result) = Self::extract_str(event, "QueryResults") {
             domain
@@ -737,7 +833,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::proc_entity(event, image, ProcRole::Own);
         let mut file = Entity::new(target, EntityType::File);
         if let Some(hashes) = Self::extract_str(event, "Hashes") {
             file.metadata.insert("hashes".into(), hashes.into());
@@ -773,9 +869,12 @@ impl SysmonJsonParser {
             .or_else(|| Self::extract_str(event, "Hostname"))
             .unwrap_or("unknown-host");
 
-        let user = Entity::new(&user_id, EntityType::User);
+        let (rel_type, user_meta) =
+            logon_family(event_id, Self::extract_str(event, "TargetUserSid"), domain);
+        let mut user = Entity::new(&user_id, EntityType::User);
+        user.metadata.extend(user_meta);
         let host = Entity::new(host_name, EntityType::Host);
-        let mut rel = Relation::new(&user.id, &host.id, RelationType::Auth, timestamp);
+        let mut rel = Relation::new(&user.id, &host.id, rel_type, timestamp);
         if let Some(logon_type) = Self::extract_str(event, "LogonType")
             .or_else(|| event.get("LogonType").and_then(|v| v.as_u64()).map(|_| ""))
         {
@@ -794,13 +893,27 @@ impl SysmonJsonParser {
             }
             let _ = logon_type; // used above
         }
-        if let Some(ip) = Self::extract_str(event, "IpAddress") {
-            if ip != "-" {
-                rel.metadata.insert("ip_address".into(), ip.into());
-            }
+        if let Some(ip) = Self::extract_str(event, "IpAddress")
+            && ip != "-"
+        {
+            rel.metadata.insert("ip_address".into(), ip.into());
         }
         if event_id == 4625 {
             rel.metadata.insert("success".into(), "false".into());
+        }
+        // Same values as the Sentinel parser: the OCSF projection reads
+        // `status`, and without it a 4625 would look like a logon of
+        // unknown outcome.
+        if !matches!(event_id, 4634 | 4647) {
+            rel.metadata.insert(
+                "status".into(),
+                if event_id == 4625 {
+                    "Failure"
+                } else {
+                    "Success"
+                }
+                .into(),
+            );
         }
         vec![(user, rel, host)]
     }
@@ -818,7 +931,7 @@ impl SysmonJsonParser {
 
         let mut triples = Vec::new();
 
-        let mut child = Entity::new(new_process, EntityType::Process);
+        let mut child = Self::proc_entity(event, new_process, ProcRole::Bare);
         if let Some(cmdline) = Self::extract_str(event, "CommandLine") {
             child.metadata.insert("cmdline".into(), cmdline.into());
         }
@@ -842,7 +955,7 @@ impl SysmonJsonParser {
 
         // Triple 2: Parent -[Spawn]-> Child
         if let Some(parent_name) = Self::extract_str(event, "ParentProcessName") {
-            let parent = Entity::new(parent_name, EntityType::Process);
+            let parent = Self::proc_entity(event, parent_name, ProcRole::Bare);
             let rel = Relation::new(&parent.id, &child.id, RelationType::Spawn, timestamp);
             triples.push((parent, rel, child));
         }
@@ -863,7 +976,7 @@ impl SysmonJsonParser {
             .or_else(|| Self::extract_str(event, "Hostname"))
             .unwrap_or("unknown-host");
 
-        let process = Entity::new(process_name, EntityType::Process);
+        let process = Self::proc_entity(event, process_name, ProcRole::Bare);
         let host = Entity::new(host_name, EntityType::Host);
         let rel = Relation::new(&process.id, &host.id, RelationType::Delete, timestamp);
         vec![(process, rel, host)]
@@ -882,7 +995,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(process_name, EntityType::Process);
+        let process = Self::proc_entity(event, process_name, ProcRole::Bare);
         let object_type = Self::extract_str(event, "ObjectType");
         let target = if object_type == Some("Key") {
             Entity::new(object_name, EntityType::Registry)
@@ -940,7 +1053,7 @@ impl SysmonJsonParser {
             None => return Vec::new(),
         };
 
-        let process = Entity::new(application, EntityType::Process);
+        let process = Self::proc_entity(event, application, ProcRole::Bare);
         let mut ip = Entity::new(dest_addr, EntityType::IP);
         if let Some(dp) = Self::extract_str(event, "DestPort") {
             ip.metadata.insert("dest_port".into(), dp.into());
@@ -972,7 +1085,7 @@ impl SysmonJsonParser {
             .unwrap_or("unknown-host");
 
         let host = Entity::new(host_name, EntityType::Host);
-        let mut process = Entity::new("powershell.exe", EntityType::Process);
+        let mut process = Self::proc_entity(event, "powershell.exe", ProcRole::Bare);
 
         if let Some(script_text) = Self::extract_str(event, "ScriptBlockText") {
             let preview: String = script_text.chars().take(200).collect();
@@ -1053,7 +1166,9 @@ impl SysmonJsonParser {
             12 | 13 => Self::typed_registry_event_raw(&event, timestamp),
             15 => Self::typed_file_stream_hash_raw(&event, timestamp),
             23 => Self::typed_file_delete_raw(&event, timestamp),
-            4624 | 4625 => Self::typed_security_logon_raw(&event, event_id, timestamp),
+            4624 | 4625 | 4634 | 4647 => {
+                Self::typed_security_logon_raw(&event, event_id, timestamp)
+            }
             4688 => Self::typed_security_process_create_raw(&event, timestamp),
             4689 => Self::typed_security_process_terminated_raw(&event, timestamp),
             4663 => Self::typed_security_object_access_raw(&event, timestamp),
@@ -1089,7 +1204,7 @@ impl SysmonJsonParser {
             15 => Self::typed_file_stream_hash(&event, timestamp),
             23 => Self::typed_file_delete(&event, timestamp),
             // Windows Security.
-            4624 | 4625 => Self::typed_security_logon(&event, event_id, timestamp),
+            4624 | 4625 | 4634 | 4647 => Self::typed_security_logon(&event, event_id, timestamp),
             4688 => Self::typed_security_process_create(&event, timestamp),
             4689 => Self::typed_security_process_terminated(&event, timestamp),
             4663 => Self::typed_security_object_access(&event, timestamp),
@@ -1139,12 +1254,13 @@ impl SysmonJsonParser {
                 src_id: user_name.into(),
                 src_type: EntityType::User,
                 src_metadata: HashMap::new(),
-                dst_id: image.into(),
+                dst_id: Self::typed_proc_id(event, image, ProcRole::Own),
                 dst_type: EntityType::Process,
                 dst_metadata: dst_meta,
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         if let Some(parent_image) = event.parent_image {
@@ -1158,15 +1274,16 @@ impl SysmonJsonParser {
                 std::mem::take(&mut child_metadata)
             };
             events.push(RawIngestEvent {
-                src_id: parent_image.into(),
+                src_id: Self::typed_proc_id(event, parent_image, ProcRole::Parent),
                 src_type: EntityType::Process,
                 src_metadata: parent_meta,
-                dst_id: image.into(),
+                dst_id: Self::typed_proc_id(event, image, ProcRole::Own),
                 dst_type: EntityType::Process,
                 dst_metadata: dst_meta,
                 rel_type: RelationType::Spawn,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         Some(events)
@@ -1179,7 +1296,7 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
         let mut triples = Vec::with_capacity(2);
-        let mut child = Entity::new(image, EntityType::Process);
+        let mut child = Self::typed_proc_entity(event, image, ProcRole::Own);
         if let Some(pid) = event.process_id {
             child.metadata.insert("pid".into(), pid.to_string());
         }
@@ -1191,12 +1308,11 @@ impl SysmonJsonParser {
         }
         if let Some(user_name) = event.user {
             let user_entity = Entity::new(user_name, EntityType::User);
-            let rel =
-                Relation::new(&user_entity.id, &child.id, RelationType::Execute, timestamp);
+            let rel = Relation::new(&user_entity.id, &child.id, RelationType::Execute, timestamp);
             triples.push((user_entity, rel, child.clone()));
         }
         if let Some(parent_image) = event.parent_image {
-            let mut parent = Entity::new(parent_image, EntityType::Process);
+            let mut parent = Self::typed_proc_entity(event, parent_image, ProcRole::Parent);
             if let Some(ppid) = event.parent_process_id {
                 parent.metadata.insert("pid".into(), ppid.to_string());
             }
@@ -1206,13 +1322,13 @@ impl SysmonJsonParser {
         Some(triples)
     }
 
-    /// Raw-event variants for the long-tail Sysmon EventIDs. Each
-    /// mirrors its `typed_*` legacy counterpart but emits
-    /// `RawIngestEvent`s without the Entity/Relation struct
-    /// allocations. Where a handler emits multiple triples sharing a
-    /// dst entity, the metadata is moved into the first event and
-    /// later emissions carry empty `dst_metadata` — the writer's
-    /// `merge_metadata` already dedupes by entity id.
+    // Raw-event variants for the long-tail Sysmon EventIDs. Each
+    // mirrors its `typed_*` legacy counterpart but emits
+    // `RawIngestEvent`s without the Entity/Relation struct
+    // allocations. Where a handler emits multiple triples sharing a
+    // dst entity, the metadata is moved into the first event and
+    // later emissions carry empty `dst_metadata` — the writer's
+    // `merge_metadata` already dedupes by entity id.
 
     #[inline]
     fn typed_network_connection_raw(
@@ -1262,10 +1378,11 @@ impl SysmonJsonParser {
             rel_type: RelationType::Connect,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         });
         if let Some(image) = event.image {
             events.push(RawIngestEvent {
-                src_id: image.into(),
+                src_id: Self::typed_proc_id(event, image, ProcRole::Own),
                 src_type: EntityType::Process,
                 src_metadata: HashMap::new(),
                 dst_id: dest_ip.into(),
@@ -1274,6 +1391,7 @@ impl SysmonJsonParser {
                 rel_type: RelationType::Connect,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         Some(events)
@@ -1299,7 +1417,7 @@ impl SysmonJsonParser {
             file_meta.insert("hashes".into(), s.into());
         }
         Some(vec![RawIngestEvent {
-            src_id: image.into(),
+            src_id: Self::typed_proc_id(event, image, ProcRole::Own),
             src_type: EntityType::Process,
             src_metadata: HashMap::new(),
             dst_id: image_loaded.into(),
@@ -1308,6 +1426,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Read,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1325,7 +1444,7 @@ impl SysmonJsonParser {
             file_meta.insert("hashes".into(), s.into());
         }
         Some(vec![RawIngestEvent {
-            src_id: image.into(),
+            src_id: Self::typed_proc_id(event, image, ProcRole::Own),
             src_type: EntityType::Process,
             src_metadata: HashMap::new(),
             dst_id: target.into(),
@@ -1334,6 +1453,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Write,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1351,7 +1471,7 @@ impl SysmonJsonParser {
             process_meta.insert("pid".into(), pid.to_string());
         }
         Some(vec![RawIngestEvent {
-            src_id: image.into(),
+            src_id: Self::typed_proc_id(event, image, ProcRole::Own),
             src_type: EntityType::Process,
             src_metadata: process_meta,
             dst_id: host_name.into(),
@@ -1360,6 +1480,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Delete,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1383,15 +1504,16 @@ impl SysmonJsonParser {
             rel_meta.insert("start_module".into(), s.into());
         }
         Some(vec![RawIngestEvent {
-            src_id: source_image.into(),
+            src_id: Self::typed_proc_id(event, source_image, ProcRole::Source),
             src_type: EntityType::Process,
             src_metadata: HashMap::new(),
-            dst_id: target_image.into(),
+            dst_id: Self::typed_proc_id(event, target_image, ProcRole::Target),
             dst_type: EntityType::Process,
             dst_metadata: HashMap::new(),
             rel_type: RelationType::Execute,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1412,7 +1534,7 @@ impl SysmonJsonParser {
             rel_meta.insert("details".into(), s.into());
         }
         Some(vec![RawIngestEvent {
-            src_id: image.into(),
+            src_id: Self::typed_proc_id(event, image, ProcRole::Own),
             src_type: EntityType::Process,
             src_metadata: HashMap::new(),
             dst_id: target_object.into(),
@@ -1421,6 +1543,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Modify,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1438,7 +1561,7 @@ impl SysmonJsonParser {
             file_meta.insert("hash".into(), s.into());
         }
         Some(vec![RawIngestEvent {
-            src_id: image.into(),
+            src_id: Self::typed_proc_id(event, image, ProcRole::Own),
             src_type: EntityType::Process,
             src_metadata: HashMap::new(),
             dst_id: target.into(),
@@ -1447,6 +1570,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Write,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1464,7 +1588,7 @@ impl SysmonJsonParser {
             file_meta.insert("hashes".into(), s.into());
         }
         Some(vec![RawIngestEvent {
-            src_id: image.into(),
+            src_id: Self::typed_proc_id(event, image, ProcRole::Own),
             src_type: EntityType::Process,
             src_metadata: HashMap::new(),
             dst_id: target.into(),
@@ -1473,6 +1597,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Delete,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1510,7 +1635,7 @@ impl SysmonJsonParser {
         }
         let mut triples = vec![(source, rel, dest.clone())];
         if let Some(image) = event.image {
-            let process = Entity::new(image, EntityType::Process);
+            let process = Self::typed_proc_entity(event, image, ProcRole::Own);
             let rel2 = Relation::new(&process.id, &dest.id, RelationType::Connect, timestamp);
             triples.push((process, rel2, dest));
         }
@@ -1518,13 +1643,10 @@ impl SysmonJsonParser {
     }
 
     #[inline]
-    fn typed_image_load(
-        event: &SysmonEventTyped<'_>,
-        timestamp: i64,
-    ) -> Option<Vec<ParsedTriple>> {
+    fn typed_image_load(event: &SysmonEventTyped<'_>, timestamp: i64) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
         let image_loaded = event.image_loaded?;
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::typed_proc_entity(event, image, ProcRole::Own);
         let mut file = Entity::new(image_loaded, EntityType::File);
         if let Some(s) = event.signed {
             file.metadata.insert("signed".into(), s.into());
@@ -1546,7 +1668,7 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
         let target = event.target_filename?;
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::typed_proc_entity(event, image, ProcRole::Own);
         let mut file = Entity::new(target, EntityType::File);
         if let Some(s) = event.hashes {
             file.metadata.insert("hashes".into(), s.into());
@@ -1561,11 +1683,8 @@ impl SysmonJsonParser {
         timestamp: i64,
     ) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
-        let mut process = Entity::new(image, EntityType::Process);
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
+        let mut process = Self::typed_proc_entity(event, image, ProcRole::Own);
         if let Some(pid) = event.process_id {
             process.metadata.insert("pid".into(), pid.to_string());
         }
@@ -1581,8 +1700,8 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let source_image = event.source_image?;
         let target_image = event.target_image?;
-        let source = Entity::new(source_image, EntityType::Process);
-        let target = Entity::new(target_image, EntityType::Process);
+        let source = Self::typed_proc_entity(event, source_image, ProcRole::Source);
+        let target = Self::typed_proc_entity(event, target_image, ProcRole::Target);
         let mut rel = Relation::new(&source.id, &target.id, RelationType::Execute, timestamp);
         if let Some(s) = event.start_address {
             rel.metadata.insert("start_address".into(), s.into());
@@ -1603,7 +1722,7 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
         let target_object = event.target_object?;
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::typed_proc_entity(event, image, ProcRole::Own);
         let registry = Entity::new(target_object, EntityType::Registry);
         let mut rel = Relation::new(&process.id, &registry.id, RelationType::Modify, timestamp);
         if let Some(s) = event.event_type_str {
@@ -1622,7 +1741,7 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
         let target = event.target_filename?;
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::typed_proc_entity(event, image, ProcRole::Own);
         let mut file = Entity::new(target, EntityType::File);
         if let Some(s) = event.hash_single {
             file.metadata.insert("hash".into(), s.into());
@@ -1638,7 +1757,7 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let image = event.image?;
         let target = event.target_filename?;
-        let process = Entity::new(image, EntityType::Process);
+        let process = Self::typed_proc_entity(event, image, ProcRole::Own);
         let mut file = Entity::new(target, EntityType::File);
         if let Some(s) = event.hashes {
             file.metadata.insert("hashes".into(), s.into());
@@ -1660,12 +1779,12 @@ impl SysmonJsonParser {
         }
     }
 
-    /// Raw-event variants for Windows Security + PowerShell EventIDs.
-    /// Same shape as the Sysmon long-tail raw migrations: skip
-    /// `Entity`/`Relation` struct allocs, build metadata HashMaps
-    /// only on the side that actually owns metadata, and apply the
-    /// dst-metadata-skip-on-second-emission trick when a handler
-    /// emits multiple triples that share a dst (4688 child process).
+    // Raw-event variants for Windows Security + PowerShell EventIDs.
+    // Same shape as the Sysmon long-tail raw migrations: skip
+    // `Entity`/`Relation` struct allocs, build metadata HashMaps
+    // only on the side that actually owns metadata, and apply the
+    // dst-metadata-skip-on-second-emission trick when a handler
+    // emits multiple triples that share a dst (4688 child process).
 
     #[inline]
     fn typed_security_logon_raw(
@@ -1678,6 +1797,8 @@ impl SysmonJsonParser {
         let user_name = event.target_user_name?;
         let user_id = Self::build_user_id(user_name, event.target_domain_name);
         let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
+        let (rel_type, user_meta) =
+            logon_family(event_id, event.target_user_sid, event.target_domain_name);
         let mut rel_meta: HashMap<String, String> = HashMap::new();
         if let Some(lt) = &event.logon_type {
             let s = lt.as_string();
@@ -1685,24 +1806,39 @@ impl SysmonJsonParser {
                 rel_meta.insert("logon_type".into(), s);
             }
         }
-        if let Some(ip) = event.ip_address {
-            if ip != "-" {
-                rel_meta.insert("ip_address".into(), ip.into());
-            }
+        if let Some(ip) = event.ip_address
+            && ip != "-"
+        {
+            rel_meta.insert("ip_address".into(), ip.into());
         }
         if event_id == 4625 {
             rel_meta.insert("success".into(), "false".into());
         }
+        // Same values as the Sentinel parser: the OCSF projection reads
+        // `status`, and without it a 4625 would look like a logon of
+        // unknown outcome.
+        if !matches!(event_id, 4634 | 4647) {
+            rel_meta.insert(
+                "status".into(),
+                if event_id == 4625 {
+                    "Failure"
+                } else {
+                    "Success"
+                }
+                .into(),
+            );
+        }
         Some(vec![RawIngestEvent {
             src_id: user_id,
             src_type: EntityType::User,
-            src_metadata: HashMap::new(),
+            src_metadata: user_meta,
             dst_id: host_name.into(),
             dst_type: EntityType::Host,
             dst_metadata: HashMap::new(),
-            rel_type: RelationType::Auth,
+            rel_type,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1733,12 +1869,13 @@ impl SysmonJsonParser {
                 src_id: user_id,
                 src_type: EntityType::User,
                 src_metadata: HashMap::new(),
-                dst_id: new_process.into(),
+                dst_id: Self::typed_proc_id(event, new_process, ProcRole::Bare),
                 dst_type: EntityType::Process,
                 dst_metadata: dst_meta,
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         if let Some(parent_name) = event.parent_process_name {
@@ -1748,15 +1885,16 @@ impl SysmonJsonParser {
                 std::mem::take(&mut child_metadata)
             };
             events.push(RawIngestEvent {
-                src_id: parent_name.into(),
+                src_id: Self::typed_proc_id(event, parent_name, ProcRole::Bare),
                 src_type: EntityType::Process,
                 src_metadata: HashMap::new(),
-                dst_id: new_process.into(),
+                dst_id: Self::typed_proc_id(event, new_process, ProcRole::Bare),
                 dst_type: EntityType::Process,
                 dst_metadata: dst_meta,
                 rel_type: RelationType::Spawn,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         Some(events)
@@ -1772,7 +1910,7 @@ impl SysmonJsonParser {
         let process_name = event.process_name?;
         let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         Some(vec![RawIngestEvent {
-            src_id: process_name.into(),
+            src_id: Self::typed_proc_id(event, process_name, ProcRole::Bare),
             src_type: EntityType::Process,
             src_metadata: HashMap::new(),
             dst_id: host_name.into(),
@@ -1781,6 +1919,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Delete,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1799,7 +1938,7 @@ impl SysmonJsonParser {
             EntityType::File
         };
         Some(vec![RawIngestEvent {
-            src_id: process_name.into(),
+            src_id: Self::typed_proc_id(event, process_name, ProcRole::Bare),
             src_type: EntityType::Process,
             src_metadata: HashMap::new(),
             dst_id: object_name.into(),
@@ -1808,6 +1947,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Read,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1843,6 +1983,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Read,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1870,7 +2011,7 @@ impl SysmonJsonParser {
             rel_meta.insert("source_address".into(), s.into());
         }
         Some(vec![RawIngestEvent {
-            src_id: application.into(),
+            src_id: Self::typed_proc_id(event, application, ProcRole::Bare),
             src_type: EntityType::Process,
             src_metadata: HashMap::new(),
             dst_id: dest_addr.into(),
@@ -1879,6 +2020,7 @@ impl SysmonJsonParser {
             rel_type: RelationType::Connect,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1902,12 +2044,13 @@ impl SysmonJsonParser {
             src_id: host_name.into(),
             src_type: EntityType::Host,
             src_metadata: HashMap::new(),
-            dst_id: "powershell.exe".into(),
+            dst_id: Self::typed_proc_id(event, "powershell.exe", ProcRole::Bare),
             dst_type: EntityType::Process,
             dst_metadata: process_meta,
             rel_type: RelationType::Execute,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }])
     }
 
@@ -1919,26 +2062,40 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let user_name = event.target_user_name?;
         let user_id = Self::build_user_id(user_name, event.target_domain_name);
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
-        let user = Entity::new(&user_id, EntityType::User);
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
+        let (rel_type, user_meta) =
+            logon_family(event_id, event.target_user_sid, event.target_domain_name);
+        let mut user = Entity::new(&user_id, EntityType::User);
+        user.metadata.extend(user_meta);
         let host = Entity::new(host_name, EntityType::Host);
-        let mut rel = Relation::new(&user.id, &host.id, RelationType::Auth, timestamp);
+        let mut rel = Relation::new(&user.id, &host.id, rel_type, timestamp);
         if let Some(lt) = &event.logon_type {
             let s = lt.as_string();
             if !s.is_empty() {
                 rel.metadata.insert("logon_type".into(), s);
             }
         }
-        if let Some(ip) = event.ip_address {
-            if ip != "-" {
-                rel.metadata.insert("ip_address".into(), ip.into());
-            }
+        if let Some(ip) = event.ip_address
+            && ip != "-"
+        {
+            rel.metadata.insert("ip_address".into(), ip.into());
         }
         if event_id == 4625 {
             rel.metadata.insert("success".into(), "false".into());
+        }
+        // Same values as the Sentinel parser: the OCSF projection reads
+        // `status`, and without it a 4625 would look like a logon of
+        // unknown outcome.
+        if !matches!(event_id, 4634 | 4647) {
+            rel.metadata.insert(
+                "status".into(),
+                if event_id == 4625 {
+                    "Failure"
+                } else {
+                    "Success"
+                }
+                .into(),
+            );
         }
         Some(vec![(user, rel, host)])
     }
@@ -1950,7 +2107,7 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let new_process = event.new_process_name?;
         let mut triples = Vec::with_capacity(2);
-        let mut child = Entity::new(new_process, EntityType::Process);
+        let mut child = Self::typed_proc_entity(event, new_process, ProcRole::Bare);
         if let Some(cmd) = event.command_line {
             child.metadata.insert("cmdline".into(), cmd.into());
         }
@@ -1964,7 +2121,7 @@ impl SysmonJsonParser {
             triples.push((user, rel, child.clone()));
         }
         if let Some(parent_name) = event.parent_process_name {
-            let parent = Entity::new(parent_name, EntityType::Process);
+            let parent = Self::typed_proc_entity(event, parent_name, ProcRole::Bare);
             let rel = Relation::new(&parent.id, &child.id, RelationType::Spawn, timestamp);
             triples.push((parent, rel, child));
         }
@@ -1977,11 +2134,8 @@ impl SysmonJsonParser {
         timestamp: i64,
     ) -> Option<Vec<ParsedTriple>> {
         let process_name = event.process_name?;
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
-        let process = Entity::new(process_name, EntityType::Process);
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
+        let process = Self::typed_proc_entity(event, process_name, ProcRole::Bare);
         let host = Entity::new(host_name, EntityType::Host);
         let rel = Relation::new(&process.id, &host.id, RelationType::Delete, timestamp);
         Some(vec![(process, rel, host)])
@@ -1994,7 +2148,7 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let process_name = event.process_name?;
         let object_name = event.object_name?;
-        let process = Entity::new(process_name, EntityType::Process);
+        let process = Self::typed_proc_entity(event, process_name, ProcRole::Bare);
         let target = if event.object_type == Some("Key") {
             Entity::new(object_name, EntityType::Registry)
         } else {
@@ -2036,7 +2190,7 @@ impl SysmonJsonParser {
     ) -> Option<Vec<ParsedTriple>> {
         let application = event.application?;
         let dest_addr = event.dest_address?;
-        let process = Entity::new(application, EntityType::Process);
+        let process = Self::typed_proc_entity(event, application, ProcRole::Bare);
         let mut ip = Entity::new(dest_addr, EntityType::IP);
         if let Some(s) = event.dest_port {
             ip.metadata.insert("dest_port".into(), s.into());
@@ -2059,18 +2213,17 @@ impl SysmonJsonParser {
         event: &SysmonEventTyped<'_>,
         timestamp: i64,
     ) -> Option<Vec<ParsedTriple>> {
-        let host_name = event
-            .computer
-            .or(event.hostname)
-            .unwrap_or("unknown-host");
+        let host_name = event.computer.or(event.hostname).unwrap_or("unknown-host");
         let host = Entity::new(host_name, EntityType::Host);
-        let mut process = Entity::new("powershell.exe", EntityType::Process);
+        let mut process = Self::typed_proc_entity(event, "powershell.exe", ProcRole::Bare);
         if let Some(script_text) = event.script_block_text {
             let preview: String = script_text.chars().take(200).collect();
             process.metadata.insert("script_preview".into(), preview);
         }
         if let Some(sbid) = event.script_block_id {
-            process.metadata.insert("script_block_id".into(), sbid.into());
+            process
+                .metadata
+                .insert("script_block_id".into(), sbid.into());
         }
         let rel = Relation::new(&host.id, &process.id, RelationType::Execute, timestamp);
         Some(vec![(host, rel, process)])
@@ -2124,10 +2277,7 @@ impl LogParser for SysmonJsonParser {
         if trimmed.starts_with('[') {
             let mut buf = trimmed.as_bytes().to_vec();
             if let Ok(events) = simd_json::serde::from_slice::<Vec<Value>>(&mut buf) {
-                return events
-                    .par_iter()
-                    .flat_map(|event| Self::parse_event(event))
-                    .collect();
+                return events.par_iter().flat_map(Self::parse_event).collect();
             }
         }
 
@@ -2144,9 +2294,7 @@ impl LogParser for SysmonJsonParser {
             .map_init(
                 || Vec::<u8>::with_capacity(2048),
                 |scratch, line| {
-                    if let Some(triples) =
-                        Self::try_parse_typed_with_scratch(line, scratch)
-                    {
+                    if let Some(triples) = Self::try_parse_typed_with_scratch(line, scratch) {
                         return triples;
                     }
                     scratch.clear();
@@ -2163,7 +2311,7 @@ impl LogParser for SysmonJsonParser {
 
     fn parse_with_stats(&self, data: &str) -> (Vec<ParsedTriple>, crate::parser::ParseStats) {
         let events = Self::collect_events(data);
-        crate::generic::parse_events_with_stats(&events, |ev| Self::parse_event(ev))
+        crate::generic::parse_events_with_stats(&events, Self::parse_event)
     }
 
     /// Raw-event override: NDJSON-only fast path that emits
@@ -2229,12 +2377,15 @@ impl LogParser for SysmonJsonParser {
     /// those should call `parse_with_stats` instead.
     ///
     /// JSON-array inputs delegate to the legacy `parse_with_stats`
-    /// + lift path to keep full stat fidelity (those inputs are
+    /// plus lift path to keep full stat fidelity (those inputs are
     /// rare for ingest and going through the stats path is fine).
     fn parse_raw_with_stats(
         &self,
         data: &str,
-    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+    ) -> (
+        Vec<crate::parser::RawIngestEvent>,
+        crate::parser::ParseStats,
+    ) {
         use rayon::prelude::*;
         let trimmed = data.trim();
 
@@ -2247,10 +2398,14 @@ impl LogParser for SysmonJsonParser {
             return (events, stats);
         }
 
-        // Per-line: (events, produced_at_least_one_triple). Reduce
-        // counts after the collect; events are flattened into the
-        // returned Vec.
-        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool)> = trimmed
+        // Per-line: (events, produced_at_least_one_triple, skip_sample).
+        // `skip_sample` is `Some((raw_row, reason))` only when the row was
+        // skipped — the `line.to_string()` allocation is paid solely on
+        // that (rare) branch so the hot per-row throughput this fast path
+        // exists for is untouched. Reduce counts after the collect;
+        // events are flattened into the returned Vec.
+        type SkipSample = Option<(String, String)>;
+        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool, SkipSample)> = trimmed
             .par_lines()
             .filter(|l| !l.trim().is_empty())
             .map_init(
@@ -2258,7 +2413,12 @@ impl LogParser for SysmonJsonParser {
                 |scratch, line| {
                     if let Some(events) = Self::try_parse_typed_raw_with_scratch(line, scratch) {
                         let produced = !events.is_empty();
-                        return (events, produced);
+                        // Matched a typed EventID but yielded zero
+                        // triples (e.g. EventID 1 with no
+                        // User/ParentImage to anchor a triple on).
+                        let skip = (!produced)
+                            .then(|| (line.to_string(), "no_mappable_entities".to_string()));
+                        return (events, produced, skip);
                     }
                     if let Some(triples) = Self::try_parse_typed_with_scratch(line, scratch) {
                         let produced = !triples.is_empty();
@@ -2266,7 +2426,9 @@ impl LogParser for SysmonJsonParser {
                             .into_iter()
                             .map(crate::parser::RawIngestEvent::from_parsed_triple)
                             .collect();
-                        return (events, produced);
+                        let skip = (!produced)
+                            .then(|| (line.to_string(), "no_mappable_entities".to_string()));
+                        return (events, produced, skip);
                     }
                     scratch.clear();
                     scratch.extend_from_slice(line.as_bytes());
@@ -2274,32 +2436,81 @@ impl LogParser for SysmonJsonParser {
                         .ok()
                         .or_else(|| serde_json::from_str(line).ok());
                     let events: Vec<crate::parser::RawIngestEvent> = parsed
+                        .as_ref()
                         .map(|e| {
-                            Self::parse_event(&e)
+                            Self::parse_event(e)
                                 .into_iter()
                                 .map(crate::parser::RawIngestEvent::from_parsed_triple)
                                 .collect()
                         })
                         .unwrap_or_default();
                     let produced = !events.is_empty();
-                    (events, produced)
+                    let skip = (!produced).then(|| {
+                        // `parsed` deserialized fine (e.g. unsupported
+                        // EventID falling to `parse_event`'s `_ =>
+                        // Vec::new()` arm) — reuse the same
+                        // classification the generic/non-native paths
+                        // report via `skip_reasons` so the reason is
+                        // consistent across fast and legacy paths.
+                        // Otherwise the line didn't even deserialize.
+                        let reason = parsed
+                            .as_ref()
+                            .map(crate::generic::classify_skip_reason)
+                            .unwrap_or("unparseable_row");
+                        (line.to_string(), reason.to_string())
+                    });
+                    (events, produced, skip)
                 },
             )
             .collect();
 
-        let mut stats = crate::parser::ParseStats::default();
-        stats.rows_seen = per_line.len();
+        let mut stats = crate::parser::ParseStats {
+            rows_seen: per_line.len(),
+            ..Default::default()
+        };
         let mut all_events: Vec<crate::parser::RawIngestEvent> = Vec::new();
-        for (events, produced) in per_line {
+        for (events, produced, skip) in per_line {
             if produced {
                 stats.rows_with_triples += 1;
             } else {
                 stats.rows_skipped += 1;
+                if let Some(sample) = skip
+                    && stats.skipped_samples.len() < crate::parser::SKIP_SAMPLE_CAP
+                {
+                    stats.skipped_samples.push(sample);
+                }
             }
             all_events.extend(events);
         }
-        // per_field_occurrence, skip_reasons, skipped_samples, drift
-        // intentionally left empty — see trait docstring.
+        // per_field_occurrence, skip_reasons, drift intentionally left
+        // empty — see trait docstring. `skipped_samples` is populated
+        // above (bounded reservoir, closes the S4 gap).
         (all_events, stats)
     }
+}
+
+/// Logon-family metadata shared by the Windows Security paths (4624, 4625,
+/// 4634, 4647) of the Sysmon/Security and Sentinel parsers.
+/// User side: the SID (the only exact identity, used by the attack-graph
+/// projection) and the domain. Relation side: a logoff (4634/4647) is
+/// not an `Auth` — hunting patterns on `Auth` must not match it — so it
+/// travels as `Other("Logoff")`; logons keep `Auth` with their outcome.
+pub(crate) fn logon_family(
+    event_id: u64,
+    sid: Option<&str>,
+    domain: Option<&str>,
+) -> (RelationType, std::collections::HashMap<String, String>) {
+    let mut user_meta = std::collections::HashMap::new();
+    if let Some(sid) = sid.filter(|s| !s.is_empty() && *s != "-" && *s != "S-1-0-0") {
+        user_meta.insert("uid".into(), sid.into());
+    }
+    if let Some(d) = domain.filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case("-")) {
+        user_meta.insert("domain".into(), d.into());
+    }
+    let rel = if matches!(event_id, 4634 | 4647) {
+        RelationType::Other("Logoff".into())
+    } else {
+        RelationType::Auth
+    };
+    (rel, user_meta)
 }

@@ -36,7 +36,13 @@ impl GraphHunterApi {
         let geoip_any = geoip_mmdb || geoip_http;
         Capabilities {
             geoip: geoip_any,
-            asn: geoip_mmdb,
+            // The ip-api.com response carries `as` / `asname`, and
+            // `HttpGeoIpProvider::lookup` parses both into `asn`/`as_org`.
+            // Reporting `asn: geoip_mmdb` therefore under-reported the
+            // capability whenever only the HTTP backend was installed —
+            // an analyst would read `asn:false` and rule out ASN-based
+            // analysis that would in fact have worked.
+            asn: geoip_mmdb || geoip_http,
             threat_intel: false,
         }
     }
@@ -313,25 +319,31 @@ mod tests {
     fn graph_summary_surfaces_last_build() {
         use crate::dto::session::CreateSessionRequest;
         let api = GraphHunterApi::new_noop();
-        api.create_session(CreateSessionRequest { name: Some("lb-test".into()) }).unwrap();
+        api.create_session(CreateSessionRequest {
+            name: Some("lb-test".into()),
+        })
+        .unwrap();
         // No build yet → last_build absent.
-        let before = api.get_graph_summary(GraphSummaryRequest::default()).unwrap();
+        let before = api
+            .get_graph_summary(GraphSummaryRequest::default())
+            .unwrap();
         assert!(before.last_build.is_none());
 
         // Record a build, then it must surface in the summary (§5).
         {
             let session = api.resolve_session(None).unwrap();
-            *session.last_build.write().unwrap() =
-                Some(crate::dto::sentinel::BuildRecord {
-                    build_id: "build-abc123".into(),
-                    proposal_id: "signinlogs-user-ip".into(),
-                    at: 1_700_000_000,
-                    entities_created: 1238,
-                    relations_created: 4791,
-                    merge_mode: "append".into(),
-                });
+            *session.last_build.write().unwrap() = Some(crate::dto::sentinel::BuildRecord {
+                build_id: "build-abc123".into(),
+                proposal_id: "signinlogs-user-ip".into(),
+                at: 1_700_000_000,
+                entities_created: 1238,
+                relations_created: 4791,
+                merge_mode: "append".into(),
+            });
         }
-        let after = api.get_graph_summary(GraphSummaryRequest::default()).unwrap();
+        let after = api
+            .get_graph_summary(GraphSummaryRequest::default())
+            .unwrap();
         let lb = after.last_build.expect("last_build surfaced");
         assert_eq!(lb.build_id, "build-abc123");
         assert_eq!(lb.relations_created, 4791);

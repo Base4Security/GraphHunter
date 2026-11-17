@@ -20,11 +20,7 @@ function nextRequestId(): string {
 }
 
 function isEmptyObjectSchema(schema: unknown): boolean {
-  if (!schema || typeof schema !== "object") return false;
-  const def = (schema as { _def?: { typeName?: string; shape?: () => Record<string, unknown> } })._def;
-  if (!def || def.typeName !== "ZodObject") return false;
-  const shape = def.shape ? def.shape() : undefined;
-  return !!shape && Object.keys(shape).length === 0;
+  return schema instanceof z.ZodObject && Object.keys(schema.shape).length === 0;
 }
 
 export function registerTools(

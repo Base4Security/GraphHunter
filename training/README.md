@@ -20,6 +20,8 @@ source .venv/bin/activate
 
 # Instalar dependencias
 pip install -r requirements.txt
+# versiones exactas; se regenera desde requirements.in con:
+# uv pip compile requirements.in --universal --python-version 3.12 -o requirements.txt
 ```
 
 Espacio en disco necesario:
@@ -40,7 +42,7 @@ El dataset está hospedado en Google Drive por DARPA. Son archivos JSON con traz
 
 **Descargar archivos:**
 
-1. Ir a: https://drive.google.com/drive/folders/1okt4AYElyBohW4XiOBqmsvjwXsnUjLVf
+1. Ir a: https://drive.google.com/drive/folders/1QlbUFWAGq3Hpl8wVdzOdIoZLFxkII4EK
 2. Navegar a la carpeta `data/cadets/`
 3. Descargar estos archivos:
    - `ta1-cadets-e3-official.json.tar.gz`

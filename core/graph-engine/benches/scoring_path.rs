@@ -17,14 +17,14 @@ fn finalized_graph(n_common: usize, n_rare: usize) -> GraphHunter {
     let mut g = GraphHunter::new();
     g.enable_anomaly_scoring(ScoringWeights::default());
     for i in 0..n_common {
-        g.add_entity(Entity::new(&format!("c{i}"), EntityType::Host))
+        g.add_entity(Entity::new(format!("c{i}"), EntityType::Host))
             .unwrap();
-        g.add_entity(Entity::new(&format!("u{i}"), EntityType::User))
+        g.add_entity(Entity::new(format!("u{i}"), EntityType::User))
             .unwrap();
         for k in 0..10 {
             g.add_relation(Relation::new(
-                &format!("u{i}"),
-                &format!("c{i}"),
+                format!("u{i}"),
+                format!("c{i}"),
                 RelationType::Auth,
                 1000 + k as i64,
             ))
@@ -32,11 +32,11 @@ fn finalized_graph(n_common: usize, n_rare: usize) -> GraphHunter {
         }
     }
     for i in 0..n_rare {
-        g.add_entity(Entity::new(&format!("r{i}"), EntityType::Process))
+        g.add_entity(Entity::new(format!("r{i}"), EntityType::Process))
             .unwrap();
         g.add_relation(Relation::new(
             "u0",
-            &format!("r{i}"),
+            format!("r{i}"),
             RelationType::Execute,
             5000 + i as i64,
         ))

@@ -76,7 +76,10 @@ impl ConstrainedSampler {
     /// tokenizer must be the *same* one the model was trained with —
     /// every token-id in the mask is interpreted in that vocabulary.
     pub fn from_lark(grammar_lark: &str, tokenizer: Tokenizer) -> SamplerResult<Self> {
-        Self::build(TopLevelGrammar::from_lark(grammar_lark.to_string()), tokenizer)
+        Self::build(
+            TopLevelGrammar::from_lark(grammar_lark.to_string()),
+            tokenizer,
+        )
     }
 
     /// Build a sampler that constrains output to a JSON Schema.
@@ -105,8 +108,9 @@ impl ConstrainedSampler {
         schema_json: serde_json::Value,
         tokenizer_path: &std::path::Path,
     ) -> SamplerResult<Self> {
-        let tokenizer = Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| SamplerError::Tokenizer(format!("load {}: {e}", tokenizer_path.display())))?;
+        let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| {
+            SamplerError::Tokenizer(format!("load {}: {e}", tokenizer_path.display()))
+        })?;
         Self::from_json_schema(schema_json, tokenizer)
     }
 

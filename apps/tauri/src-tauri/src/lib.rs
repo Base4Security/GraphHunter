@@ -4,7 +4,6 @@ pub mod error;
 pub mod evtx;
 pub mod format_registry;
 pub mod helpers;
-mod http;
 pub mod scoring;
 pub mod sentinel_connector;
 pub mod state;
@@ -19,8 +18,8 @@ pub use helpers::parse_entity_type;
 pub use state::AppState;
 pub use types::{PaginatedHuntResults, Subgraph, SubgraphEdge, SubgraphNode};
 
+use graph_hunter_server::{ServerState, bootstrap, http};
 use std::sync::{Arc, RwLock};
-use uuid::Uuid;
 
 /// Entry point for the Tauri application.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -29,66 +28,21 @@ pub fn run() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    // Load .env: walk up from CWD until we find one
-    {
-        let mut dir = std::env::current_dir().ok();
-        let mut loaded = false;
-        while let Some(d) = dir {
-            let candidate = d.join(".env");
-            if candidate.is_file() {
-                if dotenvy::from_path(&candidate).is_ok() {
-                    tracing::info!(".env loaded from {}", candidate.display());
-                    loaded = true;
-                    break;
-                }
-            }
-            dir = d.parent().map(|p| p.to_path_buf());
-        }
-        if !loaded {
-            tracing::warn!(".env not found in any parent directory");
-        }
-    }
+    // Start-up shared with the headless `graph-hunter-server` lives in
+    // `graph_hunter_server::bootstrap`, so the two transports cannot
+    // drift apart.
+    bootstrap::load_dotenv();
+    // SAFETY: still single-threaded — Tauri's runtime spawns workers
+    // later, in `setup()`.
+    unsafe { bootstrap::default_perf_flags() };
 
-    // M-track perf flags: default-on for the Tauri app so the
-    // frontend automatically benefits from the structural K_4 LFTJ
-    // dispatch (M1) and the name-marker S3 detector when the user
-    // runs `npm run tauri dev`. Both are conservative — the
-    // dispatcher inspects each hypothesis and falls back to the
-    // legacy DFS for any shape that does not match. Users can
-    // override with `GRAPHHUNTER_LFTJ_PLANNER=0` /
-    // `GRAPHHUNTER_K4_LFTJ=0` if they want the legacy path. AMAC
-    // and SEMIJOIN remain opt-in (they have parity tests but are
-    // newer and rewrite the DFS hot loop) — flip those manually
-    // once your bench shows the lift you expect.
-    for (key, default) in [
-        ("GRAPHHUNTER_LFTJ_PLANNER", "1"),
-        ("GRAPHHUNTER_K4_LFTJ", "1"),
-        ("GRAPHHUNTER_YANNAKAKIS", "1"),
-        // GRAPHHUNTER_LLM_INGEST was the silent-dispatcher kill-switch
-        // when Phase C ran the LLM on every ambiguous ingest. Phase G
-        // demoted that path to a manual "Probar mapeo IA" button on
-        // `DatasetCard`, so there's no env-var to default-on anymore —
-        // the AI runs only when the analyst clicks. The env var is
-        // still honored if set (for future re-enablement of the
-        // silent path), just not flipped at startup.
-    ] {
-        if std::env::var(key).is_err() {
-            // SAFETY: set_var is unsafe in 2024 edition because env
-            // mutation can race with other threads reading env. Here
-            // we are still single-threaded — Tauri's runtime spawns
-            // workers later in `setup()`. The matcher reads these
-            // flags lazily on first hunt, well after `run()` returns.
-            unsafe { std::env::set_var(key, default) };
-            tracing::info!("perf flag default-on: {}={}", key, default);
-        } else {
-            tracing::debug!("perf flag honored from env: {}", key);
-        }
-    }
-
-    let api_token = std::env::var("GRAPHHUNTER_API_TOKEN")
-        .unwrap_or_else(|_| Uuid::new_v4().to_string());
+    let (api_token, _) = bootstrap::resolve_token();
     let masked = if api_token.len() > 4 {
-        format!("{}...{}", &api_token[..4], &api_token[api_token.len() - 4..])
+        format!(
+            "{}...{}",
+            &api_token[..4],
+            &api_token[api_token.len() - 4..]
+        )
     } else {
         "****".to_string()
     };
@@ -106,113 +60,38 @@ pub fn run() {
     // / current / hunt_cache handles from the API so legacy helpers and
     // the canonical operations see the exact same state.
     let api = Arc::new(graph_hunter_api::GraphHunterApi::new(emitter));
-    // Populate the API's GeoIP slot at startup (MaxMind from disk).
-    // AppState no longer holds this handle directly — all GeoIP
-    // ops go through the canonical API.
+    // Populate the API's GeoIP slots at startup. The bootstrap lives on
+    // the API (not here) so the headless HTTP transport gets the same
+    // wiring; this call additionally passes the installer's bundled
+    // resource directory, which only the desktop app can resolve.
+    // Failures are logged loudly inside `bootstrap_geoip` — the previous
+    // version of this block logged only on success, so a missing
+    // database was indistinguishable from a working one and shipped as
+    // a silent `geoip=false`.
     {
-        let handle = api.geoip_provider_handle();
-        let provider = dirs::data_dir()
-            .map(|d| d.join("GraphHunter").join("geoip"))
-            .and_then(|dir| {
-                graph_hunter_core::geoip::maxmind::MaxMindProvider::from_directory(&dir).ok()
-            })
-            .filter(|p| p.is_available());
-        if provider.is_some() {
-            tracing::info!("MaxMind GeoIP databases loaded");
-        }
-        if let Ok(mut g) = handle.lock() {
-            *g = provider;
-        }
+        let bundled = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|p| p.join("resources").join("geoip")));
+        api.bootstrap_geoip(bundled);
     }
-    // Initialize the drift store on disk. Placed beside other GraphHunter
-    // runtime state. If the directory is unavailable (no HOME?) or SQLite
-    // refuses to open the file, log and leave the slot empty — ingest will
-    // run fine, only /metrics and drift_report will be empty.
-    {
-        let handle = api.drift_store_handle();
-        let store = dirs::data_dir()
-            .map(|d| d.join("GraphHunter").join("sessions"))
-            .and_then(|dir| {
-                std::fs::create_dir_all(&dir).ok()?;
-                let path = dir.join("drift.sqlite");
-                match graph_hunter_core::drift::DriftStore::open(&path) {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        tracing::warn!("DriftStore open failed at {}: {}", path.display(), e);
-                        None
-                    }
-                }
-            });
-        if store.is_some() {
-            tracing::info!("Drift store initialized");
-        }
-        if let Ok(mut g) = handle.lock() {
-            *g = store;
-        }
-    }
-
-    // DLQ store: JSONL shards under `<data>/GraphHunter/sessions/dlq/`.
-    // Same graceful-degradation contract as drift — failures leave the
-    // slot `None` and the DLQ API ops return empty.
-    {
-        let handle = api.dlq_store_handle();
-        let store = dirs::data_dir()
-            .map(|d| d.join("GraphHunter").join("sessions").join("dlq"))
-            .and_then(|dir| match graph_hunter_core::dlq::DlqStore::open(&dir) {
-                Ok(s) => Some(std::sync::Arc::new(s)),
-                Err(e) => {
-                    tracing::warn!("DlqStore open failed at {}: {}", dir.display(), e);
-                    None
-                }
-            });
-        if store.is_some() {
-            tracing::info!("Dead-letter queue initialized");
-        }
-        if let Ok(mut g) = handle.lock() {
-            *g = store;
-        }
-    }
-
-    // Mapping library: JSONL catalog under
-    // `<data>/GraphHunter/mapping_library/`. Populated by the
-    // review-queue approval hook; read by future RAG lookups.
-    {
-        let handle = api.mapping_library_handle();
-        let store = dirs::data_dir()
-            .map(|d| d.join("GraphHunter").join("mapping_library"))
-            .and_then(|dir| {
-                match graph_hunter_core::mapping_library::MappingLibraryStore::open(&dir) {
-                    Ok(s) => Some(std::sync::Arc::new(s)),
-                    Err(e) => {
-                        tracing::warn!(
-                            "MappingLibraryStore open failed at {}: {}",
-                            dir.display(),
-                            e
-                        );
-                        None
-                    }
-                }
-            });
-        if store.is_some() {
-            tracing::info!("Mapping library initialized");
-        }
-        if let Ok(mut g) = handle.lock() {
-            *g = store;
-        }
-    }
+    bootstrap::init_stores(&api);
 
     let app_state = Arc::new(state::AppState {
         sessions: api.sessions().map_handle(),
         current_session_id: api.sessions().current_handle(),
         app_handle: app_handle_slot.clone(),
-        last_mcp_subgraph: RwLock::new(None),
-        api_token,
     });
-    let http_port = std::env::var("GRAPHHUNTER_API_PORT")
-        .ok()
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(37891);
-    let state_for_http = Arc::clone(&app_state);
+    // The HTTP transport's own state. Its emitter is the API's, so
+    // `notes-changed` / `mcp-view-update` reach the frontend through the
+    // same `TauriEventEmitter` as every other canonical event.
+    let server_state = Arc::new(ServerState {
+        api_token,
+        journal: bootstrap::open_journal(),
+        emitter: api.emitter_arc(),
+    });
+    let http_port = bootstrap::resolve_port();
+    let state_for_http = server_state;
+
     let api_for_http = Arc::clone(&api);
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -224,7 +103,10 @@ pub fn run() {
             if let Ok(mut h) = app_handle_slot.write() {
                 *h = Some(app.handle().clone());
             }
-            tracing::info!("GraphHunter HTTP API starting on Tauri async runtime (port {})", http_port);
+            tracing::info!(
+                "GraphHunter HTTP API starting on Tauri async runtime (port {})",
+                http_port
+            );
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = http::run_async(state_for_http, api_for_http, http_port).await {
                     tracing::error!("GraphHunter HTTP API error: {}", e);
@@ -353,6 +235,7 @@ pub fn run() {
             // IP enrichment & subnet analysis
             commands::enrichment::cmd_enrich_ip,
             commands::enrichment::cmd_get_subnet_analysis,
+            commands::enrichment::cmd_get_shared_sessions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Graph Hunter");

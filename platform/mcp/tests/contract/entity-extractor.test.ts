@@ -13,27 +13,27 @@ test("extracts IPs from arbitrary string columns", () => {
 });
 
 test("extracts emails as User", () => {
-  const rows = [{ Account: "lasoto@telecarga.cl" }, { who: "x@y.zw" }];
+  const rows = [{ Account: "analyst@example.com" }, { who: "x@y.zw" }];
   const out = extractEntities(rows);
   const users = out
     .filter((e) => e.type === "User")
     .map((e) => e.value)
     .sort();
-  assert.deepEqual(users, ["lasoto@telecarga.cl", "x@y.zw"]);
+  assert.deepEqual(users, ["analyst@example.com", "x@y.zw"]);
 });
 
 test("Hostname classification gated on field name", () => {
-  const rows = [{ Computer: "fw01.telecarga.cl", Note: "fw02.telecarga.cl" }];
+  const rows = [{ Computer: "fw01.example.com", Note: "fw02.example.com" }];
   const out = extractEntities(rows);
   const hosts = out
     .filter((e) => e.type === "Hostname")
     .map((e) => e.value);
-  assert.deepEqual(hosts, ["fw01.telecarga.cl"]);
+  assert.deepEqual(hosts, ["fw01.example.com"]);
   // The Note field's FQDN is classified as Domain, not Hostname.
   const domains = out
     .filter((e) => e.type === "Domain")
     .map((e) => e.value);
-  assert.ok(domains.includes("fw02.telecarga.cl"));
+  assert.ok(domains.includes("fw02.example.com"));
 });
 
 test("dedupes across rows and caps at 500", () => {

@@ -61,11 +61,14 @@ fn parse_failures_from_load_data_with_config_land_in_dlq() {
         ],
     };
 
-    api.load_data_with_config(LoadDataWithConfigRequest {
-        session: None,
-        path,
-        config: cfg,
-    })
+    api.load_data_with_config(
+        LoadDataWithConfigRequest {
+            session: None,
+            path,
+            config: cfg,
+        },
+        &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+    )
     .expect("load_data_with_config");
 
     let resp = api
@@ -110,6 +113,7 @@ fn parse_failures_from_load_data_with_config_land_in_dlq() {
 ///   1. the response reports every submitted id as reingested,
 ///   2. the DLQ is drained afterwards,
 ///   3. entities actually appeared in the session graph.
+///
 /// This closes the "bad mapping → fix → retry" workflow the UI exposes
 /// through the dead-letter drawer.
 #[test]
@@ -153,11 +157,14 @@ fn reingest_roundtrip_fix_config_then_drain() {
         ],
     };
 
-    api.load_data_with_config(LoadDataWithConfigRequest {
-        session: None,
-        path,
-        config: wrong_cfg,
-    })
+    api.load_data_with_config(
+        LoadDataWithConfigRequest {
+            session: None,
+            path,
+            config: wrong_cfg,
+        },
+        &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+    )
     .expect("load_data_with_config (wrong config)");
 
     let before = api
@@ -263,11 +270,14 @@ fn no_dlq_entries_when_store_is_unconfigured() {
         }],
     };
 
-    api.load_data_with_config(LoadDataWithConfigRequest {
-        session: None,
-        path,
-        config: cfg,
-    })
+    api.load_data_with_config(
+        LoadDataWithConfigRequest {
+            session: None,
+            path,
+            config: cfg,
+        },
+        &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+    )
     .expect("load_data_with_config");
 
     let resp = api

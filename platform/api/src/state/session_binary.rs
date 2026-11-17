@@ -19,6 +19,7 @@
 //! binary format. The load path peeks the first 4 bytes of the file:
 //!   * `b"GHS1"`  → binary loader (this module).
 //!   * anything else (legacy JSON) → existing JSON loader.
+//!
 //! Existing on-disk JSON sessions stay loadable; the next save
 //! migrates them to binary transparently. No user configuration.
 //!
@@ -50,6 +51,7 @@ use std::io::{Read, Write};
 
 use graph_hunter_core::Entity;
 use graph_hunter_core::Relation;
+use graph_hunter_core::relation::RelationV1;
 use serde::{Deserialize, Serialize};
 
 use crate::state::session_types::{DatasetInfo, EntityTag, Note};
@@ -65,10 +67,22 @@ pub const FORMAT_VERSION: u32 = 2;
 /// Layout version of the binary BODY (entity/relation bincode arrays).
 /// Bump when Entity / Relation / CompactRelation (or anything they
 /// serialize) changes in a way that breaks bincode round-trip.
-pub const BODY_FORMAT_VERSION: u32 = 1;
+///
+/// v1 -> v2 (ingestion_time channel-close fase): `Relation` gained a
+/// trailing positional `pub ingested_at: i64` field. `bincode` is not
+/// self-describing, so a v1 body's `Relation` records are 8 bytes
+/// shorter per record than the current struct expects — reading them
+/// with the plain `Relation` decoder fails with a bincode EOF error
+/// mid-body. `RelationReader` handles this by dispatching on the body
+/// version it is constructed with: a v1 body is decoded via
+/// [`graph_hunter_core::relation::RelationV1`] (the pre-`ingested_at`
+/// layout) and converted, defaulting `ingested_at` to `INGEST_EPOCH_BASE`.
+pub const BODY_FORMAT_VERSION: u32 = 2;
 
-/// Oldest body version this build can still deserialize. Raise this when
-/// a body change drops backward compatibility with older saved sessions.
+/// Oldest body version this build can still deserialize. Kept at 1 —
+/// `RelationReader` still has a working v1 decode path (see
+/// `BODY_FORMAT_VERSION`'s doc comment) so old sessions load gracefully
+/// rather than being rejected outright.
 pub const MIN_SUPPORTED_BODY_VERSION: u32 = 1;
 
 fn default_body_format_version() -> u32 {
@@ -195,7 +209,7 @@ fn read_u64<R: Read>(r: &mut R) -> Result<u64, BinaryError> {
 /// Returns Ok if a body declaring `version` can be read by this build,
 /// else an `IncompatibleBody` error carrying the actionable bounds.
 pub fn check_body_compatible(version: u32) -> Result<(), BinaryError> {
-    if version > BODY_FORMAT_VERSION || version < MIN_SUPPORTED_BODY_VERSION {
+    if !(MIN_SUPPORTED_BODY_VERSION..=BODY_FORMAT_VERSION).contains(&version) {
         return Err(BinaryError::IncompatibleBody {
             found: version,
             min: MIN_SUPPORTED_BODY_VERSION,
@@ -290,7 +304,10 @@ pub struct EntityReader<'a, R: Read> {
 impl<'a, R: Read> EntityReader<'a, R> {
     pub fn new(r: &'a mut R) -> Result<Self, BinaryError> {
         let count = read_u64(r)?;
-        Ok(Self { r, remaining: count })
+        Ok(Self {
+            r,
+            remaining: count,
+        })
     }
 
     pub fn count(&self) -> u64 {
@@ -299,6 +316,9 @@ impl<'a, R: Read> EntityReader<'a, R> {
 
     /// Read the next entity, or `Ok(None)` when the stream is
     /// exhausted. Errors propagate.
+    // Not `Iterator::next`: each read is fallible, so it returns
+    // `Result<Option<_>>`; keeping the name avoids churning the callers.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Entity>, BinaryError> {
         if self.remaining == 0 {
             return Ok(None);
@@ -317,18 +337,33 @@ impl<'a, R: Read> EntityReader<'a, R> {
 pub struct RelationReader<'a, R: Read> {
     r: &'a mut R,
     remaining: u64,
+    /// Body layout version the records were written under. Drives which
+    /// bincode layout `next()` decodes each record as (see
+    /// `BODY_FORMAT_VERSION`'s doc comment for why this can't just be
+    /// `#[serde(default)]`ed away).
+    body_version: u32,
 }
 
 impl<'a, R: Read> RelationReader<'a, R> {
-    pub fn new(r: &'a mut R) -> Result<Self, BinaryError> {
+    /// `body_version` is the header's `body_format_version` — pass it
+    /// through from `read_header` so records are decoded with the
+    /// matching layout.
+    pub fn new(r: &'a mut R, body_version: u32) -> Result<Self, BinaryError> {
         let count = read_u64(r)?;
-        Ok(Self { r, remaining: count })
+        Ok(Self {
+            r,
+            remaining: count,
+            body_version,
+        })
     }
 
     pub fn count(&self) -> u64 {
         self.remaining
     }
 
+    // Not `Iterator::next`: each read is fallible, so it returns
+    // `Result<Option<_>>`; keeping the name avoids churning the callers.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Relation>, BinaryError> {
         if self.remaining == 0 {
             return Ok(None);
@@ -338,7 +373,14 @@ impl<'a, R: Read> RelationReader<'a, R> {
         self.r
             .read_exact(&mut bytes)
             .map_err(|_| BinaryError::Truncated("relation record"))?;
-        let rel: Relation = bincode::deserialize(&bytes)?;
+        let rel: Relation = if self.body_version < 2 {
+            // v1 body: Relation had no `ingested_at` field yet. Decode the
+            // old positional layout and default ingested_at on conversion.
+            let v1: RelationV1 = bincode::deserialize(&bytes)?;
+            v1.into()
+        } else {
+            bincode::deserialize(&bytes)?
+        };
         self.remaining -= 1;
         Ok(Some(rel))
     }
@@ -383,13 +425,18 @@ mod tests {
             notes: vec![],
             datasets: vec![],
             tags: vec![],
-            body_format_version: 1,
+            body_format_version: BODY_FORMAT_VERSION,
         };
         let entities = vec![
             Entity::new("a", EntityType::User),
             Entity::new("b", EntityType::Host),
         ];
-        let relations = vec![Relation::new("a", "b", RelationType::Auth, 100)];
+        // A distinct (non-default) ingested_at so the roundtrip actually
+        // proves the v2 body preserves it, not just that the struct
+        // defaults happen to match on both ends.
+        let mut rel = Relation::new("a", "b", RelationType::Auth, 100);
+        rel.ingested_at = graph_hunter_core::relation::INGEST_EPOCH_BASE + 12_345;
+        let relations = [rel];
 
         let mut buf = Vec::new();
         write_header(&mut buf, &header).unwrap();
@@ -397,7 +444,8 @@ mod tests {
         write_relations(&mut buf, relations.len() as u64, relations.iter().cloned()).unwrap();
 
         let mut cur = Cursor::new(&buf);
-        let _parsed_hdr = read_header(&mut cur).unwrap();
+        let parsed_hdr = read_header(&mut cur).unwrap();
+        assert_eq!(parsed_hdr.body_format_version, BODY_FORMAT_VERSION);
         let mut er = EntityReader::new(&mut cur).unwrap();
         assert_eq!(er.count(), 2);
         let e0 = er.next().unwrap().unwrap();
@@ -405,12 +453,79 @@ mod tests {
         assert!(er.next().unwrap().is_none());
         assert_eq!(e0.id, "a");
         assert_eq!(e1.id, "b");
-        let mut rr = RelationReader::new(&mut cur).unwrap();
+        let mut rr = RelationReader::new(&mut cur, parsed_hdr.body_format_version).unwrap();
         assert_eq!(rr.count(), 1);
         let r0 = rr.next().unwrap().unwrap();
         assert!(rr.next().unwrap().is_none());
         assert_eq!(r0.source_id, "a");
         assert_eq!(r0.dest_id, "b");
+        assert_eq!(
+            r0.ingested_at,
+            graph_hunter_core::relation::INGEST_EPOCH_BASE + 12_345,
+            "v2 body must round-trip the real ingested_at, not re-default it"
+        );
+    }
+
+    #[test]
+    fn relation_v1_body_reads_with_defaulted_ingested_at() {
+        // Simulates a session saved by a pre-ingested_at build: the
+        // relation bytes are the OLD positional layout (RelationV1, no
+        // trailing ingested_at field) but the header still (incorrectly,
+        // pre-fix) or correctly (post-fix) tags them body_format_version=1.
+        use graph_hunter_core::relation::RelationV1;
+
+        let header = SessionHeader {
+            id: "legacy".into(),
+            name: "legacy-sess".into(),
+            created_at: 0,
+            path_node_ids: vec![],
+            notes: vec![],
+            datasets: vec![],
+            tags: vec![],
+            body_format_version: 1,
+        };
+        let entities = vec![
+            Entity::new("a", EntityType::User),
+            Entity::new("b", EntityType::Host),
+        ];
+        let v1_rel = RelationV1 {
+            source_id: "a".into(),
+            dest_id: "b".into(),
+            rel_type: RelationType::Auth,
+            timestamp: 100,
+            metadata: Default::default(),
+            dataset_id: None,
+        };
+
+        let mut buf = Vec::new();
+        write_header(&mut buf, &header).unwrap();
+        write_entities(&mut buf, entities.len() as u64, &entities).unwrap();
+        // Hand-roll the v1 relation record: count + one length-prefixed
+        // bincode(RelationV1) record — write_relations() always encodes
+        // the CURRENT Relation, so it can't produce v1 bytes.
+        let rel_bytes = bincode::serialize(&v1_rel).unwrap();
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&(rel_bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&rel_bytes);
+
+        let mut cur = Cursor::new(&buf);
+        let parsed_hdr = read_header(&mut cur).unwrap();
+        assert_eq!(parsed_hdr.body_format_version, 1);
+        let mut er = EntityReader::new(&mut cur).unwrap();
+        let _ = er.next().unwrap().unwrap();
+        let _ = er.next().unwrap().unwrap();
+        assert!(er.next().unwrap().is_none());
+
+        let mut rr = RelationReader::new(&mut cur, parsed_hdr.body_format_version).unwrap();
+        let r0 = rr.next().unwrap().expect("v1 relation record must decode");
+        assert!(rr.next().unwrap().is_none());
+        assert_eq!(r0.source_id, "a");
+        assert_eq!(r0.dest_id, "b");
+        assert_eq!(
+            r0.ingested_at,
+            graph_hunter_core::relation::INGEST_EPOCH_BASE,
+            "a v1 relation carries no ingested_at; it must default to INGEST_EPOCH_BASE"
+        );
     }
 
     #[test]
@@ -432,7 +547,9 @@ mod tests {
         assert!(too_new.to_string().contains("newer"));
         let too_old = check_body_compatible(0).unwrap_err();
         assert!(matches!(too_old, BinaryError::IncompatibleBody { .. }));
-        assert!(too_old.to_string().contains("older") || too_old.to_string().contains("incompatible"));
+        assert!(
+            too_old.to_string().contains("older") || too_old.to_string().contains("incompatible")
+        );
     }
 
     #[test]
@@ -447,10 +564,10 @@ mod tests {
         // Simulate a header written by a DIFFERENT struct version:
         // (a) it has an EXTRA unknown field, and (b) it omits `tags`.
         // A schema-tolerant reader must still recover id/name/created_at.
-        let future_json = br#"{"id":"sess-x","name":"niubiz","created_at":1780667944,"path_node_ids":[],"notes":[],"datasets":[],"future_field":{"whatever":true}}"#;
+        let future_json = br#"{"id":"sess-x","name":"demo","created_at":1780667944,"path_node_ids":[],"notes":[],"datasets":[],"future_field":{"whatever":true}}"#;
         let mut buf = Vec::new();
         buf.extend_from_slice(&MAGIC);
-        buf.extend_from_slice(&2u32.to_le_bytes());                 // version 2 = JSON header
+        buf.extend_from_slice(&2u32.to_le_bytes()); // version 2 = JSON header
         buf.extend_from_slice(&(future_json.len() as u32).to_le_bytes());
         buf.extend_from_slice(future_json);
         // (no entity/relation bytes needed — read_header stops after the header)
@@ -458,7 +575,7 @@ mod tests {
         let mut cur = Cursor::new(&buf);
         let h = read_header(&mut cur).expect("v2 JSON header must parse despite drift");
         assert_eq!(h.id, "sess-x");
-        assert_eq!(h.name, "niubiz");
+        assert_eq!(h.name, "demo");
         assert_eq!(h.created_at, 1780667944);
         assert!(h.tags.is_empty(), "missing tags must default to empty");
     }

@@ -32,18 +32,9 @@ fn build_graph(n: usize, p: f64, seed: u64) -> (GraphHunter, MaterializedCsrTrie
 fn bench_query(c: &mut Criterion) {
     let big = std::env::var("BENCH_LARGE").ok().is_some();
     let cases: &[(usize, f64)] = if big {
-        &[
-            (1_000, 0.005),
-            (1_000, 0.02),
-            (1_000, 0.05),
-            (2_000, 0.01),
-        ]
+        &[(1_000, 0.005), (1_000, 0.02), (1_000, 0.05), (2_000, 0.01)]
     } else {
-        &[
-            (500, 0.01),
-            (1_000, 0.005),
-            (1_000, 0.02),
-        ]
+        &[(500, 0.01), (1_000, 0.005), (1_000, 0.02)]
     };
 
     let cap: usize = std::env::var("BENCH_CAP")
@@ -56,12 +47,14 @@ fn bench_query(c: &mut Criterion) {
         let ts_map = MinTimestampMap::build(&g, &trie);
         // Parity check before benching — a silent regression would
         // invalidate the numbers.
-        let lftj =
-            sort_triangles(enumerate_triangles_lftj(&g, &trie, &ts_map, usize::MAX));
-        let naive =
-            sort_triangles(enumerate_triangles_naive(&g, &trie, &ts_map, usize::MAX));
-        let simd =
-            sort_triangles(enumerate_triangles_lftj_simd(&g, &trie, &ts_map, usize::MAX));
+        let lftj = sort_triangles(enumerate_triangles_lftj(&g, &trie, &ts_map, usize::MAX));
+        let naive = sort_triangles(enumerate_triangles_naive(&g, &trie, &ts_map, usize::MAX));
+        let simd = sort_triangles(enumerate_triangles_lftj_simd(
+            &g,
+            &trie,
+            &ts_map,
+            usize::MAX,
+        ));
         assert_eq!(
             lftj, naive,
             "LFTJ vs naive triangle finders disagree at n={n}, p={p}"
