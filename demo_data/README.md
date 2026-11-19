@@ -25,7 +25,7 @@ dominate the repository and every clone of it:
 
 | File | Approx. size | Used by |
 |---|---:|---|
-| `mordor_combined_attacks.json` | ~132 MB | `benchmark_empirical_data_for_paper` (optional branch) |
+| `mordor_combined_attacks.json` | ~132 MB | `graph_hunter_cli bench --ablation --mordor`, `benchmark_empirical_data_for_paper` (optional branch); rebuild it with [DOWNLOAD_REAL_DATA.md](DOWNLOAD_REAL_DATA.md) |
 | `mega_attack_dataset.json` | large | performance work |
 | `mega_dataset_1gb.json` | ~1 GB | performance work |
 

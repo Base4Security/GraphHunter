@@ -72,9 +72,10 @@ use crate::lftj::{CsrTrieIter, MaterializedCsrTrie, TrieIter};
 /// That is the honest price of correctness here; the graph already stores
 /// the same timestamps, and the index is built once per query.
 ///
-/// No sort is needed at build time: the streaming adjacency is already
-/// ordered by timestamp (the `edges_sorted` invariant), so appending in
-/// adjacency order leaves every pair's sublist ascending by construction.
+/// On a finalized graph no sort is needed at build time: the streaming
+/// adjacency is already ordered by timestamp (the `edges_sorted` invariant),
+/// so appending in adjacency order leaves every pair's sublist ascending by
+/// construction. A graph that was never finalized gets its runs sorted here.
 pub struct MinTimestampMap {
     /// Same length as `trie.dst_keys`. `min_ts[trie.dst_offsets[i] +
     /// idx_within_a_dsts]` is the smallest timestamp on `a -> dst`.
@@ -136,10 +137,21 @@ impl MinTimestampMap {
             });
         }
 
-        // Each pair's run is ascending already: the streaming adjacency is
-        // timestamp-ordered, so appends within one slot arrive in order.
-        // Sorting defensively would be O(E log E) for no gain — but a
-        // debug assert keeps the invariant from rotting silently.
+        // Each pair's run is ascending already once the streaming adjacency
+        // is finalized (timestamp-ordered), so appends within one slot arrive
+        // in order. A graph that was never finalized still holds arrival
+        // order, and the lookups below binary-search these runs, so sort
+        // them then; on a finalized graph this is skipped.
+        if !graph.streaming.is_finalized() {
+            for s in 0..n_slots {
+                ts_values[ts_offsets[s] as usize..ts_offsets[s + 1] as usize].sort_unstable();
+            }
+            for (s, m) in min_ts.iter_mut().enumerate() {
+                if ts_offsets[s] < ts_offsets[s + 1] {
+                    *m = ts_values[ts_offsets[s] as usize];
+                }
+            }
+        }
         debug_assert!(
             (0..n_slots).all(|s| {
                 let r = &ts_values[ts_offsets[s] as usize..ts_offsets[s + 1] as usize];

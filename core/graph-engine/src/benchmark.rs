@@ -951,6 +951,177 @@ pub fn perf_rows_to_csv(rows: &[PerfRow]) -> String {
     out
 }
 
+// ── Pruning ablation over loaded datasets ──
+//
+// The paper's ablation table: the instrumented search with its pruning
+// against the naive DFS without it, on real or simulated logs, plus the
+// time of the complete engine. Unlike `run_benchmark` it sorts the graph
+// first (the engine's documented precondition), reports wall-clock time as
+// a median over `runs` instead of a single run, and keeps the node ratio
+// and the time ratio apart, because at microsecond scale they disagree.
+
+/// One row of the pruning ablation: one dataset, one hypothesis length.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AblationRow {
+    pub dataset: String,
+    pub n_entities: usize,
+    pub n_relations: usize,
+    pub d_max: usize,
+    pub hypothesis_len: usize,
+    pub runs: usize,
+    /// Matches of the instrumented search (the naive DFS returns the same).
+    pub results: usize,
+    pub nodes_pruned: usize,
+    /// Nodes the pruned search reached at each depth, seeds first: where
+    /// the search branches out and where it narrows.
+    pub nodes_per_level: Vec<usize>,
+    /// `None` when the naive DFS was skipped (see `naive_max_relations`).
+    pub nodes_naive: Option<usize>,
+    pub pruned_p50_us: u64,
+    pub naive_p50_us: Option<u64>,
+    /// The complete engine (`search_temporal_pattern`), capped at 10,000.
+    pub engine_results: usize,
+    pub engine_truncated: bool,
+    pub engine_p50_us: u64,
+    /// Edges the instrumented search examined, and the share each rule
+    /// rejected of what reached it (the rules run in this order).
+    pub edges_examined: usize,
+    pub cascade_rel_pct: f64,
+    pub cascade_ent_pct: f64,
+    pub cascade_temporal_pct: f64,
+    pub cascade_k_pct: f64,
+}
+
+fn median_us(runs: usize, mut f: impl FnMut()) -> u64 {
+    let mut lat: Vec<u64> = (0..runs.max(1))
+        .map(|_| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed().as_micros() as u64
+        })
+        .collect();
+    lat.sort_unstable();
+    percentile_us(&lat, 0.50)
+}
+
+/// Runs the ablation on one loaded graph for each length in `lengths`.
+/// The naive DFS enumerates every simple path, so on a graph with hubs it
+/// does not finish; it only runs when the graph has at most
+/// `naive_max_relations` edges, and is reported as skipped otherwise.
+pub fn run_ablation(
+    dataset: &str,
+    graph: &mut GraphHunter,
+    build: fn(usize) -> Hypothesis,
+    lengths: &[usize],
+    runs: usize,
+    naive_max_relations: usize,
+) -> Vec<AblationRow> {
+    graph
+        .sort_edges_by_timestamp()
+        .expect("sorting a loaded graph cannot fail");
+    let g = &*graph;
+    let (n, m, d_max, _, _, _) = graph_params(g);
+    let run_naive = m <= naive_max_relations;
+    let share = |part: usize, whole: usize| {
+        if whole == 0 {
+            0.0
+        } else {
+            part as f64 * 100.0 / whole as f64
+        }
+    };
+    lengths
+        .iter()
+        .map(|&l| {
+            let h = build(l);
+            let (results, stats) = search_instrumented(g, &h, None).expect("valid hypothesis");
+            let pruned_p50_us = median_us(runs, || {
+                let _ = search_instrumented(g, &h, None);
+            });
+            let (nodes_naive, naive_p50_us) = if run_naive {
+                let (_, visited) = g.search_naive_dfs(&h).expect("valid hypothesis");
+                let t = median_us(runs, || {
+                    let _ = g.search_naive_dfs(&h);
+                });
+                (Some(visited), Some(t))
+            } else {
+                (None, None)
+            };
+            let (engine_paths, engine_truncated) = g
+                .search_temporal_pattern(&h, None, None)
+                .expect("valid hypothesis");
+            let engine_p50_us = median_us(runs, || {
+                let _ = g.search_temporal_pattern(&h, None, None);
+            });
+            let examined = stats.edges_examined;
+            let after_rel = examined - stats.rejected_rel_type;
+            let after_ent = after_rel - stats.rejected_ent_type;
+            let after_tmp = after_ent - stats.rejected_temporal - stats.rejected_time_window;
+            AblationRow {
+                dataset: dataset.to_string(),
+                n_entities: n,
+                n_relations: m,
+                d_max,
+                hypothesis_len: l,
+                runs,
+                results: results.len(),
+                nodes_pruned: stats.nodes_visited,
+                nodes_per_level: stats.nodes_per_level.clone(),
+                nodes_naive,
+                pruned_p50_us,
+                naive_p50_us,
+                engine_results: engine_paths.len(),
+                engine_truncated,
+                engine_p50_us,
+                edges_examined: examined,
+                cascade_rel_pct: share(stats.rejected_rel_type, examined),
+                cascade_ent_pct: share(stats.rejected_ent_type, after_rel),
+                cascade_temporal_pct: share(stats.rejected_temporal, after_ent),
+                cascade_k_pct: share(stats.rejected_k_simple, after_tmp),
+            }
+        })
+        .collect()
+}
+
+/// CSV serialization of the ablation table; skipped naive runs are empty.
+pub fn ablation_rows_to_csv(rows: &[AblationRow]) -> String {
+    let opt = |v: Option<u64>| v.map(|x| x.to_string()).unwrap_or_default();
+    let mut out = String::from(
+        "dataset,n_entities,n_relations,d_max,hypothesis_len,runs,results,nodes_pruned,\
+         nodes_per_level,nodes_naive,pruned_p50_us,naive_p50_us,engine_results,engine_truncated,engine_p50_us,\
+         edges_examined,cascade_rel_pct,cascade_ent_pct,cascade_temporal_pct,cascade_k_pct\n",
+    );
+    for r in rows {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.1},{:.1}\n",
+            r.dataset,
+            r.n_entities,
+            r.n_relations,
+            r.d_max,
+            r.hypothesis_len,
+            r.runs,
+            r.results,
+            r.nodes_pruned,
+            r.nodes_per_level
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("/"),
+            opt(r.nodes_naive.map(|v| v as u64)),
+            r.pruned_p50_us,
+            opt(r.naive_p50_us),
+            r.engine_results,
+            r.engine_truncated,
+            r.engine_p50_us,
+            r.edges_examined,
+            r.cascade_rel_pct,
+            r.cascade_ent_pct,
+            r.cascade_temporal_pct,
+            r.cascade_k_pct,
+        ));
+    }
+    out
+}
+
 /// Format benchmark results as a LaTeX table row.
 pub fn format_latex_row(r: &BenchmarkResult) -> String {
     let (rr_rel, rr_ent, rr_temp, _rr_win, _rr_cycle) = r.pruning_stats.rejection_rates();
@@ -976,6 +1147,48 @@ pub fn format_latex_row(r: &BenchmarkResult) -> String {
 #[cfg(test)]
 mod perf_harness_tests {
     use super::*;
+
+    /// The ablation compares like with like: on a graph built out of time
+    /// order, the pruned search, the naive DFS and the engine all find the
+    /// one chain that respects time, and the naive DFS visits more nodes.
+    #[test]
+    fn the_ablation_rows_agree_on_the_matches() {
+        let mut g = GraphHunter::new();
+        g.add_entity(Entity::new("alice@example.com", EntityType::User))
+            .unwrap();
+        for p in ["p1", "p2", "p3"] {
+            g.add_entity(Entity::new(p, EntityType::Process)).unwrap();
+        }
+        g.add_entity(Entity::new("f", EntityType::File)).unwrap();
+        for (s, d, r, t) in [
+            ("alice@example.com", "p1", RelationType::Execute, 100),
+            ("p1", "p3", RelationType::Spawn, 300),
+            ("p1", "p2", RelationType::Spawn, 50),
+            ("p3", "f", RelationType::Write, 400),
+            ("p2", "f", RelationType::Write, 60),
+        ] {
+            g.add_relation(Relation::new(s, d, r, t)).unwrap();
+        }
+        let rows = run_ablation("t", &mut g, build_spawn_chain_hypothesis, &[3], 3, 1_000);
+        let r = &rows[0];
+        assert_eq!(r.results, 1);
+        assert_eq!(r.engine_results, 1);
+        let naive = r.nodes_naive.expect("small graph runs the naive DFS");
+        assert!(naive > r.nodes_pruned);
+
+        let csv = ablation_rows_to_csv(&rows);
+        assert_eq!(csv.lines().count(), 2);
+    }
+
+    /// Above the edge limit the naive DFS is skipped, not run for hours.
+    #[test]
+    fn the_ablation_skips_the_naive_dfs_above_the_limit() {
+        let mut g = generate_erdos_renyi(50, 0.1, 0, 1_000, 3);
+        let rows = run_ablation("er", &mut g, build_spawn_chain_hypothesis, &[2], 1, 10);
+        assert!(rows[0].nodes_naive.is_none());
+        assert!(rows[0].naive_p50_us.is_none());
+        assert!(ablation_rows_to_csv(&rows).contains(",,"));
+    }
 
     /// The same seed produces the same graph and therefore the same
     /// structural numbers — the property the whole harness rests on. (The
