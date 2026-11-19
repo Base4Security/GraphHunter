@@ -769,11 +769,24 @@ impl InMemoryStreamingBackend {
                 outer.len() + if merge_tails { tails.len() } else { 0 },
                 ahash::RandomState::new(),
             );
+        // The matcher bounds every step with `partition_point` over these
+        // lists, which is only correct on timestamp order. Before finalize
+        // the base lists still hold arrival order, so the copy is sorted
+        // here; after finalize they already are, and this costs nothing.
+        let in_memory = |edges: &[StreamEdge]| {
+            if merge_tails {
+                FrozenNeighborList::InMemory(Arc::from(edges))
+            } else {
+                let mut sorted = edges.to_vec();
+                sorted.sort_by_key(|e| e.timestamp);
+                FrozenNeighborList::InMemory(Arc::from(sorted))
+            }
+        };
         for (&sid, slot) in outer.iter() {
             let guard = slot.read();
             let mut f = match &*guard {
-                NeighborList::Inline(sv) => FrozenNeighborList::InMemory(Arc::from(sv.as_slice())),
-                NeighborList::Vec(v) => FrozenNeighborList::InMemory(Arc::from(v.as_slice())),
+                NeighborList::Inline(sv) => in_memory(sv.as_slice()),
+                NeighborList::Vec(v) => in_memory(v.as_slice()),
                 NeighborList::Mmap {
                     handle,
                     byte_offset,

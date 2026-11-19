@@ -1207,7 +1207,9 @@ impl GraphHunter {
 
     /// Searches for paths matching a temporal hypothesis pattern.
     /// For best performance, call `sort_edges_by_timestamp()` after ingestion.
-    /// The search still works without sorting but binary-search optimizations are disabled.
+    /// Without it the answer is the same: the snapshot the matcher reads
+    /// sorts each neighbor list itself, at the cost of that sort on every
+    /// snapshot rebuild.
     pub fn search_temporal_pattern(
         &self,
         hypothesis: &Hypothesis,
