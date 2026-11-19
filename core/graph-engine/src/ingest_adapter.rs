@@ -59,6 +59,9 @@ pub type TripleBatchStream = BoxStream<'static, Result<TripleBatch, SourceError>
 /// "give me triples" contract. The adapter owns its own credentials,
 /// watermark state, and parser — from the orchestrator's point of
 /// view, it's a self-contained unit.
+// `#[async_trait]` expands each method to a `#[must_use]` fn returning a
+// boxed future (already must_use); the lint fires on the macro output.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait IngestAdapter: Send + Sync {
     /// Stable identifier for diagnostics and watermark scoping.

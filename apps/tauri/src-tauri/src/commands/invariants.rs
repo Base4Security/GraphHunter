@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use graph_hunter_api::dto::invariants::CheckInvariantsRequest;
 use graph_hunter_api::GraphHunterApi;
+use graph_hunter_api::dto::invariants::CheckInvariantsRequest;
 use graph_hunter_core::invariants::InvariantReport;
 use tauri::State;
 

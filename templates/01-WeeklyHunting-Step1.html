@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Threat Hunting · Fase 1 — Arquitectura de Entorno e Hipótesis · [FECHA_EMISION] · BASE4 Security</title>
+<link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,300;0,400;0,700;0,900;1,400&display=swap" rel="stylesheet">
+<style>
+:root{--or:#F1912D;--or2:#DC780F;--or3:#7C4409;--bk:#282828;--w:#fff;--g1:#404040;--g2:#5A5A5A;--g3:#747474;--g4:#A8A8A8;--g5:#DCDCDC;--cr:#8B0000;--hi:#C0392B;--me:#D68910;--lo:#1E8449;--nav-w:240px;--page:1100px}
+*{box-sizing:border-box;margin:0;padding:0}html{background:#1a1a1a}
+body{font-family:'Lato',sans-serif;background:#1a1a1a;color:var(--bk);line-height:1.6;font-size:14px}
+.doc-wrap{max-width:var(--page);margin:32px auto;background:var(--w);box-shadow:0 4px 40px rgba(0,0,0,.5)}
+.page-header{background:var(--bk);padding:18px 48px;display:flex;align-items:center;justify-content:space-between;border-bottom:3px solid var(--or)}
+.ph-logo{display:flex;align-items:center}
+.ph-logo img{display:block;height:72px;width:auto;max-width:220px}
+.ph-right{font-size:11px;color:var(--g4);text-align:right;line-height:1.5}
+.cover{background:var(--bk);padding:56px 48px 48px;position:relative;overflow:hidden}
+.cover-stripe{position:absolute;top:0;right:0;width:6px;height:100%;background:linear-gradient(to bottom,var(--or),var(--or3))}
+.cover>*{position:relative;z-index:1}
+.cover-date{font-size:12px;color:var(--g4);letter-spacing:1px;margin-bottom:28px}
+.cover-title{font-family:'Lato',sans-serif;font-weight:900;font-size:32px;color:var(--w);line-height:1.15;margin-bottom:8px}
+.cover-sub{font-size:14px;color:var(--g4);font-weight:300;margin-bottom:4px}
+.cover-phase{font-size:13px;color:var(--or);font-weight:700;margin-bottom:36px}
+.cover-divider{width:56px;height:3px;background:linear-gradient(90deg,var(--or),var(--or3));margin-bottom:28px}
+.cover-meta{display:grid;grid-template-columns:1fr 1fr;border:1px solid rgba(255,255,255,.1)}
+.cm-k{padding:9px 16px;font-size:11px;color:var(--g4);font-weight:700;letter-spacing:.5px;text-transform:uppercase;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03)}
+.cm-v{padding:9px 16px;font-size:12px;color:var(--w);border-bottom:1px solid rgba(255,255,255,.08);border-left:1px solid rgba(255,255,255,.08)}
+.doc-layout{display:grid;grid-template-columns:var(--nav-w) 1fr;align-items:start}
+.side-nav{position:sticky;top:0;align-self:start;min-height:100vh;background:var(--bk);padding:28px 0 32px;border-right:3px solid var(--or);overflow-y:auto;max-height:100vh}
+.side-nav-inner{padding:0 18px}
+.side-nav-title{font-size:10px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--g4);margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,.12)}
+.side-nav ul{list-style:none}
+.side-nav li{margin:0}
+.side-nav a{display:block;padding:7px 10px;font-size:12px;line-height:1.35;color:var(--g4);text-decoration:none;border-left:2px solid transparent;transition:color .15s,border-color .15s}
+.side-nav a:hover,.side-nav a:focus{color:var(--w);border-left-color:var(--or);outline:none}
+.side-nav .nav-section>a{font-weight:700;color:var(--w);margin-top:10px}
+.side-nav .nav-section:first-child>a{margin-top:0}
+.side-nav .nav-sub a{padding-left:22px;font-size:11px}
+.doc-main{padding:48px 40px 64px;min-width:0}
+.sec{margin-bottom:44px;scroll-margin-top:16px}
+.scenario{scroll-margin-top:16px;margin-bottom:32px}
+.sec-title{font-family:'Lato',sans-serif;font-weight:900;font-size:18px;color:var(--bk);padding:0 0 10px;border-bottom:3px solid var(--or);margin-bottom:18px}
+.sec-sub{font-weight:700;font-size:13px;color:var(--bk);margin:18px 0 8px}
+.para{font-size:13px;color:var(--g1);line-height:1.7;margin-bottom:10px}
+.para strong{color:var(--bk)}
+.placeholder{color:var(--g3);font-style:italic}
+.scenario-title{font-size:16px;font-weight:900;color:var(--bk);margin-bottom:4px}
+.scenario-title span{color:var(--or)}
+.scenario-meta{font-size:12px;margin-bottom:8px;padding:6px 12px;background:#f9f9f9;border-left:3px solid var(--or)}
+.scenario-meta strong{color:var(--bk)}
+.scenario-divider{border:none;border-top:1px solid var(--g5);margin:8px 0 12px}
+.sub-label{font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--g3);margin:14px 0 6px}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px}
+thead tr{background:var(--bk);color:var(--w)}
+thead th{padding:8px 12px;text-align:left;font-weight:700;font-size:11px;letter-spacing:.3px;border:1px solid var(--bk)}
+tbody tr:nth-child(even){background:#f7f7f7}
+tbody td{padding:7px 12px;border:1px solid #e0e0e0;color:var(--g1);vertical-align:top}
+tbody td:first-child{font-weight:700;color:var(--g2)}
+.pill{display:inline-block;padding:2px 8px;border-radius:2px;font-size:10px;font-weight:700;letter-spacing:.5px;color:var(--w)}
+.p-crit{background:var(--cr)}.p-high{background:var(--hi)}.p-med{background:var(--me)}.p-low{background:var(--lo)}
+.p-pass{background:var(--lo)}.p-fail{background:var(--hi)}.p-na{background:var(--g3);color:var(--bk)}
+.score-tbl tbody td:nth-child(3),.score-tbl tbody td:nth-child(4){text-align:center;font-weight:700;color:var(--bk)}
+.blist{padding-left:0;list-style:none;margin-bottom:10px}
+.blist li{padding:5px 0 5px 20px;position:relative;font-size:13px;color:var(--g1);line-height:1.55;border-bottom:1px dotted var(--g5)}
+.blist li::before{content:"›";position:absolute;left:0;color:var(--or);font-weight:700;font-size:16px;line-height:1.3}
+.blist li strong{color:var(--bk)}
+.mitre-tag{display:inline-block;padding:2px 6px;margin:1px 3px 1px 0;font-size:10px;font-weight:700;background:var(--g1);color:var(--w);border-radius:2px;letter-spacing:.3px}
+.menu-block{background:#fafafa;border:1px solid var(--g5);border-left:4px solid var(--or);padding:14px 18px;margin-top:18px}
+.menu-block .sec-sub{margin-top:0}
+.page-footer{background:var(--bk);padding:14px 48px;display:flex;justify-content:space-between;align-items:center;border-top:2px solid var(--or3)}
+.pf-left{font-size:11px;color:var(--g4)}.pf-right{font-size:11px;color:var(--g4);text-align:right}
+.pf-right span{color:var(--or)}
+@media (max-width:900px){.doc-layout{grid-template-columns:1fr}.side-nav{position:relative;min-height:auto;max-height:none;border-right:none;border-bottom:3px solid var(--or)}.side-nav ul{display:flex;flex-wrap:wrap;gap:4px}.side-nav .nav-section,.side-nav .nav-sub{display:inline}.side-nav a,.side-nav .nav-section>a,.side-nav .nav-sub a{padding:6px 10px;margin:0;border-left:none;border-radius:2px;background:rgba(255,255,255,.06)}}
+@media print{.doc-wrap{max-width:100%;margin:0;box-shadow:none}body{background:white}.side-nav{display:none}.doc-layout{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<!--
+  Plantilla — Informe de Threat Hunting (Fase 1: Arquitectura de Entorno e Hipótesis)
+  Mapea al prompt: 01-WeeklyHunting-Step1.md
+  Uso: duplicar este archivo por ciclo (ej. hunt-phase1-W23-2026.html).
+  Sustituir todos los marcadores [ENTRE_CORCHETES].
+  Duplicar bloques .scenario, entradas en .side-nav (nav-sub) y filas de tablas según escenarios.
+-->
+<div class="doc-wrap">
+<header class="page-header">
+  <div class="ph-logo">
+    <img src="https://base4sec.com/wp-content/uploads/2025/05/Logo_Slogan.png" alt="BASE4 Security — Your cyber ally" width="220" height="72" />
+  </div>
+  <div class="ph-right">Threat Hunting · Fase 1 · [FECHA_EMISION]<br>Clasificación: [CLASIFICACION]</div>
+</header>
+
+<div class="cover">
+  <div class="cover-stripe"></div>
+  <div class="cover-date">[FECHA_EMISION]</div>
+  <h1 class="cover-title">Arquitectura de Entorno e Hipótesis</h1>
+  <div class="cover-sub">[SUBTITULO_ALCANCE]</div>
+  <div class="cover-phase">Fase 1 · Auditoría de Telemetría y Modelado de Escenarios</div>
+  <div class="cover-divider"></div>
+  <div class="cover-meta">
+    <div class="cm-k">Cliente / Entorno</div><div class="cm-v">[CLIENTE_ENTORNO]</div>
+    <div class="cm-k">Fecha de emisión</div><div class="cm-v">[FECHA_EMISION]</div>
+    <div class="cm-k">Clasificación</div><div class="cm-v">[CLASIFICACION]</div>
+    <div class="cm-k">Plataforma analítica</div><div class="cm-v">Microsoft Sentinel vía Graphhunter MCP</div>
+    <div class="cm-k">Ventana de ingestión</div><div class="cm-v">[VENTANA_INGESTA] · ej. últimas 24 h</div>
+    <div class="cm-k">Escenarios propuestos</div><div class="cm-v" style="color:var(--or);font-weight:700">[N_ESCENARIOS]</div>
+    <div class="cm-k">Informe ID</div><div class="cm-v">[INFORME_ID]</div>
+  </div>
+</div>
+
+<div class="doc-layout">
+<nav class="side-nav" aria-label="Índice del informe">
+  <div class="side-nav-inner">
+    <div class="side-nav-title">Índice · Fase 1</div>
+    <ul>
+      <li class="nav-section"><a href="#sec-resumen">1. Resumen de la fase</a></li>
+      <li class="nav-section"><a href="#sec-visibilidad">2. Matriz de visibilidad</a></li>
+      <li class="nav-section"><a href="#sec-gap">3. Brechas de visibilidad</a></li>
+      <li class="nav-section"><a href="#sec-escenarios">4. Escenarios propuestos</a></li>
+      <!-- Duplicar li.nav-sub por cada escenario; sincronizar id en .scenario -->
+      <li class="nav-sub"><a href="#esc-01">E-01 · [E-01_TITULO_CORTO]</a></li>
+      <li class="nav-sub"><a href="#esc-02">E-02 · [E-02_TITULO_CORTO]</a></li>
+      <li class="nav-sub"><a href="#esc-03">E-03 · [E-03_TITULO_CORTO]</a></li>
+      <li class="nav-sub"><a href="#esc-04">E-04 · [E-04_TITULO_CORTO]</a></li>
+      <li class="nav-section"><a href="#sec-metodologia">5. Metodología (Behavioral vs Intel)</a></li>
+      <li class="nav-section"><a href="#sec-menu">6. Menú de selección</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="doc-main">
+
+<!-- ═══ 1. RESUMEN DE LA FASE ═══ -->
+<div class="sec" id="sec-resumen">
+<h2 class="sec-title">1. Resumen de la fase</h2>
+<p class="para placeholder">[RESUMEN_PARRAFO_1 — Objetivo del ciclo, alcance de la auditoría de telemetría y enfoque metodológico.]</p>
+<p class="para placeholder">[RESUMEN_PARRAFO_2 — Síntesis de capas de la pila auditadas (Endpoint, Identidad, Red, Nube) y nivel de cobertura.]</p>
+<p class="para placeholder">[RESUMEN_PARRAFO_3 — Comentario sobre los escenarios propuestos y rationale de selección.]</p>
+</div>
+
+<!-- ═══ 2. MATRIZ DE VISIBILIDAD ═══ -->
+<div class="sec" id="sec-visibilidad">
+<h2 class="sec-title">2. Matriz de visibilidad</h2>
+<p class="para placeholder">[VISIBILIDAD_INTRO — Tablas activas detectadas, volumen de ingestión y campos clave del esquema.]</p>
+<div class="sec-sub">Tablas activas — calidad y potencial de hunting</div>
+<table class="score-tbl">
+  <thead><tr><th>Source Table</th><th>Esquema / Campos clave</th><th style="width:140px">Calidad / Freshness</th><th style="width:140px">Hunting Potential</th></tr></thead>
+  <tbody>
+    <tr><td class="placeholder">[TABLA_1] · ej. SecurityEvent</td><td>[CAMPOS_1]</td><td><span class="pill p-pass">Alta</span></td><td>[SCORE_1] / 10</td></tr>
+    <tr><td class="placeholder">[TABLA_2] · ej. SigninLogs</td><td>[CAMPOS_2]</td><td><span class="pill p-pass">Alta</span></td><td>[SCORE_2] / 10</td></tr>
+    <tr><td class="placeholder">[TABLA_3] · ej. OfficeActivity</td><td>[CAMPOS_3]</td><td><span class="pill p-med">Media</span></td><td>[SCORE_3] / 10</td></tr>
+    <tr><td class="placeholder">[TABLA_4]</td><td>[CAMPOS_4]</td><td><span class="pill p-med">Media</span></td><td>[SCORE_4] / 10</td></tr>
+    <!-- Añadir filas adicionales según hallazgos del audit -->
+  </tbody>
+</table>
+<div class="sec-sub">Visibilidad por capa de la pila</div>
+<table>
+  <thead><tr><th>Capa</th><th style="width:120px">Estado</th><th>Fuentes detectadas</th></tr></thead>
+  <tbody>
+    <tr><td>Endpoint</td><td><span class="pill p-pass">✓ Activa</span></td><td class="placeholder">[FUENTE_ENDPOINT]</td></tr>
+    <tr><td>Identidad</td><td><span class="pill p-pass">✓ Activa</span></td><td class="placeholder">[FUENTE_IDENTIDAD]</td></tr>
+    <tr><td>Red / Perímetro</td><td><span class="pill p-med">⚠ Parcial</span></td><td class="placeholder">[FUENTE_RED]</td></tr>
+    <tr><td>Nube / SaaS</td><td><span class="pill p-pass">✓ Activa</span></td><td class="placeholder">[FUENTE_NUBE]</td></tr>
+    <tr><td>DNS</td><td><span class="pill p-fail">✗ Ausente</span></td><td class="placeholder">[FUENTE_DNS]</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ═══ 3. BRECHAS DE VISIBILIDAD ═══ -->
+<div class="sec" id="sec-gap">
+<h2 class="sec-title">3. Brechas de visibilidad</h2>
+<p class="para placeholder">[GAP_INTRO — Telemetría faltante desde la perspectiva de Microsoft Sentinel. No considerar elementos internos de Graphhunter.]</p>
+<ul class="blist">
+  <li class="placeholder"><strong>[GAP_1_TITULO]:</strong> [GAP_1_EXPLICACION — qué es y por qué impacta la capacidad de hunting].</li>
+  <li class="placeholder"><strong>[GAP_2_TITULO]:</strong> [GAP_2_EXPLICACION].</li>
+  <li class="placeholder"><strong>[GAP_3_TITULO]:</strong> [GAP_3_EXPLICACION].</li>
+  <li class="placeholder"><strong>[GAP_4_TITULO]:</strong> [GAP_4_EXPLICACION].</li>
+</ul>
+</div>
+
+<!-- ═══ 4. ESCENARIOS PROPUESTOS ═══ -->
+<div class="sec" id="sec-escenarios">
+<h2 class="sec-title">4. Escenarios propuestos</h2>
+<p class="para placeholder">[ESCENARIOS_INTRO — Teatros de operación derivados exclusivamente de la telemetría verificada como activa. Sin solapamiento con detecciones SOC ya cubiertas por Graphhunter.]</p>
+
+<div class="scenario" id="esc-01">
+  <div class="scenario-title"><span>E-01 —</span> [E-01_TITULO]</div>
+  <div class="scenario-meta"><strong>Teatro de operación:</strong> [TEATRO_1].&nbsp;&nbsp;<strong>Relevancia:</strong> <em>[POR_QUE_APLICA_AL_ENTORNO]</em></div>
+  <hr class="scenario-divider">
+  <p class="para placeholder">[E-01_NARRATIVA — Comportamiento adversarial cubierto y telemetría de soporte.]</p>
+  <div class="sub-label">Mapping MITRE ATT&amp;CK</div>
+  <p class="para"><span class="mitre-tag">[TACTICA_1]</span><span class="mitre-tag">[TACTICA_2]</span> · Técnicas relacionadas: <span class="mitre-tag">[T1XXX]</span><span class="mitre-tag">[T1YYY]</span></p>
+  <div class="sub-label">Fuentes de telemetría requeridas</div>
+  <ul class="blist">
+    <li class="placeholder"><strong>[TABLA_REQ_1]:</strong> [USO_EN_ESTE_ESCENARIO]</li>
+    <li class="placeholder"><strong>[TABLA_REQ_2]:</strong> [USO_EN_ESTE_ESCENARIO]</li>
+  </ul>
+</div>
+
+<div class="scenario" id="esc-02">
+  <div class="scenario-title"><span>E-02 —</span> [E-02_TITULO]</div>
+  <div class="scenario-meta"><strong>Teatro de operación:</strong> [TEATRO_2].&nbsp;&nbsp;<strong>Relevancia:</strong> <em>[POR_QUE_APLICA_AL_ENTORNO]</em></div>
+  <hr class="scenario-divider">
+  <p class="para placeholder">[E-02_NARRATIVA]</p>
+  <div class="sub-label">Mapping MITRE ATT&amp;CK</div>
+  <p class="para"><span class="mitre-tag">[TACTICA_1]</span> · <span class="mitre-tag">[T1XXX]</span></p>
+  <div class="sub-label">Fuentes de telemetría requeridas</div>
+  <ul class="blist">
+    <li class="placeholder"><strong>[TABLA_REQ_1]:</strong> [USO_EN_ESTE_ESCENARIO]</li>
+  </ul>
+</div>
+
+<div class="scenario" id="esc-03">
+  <div class="scenario-title"><span>E-03 —</span> [E-03_TITULO]</div>
+  <div class="scenario-meta"><strong>Teatro de operación:</strong> [TEATRO_3].&nbsp;&nbsp;<strong>Relevancia:</strong> <em>[POR_QUE_APLICA_AL_ENTORNO]</em></div>
+  <hr class="scenario-divider">
+  <p class="para placeholder">[E-03_NARRATIVA]</p>
+  <div class="sub-label">Mapping MITRE ATT&amp;CK</div>
+  <p class="para"><span class="mitre-tag">[TACTICA_1]</span> · <span class="mitre-tag">[T1XXX]</span></p>
+</div>
+
+<div class="scenario" id="esc-04">
+  <div class="scenario-title"><span>E-04 —</span> [E-04_TITULO]</div>
+  <div class="scenario-meta"><strong>Teatro de operación:</strong> [TEATRO_4].&nbsp;&nbsp;<strong>Relevancia:</strong> <em>[POR_QUE_APLICA_AL_ENTORNO]</em></div>
+  <hr class="scenario-divider">
+  <p class="para placeholder">[E-04_NARRATIVA]</p>
+  <div class="sub-label">Mapping MITRE ATT&amp;CK</div>
+  <p class="para"><span class="mitre-tag">[TACTICA_1]</span> · <span class="mitre-tag">[T1XXX]</span></p>
+</div>
+<!-- Duplicar bloque .scenario y entrada en .side-nav para escenarios adicionales. -->
+</div>
+
+<!-- ═══ 5. METODOLOGÍA — BEHAVIORAL VS INTEL-DRIVEN ═══ -->
+<div class="sec" id="sec-metodologia">
+<h2 class="sec-title">5. Distribución metodológica</h2>
+<p class="para placeholder">[METODOLOGIA_INTRO — Clasificación de cada escenario según tipo de hunt feasible: Behavioral, Intel-Driven o Situational.]</p>
+<table>
+  <thead><tr><th>Escenario</th><th style="width:110px">Behavioral</th><th style="width:110px">Intel-Driven</th><th style="width:110px">Situational</th><th>Justificación</th></tr></thead>
+  <tbody>
+    <tr><td>E-01 · [E-01_TITULO_CORTO]</td><td><span class="pill p-pass">✓</span></td><td><span class="pill p-na">—</span></td><td><span class="pill p-na">—</span></td><td class="placeholder">[JUSTIF_E01]</td></tr>
+    <tr><td>E-02 · [E-02_TITULO_CORTO]</td><td><span class="pill p-na">—</span></td><td><span class="pill p-pass">✓</span></td><td><span class="pill p-pass">✓</span></td><td class="placeholder">[JUSTIF_E02]</td></tr>
+    <tr><td>E-03 · [E-03_TITULO_CORTO]</td><td><span class="pill p-pass">✓</span></td><td><span class="pill p-pass">✓</span></td><td><span class="pill p-na">—</span></td><td class="placeholder">[JUSTIF_E03]</td></tr>
+    <tr><td>E-04 · [E-04_TITULO_CORTO]</td><td><span class="pill p-na">—</span></td><td><span class="pill p-na">—</span></td><td><span class="pill p-pass">✓</span></td><td class="placeholder">[JUSTIF_E04]</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ═══ 6. MENÚ DE SELECCIÓN ═══ -->
+<div class="sec" id="sec-menu">
+<h2 class="sec-title">6. Menú de selección para el operador</h2>
+<p class="para placeholder">[MENU_INTRO — Resumen ejecutivo para que el operador promueva uno o más escenarios a la Fase 2 de ejecución.]</p>
+<div class="menu-block">
+  <div class="sec-sub">Recomendación priorizada</div>
+  <ul class="blist">
+    <li class="placeholder"><strong>[OPCION_A] · E-0X:</strong> [POR_QUE_ELEGIRLA — ROI esperado, criticidad, ventana de exposición].</li>
+    <li class="placeholder"><strong>[OPCION_B] · E-0X:</strong> [POR_QUE_ELEGIRLA].</li>
+    <li class="placeholder"><strong>[OPCION_C] · E-0X:</strong> [POR_QUE_ELEGIRLA].</li>
+  </ul>
+  <div class="sec-sub">Decisión esperada</div>
+  <p class="para placeholder">[DECISION_PENDIENTE — qué se necesita confirmar antes de pasar a la Fase 2: ventana temporal, owner, criticidad asignada.]</p>
+</div>
+</div>
+
+</main>
+</div>
+
+<footer class="page-footer">
+  <div class="pf-left">© [AÑO] BASE4 Security S.A. · Todos los derechos reservados<br>Documento confidencial — [USO_DOCUMENTO]</div>
+  <div class="pf-right">info@base4sec.com<br>LATAM · USA · España &nbsp;|&nbsp; <span>Tu ciber aliado.</span></div>
+</footer>
+</div>
+</body>
+</html>

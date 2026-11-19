@@ -194,6 +194,9 @@ pub struct EnrichmentAuditEntry {
 /// All methods are async so implementations can back onto sqlite, a
 /// remote database, or an in-memory HashMap for tests without changing
 /// callers.
+// `#[async_trait]` expands each method to a `#[must_use]` fn returning a
+// boxed future (already must_use); the lint fires on the macro output.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait WatermarkStore: Send + Sync {
     /// Reads the watermark for a given key. Returns `Ok(None)` if no
@@ -249,10 +252,10 @@ impl SqliteWatermarkStore {
     /// and the schema if they don't exist.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, WatermarkError> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
         Self::init_schema(&conn)?;

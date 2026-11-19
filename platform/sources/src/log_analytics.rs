@@ -47,8 +47,8 @@ use tokio_util::sync::CancellationToken;
 use crate::http_client::{HttpClient, HttpRequest, HttpResponse, StatusClass};
 use crate::token_cache::{AzureTokenCache, TokenKey};
 use crate::{
-    ChunkEncoding, ChunkStream, LogSource, PollStream, QueryScope, RawChunk, SourceError,
-    SourceKind, Watermark,
+    ChunkEncoding, ChunkStream, LogSource, PollStream, QueryScope, RawChunk, SourceCapabilities,
+    SourceError, SourceKind, Watermark,
 };
 
 /// Default Log Analytics API root. Overridable for tests + alternate
@@ -354,6 +354,13 @@ impl LogSource for LogAnalyticsSource {
 
     fn available_tables(&self) -> &[&'static str] {
         AVAILABLE_TABLES
+    }
+
+    fn capabilities(&self) -> SourceCapabilities {
+        // KQL query API: append-only, time/field filterable, paginated,
+        // backfillable by widening the range; no stable per-row id, no
+        // correction/deletion semantics, opaque ISO-8601 watermark.
+        SourceCapabilities::kql_query_source()
     }
 
     async fn check_auth(&self) -> Result<(), SourceError> {
@@ -792,5 +799,18 @@ mod tests {
         );
         assert!(source.available_tables().contains(&"SecurityEvent"));
         assert!(source.available_tables().contains(&"DeviceProcessEvents"));
+    }
+
+    #[test]
+    fn log_analytics_declares_kql_query_capabilities() {
+        let http = Arc::new(MockHttpClient::new());
+        let src = make_source(http, None);
+        let c = src.capabilities();
+        assert!(c.append_only);
+        assert!(c.supports_time_filter);
+        assert!(c.supports_pagination);
+        assert!(c.supports_backfill);
+        assert!(!c.stable_event_ids);
+        assert!(!c.supports_deletions);
     }
 }

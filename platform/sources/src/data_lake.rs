@@ -25,7 +25,10 @@
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::{ChunkStream, LogSource, PollStream, QueryScope, SourceError, SourceKind, Watermark};
+use crate::{
+    ChunkStream, LogSource, PollStream, QueryScope, SourceCapabilities, SourceError, SourceKind,
+    Watermark,
+};
 
 /// A minimal, stubbed Sentinel Data Lake v2 source. Holds identity info
 /// so it can participate in the upper layers (health dashboard, metrics,
@@ -79,6 +82,19 @@ impl LogSource for DataLakeV2Source {
 
     fn available_tables(&self) -> &[&'static str] {
         &self.available_tables
+    }
+
+    /// Declares KQL-query-API capabilities even though the data plane is
+    /// stubbed (see module doc). This documents *intent*: when the real
+    /// query path lands, it will behave like Log Analytics / Defender XDR
+    /// (append-only, time-filterable, paginated, backfillable, no stable
+    /// row id, no deletions). Consumers that gate on `capabilities()`
+    /// before calling `query_scoped`/`poll_since` will still hit the
+    /// `SourceError::Fatal` stub error at call time, so declaring the
+    /// eventual contract here is safe and avoids a second capabilities
+    /// update when the stub is filled in.
+    fn capabilities(&self) -> SourceCapabilities {
+        SourceCapabilities::kql_query_source()
     }
 
     /// Always returns OK so the polling loop doesn't 3-strike-breaker a
@@ -195,5 +211,17 @@ mod tests {
             "t",
             "w",
         ))];
+    }
+
+    #[test]
+    fn data_lake_declares_kql_query_capabilities() {
+        let src = DataLakeV2Source::new("datalake_v2:ws-1", "tenant-a", "ws-1");
+        let c = src.capabilities();
+        assert!(c.append_only);
+        assert!(c.supports_time_filter);
+        assert!(c.supports_pagination);
+        assert!(c.supports_backfill);
+        assert!(!c.stable_event_ids);
+        assert!(!c.supports_deletions);
     }
 }

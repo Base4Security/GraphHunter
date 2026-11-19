@@ -111,7 +111,7 @@ fn parse_json_array(contents: &str) -> Vec<Value> {
     serde_json::from_str::<Value>(contents)
         .ok()
         .and_then(|v| v.as_array().cloned())
-        .unwrap_or_else(Vec::new)
+        .unwrap_or_default()
 }
 
 fn parse_csv_to_objects(contents: &str) -> Vec<Value> {

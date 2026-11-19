@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use tauri::State;
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::dto::export::{
     ExportHuntResultsRequest, ExportIocsRequest, ExportOcsfRequest, ExportSubgraphRequest,
 };
-use graph_hunter_api::GraphHunterApi;
 
 use crate::error::CommandError;
 

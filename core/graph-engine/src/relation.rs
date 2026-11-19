@@ -28,6 +28,13 @@ where
 ///
 /// The `timestamp` field stores Unix epoch seconds and is critical for
 /// temporal pattern matching (causal monotonicity enforcement).
+/// Default for [`Relation::ingested_at`] when deserializing wire data that
+/// predates this field (see the `#[serde(default = ...)]` below) — the same
+/// 0-delta epoch base used by [`CompactRelation::ingested_at_delta`].
+fn default_ingested_at() -> i64 {
+    INGEST_EPOCH_BASE
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Relation {
     pub source_id: String,
@@ -42,10 +49,65 @@ pub struct Relation {
         serialize_with = "serialize_arc_str"
     )]
     pub dataset_id: Option<Arc<str>>,
+    /// Wall-clock time this edge was written to the graph (epoch seconds),
+    /// i.e. [`CompactRelation::ingested_at`] read back onto the
+    /// materialized struct. Additive field: `#[serde(default = ...)]` keeps
+    /// existing wire consumers (e.g. journal envelopes serialized before
+    /// this field existed) deserializing cleanly, resolving to the same
+    /// `INGEST_EPOCH_BASE` that a legacy `ingested_at_delta` of 0 resolves
+    /// to on the compact side.
+    #[serde(default = "default_ingested_at")]
+    pub ingested_at: i64,
+}
+
+/// Wire layout of [`Relation`] as it existed before `ingested_at` was
+/// added (session `BODY_FORMAT_VERSION` 1). `bincode` is positional, not
+/// self-describing, so `#[serde(default = ...)]` on `Relation::ingested_at`
+/// has NO effect when deserializing a v1 body — the decoder still expects
+/// trailing `ingested_at` bytes that a v1 file never wrote, which fails
+/// with a bincode EOF error. This struct mirrors the exact pre-Task-2
+/// field set (`dataset_id` already existed at v1; only `ingested_at` is
+/// new) so a v1 session body can still be read: deserialize with this
+/// type, then `.into()` to get a `Relation` with `ingested_at` defaulted
+/// to [`INGEST_EPOCH_BASE`] — the same fallback JSON callers get via
+/// `default_ingested_at`. Used only by the session-binary v1 body reader;
+/// new code should never construct this directly. `Serialize` is derived
+/// too (not just `Deserialize`) so tests in other crates can encode v1
+/// fixture bytes without reaching into private helpers.
+#[derive(Serialize, Deserialize)]
+pub struct RelationV1 {
+    pub source_id: String,
+    pub dest_id: String,
+    pub rel_type: RelationType,
+    pub timestamp: i64,
+    pub metadata: HashMap<String, String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_arc_str",
+        serialize_with = "serialize_arc_str"
+    )]
+    pub dataset_id: Option<Arc<str>>,
+}
+
+impl From<RelationV1> for Relation {
+    fn from(v1: RelationV1) -> Self {
+        Relation {
+            source_id: v1.source_id,
+            dest_id: v1.dest_id,
+            rel_type: v1.rel_type,
+            timestamp: v1.timestamp,
+            metadata: v1.metadata,
+            dataset_id: v1.dataset_id,
+            ingested_at: default_ingested_at(),
+        }
+    }
 }
 
 impl Relation {
-    /// Creates a new relation with empty metadata.
+    /// Creates a new relation with empty metadata. `ingested_at` defaults to
+    /// [`INGEST_EPOCH_BASE`] (the 0-delta default) — callers that observed a
+    /// real ingestion time (e.g. `materialize_relation`) should set it
+    /// directly.
     pub fn new(
         source_id: impl Into<String>,
         dest_id: impl Into<String>,
@@ -59,6 +121,7 @@ impl Relation {
             timestamp,
             metadata: HashMap::new(),
             dataset_id: None,
+            ingested_at: INGEST_EPOCH_BASE,
         }
     }
 

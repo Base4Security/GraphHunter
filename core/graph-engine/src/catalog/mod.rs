@@ -190,13 +190,18 @@ pub fn get_catalog_snapshot() -> &'static CatalogSnapshot {
 mod tests {
     use super::*;
 
+    /// Every registered built-in reaches the merged catalog. Counted off
+    /// the registration list rather than a literal, so adding a pattern
+    /// does not fail a test whose only fix is to bump a number — the
+    /// file-registration parity check in `loader` is what actually guards
+    /// against losing an entry.
     #[test]
-    fn builtin_catalog_has_30_entries() {
+    fn every_registered_builtin_reaches_the_catalog() {
         let entries = get_catalog();
         assert_eq!(
             entries.len(),
-            30,
-            "built-in catalog should have exactly 30 entries"
+            loader::BUILTIN_YAMLS.len(),
+            "every registered built-in YAML should produce exactly one catalog entry"
         );
     }
 

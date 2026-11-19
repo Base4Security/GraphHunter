@@ -110,7 +110,9 @@ impl CircuitBreaker {
     }
 
     fn record_success(&self, metrics: &PollerMetrics) {
-        metrics.circuit_consecutive_failures.store(0, Ordering::Relaxed);
+        metrics
+            .circuit_consecutive_failures
+            .store(0, Ordering::Relaxed);
         metrics.circuit_open_until.store(0, Ordering::Relaxed);
     }
 
@@ -180,11 +182,7 @@ impl PollerConfig {
         self
     }
 
-    pub fn with_circuit_breaker(
-        mut self,
-        max_failures: u32,
-        backoff_base: Duration,
-    ) -> Self {
+    pub fn with_circuit_breaker(mut self, max_failures: u32, backoff_base: Duration) -> Self {
         self.circuit_max_failures = max_failures;
         self.circuit_backoff_base = backoff_base;
         self
@@ -246,10 +244,7 @@ impl SourcePoller {
         config: PollerConfig,
         watermarks: Arc<dyn WatermarkStore>,
     ) -> Self {
-        let circuit = CircuitBreaker::new(
-            config.circuit_max_failures,
-            config.circuit_backoff_base,
-        );
+        let circuit = CircuitBreaker::new(config.circuit_max_failures, config.circuit_backoff_base);
         Self {
             source,
             config,
@@ -361,12 +356,10 @@ impl SourcePoller {
                     // advanced. A stream that echoes the input wm
                     // (e.g., the LA impl when it has nothing new to
                     // say) is a no-op.
-                    if new_wm != current_wm {
-                        if self.watermarks.set(&key, &new_wm).await.is_ok() {
-                            self.metrics
-                                .watermark_advances
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
+                    if new_wm != current_wm && self.watermarks.set(&key, &new_wm).await.is_ok() {
+                        self.metrics
+                            .watermark_advances
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 Err(err) => {
@@ -792,13 +785,33 @@ mod tests {
         assert!(metrics.snapshot().consecutive_failures >= 3);
 
         let calls_when_open = failing.call_count();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Wait until a skip is *observed*, instead of sleeping a fixed
+        // 50ms and assuming the poller was scheduled inside it. The old
+        // form failed about one run in five. Two things changed here and
+        // only the pair was measured: the wait ends as soon as the skip
+        // appears, and `raw_rx` keeps being drained while waiting (with a
+        // 4-slot channel and no reader, a blocked send is a plausible way
+        // for the poller never to reach the next tick — plausible, not
+        // confirmed). 25 consecutive runs pass; the loop bound keeps a
+        // real regression failing instead of hanging.
+        for _ in 0..50 {
+            if metrics.snapshot().circuit_open_skips >= 1 {
+                break;
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(20), raw_rx.recv()).await;
+            tokio::task::yield_now().await;
+        }
+
         let calls_after_wait = failing.call_count();
         assert_eq!(
             calls_when_open, calls_after_wait,
             "poll_since should be skipped while circuit is open"
         );
-        assert!(metrics.snapshot().circuit_open_skips >= 1);
+        assert!(
+            metrics.snapshot().circuit_open_skips >= 1,
+            "an open circuit must record at least one skipped tick"
+        );
 
         cancel.cancel();
         drop(raw_rx);
@@ -820,7 +833,10 @@ mod tests {
         for _ in 0..3 {
             breaker.record_failure(&metrics);
         }
-        assert!(CircuitBreaker::is_open(&metrics), "circuit must be open after max failures");
+        assert!(
+            CircuitBreaker::is_open(&metrics),
+            "circuit must be open after max failures"
+        );
 
         // A single success resets everything.
         breaker.record_success(&metrics);
@@ -829,7 +845,9 @@ mod tests {
             "circuit must be closed after record_success"
         );
         assert_eq!(
-            metrics.circuit_consecutive_failures.load(std::sync::atomic::Ordering::Relaxed),
+            metrics
+                .circuit_consecutive_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
             0,
             "consecutive_failures must be zero after recovery"
         );

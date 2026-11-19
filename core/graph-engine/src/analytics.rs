@@ -6,6 +6,7 @@ use crate::anomaly::ScoreBreakdown;
 use crate::config;
 use crate::graph::GraphHunter;
 use crate::interner::StrId;
+use crate::streaming::StreamEdge;
 use crate::types::{EntityType, RelationType};
 
 /// Combined in_degree + out_degree above which a plain `expand_node` call
@@ -370,6 +371,9 @@ fn percentile_of(xs: &[f64], x: f64) -> f64 {
     (100.0 * (below + equal / 2.0) / n).clamp(0.0, 100.0)
 }
 
+// Each argument is a distinct, already-computed score component; bundling
+// them into a one-off struct for a single private caller adds no clarity.
+#[allow(clippy::too_many_arguments)]
 fn build_narrative(
     composite: f64,
     composite_pct: f64,
@@ -544,6 +548,30 @@ impl GraphHunter {
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then(b.connections.cmp(&a.connections))
             });
+        } else {
+            // Best match first, then most connected, then id: the cap used
+            // to cut an unsorted list, so the answer was whichever matches
+            // the map happened to yield — and a query for a hostname could
+            // return `limit` process ids scoped to that host
+            // (`host|...|image`) without the host itself.
+            let rank = |id: &str| {
+                let id = id.to_lowercase();
+                if id == query_lower {
+                    0
+                } else if id.starts_with(&query_lower) && !id.contains('|') {
+                    1
+                } else if !id.contains('|') {
+                    2
+                } else {
+                    3
+                }
+            };
+            results.sort_by(|a, b| {
+                rank(&a.id)
+                    .cmp(&rank(&b.id))
+                    .then(b.connections.cmp(&a.connections))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
         }
         results.truncate(limit);
         results
@@ -578,10 +606,12 @@ impl GraphHunter {
                 continue;
             }
 
-            // Outgoing edges
-            if let Some(arc) = self.streaming.neighbors_arc(current_sid) {
-                let g = arc.read();
-                for edge in g.as_slice() {
+            // Outgoing edges (base + post-finalize tail; base-only would
+            // drop every edge appended after the last finalize — the
+            // /expand-shows-0-edges bug on freshly built graphs).
+            {
+                let out_edges = self.neighbors_incl_tail(current_sid);
+                for edge in &out_edges {
                     if edges.len() >= max_edges {
                         truncated = true;
                         break;
@@ -590,37 +620,34 @@ impl GraphHunter {
                     let dest_id_str = self.interner.resolve(dest_sid);
 
                     if let Some(f) = filter {
-                        if let Some(ref rel_types) = f.relation_types {
-                            if !rel_types
-                                .iter()
-                                .any(|rt| rt.to_u8() == edge.rel_type_tag)
-                            {
-                                continue;
-                            }
+                        if let Some(ref rel_types) = f.relation_types
+                            && !rel_types.iter().any(|rt| {
+                                self.edge_rel_matches(rt, edge.rel_type_tag, edge.metadata_offset)
+                            })
+                        {
+                            continue;
                         }
-                        if let Some(start) = f.time_start {
-                            if edge.timestamp < start {
-                                continue;
-                            }
+                        if let Some(start) = f.time_start
+                            && edge.timestamp < start
+                        {
+                            continue;
                         }
-                        if let Some(end) = f.time_end {
-                            if edge.timestamp > end {
-                                continue;
-                            }
+                        if let Some(end) = f.time_end
+                            && edge.timestamp > end
+                        {
+                            continue;
                         }
-                        if let Some(ref entity_types) = f.entity_types {
-                            if let Some(entity) = self.entities.get(&dest_sid) {
-                                if !entity_types.contains(&entity.entity_type) {
-                                    continue;
-                                }
-                            }
+                        if let Some(ref entity_types) = f.entity_types
+                            && let Some(entity) = self.entities.get(&dest_sid)
+                            && !entity_types.contains(&entity.entity_type)
+                        {
+                            continue;
                         }
-                        if let Some(min_score) = f.min_score {
-                            if let Some(entity) = self.entities.get(&dest_sid) {
-                                if entity.score < min_score {
-                                    continue;
-                                }
-                            }
+                        if let Some(min_score) = f.min_score
+                            && let Some(entity) = self.entities.get(&dest_sid)
+                            && entity.score < min_score
+                        {
+                            continue;
                         }
                     }
 
@@ -640,10 +667,8 @@ impl GraphHunter {
                         edges.push(NeighborEdge {
                             source: self.interner.resolve(edge.source_sid).to_string(),
                             target: dest_id_str.to_string(),
-                            rel_type: self.resolve_rel_type_name_raw(
-                                edge.rel_type_tag,
-                                edge.metadata_offset,
-                            ),
+                            rel_type: self
+                                .resolve_rel_type_name_raw(edge.rel_type_tag, edge.metadata_offset),
                             timestamp: edge.timestamp,
                             metadata: meta,
                         });
@@ -660,9 +685,9 @@ impl GraphHunter {
                         truncated = true;
                         break;
                     }
-                    if let Some(arc) = self.streaming.neighbors_arc(source_sid) {
-                        let g = arc.read();
-                        for edge in g.as_slice() {
+                    {
+                        let src_out = self.neighbors_incl_tail(source_sid);
+                        for edge in &src_out {
                             if edges.len() >= max_edges {
                                 truncated = true;
                                 break;
@@ -865,19 +890,135 @@ impl GraphHunter {
             return;
         }
 
-        let log_max = ((max_degree + 1) as f64).ln();
+        // Rarity of a process is the rarity of its image. A process id
+        // names one instance on one host (`process_identity`), so by its
+        // own degree every execution of `cmd.exe` is a barely-connected,
+        // "rare" node. Sum the degree over all instances of the image and
+        // rank on that; `degree_score` stays per node.
+        let mut image_degree: HashMap<&str, usize> = HashMap::new();
+        for (&sid, entity) in &self.entities {
+            if entity.entity_type != EntityType::Process {
+                continue;
+            }
+            let image = crate::process_identity::image_of(&entity.id);
+            if image.len() != entity.id.len() {
+                *image_degree.entry(image).or_default() += degrees.get(&sid).copied().unwrap_or(0);
+            }
+        }
+        let rarity_degree: HashMap<StrId, usize> = self
+            .entities
+            .iter()
+            .filter(|(_, e)| e.entity_type == EntityType::Process)
+            .filter_map(|(&sid, e)| {
+                image_degree
+                    .get(crate::process_identity::image_of(&e.id))
+                    .map(|&d| (sid, d))
+            })
+            .collect();
+        let max_rarity_degree = rarity_degree
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .max(max_degree);
+
+        // Rarity of what a process touches is the rarity of that behaviour.
+        // A file written once is "rare" by its own degree, but when the
+        // writer's image writes a fresh file thousands of times (inventory
+        // scripts, browser caches) every one of those files is routine.
+        // Count edges per (image, relation, target type) and floor the
+        // target's rarity degree at its least common class, so one touch
+        // by an unusual actor still keeps it rare. Each class is a subset
+        // of its image's edges, so `max_rarity_degree` already bounds it.
+        let mut class_count: HashMap<(&str, u8, &EntityType), usize> = HashMap::new();
+        self.streaming.for_each_edge(|src, edge| {
+            if let Some(key) = self.actor_class(src, edge) {
+                *class_count.entry(key).or_default() += 1;
+            }
+        });
+        let mut actor_floor: HashMap<StrId, usize> = HashMap::new();
+        self.streaming.for_each_edge(|src, edge| {
+            if let Some(key) = self.actor_class(src, edge) {
+                let n = class_count.get(&key).copied().unwrap_or(0);
+                actor_floor
+                    .entry(edge.dest_sid)
+                    .and_modify(|floor| *floor = (*floor).min(n))
+                    .or_insert(n);
+            }
+        });
+
+        // The same holds from the other end for what is not a process. A
+        // firewall sees each unmanaged client once, going where everyone
+        // goes: rare by its own degree, routine by what it did. Count edges
+        // per (source type, relation, target) and floor the source at its
+        // least common one, so a client that went where nobody goes stays
+        // rare. Processes are left out: their image already ranks them.
+        let mut source_class: HashMap<(&EntityType, u8, StrId), usize> = HashMap::new();
+        self.streaming.for_each_edge(|src, edge| {
+            if let Some(key) = self.source_class(src, edge) {
+                *source_class.entry(key).or_default() += 1;
+            }
+        });
+        self.streaming.for_each_edge(|src, edge| {
+            if let Some(key) = self.source_class(src, edge) {
+                let n = source_class.get(&key).copied().unwrap_or(0);
+                actor_floor
+                    .entry(src)
+                    .and_modify(|floor| *floor = (*floor).min(n))
+                    .or_insert(n);
+            }
+        });
+
+        let log_max = ((max_rarity_degree + 1) as f64).ln();
         for (&sid, entity) in &mut self.entities {
             let deg = degrees.get(&sid).copied().unwrap_or(0);
             let degree_norm = (deg as f64 / max_degree as f64) * 100.0;
             entity.score = degree_norm;
             entity.degree_score = degree_norm;
+            let deg_for_rarity = rarity_degree
+                .get(&sid)
+                .copied()
+                .unwrap_or(deg)
+                .max(actor_floor.get(&sid).copied().unwrap_or(0));
             let rarity = if log_max > 0.0 {
-                (1.0 - ((deg + 1) as f64).ln() / log_max) * 100.0
+                (1.0 - ((deg_for_rarity + 1) as f64).ln() / log_max) * 100.0
             } else {
                 0.0
             };
             entity.rarity_score = rarity.clamp(0.0, 100.0);
         }
+    }
+
+    /// The behaviour class of an edge from a process to a non-process
+    /// target: `(image, relation tag, target type)`. `None` for any other
+    /// edge. Used by [`Self::compute_scores`] to rank a target by how
+    /// routine it is for that image to touch things of its kind.
+    fn actor_class(&self, src: StrId, edge: &StreamEdge) -> Option<(&str, u8, &EntityType)> {
+        let actor = self.entities.get(&src)?;
+        if actor.entity_type != EntityType::Process {
+            return None;
+        }
+        let target = self.entities.get(&edge.dest_sid)?;
+        if target.entity_type == EntityType::Process {
+            return None;
+        }
+        Some((
+            crate::process_identity::image_of(&actor.id),
+            edge.rel_type_tag,
+            &target.entity_type,
+        ))
+    }
+
+    /// The behaviour class of an edge from a non-process source: `(source
+    /// type, relation tag, target)`. `None` when the source is a process.
+    /// Used by [`Self::compute_scores`] to rank a source by how many of its
+    /// kind did the same thing.
+    fn source_class(&self, src: StrId, edge: &StreamEdge) -> Option<(&EntityType, u8, StrId)> {
+        let source = self.entities.get(&src)?;
+        if source.entity_type == EntityType::Process {
+            return None;
+        }
+        Some((&source.entity_type, edge.rel_type_tag, edge.dest_sid))
     }
 
     /// Computes betweenness centrality using Brandes' algorithm.
@@ -1026,10 +1167,9 @@ impl GraphHunter {
         let mut weighted_edges: Vec<(usize, usize, f64)> = Vec::new();
 
         self.streaming.for_each_edge(|src_sid, edge| {
-            if let (Some(&src_idx), Some(&dst_idx)) = (
-                sid_to_idx.get(&src_sid),
-                sid_to_idx.get(&edge.dest_sid),
-            ) {
+            if let (Some(&src_idx), Some(&dst_idx)) =
+                (sid_to_idx.get(&src_sid), sid_to_idx.get(&edge.dest_sid))
+            {
                 let dt = (t_ref - edge.timestamp).max(0) as f64;
                 let w = (-lambda * dt).exp();
                 w_out[src_idx] += w;
@@ -1172,12 +1312,7 @@ impl GraphHunter {
         // to per-unique-neighbor, matching the intended semantics: "how
         // many neighbors of each type does this node have?".
         self.streaming.with_neighbors_and_tail(sid, |base, tail| {
-            let mut scanned = 0usize;
-            for edge in base.iter().chain(tail.iter()) {
-                if scanned >= config::MAX_SCAN_EDGES {
-                    break;
-                }
-                scanned += 1;
+            for edge in base.iter().chain(tail.iter()).take(config::MAX_SCAN_EDGES) {
                 if edge.timestamp != 0 {
                     min_ts = min_ts.min(edge.timestamp);
                     max_ts = max_ts.max(edge.timestamp);
@@ -1209,12 +1344,7 @@ impl GraphHunter {
         // tail-aware helper and find the first edge that lands on us;
         // any single timestamp suffices to extend the min/max range.
         if let Some(sources) = self.reverse_adj.get(&sid) {
-            let mut scanned = 0usize;
-            for &source_sid in sources.iter() {
-                if scanned >= config::MAX_SCAN_EDGES {
-                    break;
-                }
-                scanned += 1;
+            for &source_sid in sources.iter().take(config::MAX_SCAN_EDGES) {
                 let Some(src_entity) = self.entities.get(&source_sid) else {
                     continue;
                 };
@@ -1369,7 +1499,7 @@ impl GraphHunter {
                 count: ids.len(),
             })
             .collect();
-        type_distribution.sort_by(|a, b| b.count.cmp(&a.count));
+        type_distribution.sort_by_key(|t| std::cmp::Reverse(t.count));
 
         let mut min_ts = i64::MAX;
         let mut max_ts = i64::MIN;
@@ -1450,6 +1580,29 @@ impl GraphHunter {
         min_score: Option<f64>,
         dedup_mode: DedupMode,
     ) -> (Vec<ScoredPath>, usize) {
+        self.score_and_paginate_shaped(paths, page, page_size, min_score, dedup_mode, None)
+    }
+
+    /// [`Self::score_and_paginate_paths`] for results of a known shape.
+    /// With `clauses` (a graph-shaped pattern, `yannakakis::joined_clauses`)
+    /// each result holds one node per binding, so its edges, times, sources,
+    /// edge rarity and summary come from the clauses instead of from
+    /// consecutive nodes, which in a joined result are not edges.
+    pub fn score_and_paginate_shaped<S: AsRef<str>>(
+        &self,
+        paths: &[Vec<S>],
+        page: usize,
+        page_size: usize,
+        min_score: Option<f64>,
+        dedup_mode: DedupMode,
+        clauses: Option<&[crate::yannakakis::JoinedClause]>,
+    ) -> (Vec<ScoredPath>, usize) {
+        let clause_edges: Option<Vec<(usize, usize)>> =
+            clauses.map(|c| c.iter().map(|c| (c.origin, c.dest)).collect());
+        let score_path = |s: &crate::anomaly::AnomalyScorer, path: &[String]| match &clause_edges {
+            Some(edges) => s.score_path_edges(path, edges, self),
+            None => s.score_path(path, self),
+        };
         // The DFS hot path emits `Vec<Arc<str>>` (D0). Analytics still
         // surfaces `ScoredPath` with `Vec<String>` to keep the public DTO
         // stable across FFI / REST / MCP. We materialize `Vec<String>`
@@ -1539,7 +1692,7 @@ impl GraphHunter {
                         total_score += s;
                     }
                 }
-                let anomaly = scorer.map(|s| s.score_path(path, self).0).unwrap_or(0.0);
+                let anomaly = scorer.map(|s| score_path(s, path).0).unwrap_or(0.0);
                 (idx, max_score, total_score, anomaly)
             })
             .collect();
@@ -1601,7 +1754,11 @@ impl GraphHunter {
                         }
                     }
 
+                    let joined = clauses.map(|c| self.joined_path_meta(path, c));
                     for i in 0..path.len().saturating_sub(1) {
+                        if joined.is_some() {
+                            break;
+                        }
                         // Use compact relations to avoid materializing full Relation objects
                         let dest_sid = self.interner.get(&path[i + 1]);
                         for compact in self.get_compact_relations(&path[i]) {
@@ -1624,6 +1781,12 @@ impl GraphHunter {
                         }
                     }
 
+                    if let Some((start, end, tags, summary)) = joined {
+                        time_start = start;
+                        time_end = end;
+                        dataset_tags = tags;
+                        labels = vec![summary];
+                    }
                     if time_start == i64::MAX {
                         time_start = 0;
                     }
@@ -1633,7 +1796,7 @@ impl GraphHunter {
 
                     let (anomaly_score, anomaly_breakdown) = match scorer {
                         Some(s) => {
-                            let (score, breakdown) = s.score_path(path, self);
+                            let (score, breakdown) = score_path(s, path);
                             (Some(score), Some(breakdown))
                         }
                         None => (None, None),
@@ -1661,6 +1824,61 @@ impl GraphHunter {
         };
 
         (page_items, filtered_count)
+    }
+
+    /// Time span, contributing datasets and a readable summary of one
+    /// joined-pattern result, read edge by edge from its clauses.
+    ///
+    /// A pair is usually observed many times (a host reports its address on
+    /// every connection). The span is the tightest window holding one
+    /// observation of every clause — the episode the match describes — not
+    /// the first and last time each pair was ever seen. Atemporal edges
+    /// (timestamp 0) hold at any time and do not bound it.
+    fn joined_path_meta(
+        &self,
+        path: &[String],
+        clauses: &[crate::yannakakis::JoinedClause],
+    ) -> (i64, i64, std::collections::BTreeSet<u16>, String) {
+        let mut tags = std::collections::BTreeSet::new();
+        let mut stamps: Vec<Vec<i64>> = Vec::new();
+        let mut parts: Vec<String> = Vec::new();
+        for clause in clauses {
+            let (Some(src), Some(dst)) = (path.get(clause.origin), path.get(clause.dest)) else {
+                continue;
+            };
+            parts.push(format!(
+                "{} -[{}]-> {}",
+                short_label(src),
+                clause.relation,
+                short_label(dst)
+            ));
+            let dest_sid = self.interner.get(dst);
+            let mut seen: Vec<i64> = Vec::new();
+            for compact in self.get_compact_relations(src) {
+                if Some(compact.dest_sid) != dest_sid
+                    || !self.edge_rel_matches(
+                        &clause.relation,
+                        compact.rel_type_tag,
+                        compact.metadata_offset,
+                    )
+                {
+                    continue;
+                }
+                if compact.dataset_tag != 0 {
+                    tags.insert(compact.dataset_tag);
+                }
+                if compact.timestamp != 0 {
+                    seen.push(compact.timestamp);
+                }
+            }
+            seen.sort_unstable();
+            seen.dedup();
+            if !seen.is_empty() {
+                stamps.push(seen);
+            }
+        }
+        let (start, end) = tightest_cover(&stamps).unwrap_or((0, 0));
+        (start, end, tags, parts.join("; "))
     }
 
     /// Computes the relation schema: one entry per distinct
@@ -1693,10 +1911,11 @@ impl GraphHunter {
 
         {
             let cache = self.schema_cache.lock().expect("schema_cache poisoned");
-            if let Some(entry) = cache.as_ref() {
-                if entry.edge_count == edge_count && entry.meta_bytes == meta_bytes {
-                    return (entry.schema.clone(), true);
-                }
+            if let Some(entry) = cache.as_ref()
+                && entry.edge_count == edge_count
+                && entry.meta_bytes == meta_bytes
+            {
+                return (entry.schema.clone(), true);
             }
         }
 
@@ -1707,11 +1926,20 @@ impl GraphHunter {
         // known keys wastes ~25% of schema compute for zero new info.
         const SCHEMA_META_SAMPLE_CAP: usize = 1_000;
 
-        let mut groups: HashMap<(RelationType, EntityType, EntityType), (usize, HashSet<String>)> =
+        // Keyed by the relation's name, not its tag: every user-defined
+        // relation shares one tag and keeps its name in the metadata
+        // store, so grouping by tag printed them all as an empty string —
+        // the one place a client learns which relation names exist.
+        let mut groups: HashMap<(String, EntityType, EntityType), (usize, HashSet<String>)> =
             HashMap::new();
+        let other_tag = RelationType::Other(String::new()).to_u8();
 
         self.streaming.for_each_edge(|src_sid, edge| {
-            let rel = edge.rel_type();
+            let rel = if edge.rel_type_tag == other_tag {
+                self.resolve_rel_type_name_raw(edge.rel_type_tag, edge.metadata_offset)
+            } else {
+                format!("{}", edge.rel_type())
+            };
             let src_et = match self.entities.get(&src_sid) {
                 Some(e) => e.entity_type.clone(),
                 None => return,
@@ -1739,8 +1967,9 @@ impl GraphHunter {
             .map(|((rel, src, dst), (count, keys))| {
                 let mut keys_vec: Vec<String> = keys.into_iter().collect();
                 keys_vec.sort();
+                keys_vec.retain(|k| k != "_rel_type");
                 RelSchemaEntry {
-                    rel_type: format!("{}", rel),
+                    rel_type: rel,
                     source_type: format!("{}", src),
                     target_type: format!("{}", dst),
                     edge_count: count,
@@ -1749,7 +1978,7 @@ impl GraphHunter {
             })
             .collect();
 
-        out.sort_by(|a, b| b.edge_count.cmp(&a.edge_count));
+        out.sort_by_key(|r| std::cmp::Reverse(r.edge_count));
 
         {
             let mut cache = self.schema_cache.lock().expect("schema_cache poisoned");
@@ -1790,14 +2019,14 @@ impl GraphHunter {
         let (baseline_scored, _) = self.score_and_paginate_paths(
             &baseline_raw,
             0,
-            usize::MAX.min(baseline_raw.len().max(1)),
+            baseline_raw.len().max(1),
             None,
             DedupMode::ByPath,
         );
         let (current_scored, _) = self.score_and_paginate_paths(
             &current_raw,
             0,
-            usize::MAX.min(current_raw.len().max(1)),
+            current_raw.len().max(1),
             None,
             DedupMode::ByPath,
         );
@@ -2098,8 +2327,9 @@ impl GraphHunter {
         // MetadataStore (cf. its existing `visit_keys`) to avoid the alloc.
         self.streaming.for_each_edge(|src, e| {
             let md = self.meta_store.get(e.metadata_offset);
-            let rt = md.get("_rel_type").cloned()
-                .unwrap_or_else(|| format!("{}", crate::types::RelationType::from_u8(e.rel_type_tag)));
+            let rt = md.get("_rel_type").cloned().unwrap_or_else(|| {
+                format!("{}", crate::types::RelationType::from_u8(e.rel_type_tag))
+            });
             let entry = groups.entry((src, e.dest_sid, rt)).or_insert_with(|| Agg {
                 count: 0,
                 bytes: 0,
@@ -2132,8 +2362,8 @@ impl GraphHunter {
         // completeness fix), so heavy_edges covers live Sentinel tail data.
         let mut out: Vec<HeavyEdge> = groups
             .into_iter()
-            .filter(|((_, _, rt), _)| opts.rel_type.as_ref().map_or(true, |w| w == rt))
-            .filter(|(_, a)| opts.min_count.map_or(true, |m| a.count >= m))
+            .filter(|((_, _, rt), _)| opts.rel_type.as_ref().is_none_or(|w| w == rt))
+            .filter(|(_, a)| opts.min_count.is_none_or(|m| a.count >= m))
             .map(|((s, d, rt), a)| HeavyEdge {
                 source: self.interner.resolve(s).to_string(),
                 target: self.interner.resolve(d).to_string(),
@@ -2150,7 +2380,11 @@ impl GraphHunter {
                 last_ts: a.last_ts,
             })
             .collect();
-        out.sort_by(|x, y| y.count.cmp(&x.count).then(y.total_bytes.cmp(&x.total_bytes)));
+        out.sort_by(|x, y| {
+            y.count
+                .cmp(&x.count)
+                .then(y.total_bytes.cmp(&x.total_bytes))
+        });
         out.truncate(opts.top_n);
         out
     }
@@ -2163,30 +2397,39 @@ impl GraphHunter {
         // on-demand analytical query (cf. heavy_edges). `for_each_edge` visits
         // base AND post-finalize tail edges, so live finalized graphs are covered.
         let window = opts.window_secs.max(1) as i64;
-        let mut groups: HashMap<(StrId, StrId, String), Vec<(i64, u64, bool)>> = HashMap::new();
+        // (src, dst, rel_type) -> [(timestamp, sentbyte, is_reset)]
+        type ChannelKey = (StrId, StrId, String);
+        let mut groups: HashMap<ChannelKey, Vec<(i64, u64, bool)>> = HashMap::new();
         self.streaming.for_each_edge(|src, ed| {
             let md = self.meta_store.get(ed.metadata_offset);
-            let rt = md.get("_rel_type").cloned()
-                .unwrap_or_else(|| format!("{}", crate::types::RelationType::from_u8(ed.rel_type_tag)));
-            let bytes = md.get("sentbyte").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            let rt = md.get("_rel_type").cloned().unwrap_or_else(|| {
+                format!("{}", crate::types::RelationType::from_u8(ed.rel_type_tag))
+            });
+            let bytes = md
+                .get("sentbyte")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
             let is_reset = matches!(
                 md.get("action").map(|s| s.as_str()),
                 Some("client-rst") | Some("server-rst")
             );
-            groups.entry((src, ed.dest_sid, rt)).or_default().push((ed.timestamp, bytes, is_reset));
+            groups
+                .entry((src, ed.dest_sid, rt))
+                .or_default()
+                .push((ed.timestamp, bytes, is_reset));
         });
 
         let mut out: Vec<ChannelBehavior> = Vec::new();
         for ((s, d, rt), mut edges) in groups {
-            if let Some(m) = opts.min_count {
-                if edges.len() < m {
-                    continue;
-                }
+            if let Some(m) = opts.min_count
+                && edges.len() < m
+            {
+                continue;
             }
-            if let Some(want) = opts.rel_type.as_ref() {
-                if want != &rt {
-                    continue;
-                }
+            if let Some(want) = opts.rel_type.as_ref()
+                && want != &rt
+            {
+                continue;
             }
             edges.sort_by_key(|x| x.0);
             let count = edges.len();
@@ -2197,17 +2440,12 @@ impl GraphHunter {
             let mut interval_cv = 0.0_f64;
             let mut beacon_score = 0.0_f64;
             if count >= 2 {
-                let intervals: Vec<f64> = edges
-                    .windows(2)
-                    .map(|w| (w[1].0 - w[0].0) as f64)
-                    .collect();
+                let intervals: Vec<f64> =
+                    edges.windows(2).map(|w| (w[1].0 - w[0].0) as f64).collect();
                 let mean = intervals.iter().sum::<f64>() / intervals.len() as f64;
                 interval_mean_secs = mean;
                 if count >= 3 && mean > 0.0 {
-                    let var = intervals
-                        .iter()
-                        .map(|x| (x - mean).powi(2))
-                        .sum::<f64>()
+                    let var = intervals.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
                         / intervals.len() as f64;
                     interval_cv = var.sqrt() / mean;
                     beacon_score = 1.0 - interval_cv.min(1.0);
@@ -2306,7 +2544,14 @@ impl GraphHunter {
             edge: None,
         }];
         self.dfs_paths(
-            from_sid, to_sid, max_depth, rel_filter, &mut path, &mut on_path, &mut out, max_paths,
+            from_sid,
+            to_sid,
+            max_depth,
+            rel_filter,
+            &mut path,
+            &mut on_path,
+            &mut out,
+            max_paths,
         );
         out
     }
@@ -2351,7 +2596,11 @@ impl GraphHunter {
                 g.as_slice()
                     .iter()
                     .filter(|e| {
-                        rel_filter.is_none_or(|rf| rf.iter().any(|rt| rt.to_u8() == e.rel_type_tag))
+                        rel_filter.is_none_or(|rf| {
+                            rf.iter().any(|rt| {
+                                self.edge_rel_matches(rt, e.rel_type_tag, e.metadata_offset)
+                            })
+                        })
                     })
                     .map(|e| (e.dest_sid, e.rel_type_tag, e.metadata_offset))
                     .collect()
@@ -2372,7 +2621,9 @@ impl GraphHunter {
                 edge: Some(self.resolve_rel_type_name_raw(tag, off)),
             });
             on_path.insert(dest);
-            self.dfs_paths(dest, to_sid, max_depth, rel_filter, path, on_path, out, max_paths);
+            self.dfs_paths(
+                dest, to_sid, max_depth, rel_filter, path, on_path, out, max_paths,
+            );
             on_path.remove(&dest);
             path.pop();
         }
@@ -2395,6 +2646,7 @@ impl GraphHunter {
         let candidates: Vec<&crate::entity::Entity> = self
             .entities
             .values()
+            .map(|e| &**e)
             .filter(|e| node_class.is_none_or(|c| format!("{}", e.entity_type) == c))
             .collect();
         if candidates.len() < 2 {
@@ -2454,9 +2706,48 @@ impl GraphHunter {
                 });
             }
         }
-        hits.sort_by(|a, b| b.z_score.partial_cmp(&a.z_score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.z_score
+                .partial_cmp(&a.z_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(top_n);
         hits
+    }
+}
+
+/// A Windows path shortened to its file name for display; any other id
+/// (emails, FQDNs, addresses) whole.
+fn short_label(id: &str) -> &str {
+    id.rfind('\\').map_or(id, |pos| &id[pos + 1..])
+}
+
+/// The smallest `[lo, hi]` holding at least one value of every list (each
+/// sorted ascending and non-empty); `None` when there are no lists.
+fn tightest_cover(lists: &[Vec<i64>]) -> Option<(i64, i64)> {
+    if lists.is_empty() {
+        return None;
+    }
+    let mut at = vec![0usize; lists.len()];
+    let mut best: Option<(i64, i64)> = None;
+    loop {
+        let (mut lowest, mut lo, mut hi) = (0, i64::MAX, i64::MIN);
+        for (i, list) in lists.iter().enumerate() {
+            let v = list[at[i]];
+            if v < lo {
+                lo = v;
+                lowest = i;
+            }
+            hi = hi.max(v);
+        }
+        if best.is_none_or(|(a, b)| hi - lo < b - a) {
+            best = Some((lo, hi));
+        }
+        // Only raising the lowest value can narrow the window.
+        at[lowest] += 1;
+        if at[lowest] == lists[lowest].len() {
+            return best;
+        }
     }
 }
 
@@ -2464,9 +2755,9 @@ impl GraphHunter {
 mod heavy_edges_tests {
     use super::*;
     use crate::GraphHunter;
-    use crate::types::{EntityType, RelationType};
     use crate::entity::Entity;
     use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
     use std::collections::HashMap;
 
     fn edge(
@@ -2486,7 +2777,11 @@ mod heavy_edges_tests {
         }
         let mut rel = Relation::new(s, d, rt, ts);
         rel.metadata = md;
-        (Entity::new(s, EntityType::IP), rel, Entity::new(d, EntityType::IP))
+        (
+            Entity::new(s, EntityType::IP),
+            rel,
+            Entity::new(d, EntityType::IP),
+        )
     }
 
     #[test]
@@ -2494,16 +2789,55 @@ mod heavy_edges_tests {
         let mut g = GraphHunter::new();
         g.insert_triples(
             vec![
-                edge("A", "B", RelationType::Connect, 10, Some("100"), Some("close")),
-                edge("A", "B", RelationType::Connect, 20, Some("200"), Some("close")),
-                edge("A", "B", RelationType::Connect, 30, Some("300"), Some("close")),
-                edge("A", "B", RelationType::Connect, 40, Some("400"), Some("client-rst")),
-                edge("A", "C", RelationType::Connect, 50, Some("999"), Some("close")),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    10,
+                    Some("100"),
+                    Some("close"),
+                ),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    20,
+                    Some("200"),
+                    Some("close"),
+                ),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    30,
+                    Some("300"),
+                    Some("close"),
+                ),
+                edge(
+                    "A",
+                    "B",
+                    RelationType::Connect,
+                    40,
+                    Some("400"),
+                    Some("client-rst"),
+                ),
+                edge(
+                    "A",
+                    "C",
+                    RelationType::Connect,
+                    50,
+                    Some("999"),
+                    Some("close"),
+                ),
             ],
             None,
         )
         .unwrap();
-        let out = g.heavy_edges(&HeavyEdgesOpts { top_n: 10, min_count: None, rel_type: None });
+        let out = g.heavy_edges(&HeavyEdgesOpts {
+            top_n: 10,
+            min_count: None,
+            rel_type: None,
+        });
         let ab = out
             .iter()
             .find(|e| e.source == "A" && e.target == "B")
@@ -2517,10 +2851,17 @@ mod heavy_edges_tests {
         // count 4 ranks first
         assert_eq!(out[0].source, "A");
         assert_eq!(out[0].target, "B");
-        let filtered =
-            g.heavy_edges(&HeavyEdgesOpts { top_n: 10, min_count: Some(2), rel_type: None });
+        let filtered = g.heavy_edges(&HeavyEdgesOpts {
+            top_n: 10,
+            min_count: Some(2),
+            rel_type: None,
+        });
         assert!(filtered.iter().all(|e| e.count >= 2));
-        assert!(filtered.iter().all(|e| !(e.source == "A" && e.target == "C")));
+        assert!(
+            filtered
+                .iter()
+                .all(|e| !(e.source == "A" && e.target == "C"))
+        );
     }
 
     #[test]
@@ -2564,15 +2905,16 @@ mod heavy_edges_tests {
             None,
         )
         .unwrap();
-        let hood = g
-            .get_neighborhood("a", 1, 50, None)
-            .expect("neighborhood");
+        let hood = g.get_neighborhood("a", 1, 50, None).expect("neighborhood");
         let e = hood
             .edges
             .iter()
             .find(|e| e.source == "a" && e.target == "b")
             .expect("edge a->b");
-        assert_eq!(e.rel_type, "SNAT", "rel_type should be recovered custom name");
+        assert_eq!(
+            e.rel_type, "SNAT",
+            "rel_type should be recovered custom name"
+        );
         assert!(
             !e.metadata.contains_key("_rel_type"),
             "_rel_type must not leak into public edge metadata"
@@ -2596,7 +2938,10 @@ mod hydration_outcome_tests {
             hydration: None,
         };
         let json = serde_json::to_string(&hood).unwrap();
-        assert!(!json.contains("hydration"), "None hydration must be skipped: {json}");
+        assert!(
+            !json.contains("hydration"),
+            "None hydration must be skipped: {json}"
+        );
     }
 
     #[test]
@@ -2618,12 +2963,18 @@ mod hydration_outcome_tests {
 mod channel_behavior_tests {
     use super::*;
     use crate::GraphHunter;
-    use crate::types::{EntityType, RelationType};
     use crate::entity::Entity;
     use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
     use std::collections::HashMap;
 
-    fn e(s: &str, d: &str, ts: i64, sentbyte: Option<&str>, action: Option<&str>) -> crate::parser::ParsedTriple {
+    fn e(
+        s: &str,
+        d: &str,
+        ts: i64,
+        sentbyte: Option<&str>,
+        action: Option<&str>,
+    ) -> crate::parser::ParsedTriple {
         let mut md = HashMap::new();
         if let Some(b) = sentbyte {
             md.insert("sentbyte".into(), b.into());
@@ -2633,7 +2984,11 @@ mod channel_behavior_tests {
         }
         let mut rel = Relation::new(s, d, RelationType::Connect, ts);
         rel.metadata = md;
-        (Entity::new(s, EntityType::IP), rel, Entity::new(d, EntityType::IP))
+        (
+            Entity::new(s, EntityType::IP),
+            rel,
+            Entity::new(d, EntityType::IP),
+        )
     }
 
     fn opts(sort_by: ChannelSortBy) -> ChannelBehaviorOpts {
@@ -2734,38 +3089,70 @@ mod channel_behavior_tests {
     #[test]
     fn min_count_filters_small_channels() {
         let mut g = GraphHunter::new();
-        g.insert_triples(vec![
-            e("A","B",0,None,None), e("A","B",60,None,None), e("A","B",120,None,None), // count 3
-            e("A","C",0,None,None), // count 1
-        ], None).unwrap();
+        g.insert_triples(
+            vec![
+                e("A", "B", 0, None, None),
+                e("A", "B", 60, None, None),
+                e("A", "B", 120, None, None), // count 3
+                e("A", "C", 0, None, None),   // count 1
+            ],
+            None,
+        )
+        .unwrap();
         let out = g.channel_behavior(&ChannelBehaviorOpts {
-            top_n: 10, min_count: Some(3), window_secs: 60, rel_type: None, sort_by: ChannelSortBy::Beacon,
+            top_n: 10,
+            min_count: Some(3),
+            window_secs: 60,
+            rel_type: None,
+            sort_by: ChannelSortBy::Beacon,
         });
-        assert!(out.iter().any(|c| c.source=="A" && c.target=="B"));
-        assert!(out.iter().all(|c| !(c.source=="A" && c.target=="C")), "A->C (count 1) must be filtered by min_count=3");
+        assert!(out.iter().any(|c| c.source == "A" && c.target == "B"));
+        assert!(
+            out.iter().all(|c| !(c.source == "A" && c.target == "C")),
+            "A->C (count 1) must be filtered by min_count=3"
+        );
     }
 
     #[test]
     fn rel_type_filter_restricts_channels() {
         let mut g = GraphHunter::new();
         // A->B Connect (built-in) and A->D Other("SNAT")
-        let mut snat = Relation::new("A","D",RelationType::Other("SNAT".to_string()),0);
+        let mut snat = Relation::new("A", "D", RelationType::Other("SNAT".to_string()), 0);
         snat.metadata = HashMap::new();
-        g.insert_triples(vec![
-            e("A","B",0,None,None), e("A","B",60,None,None),
-            (Entity::new("A",EntityType::IP), snat, Entity::new("D",EntityType::IP)),
-        ], None).unwrap();
+        g.insert_triples(
+            vec![
+                e("A", "B", 0, None, None),
+                e("A", "B", 60, None, None),
+                (
+                    Entity::new("A", EntityType::IP),
+                    snat,
+                    Entity::new("D", EntityType::IP),
+                ),
+            ],
+            None,
+        )
+        .unwrap();
         let out = g.channel_behavior(&ChannelBehaviorOpts {
-            top_n: 10, min_count: None, window_secs: 60, rel_type: Some("SNAT".to_string()), sort_by: ChannelSortBy::Beacon,
+            top_n: 10,
+            min_count: None,
+            window_secs: 60,
+            rel_type: Some("SNAT".to_string()),
+            sort_by: ChannelSortBy::Beacon,
         });
-        assert!(out.iter().all(|c| c.rel_type=="SNAT"), "only SNAT channels");
-        assert!(out.iter().any(|c| c.source=="A" && c.target=="D"), "the SNAT channel is present");
+        assert!(
+            out.iter().all(|c| c.rel_type == "SNAT"),
+            "only SNAT channels"
+        );
+        assert!(
+            out.iter().any(|c| c.source == "A" && c.target == "D"),
+            "the SNAT channel is present"
+        );
     }
 }
 
 #[cfg(test)]
 mod find_paths_tests {
-    use super::*;
+
     use crate::GraphHunter;
     use crate::entity::Entity;
     use crate::relation::Relation;
@@ -2853,7 +3240,7 @@ mod find_paths_tests {
 
 #[cfg(test)]
 mod structural_anomaly_tests {
-    use super::*;
+
     use crate::GraphHunter;
     use crate::entity::Entity;
     use crate::relation::Relation;
@@ -2900,5 +3287,97 @@ mod structural_anomaly_tests {
         assert!(g.structural_anomalies("nonsense", None, 10).is_empty());
         let tiny = GraphHunter::new();
         assert!(tiny.structural_anomalies("all", None, 10).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod actor_rarity_tests {
+    use crate::GraphHunter;
+    use crate::entity::Entity;
+    use crate::relation::Relation;
+    use crate::types::{EntityType, RelationType};
+
+    fn write(host: &str, image: &str, file: &str, ts: i64) -> (Entity, Relation, Entity) {
+        let proc = format!("{host}|{image}");
+        (
+            Entity::new(&proc, EntityType::Process),
+            Relation::new(&proc, file, RelationType::Write, ts),
+            Entity::new(file, EntityType::File),
+        )
+    }
+
+    /// Forty hosts each write their own one-off log with the same script
+    /// host; one unusual image writes one file. Every file has degree 1.
+    fn routine_and_odd_writes() -> GraphHunter {
+        let mut g = GraphHunter::new();
+        let mut triples: Vec<_> = (0..40)
+            .map(|i| {
+                write(
+                    &format!("ws-{i}"),
+                    "powershell.exe",
+                    &format!("inv-{i}.log"),
+                    i,
+                )
+            })
+            .collect();
+        triples.push(write("srv-07", "beacon.exe", "staging.zip", 99));
+        g.insert_triples(triples, None).unwrap();
+        g.compute_scores();
+        g
+    }
+
+    #[test]
+    fn a_one_off_file_from_a_routine_writer_is_not_rare() {
+        let g = routine_and_odd_writes();
+        let odd = g.get_entity("staging.zip").unwrap().rarity_score;
+        let routine = g.get_entity("inv-3.log").unwrap().rarity_score;
+        assert!(
+            odd > routine + 30.0,
+            "odd write {odd} should clearly outrank routine write {routine}"
+        );
+    }
+
+    #[test]
+    fn one_unusual_actor_keeps_a_shared_target_rare() {
+        let mut g = routine_and_odd_writes();
+        // The routine writer also touches the odd file: still rare, the
+        // least common behaviour decides.
+        g.insert_triples(
+            vec![write("ws-1", "powershell.exe", "staging.zip", 100)],
+            None,
+        )
+        .unwrap();
+        g.compute_scores();
+        let odd = g.get_entity("staging.zip").unwrap().rarity_score;
+        let routine = g.get_entity("inv-3.log").unwrap().rarity_score;
+        assert!(odd > routine, "{odd} vs {routine}");
+    }
+
+    fn connect(src: &str, dst: &str, ts: i64) -> (Entity, Relation, Entity) {
+        (
+            Entity::new(src, EntityType::IP),
+            Relation::new(src, dst, RelationType::Connect, ts),
+            Entity::new(dst, EntityType::IP),
+        )
+    }
+
+    /// A firewall sees each unmanaged client once, going where everyone
+    /// goes. Seen once is not rare when what it did is routine; the one
+    /// client that went somewhere nobody goes is.
+    #[test]
+    fn a_one_off_source_doing_what_everyone_does_is_not_rare() {
+        let mut g = GraphHunter::new();
+        let mut triples: Vec<_> = (0..40)
+            .map(|i| connect(&format!("10.30.0.{i}"), "198.51.100.10", i))
+            .collect();
+        triples.push(connect("10.30.9.9", "203.0.113.42", 99));
+        g.insert_triples(triples, None).unwrap();
+        g.compute_scores();
+        let odd = g.get_entity("10.30.9.9").unwrap().rarity_score;
+        let routine = g.get_entity("10.30.0.3").unwrap().rarity_score;
+        assert!(
+            odd > routine + 30.0,
+            "odd client {odd} should clearly outrank routine client {routine}"
+        );
     }
 }

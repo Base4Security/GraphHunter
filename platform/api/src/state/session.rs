@@ -139,6 +139,20 @@ pub struct Session {
     /// Most recent `graph_build` (§4.3), surfaced in §5 status as `last_build`.
     /// Ephemeral — cleared on process restart.
     pub last_build: RwLock<Option<crate::dto::sentinel::BuildRecord>>,
+    /// Completeness tracking (design spec §17, `completeness_flag`):
+    /// folds `stopped_early` / `whole_file_rejected` signals across every
+    /// ingest into this session. `run_hunt` reads it (via
+    /// `crate::coverage::answer_coverage`) to populate
+    /// `RunHuntResponse.coverage`. Monotonic — see `IngestCoverage::observe`.
+    pub ingest_coverage: RwLock<crate::coverage::IngestCoverage>,
+    /// Per-source watermark + circuit breaker (Fase F, Task 3/4): tracks how
+    /// far each SIEM source (`ingest_siem`) or streaming source has been
+    /// successfully pulled, and a consecutive-failure breaker used only as a
+    /// *reporting* signal (missing_sources on answers) — never to skip a
+    /// pull, since `ingest_siem` is one-shot and has no later tick to
+    /// recover a skipped source. Ephemeral — NOT persisted in
+    /// `SessionFile`/GHS1, same policy as `ingest_coverage`.
+    pub source_coverage: RwLock<crate::coverage::SourceCoverage>,
 }
 
 /// D3 stage 3+4 — Session-level LFTJ index cache. Built lazily on
@@ -173,7 +187,8 @@ pub struct LftjSessionCache {
     /// Persistent canonical raw-result cache. Survives across
     /// batches; bounded at `MAX_CANONICAL_ENTRIES` with FIFO
     /// eviction (oldest insertion order discarded first).
-    pub canonical_results: HashMap<LftjCanonicalKey, Arc<Vec<graph_hunter_core::graph::HuntResult>>>,
+    pub canonical_results:
+        HashMap<LftjCanonicalKey, Arc<Vec<graph_hunter_core::graph::HuntResult>>>,
     /// Insertion-order witness for FIFO eviction. Front = oldest.
     pub canonical_results_order: std::collections::VecDeque<LftjCanonicalKey>,
 }
@@ -222,6 +237,10 @@ pub const MAX_BAG_BYTES: usize = 256 * 1024 * 1024;
 /// enumerator pays bag cost first and prefix cost second.
 pub const MAX_PREFIX_BYTES: usize = 128 * 1024 * 1024;
 
+/// Prefix snapshot cached per chain prefix: one `(visited path, timestamp)`
+/// row per partial match.
+pub type PrefixSnapshot = Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>;
+
 /// D3 stage 5 — Session-level Yannakakis cache. Persists `Bag`
 /// materializations and prefix snapshots across `run_hunt_batch`
 /// calls. Each cache FIFO-evicts on its own total byte budget
@@ -235,10 +254,7 @@ pub struct YannakakisSessionCache {
     pub bags: HashMap<String, Arc<graph_hunter_core::yannakakis::Bag>>,
     pub bags_order: std::collections::VecDeque<String>,
     pub bags_bytes: usize,
-    pub prefixes: HashMap<
-        String,
-        Arc<Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>>,
-    >,
+    pub prefixes: HashMap<String, Arc<PrefixSnapshot>>,
     pub prefixes_order: std::collections::VecDeque<String>,
     pub prefixes_bytes: usize,
 }
@@ -269,9 +285,7 @@ impl YannakakisSessionCache {
     /// captured from the first entry — prefix snapshots at a fixed
     /// depth all have equal-length inner vecs, so the first row is
     /// representative.
-    fn prefix_bytes(
-        snapshot: &Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>,
-    ) -> usize {
+    fn prefix_bytes(snapshot: &[(Vec<graph_hunter_core::interner::StrId>, i64)]) -> usize {
         let depth_bytes = snapshot
             .first()
             .map(|(v, _)| v.len() * std::mem::size_of::<graph_hunter_core::interner::StrId>())
@@ -284,11 +298,7 @@ impl YannakakisSessionCache {
     /// `false` when the key already existed (the previous value is
     /// overwritten with the new one but the FIFO position is
     /// unchanged).
-    pub fn insert(
-        &mut self,
-        key: String,
-        bag: Arc<graph_hunter_core::yannakakis::Bag>,
-    ) -> bool {
+    pub fn insert(&mut self, key: String, bag: Arc<graph_hunter_core::yannakakis::Bag>) -> bool {
         let new_bytes = Self::bag_bytes(&bag);
         let is_new = !self.bags.contains_key(&key);
         if is_new {
@@ -297,13 +307,10 @@ impl YannakakisSessionCache {
             // the bag itself exceeds the budget; insert it anyway
             // (one big bag is better than no bags) but the next
             // insert will evict it.
-            while self.bags_bytes + new_bytes > MAX_BAG_BYTES
-                && !self.bags_order.is_empty()
-            {
+            while self.bags_bytes + new_bytes > MAX_BAG_BYTES && !self.bags_order.is_empty() {
                 let evict_key = self.bags_order.pop_front().expect("non-empty");
                 if let Some(evicted) = self.bags.remove(&evict_key) {
-                    self.bags_bytes =
-                        self.bags_bytes.saturating_sub(Self::bag_bytes(&evicted));
+                    self.bags_bytes = self.bags_bytes.saturating_sub(Self::bag_bytes(&evicted));
                 }
             }
             self.bags_order.push_back(key.clone());
@@ -315,11 +322,7 @@ impl YannakakisSessionCache {
 
     /// Insert a prefix snapshot with the same FIFO + byte-budget
     /// semantics as `insert`. Returns `true` on a new key.
-    pub fn insert_prefix(
-        &mut self,
-        key: String,
-        snapshot: Arc<Vec<(Vec<graph_hunter_core::interner::StrId>, i64)>>,
-    ) -> bool {
+    pub fn insert_prefix(&mut self, key: String, snapshot: Arc<PrefixSnapshot>) -> bool {
         let new_bytes = Self::prefix_bytes(&snapshot);
         let is_new = !self.prefixes.contains_key(&key);
         if is_new {
@@ -365,21 +368,17 @@ impl Session {
             live_tail_stats: RwLock::new(LiveTailStats::default()),
             proposals: RwLock::new(std::collections::HashMap::new()),
             last_build: RwLock::new(None),
+            ingest_coverage: RwLock::new(crate::coverage::IngestCoverage::default()),
+            source_coverage: RwLock::new(crate::coverage::SourceCoverage::default()),
         }
     }
 
     pub fn phase(&self) -> SessionPhase {
-        *self
-            .phase
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        *self.phase.read().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn set_phase(&self, phase: SessionPhase) {
-        *self
-            .phase
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = phase;
+        *self.phase.write().unwrap_or_else(|e| e.into_inner()) = phase;
     }
 
     /// Record post-finalize appends: when the streaming graph is finalized
@@ -445,10 +444,10 @@ impl LftjSessionCache {
     ) -> bool {
         let is_new = !self.canonical_results.contains_key(&key);
         if is_new {
-            if self.canonical_results.len() >= MAX_CANONICAL_ENTRIES {
-                if let Some(evict_key) = self.canonical_results_order.pop_front() {
-                    self.canonical_results.remove(&evict_key);
-                }
+            if self.canonical_results.len() >= MAX_CANONICAL_ENTRIES
+                && let Some(evict_key) = self.canonical_results_order.pop_front()
+            {
+                self.canonical_results.remove(&evict_key);
             }
             self.canonical_results_order.push_back(key);
         }
@@ -658,6 +657,7 @@ mod tests {
                 rel_type: RelationType::Auth,
                 rel_metadata: Default::default(),
                 timestamp: ts,
+                raw_line: None,
             }
         }
 
@@ -672,7 +672,8 @@ mod tests {
 
         let new_relations = {
             let mut g = session.graph.write().unwrap();
-            let (_, nr) = g.insert_raw_events(vec![edge("u2", "h2", 200)], None)
+            let (_, nr) = g
+                .insert_raw_events(vec![edge("u2", "h2", 200)], None)
                 .unwrap();
             nr
         };

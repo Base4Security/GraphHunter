@@ -40,12 +40,11 @@ pub fn parse_tool_calls(response: &str) -> Vec<ToolCall> {
         let abs_start = search_from + start + 7;
         if let Some(end) = response[abs_start..].find("```") {
             let block = response[abs_start..abs_start + end].trim();
-            if let Ok(val) = serde_json::from_str::<Value>(block) {
-                if val.get("tool").is_some() {
-                    if let Ok(tc) = serde_json::from_value::<ToolCall>(val) {
-                        calls.push(tc);
-                    }
-                }
+            if let Ok(val) = serde_json::from_str::<Value>(block)
+                && val.get("tool").is_some()
+                && let Ok(tc) = serde_json::from_value::<ToolCall>(val)
+            {
+                calls.push(tc);
             }
             search_from = abs_start + end + 3;
         } else {
@@ -98,10 +97,10 @@ pub struct ProviderConfig {
 
 impl ProviderConfig {
     fn effective_model(&self) -> String {
-        if let Some(ref m) = self.model {
-            if !m.is_empty() {
-                return m.clone();
-            }
+        if let Some(ref m) = self.model
+            && !m.is_empty()
+        {
+            return m.clone();
         }
         match self.provider {
             AiProvider::OpenAI => {
@@ -113,10 +112,10 @@ impl ProviderConfig {
     }
 
     fn effective_base_url(&self) -> String {
-        if let Some(ref u) = self.base_url {
-            if !u.is_empty() {
-                return u.clone();
-            }
+        if let Some(ref u) = self.base_url
+            && !u.is_empty()
+        {
+            return u.clone();
         }
         match self.provider {
             AiProvider::OpenAI => std::env::var("OPENAI_API_BASE")
@@ -175,6 +174,12 @@ impl AiConversation {
     pub fn clear(&mut self) {
         self.messages.clear();
         self.context_summary = None;
+    }
+}
+
+impl Default for AiConversation {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -309,45 +314,45 @@ struct ApiError {
 /// Try to build a ProviderConfig from env vars alone (no explicit config).
 fn config_from_env() -> Option<ProviderConfig> {
     // Try OpenAI first, then Anthropic, then Google
-    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        if !key.is_empty() {
-            return Some(ProviderConfig {
-                provider: AiProvider::OpenAI,
-                api_key: key,
-                model: std::env::var("OPENAI_MODEL").ok(),
-                base_url: std::env::var("OPENAI_API_BASE").ok(),
-            });
-        }
+    if let Ok(key) = std::env::var("OPENAI_API_KEY")
+        && !key.is_empty()
+    {
+        return Some(ProviderConfig {
+            provider: AiProvider::OpenAI,
+            api_key: key,
+            model: std::env::var("OPENAI_MODEL").ok(),
+            base_url: std::env::var("OPENAI_API_BASE").ok(),
+        });
     }
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        if !key.is_empty() {
-            return Some(ProviderConfig {
-                provider: AiProvider::Anthropic,
-                api_key: key,
-                model: None,
-                base_url: None,
-            });
-        }
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
+        && !key.is_empty()
+    {
+        return Some(ProviderConfig {
+            provider: AiProvider::Anthropic,
+            api_key: key,
+            model: None,
+            base_url: None,
+        });
     }
-    if let Ok(key) = std::env::var("GOOGLE_AI_KEY") {
-        if !key.is_empty() {
-            return Some(ProviderConfig {
-                provider: AiProvider::Google,
-                api_key: key,
-                model: None,
-                base_url: None,
-            });
-        }
+    if let Ok(key) = std::env::var("GOOGLE_AI_KEY")
+        && !key.is_empty()
+    {
+        return Some(ProviderConfig {
+            provider: AiProvider::Google,
+            api_key: key,
+            model: None,
+            base_url: None,
+        });
     }
     None
 }
 
 /// Resolve effective config: explicit config first, then env fallback.
 pub fn resolve_config(explicit: Option<&ProviderConfig>) -> Result<ProviderConfig, String> {
-    if let Some(cfg) = explicit {
-        if !cfg.api_key.is_empty() {
-            return Ok(cfg.clone());
-        }
+    if let Some(cfg) = explicit
+        && !cfg.api_key.is_empty()
+    {
+        return Ok(cfg.clone());
     }
     config_from_env().ok_or_else(|| {
         "No AI provider configured. Set API key in settings or via environment variables (OPENAI_API_KEY, ANTHROPIC_API_KEY, or GOOGLE_AI_KEY).".to_string()
@@ -884,8 +889,7 @@ fn extract_dsl_line(text: &str) -> Option<String> {
         let cleaned = line
             .trim()
             .replace('\u{2192}', "->")
-            .replace('\u{2013}', "-")
-            .replace('\u{2014}', "-")
+            .replace(['\u{2013}', '\u{2014}'], "-")
             .replace('\u{200B}', "")
             .replace("\\_", "_");
         if cleaned.is_empty() {
@@ -898,8 +902,7 @@ fn extract_dsl_line(text: &str) -> Option<String> {
 
     let cleaned = inner
         .replace('\u{2192}', "->")
-        .replace('\u{2013}', "-")
-        .replace('\u{2014}', "-")
+        .replace(['\u{2013}', '\u{2014}'], "-")
         .replace('\u{200B}', "")
         .replace("\\_", "_");
     let single = cleaned.lines().next().unwrap_or("").trim();
@@ -1181,7 +1184,7 @@ And also:
         let node = r#"{"id":"node-XXXX","entity_type":"IP","score":42.5,"metadata":{"key":"value-padding-to-inflate-size-significantly-beyond-threshold"}}"#;
         let nodes = format!("[{}]", vec![node; 200].join(","));
         let edges = r#"[{"source":"a","target":"b","rel_type":"Connect","timestamp":100}]"#;
-        let ctx = compress_subgraph_context(&nodes, &edges, None);
+        let ctx = compress_subgraph_context(&nodes, edges, None);
         assert!(ctx.contains("Subgraph summary:"));
         assert!(ctx.contains("Node types:"));
         assert!(ctx.contains("Edges:"));
@@ -1254,9 +1257,9 @@ And also:
 
     #[test]
     fn user_input_wrapped_in_tags() {
-        let conv = AiConversation::new();
-        let nodes = "[]";
-        let edges = "[]";
+        let _conv = AiConversation::new();
+        let _nodes = "[]";
+        let _edges = "[]";
         // We can't call analyze_graph_conversation (async + needs network),
         // but we can test the message assembly logic via build_analyze_user_message.
         let msg = build_analyze_user_message("context here", Some("my question"));

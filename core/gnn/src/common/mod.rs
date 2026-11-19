@@ -8,7 +8,6 @@
 pub mod model_gate;
 
 pub use model_gate::{
-    EXPERIMENTAL_V2_ENABLED, MIN_VALIDATION_ACCURACY, ModelLoadError, ModelMetadata,
-    ModelVersion, TensorShape, TrainingCorpus, expected_shape_for, load_and_validate_metadata,
-    validate_metadata,
+    EXPERIMENTAL_V2_ENABLED, MIN_VALIDATION_ACCURACY, ModelLoadError, ModelMetadata, ModelVersion,
+    TensorShape, TrainingCorpus, expected_shape_for, load_and_validate_metadata, validate_metadata,
 };

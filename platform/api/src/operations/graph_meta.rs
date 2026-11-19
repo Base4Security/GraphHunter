@@ -7,22 +7,22 @@
 //! Task 2 (real data): wires in:
 //! - `active_datasets` — from the current session's `DatasetInfo` list.
 //! - `active_hunts`    — from the shared hunt cache (`Vec<Vec<Arc<str>>>`).
-//!                       The cache holds raw path lists with no per-hunt
-//!                       metadata (params, timestamp, TTL); those are Task 3+
-//!                       concerns. A non-empty cache is surfaced as one
-//!                       `ActiveHunt` entry whose `result_size` is the path
-//!                       count. All metadata fields default to placeholder
-//!                       values until a richer cache structure is introduced.
+//!   The cache holds raw path lists with no per-hunt
+//!   metadata (params, timestamp, TTL); those are Task 3+
+//!   concerns. A non-empty cache is surfaced as one
+//!   `ActiveHunt` entry whose `result_size` is the path
+//!   count. All metadata fields default to placeholder
+//!   values until a richer cache structure is introduced.
 //! - `sources`         — the registered log format names (sysmon, sentinel,
-//!                       cognito, fortigate, iis, haproxy, fortianalyzer,
-//!                       generic, csv). Per-source ingest timestamps and row
-//!                       counts require session-level tracking not yet built;
-//!                       `last_ingest` and `rows_lifetime` default to their
-//!                       zero/None values (Task 3).
+//!   cognito, fortigate, iis, haproxy, fortianalyzer,
+//!   generic, csv). Per-source ingest timestamps and row
+//!   counts require session-level tracking not yet built;
+//!   `last_ingest` and `rows_lifetime` default to their
+//!   zero/None values (Task 3).
 //! - `totals`          — node + edge counts from the session graph's
-//!                       `entity_count()` / `relation_count()` /
-//!                       `entity_type_counts()`. Zero when no session is
-//!                       loaded (graceful degradation).
+//!   `entity_count()` / `relation_count()` /
+//!   `entity_type_counts()`. Zero when no session is
+//!   loaded (graceful degradation).
 //!
 //! Task 4: 30s TTL cache on `get_graph_meta_summary`. The public method is
 //! now a cache-or-compute facade; the computation lives in the private
@@ -42,8 +42,8 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::dto::v1::graph_meta::{
-    ActiveHunt, FoundEntity, GraphSummary, GraphTotals, OverlapRequest, OverlapResponse,
-    RecentPivot, SourceState, GRAPH_META_SCHEMA_VERSION, OVERLAP_MAX_ENTITIES,
+    ActiveHunt, FoundEntity, GRAPH_META_SCHEMA_VERSION, GraphSummary, GraphTotals,
+    OVERLAP_MAX_ENTITIES, OverlapRequest, OverlapResponse, RecentPivot, SourceState,
 };
 use crate::error::ApiError;
 use crate::{ApiResult, GraphHunterApi};
@@ -74,7 +74,13 @@ const REGISTERED_SOURCE_NAMES: &[&str] = &[
 
 const SUMMARY_TTL: Duration = Duration::from_secs(30);
 
-static SUMMARY_CACHE: LazyLock<Mutex<Option<(Instant, GraphSummary)>>> =
+/// What a cached summary was computed from: current session id, entity
+/// and relation counts, hunt-cache size. A cached entry is only served
+/// while this still matches — a TTL alone kept answering "0 nodes" for up
+/// to 30s after an ingest, which reads as "the ingest did nothing".
+type SummaryKey = (Option<String>, u64, u64, usize);
+
+static SUMMARY_CACHE: LazyLock<Mutex<Option<(Instant, SummaryKey, GraphSummary)>>> =
     LazyLock::new(|| Mutex::new(None));
 
 // ── Task 5: recent-pivots ring buffer ───────────────────────────────────────
@@ -160,8 +166,7 @@ pub static RECENT_PIVOTS: LazyLock<RecentPivotsBuffer> =
 // The leading underscore in the names is the convention for "test-only,
 // do not call from production paths". The cost of carrying these in
 // release builds is a few hundred bytes for a no-op-in-production helper.
-pub static _GRAPH_META_TEST_MUTEX: LazyLock<Mutex<()>> =
-    LazyLock::new(|| Mutex::new(()));
+pub static _GRAPH_META_TEST_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Flush the `SUMMARY_CACHE` so that the next call to
 /// `get_graph_meta_summary` recomputes from scratch. Test-only by
@@ -202,18 +207,37 @@ impl GraphHunterApi {
     /// pollution.
     pub fn get_graph_meta_summary(&self) -> ApiResult<GraphSummary> {
         // ── Consult cache ───────────────────────────────────────────────
+        let key = self.summary_key();
         {
             let guard = SUMMARY_CACHE.lock().unwrap();
-            if let Some((t, cached)) = guard.as_ref() {
-                if t.elapsed() < SUMMARY_TTL {
-                    return Ok(cached.clone());
-                }
+            if let Some((t, cached_key, cached)) = guard.as_ref()
+                && t.elapsed() < SUMMARY_TTL
+                && *cached_key == key
+            {
+                return Ok(cached.clone());
             }
         }
         // ── Cache miss: compute and store ───────────────────────────────
         let fresh = self.compute_graph_meta_summary()?;
-        *SUMMARY_CACHE.lock().unwrap() = Some((Instant::now(), fresh.clone()));
+        *SUMMARY_CACHE.lock().unwrap() = Some((Instant::now(), key, fresh.clone()));
         Ok(fresh)
+    }
+
+    /// Cheap fingerprint of everything the summary reports (two counter
+    /// reads and a length), so the cache can tell it went stale.
+    fn summary_key(&self) -> SummaryKey {
+        let session = self.sessions().current_session();
+        let (nodes, edges) = session
+            .as_ref()
+            .and_then(|s| {
+                s.graph
+                    .read()
+                    .ok()
+                    .map(|g| (g.entity_count() as u64, g.relation_count() as u64))
+            })
+            .unwrap_or((0, 0));
+        let hunts = self.inner.hunt_cache.read().map(|g| g.len()).unwrap_or(0);
+        (session.map(|s| s.id.clone()), nodes, edges, hunts)
     }
 
     /// Inner computation for `get_graph_meta_summary`. Never reads the
@@ -288,12 +312,7 @@ impl GraphHunterApi {
         // recalibration — each entry will report its own path count rather
         // than an aggregate across all hunts.
         let active_hunts: Vec<ActiveHunt> = {
-            let cache = self
-                .inner
-                .hunt_cache
-                .read()
-                .map(|g| g.len())
-                .unwrap_or(0);
+            let cache = self.inner.hunt_cache.read().map(|g| g.len()).unwrap_or(0);
             if cache > 0 {
                 vec![ActiveHunt {
                     cache_key: "current".to_string(),
@@ -313,7 +332,11 @@ impl GraphHunterApi {
         Ok(GraphSummary {
             schema_version: GRAPH_META_SCHEMA_VERSION,
             as_of: chrono::Utc::now().to_rfc3339(),
-            totals: GraphTotals { nodes, edges, by_type },
+            totals: GraphTotals {
+                nodes,
+                edges,
+                by_type,
+            },
             sources,
             active_datasets,
             active_hunts,
@@ -403,25 +426,53 @@ mod tests {
     /// Helper: build an API with one Ready session that contains a named dataset.
     fn api_with_dataset(session_id: &str, dataset_id: &str) -> GraphHunterApi {
         let api = GraphHunterApi::new_noop();
-        let session = Arc::new(Session::new(session_id, "test session", GraphHunter::new(), 0));
+        let session = Arc::new(Session::new(
+            session_id,
+            "test session",
+            GraphHunter::new(),
+            0,
+        ));
         // Push a DatasetInfo directly so we don't need a real file on disk.
-        session
-            .datasets
-            .write()
-            .unwrap()
-            .push(DatasetInfo {
-                id: dataset_id.to_string(),
-                name: dataset_id.to_string(),
-                path: None,
-                created_at: 0,
-                entity_count: 0,
-                relation_count: 0,
-                field_config: None,
-                ingest_stats: None,
-            });
+        session.datasets.write().unwrap().push(DatasetInfo {
+            id: dataset_id.to_string(),
+            name: dataset_id.to_string(),
+            path: None,
+            created_at: 0,
+            entity_count: 0,
+            relation_count: 0,
+            field_config: None,
+            ingest_stats: None,
+            parser: None,
+            mapping_hash: None,
+        });
         api.sessions().insert(session);
         api.sessions().set_current(Some(session_id.to_string()));
         api
+    }
+
+    // The TTL alone used to keep a pre-ingest "0 nodes" summary alive for
+    // 30s; the cache must notice the graph changed underneath it.
+    #[test]
+    fn summary_is_recomputed_when_the_graph_changes_within_the_ttl() {
+        use graph_hunter_core::{Entity, EntityType};
+        let _g = _GRAPH_META_TEST_MUTEX.lock().unwrap();
+        _flush_summary_cache_for_test();
+        _flush_recent_pivots_for_test();
+        let api = api_with_dataset("s-fresh", "d1");
+
+        let before = api.get_graph_meta_summary().expect("summary");
+        assert_eq!(before.totals.nodes, 0);
+
+        let session = api.sessions().current_session().expect("session");
+        session
+            .graph
+            .write()
+            .unwrap()
+            .add_entity(Entity::new("alice", EntityType::User))
+            .expect("add entity");
+
+        let after = api.get_graph_meta_summary().expect("summary");
+        assert_eq!(after.totals.nodes, 1, "stale cached summary was served");
     }
 
     // ── Task 1/2 tests (unchanged assertions, now with cache flush) ──────
@@ -435,7 +486,9 @@ mod tests {
         _flush_summary_cache_for_test();
         _flush_recent_pivots_for_test();
         let api = GraphHunterApi::new_noop();
-        let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
+        let summary = api
+            .get_graph_meta_summary()
+            .expect("get_graph_meta_summary");
         assert_eq!(summary.schema_version, GRAPH_META_SCHEMA_VERSION);
     }
 
@@ -445,14 +498,15 @@ mod tests {
         _flush_summary_cache_for_test();
         _flush_recent_pivots_for_test();
         let api = GraphHunterApi::new_noop();
-        let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
+        let summary = api
+            .get_graph_meta_summary()
+            .expect("get_graph_meta_summary");
         assert!(
             !summary.as_of.is_empty(),
             "as_of must be a non-empty RFC 3339 string"
         );
         // Confirm chrono can parse its own output.
-        chrono::DateTime::parse_from_rfc3339(&summary.as_of)
-            .expect("as_of must parse as RFC 3339");
+        chrono::DateTime::parse_from_rfc3339(&summary.as_of).expect("as_of must parse as RFC 3339");
     }
 
     #[test]
@@ -462,7 +516,9 @@ mod tests {
         _flush_recent_pivots_for_test();
         // Fresh API with no session — graceful degradation path.
         let api = GraphHunterApi::new_noop();
-        let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
+        let summary = api
+            .get_graph_meta_summary()
+            .expect("get_graph_meta_summary");
         assert_eq!(summary.totals.nodes, 0);
         assert_eq!(summary.totals.edges, 0);
         assert!(summary.totals.by_type.is_empty());
@@ -478,7 +534,9 @@ mod tests {
         _flush_summary_cache_for_test();
         _flush_recent_pivots_for_test();
         let api = GraphHunterApi::new_noop();
-        let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
+        let summary = api
+            .get_graph_meta_summary()
+            .expect("get_graph_meta_summary");
         let v = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(v["schema_version"], 1);
         assert!(v["as_of"].is_string());
@@ -498,9 +556,14 @@ mod tests {
         _flush_summary_cache_for_test();
         _flush_recent_pivots_for_test();
         let api = GraphHunterApi::new_noop();
-        let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
+        let summary = api
+            .get_graph_meta_summary()
+            .expect("get_graph_meta_summary");
         // The static FORMAT_REGISTRY is always present regardless of session state.
-        assert!(!summary.sources.is_empty(), "sources must list registered formats");
+        assert!(
+            !summary.sources.is_empty(),
+            "sources must list registered formats"
+        );
         let names: Vec<&str> = summary.sources.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"sysmon"), "sysmon must be in sources");
         assert!(names.contains(&"sentinel"), "sentinel must be in sources");
@@ -513,9 +576,13 @@ mod tests {
         _flush_summary_cache_for_test();
         _flush_recent_pivots_for_test();
         let api = api_with_dataset("s1", "ator-evtx-snapshot");
-        let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
+        let summary = api
+            .get_graph_meta_summary()
+            .expect("get_graph_meta_summary");
         assert!(
-            summary.active_datasets.contains(&"ator-evtx-snapshot".to_string()),
+            summary
+                .active_datasets
+                .contains(&"ator-evtx-snapshot".to_string()),
             "active_datasets must include the registered dataset id"
         );
     }
@@ -535,14 +602,15 @@ mod tests {
                 vec![Arc::from("u2"), Arc::from("h2")],
             ];
         }
-        let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
+        let summary = api
+            .get_graph_meta_summary()
+            .expect("get_graph_meta_summary");
         assert!(
             !summary.active_hunts.is_empty(),
             "hunt cache should expose entries in active_hunts"
         );
         assert_eq!(
-            summary.active_hunts[0].result_size,
-            2,
+            summary.active_hunts[0].result_size, 2,
             "result_size must equal the number of paths in the cache"
         );
     }
@@ -553,7 +621,9 @@ mod tests {
         _flush_summary_cache_for_test();
         _flush_recent_pivots_for_test();
         let api = GraphHunterApi::new_noop();
-        let summary = api.get_graph_meta_summary().expect("get_graph_meta_summary");
+        let summary = api
+            .get_graph_meta_summary()
+            .expect("get_graph_meta_summary");
         assert!(
             summary.active_hunts.is_empty(),
             "empty hunt cache must produce empty active_hunts"
@@ -571,9 +641,17 @@ mod tests {
         let api = GraphHunterApi::new_noop();
         let t1 = api.get_graph_meta_summary().expect("first call");
 
-        // Mutate state that would change the next computation: insert a
-        // session with a dataset. While holding the global mutex no other
-        // test can flush the cache between these two calls.
+        // Nothing the summary reports changed: the cached one is served.
+        let t1_again = api.get_graph_meta_summary().expect("repeat call");
+        assert_eq!(
+            t1.as_of, t1_again.as_of,
+            "cached responses must share as_of"
+        );
+
+        // Switch to a session with a dataset. The cache is keyed on the
+        // current session and its graph counters, so this must not be
+        // answered from the entry computed before the switch — that is
+        // what used to report an empty graph right after an ingest.
         let session = Arc::new(Session::new("s1", "test", GraphHunter::new(), 0));
         session.datasets.write().unwrap().push(DatasetInfo {
             id: "ds1".into(),
@@ -584,17 +662,18 @@ mod tests {
             relation_count: 0,
             field_config: None,
             ingest_stats: None,
+            parser: None,
+            mapping_hash: None,
         });
         api.sessions().insert(session);
         api.sessions().set_current(Some("s1".into()));
 
         let t2 = api.get_graph_meta_summary().expect("second call");
 
-        assert_eq!(t1.as_of, t2.as_of, "cached responses must share as_of");
-        assert!(
-            t2.active_datasets.is_empty(),
-            "cached response should still show empty active_datasets even though state changed; got {:?}",
-            t2.active_datasets
+        assert_eq!(
+            t2.active_datasets,
+            vec!["ds1".to_string()],
+            "a session switch must invalidate the cached summary"
         );
     }
 
@@ -658,7 +737,10 @@ mod tests {
 
         let api = GraphHunterApi::new_noop();
         let summary = api.get_graph_meta_summary().expect("summary");
-        let found = summary.recent_pivots.iter().any(|p| p.entity == "192.168.1.1");
+        let found = summary
+            .recent_pivots
+            .iter()
+            .any(|p| p.entity == "192.168.1.1");
         assert!(found, "summary.recent_pivots must include the pushed pivot");
     }
 
@@ -673,8 +755,14 @@ mod tests {
             .post_graph_overlap(OverlapRequest {
                 schema_version: 1,
                 entities: vec![
-                    EntityRef { kind: "IP".into(), value: "1.2.3.4".into() },
-                    EntityRef { kind: "User".into(), value: "alice@corp".into() },
+                    EntityRef {
+                        kind: "IP".into(),
+                        value: "1.2.3.4".into(),
+                    },
+                    EntityRef {
+                        kind: "User".into(),
+                        value: "alice@corp".into(),
+                    },
                 ],
             })
             .expect("overlap must succeed");
@@ -695,7 +783,10 @@ mod tests {
             })
             .collect();
         let err = api
-            .post_graph_overlap(OverlapRequest { schema_version: 1, entities })
+            .post_graph_overlap(OverlapRequest {
+                schema_version: 1,
+                entities,
+            })
             .expect_err("must reject above cap");
         assert_eq!(err.status_code(), 413, "PayloadTooLarge ⇒ HTTP 413");
     }
@@ -723,7 +814,10 @@ mod tests {
         let summary = api.get_graph_meta_summary().expect("summary");
         assert_eq!(summary.schema_version, 1);
         let overlap = api
-            .post_graph_overlap(OverlapRequest { schema_version: 1, entities: vec![] })
+            .post_graph_overlap(OverlapRequest {
+                schema_version: 1,
+                entities: vec![],
+            })
             .expect("overlap");
         assert_eq!(overlap.schema_version, 1);
     }
@@ -749,15 +843,24 @@ mod tests {
             .post_graph_overlap(OverlapRequest {
                 schema_version: 1,
                 entities: vec![
-                    EntityRef { kind: "IP".into(), value: "203.0.113.42".into() },
-                    EntityRef { kind: "IP".into(), value: "8.8.8.8".into() },
+                    EntityRef {
+                        kind: "IP".into(),
+                        value: "203.0.113.42".into(),
+                    },
+                    EntityRef {
+                        kind: "IP".into(),
+                        value: "8.8.8.8".into(),
+                    },
                 ],
             })
             .expect("overlap");
         assert_eq!(resp.found.len(), 1, "exactly one entity present");
         assert_eq!(resp.found[0].entity, "203.0.113.42");
         assert_eq!(resp.found[0].degree, 0, "no relations ⇒ degree 0");
-        assert!(resp.found[0].top_neighbor.is_none(), "top_neighbor deferred in v1");
+        assert!(
+            resp.found[0].top_neighbor.is_none(),
+            "top_neighbor deferred in v1"
+        );
         assert_eq!(resp.missing, vec!["8.8.8.8".to_string()]);
     }
 }

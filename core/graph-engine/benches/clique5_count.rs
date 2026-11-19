@@ -15,8 +15,8 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use graph_hunter_core::generate_erdos_renyi;
 use graph_hunter_core::lftj::{
     MaterializedCsrTrie, count_5cliques_canonical_lftj_simd,
-    count_5cliques_canonical_lftj_simd_par, count_5cliques_lftj_simd,
-    count_5cliques_lftj_simd_par, count_5cliques_naive,
+    count_5cliques_canonical_lftj_simd_par, count_5cliques_lftj_simd, count_5cliques_lftj_simd_par,
+    count_5cliques_naive,
 };
 
 fn build_trie(n: usize, p: f64, seed: u64) -> MaterializedCsrTrie {
@@ -28,12 +28,7 @@ fn build_trie(n: usize, p: f64, seed: u64) -> MaterializedCsrTrie {
 fn bench_clique5(c: &mut Criterion) {
     let big = std::env::var("BENCH_LARGE").ok().is_some();
     let cases: &[(usize, f64)] = if big {
-        &[
-            (1_000, 0.01),
-            (1_000, 0.02),
-            (1_000, 0.05),
-            (1_000, 0.10),
-        ]
+        &[(1_000, 0.01), (1_000, 0.02), (1_000, 0.05), (1_000, 0.10)]
     } else {
         // Naive K5 at p=0.05 is already several seconds per iter.
         // Default sweep stays light; AGM curve is already visible at
@@ -65,16 +60,12 @@ fn bench_clique5(c: &mut Criterion) {
         let label = format!("V={n},E={},K5={}", trie.edge_count(), naive_count);
 
         let mut group = c.benchmark_group("clique5-count");
-        group.bench_with_input(
-            BenchmarkId::new("naive", &label),
-            &&trie,
-            |b, &trie| b.iter(|| black_box(count_5cliques_naive(black_box(trie)))),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("lftj+simd", &label),
-            &&trie,
-            |b, &trie| b.iter(|| black_box(count_5cliques_lftj_simd(black_box(trie)))),
-        );
+        group.bench_with_input(BenchmarkId::new("naive", &label), &&trie, |b, &trie| {
+            b.iter(|| black_box(count_5cliques_naive(black_box(trie))))
+        });
+        group.bench_with_input(BenchmarkId::new("lftj+simd", &label), &&trie, |b, &trie| {
+            b.iter(|| black_box(count_5cliques_lftj_simd(black_box(trie))))
+        });
         group.bench_with_input(
             BenchmarkId::new("lftj+simd+par", &label),
             &&trie,
@@ -83,17 +74,13 @@ fn bench_clique5(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("lftj+simd+canonical", &label),
             &&trie,
-            |b, &trie| {
-                b.iter(|| black_box(count_5cliques_canonical_lftj_simd(black_box(trie))))
-            },
+            |b, &trie| b.iter(|| black_box(count_5cliques_canonical_lftj_simd(black_box(trie)))),
         );
         group.bench_with_input(
             BenchmarkId::new("lftj+simd+canonical+par", &label),
             &&trie,
             |b, &trie| {
-                b.iter(|| {
-                    black_box(count_5cliques_canonical_lftj_simd_par(black_box(trie)))
-                })
+                b.iter(|| black_box(count_5cliques_canonical_lftj_simd_par(black_box(trie))))
             },
         );
         group.finish();

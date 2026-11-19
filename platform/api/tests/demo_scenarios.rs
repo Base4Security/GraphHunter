@@ -32,11 +32,14 @@ fn api_with_fixture(session_name: &str, path: &str, format: &str) -> GraphHunter
     })
     .expect("create_session");
     let result = api
-        .load_data(LoadDataRequest {
-            session: None,
-            path: path.into(),
-            format: format.into(),
-        })
+        .load_data(
+            LoadDataRequest {
+                session: None,
+                path: path.into(),
+                format: format.into(),
+            },
+            &graph_hunter_api::paths::PathPolicy::LocalTrusted,
+        )
         .expect("load_data");
     assert!(
         !result.zero_triples,
@@ -101,7 +104,11 @@ fn demo_office_spawn_sysmon() {
     );
     let paths = run_hunt_paths(&api, "Process -[Spawn]-> Process -[DNS]-> Domain");
 
-    within_10pct("office-spawn", paths.len(), 22);
+    // 8 = one path per DNS query made by a spawned process in the fixture:
+    // svchost 1, OUTLOOK 1, chrome 1, powershell 2, beacon 3. This used to
+    // be 22 because the answer addresses and the record type of each query
+    // (`QueryResults`, `QueryType`) were ingested as extra `Domain` nodes.
+    within_10pct("office-spawn", paths.len(), 8);
     assert!(!paths.is_empty(), "office-spawn: need ≥1 match");
 
     // Structural property: every path has exactly 3 nodes (2 hops).

@@ -171,12 +171,15 @@ fn json_array_format_returns_a_valid_array() {
     assert_eq!(v["_meta"]["has_more"].as_bool(), Some(false));
 }
 
-/// M3.d acceptance: when a dataset has a FieldConfig, the
-/// `mapping_hash` stamped onto every emitted event must be the
-/// deterministic `sha256(vrl_source)` from `field_config_to_vrl`,
-/// not the placeholder `builtin:<parser>` tag.
+/// M3.d / provenance_stability acceptance: when a dataset has a
+/// FieldConfig, the `mapping_hash` stamped onto every emitted event must
+/// be `cfg:sha256(serde_json(field_config))` — hashed directly from the
+/// frozen config recorded on `DatasetInfo` at ingest time, not from any
+/// downstream VRL/compiler representation of it (which could change
+/// independently of the config, e.g. across a VRL-generator version bump)
+/// — and never the placeholder `builtin:<parser>` tag.
 #[test]
-fn dataset_with_field_config_stamps_real_vrl_hash() {
+fn dataset_with_field_config_stamps_real_cfg_hash() {
     use graph_hunter_api::state::session_types::DatasetInfo;
     use graph_hunter_core::field_preview::{FieldConfig, FieldMapping, FieldRole};
     use graph_hunter_core::{Entity, EntityType, Relation, RelationType};
@@ -207,7 +210,17 @@ fn dataset_with_field_config_stamps_real_vrl_hash() {
             },
         ],
     };
-    let expected_hash = graph_hunter_vrl::field_config_to_vrl(&cfg).mapping_hash;
+    // Computed via the same public constructor `export_ocsf` uses
+    // internally (`ProvenanceCtx::for_configurable`) — the dataset_id/
+    // raw_event arguments don't affect `mapping_hash`, only the config
+    // does, so this is a legitimate independent expectation, not a
+    // tautology: it pins the `cfg:` + content-hash *contract*, and a
+    // regression that changes what export actually feeds into that
+    // constructor (e.g. reverting to the VRL-source hash) would still
+    // fail this assertion.
+    let expected_hash =
+        graph_hunter_canonical::ProvenanceCtx::for_configurable(&cfg, "ds-with-vrl", &[])
+            .mapping_hash;
 
     {
         let mut datasets = session.datasets.write().expect("datasets lock");
@@ -220,6 +233,12 @@ fn dataset_with_field_config_stamps_real_vrl_hash() {
             relation_count: 0,
             field_config: Some(cfg),
             ingest_stats: None,
+            parser: None,
+            // Export now derives `provenance.mapping_hash` from this
+            // frozen field, never from `field_config` above (see
+            // `DatasetInfo::mapping_hash`) — set it explicitly here to
+            // the same hash `expected_hash` was computed from above.
+            mapping_hash: Some(expected_hash.clone()),
         });
     }
     {
@@ -258,18 +277,19 @@ fn dataset_with_field_config_stamps_real_vrl_hash() {
     let stamped_hash = prov["mapping_hash"].as_str().expect("mapping_hash str");
     assert_eq!(
         stamped_hash, expected_hash,
-        "mapping_hash must be sha256(vrl_source), not a placeholder"
+        "mapping_hash must be cfg:sha256(serde_json(field_config)), not a placeholder"
     );
+    assert!(stamped_hash.starts_with("cfg:"), "got: {stamped_hash}");
     assert!(
         !stamped_hash.starts_with("builtin:"),
         "must not fall back to builtin:* placeholder"
     );
     let mapping_id = prov["mapping_id"].as_str().expect("mapping_id str");
-    assert!(
-        mapping_id.starts_with("vrl-v"),
-        "mapping_id should encode the compiler version: {mapping_id}"
+    assert_eq!(
+        mapping_id, stamped_hash,
+        "mapping_id is the config's own content-hash identity"
     );
-    assert_eq!(prov["parser_name"].as_str(), Some("vrl"));
+    assert_eq!(prov["parser_name"].as_str(), Some("configurable"));
 }
 
 #[test]

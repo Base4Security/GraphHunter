@@ -5,7 +5,7 @@
 //! CI / other devs don't blow up when the file isn't present.
 //!
 //! Run with:
-//!   $env:GH_PCAP_FIXTURE = 'C:\Users\lsotomayor\Downloads\evo_telecarga_externa.pcap'
+//!   $env:GH_PCAP_FIXTURE = 'C:\ruta\a\captura.pcap'
 //!   cargo test --test pcap_ingest_real_file -- --nocapture
 
 use std::sync::Arc;

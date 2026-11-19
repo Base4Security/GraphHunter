@@ -10,12 +10,12 @@ use std::sync::Arc;
 
 use tauri::State;
 
+use graph_hunter_api::GraphHunterApi;
 use graph_hunter_api::ai;
 use graph_hunter_api::dto::ai::{
     AiChatRequest, AiConversationScope, AnalyzeGraphConversationRequest, AnalyzeGraphRequest,
     ProposeHypothesisRequest, SetAiKeyRequest, SetAiProviderRequest,
 };
-use graph_hunter_api::GraphHunterApi;
 
 use crate::error::CommandError;
 use crate::types::DslResult;
@@ -26,10 +26,7 @@ pub fn cmd_ai_check_config(api: State<Arc<GraphHunterApi>>) -> ai::AiConfig {
 }
 
 #[tauri::command]
-pub fn cmd_ai_set_key(
-    api: State<Arc<GraphHunterApi>>,
-    key: String,
-) -> Result<(), CommandError> {
+pub fn cmd_ai_set_key(api: State<Arc<GraphHunterApi>>, key: String) -> Result<(), CommandError> {
     api.ai_set_key(SetAiKeyRequest { key })
         .map_err(CommandError::from)
 }

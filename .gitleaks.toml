@@ -1,0 +1,17 @@
+# Configuración de secret scanning (job `secretos` de .github/workflows/baseline.yml).
+#
+# Cada excepción nombra el falso positivo concreto. No se agregan rutas enteras:
+# un secreto real en esos archivos tiene que seguir saltando.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Valores de ejemplo en tests y documentación, no son credenciales"
+regexTarget = "match"
+regexes = [
+  # cache_key de fixture en el test de contrato del footer del MCP.
+  '''hunt-abc123d(ef456)?''',
+  # Token de ejemplo del libro (capítulo de la API HTTP).
+  '''Bearer ghk_abc123\.\.\.''',
+]

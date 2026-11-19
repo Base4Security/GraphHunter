@@ -369,7 +369,7 @@ fn random_field_config(rng: &mut Lcg) -> FieldConfig {
 #[test]
 fn compiler_outputs_validate_and_obey_grammar_surface() {
     let v = VrlSubsetValidator::new();
-    let mut rng = Lcg::new(0xF12_6_C0FFEE);
+    let mut rng = Lcg::new(0x00F1_26C0_FFEE);
     let mut total = 0usize;
     let mut failures: Vec<(usize, String, String)> = Vec::new();
 

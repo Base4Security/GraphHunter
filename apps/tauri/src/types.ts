@@ -151,7 +151,9 @@ export interface ParseStats {
   rows_skipped: number;
   per_field_occurrence?: Record<string, number>;
   /** Why rows were skipped, aggregated by short reason tag
-   *  (e.g. `empty_row`, `no_canonical_fields`, `no_anchor`). */
+   *  (`empty_row`, `no_canonical_fields`, `no_anchor`, `single_endpoint`,
+   *  `no_triple_emitted`). `single_endpoint` is a property of the data, not
+   *  a failure: the event names one entity and a relation needs two. */
   skip_reasons?: Record<string, number>;
   /** Up to ~20 sampled skipped rows (raw JSON snippet + reason tag).
    *  Surfaced by the Skipped badge popover so analysts can inspect
@@ -181,6 +183,11 @@ export interface HuntResults {
     tail_edge_count: number;
     index_coverage: number;
   };
+  /** Fase D/E: core's answer-coverage (missing_sources/source_watermarks),
+   * omitted from the wire when default/all-clear. No TS type exists for
+   * `graph_hunter_api::coverage::AnswerCoverage` yet — typed as `unknown`
+   * on purpose; no UI consumes this field (YAGNI). */
+  coverage?: unknown;
 }
 
 export interface ScoreBreakdown {
@@ -712,6 +719,16 @@ export interface SentinelEnvStatus {
   azure_resource_group: string | null;
   azure_workspace_id: string | null;
   azure_workspace_name: string | null;
+  /** Fase G: whether one-click hunting templates are enabled
+   * (GRAPHHUNTER_HUNTING_TEMPLATES). Default true server-side;
+   * treat undefined the same as true (default-visible) so a
+   * frontend built against an older backend still shows the
+   * surface. */
+  hunting_templates_enabled?: boolean;
+  /** Fase G: whether the raw-KQL escape hatch is enabled
+   * (GRAPHHUNTER_KQL_ESCAPE_HATCH). Default true server-side;
+   * same undefined-as-true default-visible handling. */
+  kql_escape_hatch_enabled?: boolean;
 }
 
 /** Emitted by the backend every time a KQL query executes (polling or ad-hoc). */

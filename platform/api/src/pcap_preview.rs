@@ -150,8 +150,7 @@ pub fn pcap_preview_sample(path: &str) -> Result<PcapPreviewResult, String> {
     let format = pcap_format_name(path).to_string();
 
     let file = File::open(path).map_err(|e| format!("open '{path}': {e}"))?;
-    let mut reader = create_reader(65_536, file)
-        .map_err(|e| format!("pcap reader init: {e:?}"))?;
+    let mut reader = create_reader(65_536, file).map_err(|e| format!("pcap reader init: {e:?}"))?;
 
     let mut state = PreviewState::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -171,8 +170,8 @@ pub fn pcap_preview_sample(path: &str) -> Result<PcapPreviewResult, String> {
             Ok((offset, block)) => {
                 match block {
                     PcapBlockOwned::LegacyHeader(hdr) => {
-                        legacy_nanos = hdr.magic_number == 0xa1b2_3c4d
-                            || hdr.magic_number == 0x4d3c_b2a1;
+                        legacy_nanos =
+                            hdr.magic_number == 0xa1b2_3c4d || hdr.magic_number == 0x4d3c_b2a1;
                     }
                     PcapBlockOwned::Legacy(pkt) => {
                         let ts_secs = pkt.ts_sec as i64;
@@ -255,10 +254,7 @@ fn observe_ng_block(
             if_tsresol.push(resol);
         }
         Block::EnhancedPacket(epb) => {
-            let resol = if_tsresol
-                .get(epb.if_id as usize)
-                .copied()
-                .unwrap_or(6);
+            let resol = if_tsresol.get(epb.if_id as usize).copied().unwrap_or(6);
             let raw = ((epb.ts_high as u64) << 32) | (epb.ts_low as u64);
             let ts_secs = ng_raw_to_secs(raw, resol);
             if !state.observe(epb.data, ts_secs) {
@@ -329,14 +325,12 @@ impl PreviewState {
             return false;
         };
         let (src_ip, dst_ip) = match parsed.net.as_ref() {
-            Some(etherparse::NetHeaders::Ipv4(h, _)) => (
-                fmt_ipv4(&h.source),
-                fmt_ipv4(&h.destination),
-            ),
-            Some(etherparse::NetHeaders::Ipv6(h, _)) => (
-                fmt_ipv6(&h.source),
-                fmt_ipv6(&h.destination),
-            ),
+            Some(etherparse::NetHeaders::Ipv4(h, _)) => {
+                (fmt_ipv4(&h.source), fmt_ipv4(&h.destination))
+            }
+            Some(etherparse::NetHeaders::Ipv6(h, _)) => {
+                (fmt_ipv6(&h.source), fmt_ipv6(&h.destination))
+            }
             _ => return false,
         };
         let entry = self.src_ips.entry(src_ip.clone()).or_insert((0, 0));
@@ -390,13 +384,13 @@ impl PreviewState {
                 bytes,
             })
             .collect();
-        protocol_mix.sort_by(|a, b| b.packets.cmp(&a.packets));
+        protocol_mix.sort_by_key(|x| std::cmp::Reverse(x.packets));
 
         let top_src_ips = topn_ip(self.src_ips);
         let top_dst_ips = topn_ip(self.dst_ips);
 
         let mut port_pairs: Vec<((u16, &'static str), u64)> = self.dst_ports.into_iter().collect();
-        port_pairs.sort_by(|a, b| b.1.cmp(&a.1));
+        port_pairs.sort_by_key(|x| std::cmp::Reverse(x.1));
         let top_dst_ports: Vec<PortCount> = port_pairs
             .into_iter()
             .take(TOP_N)
@@ -425,7 +419,7 @@ impl PreviewState {
 
 fn topn_ip(m: HashMap<String, (u64, u64)>) -> Vec<IpCount> {
     let mut v: Vec<(String, (u64, u64))> = m.into_iter().collect();
-    v.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+    v.sort_by_key(|x| std::cmp::Reverse(x.1.0));
     v.into_iter()
         .take(TOP_N)
         .map(|(ip, (pkts, bytes))| IpCount {
@@ -646,7 +640,10 @@ mod tests {
             result.top_src_ips
         );
         assert!(
-            result.top_dst_ports.iter().any(|p| p.service.as_deref() == Some("HTTPS")),
+            result
+                .top_dst_ports
+                .iter()
+                .any(|p| p.service.as_deref() == Some("HTTPS")),
             "expected HTTPS service tag on 443"
         );
         assert!(result.time_span.is_some(), "expected a time span");

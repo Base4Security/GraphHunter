@@ -82,7 +82,10 @@ pub enum ModelLoadError {
     /// fatal regardless of the feature flag.
     ValidationAccuracyBelowThreshold { got: f32, min: f32 },
     /// `input_shape` doesn't match the version's expected k_max/d_node.
-    ShapeMismatch { got: TensorShape, expected: TensorShape },
+    ShapeMismatch {
+        got: TensorShape,
+        expected: TensorShape,
+    },
     /// Declared sha256 didn't match the file's actual hash.
     SignatureMismatch,
 }
@@ -97,10 +100,9 @@ impl std::fmt::Display for ModelLoadError {
                 f,
                 "model trained on synthetic corpus; enable feature `gnn-v2-experimental` to load it"
             ),
-            Self::ValidationAccuracyBelowThreshold { got, min } => write!(
-                f,
-                "validation accuracy {got:.3} below minimum {min:.3}"
-            ),
+            Self::ValidationAccuracyBelowThreshold { got, min } => {
+                write!(f, "validation accuracy {got:.3} below minimum {min:.3}")
+            }
             Self::ShapeMismatch { got, expected } => write!(
                 f,
                 "tensor shape mismatch: got k_max={} d_node={}, expected k_max={} d_node={}",
@@ -155,8 +157,14 @@ pub fn validate_metadata(
 /// mismatch via `validate_metadata`.
 pub fn expected_shape_for(version: ModelVersion) -> TensorShape {
     match version {
-        ModelVersion::V1 => TensorShape { k_max: 32, d_node: 16 },
-        ModelVersion::V2 => TensorShape { k_max: 32, d_node: 24 },
+        ModelVersion::V1 => TensorShape {
+            k_max: 32,
+            d_node: 16,
+        },
+        ModelVersion::V2 => TensorShape {
+            k_max: 32,
+            d_node: 24,
+        },
     }
 }
 
@@ -172,7 +180,9 @@ pub fn load_and_validate_metadata<P: AsRef<Path>>(
 ) -> Result<ModelMetadata, ModelLoadError> {
     let onnx_path = onnx_path.as_ref();
     if !onnx_path.exists() {
-        return Err(ModelLoadError::MissingModel(onnx_path.display().to_string()));
+        return Err(ModelLoadError::MissingModel(
+            onnx_path.display().to_string(),
+        ));
     }
     let sidecar = sidecar_path_for(onnx_path);
     let text = std::fs::read_to_string(&sidecar)
@@ -199,7 +209,10 @@ mod tests {
             trained_on: TrainingCorpus::Production,
             validation_accuracy: 0.87,
             class_labels: vec!["benign".into(), "c2_beacon".into()],
-            input_shape: TensorShape { k_max: 32, d_node: 16 },
+            input_shape: TensorShape {
+                k_max: 32,
+                d_node: 16,
+            },
             sha256: None,
         }
     }
@@ -239,7 +252,10 @@ mod tests {
     #[test]
     fn rejects_shape_mismatch() {
         let mut meta = base_meta();
-        meta.input_shape = TensorShape { k_max: 16, d_node: 8 };
+        meta.input_shape = TensorShape {
+            k_max: 16,
+            d_node: 8,
+        };
         let err = validate_metadata(&meta, false).unwrap_err();
         assert!(matches!(err, ModelLoadError::ShapeMismatch { .. }));
     }

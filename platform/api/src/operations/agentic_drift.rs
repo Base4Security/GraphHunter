@@ -152,9 +152,9 @@ impl GraphHunterApi {
     }
 
     /// `mapping_regression_tester` — replay the dataset's raw events
-    /// through a candidate VRL program and diff the resulting triple
-    /// + canonical sets against the active mapping. Pass / warn /
-    /// fail verdict feeds the review queue gate.
+    /// through a candidate VRL program and diff the resulting triple and
+    /// canonical sets against the active mapping. Pass / warn / fail
+    /// verdict feeds the review queue gate.
     pub fn mapping_regression_test(
         &self,
         req: MappingRegressionRequest,
@@ -364,6 +364,13 @@ fn synthesize_events_from_session(
         .graph
         .read()
         .map_err(|e| ApiError::Internal(format!("graph lock poisoned: {e}")))?;
+    // See the note in `operations/export.rs`: an allocation abort here
+    // leaves no stack, so the caller has to name itself first.
+    tracing::info!(
+        "to_snapshot: agentic_drift, {} entities / {} relations",
+        graph.entity_count(),
+        graph.relation_count()
+    );
     let (entities, relations) = graph.to_snapshot();
     let entity_index: HashMap<String, &Entity> =
         entities.iter().map(|e| (e.id.clone(), e)).collect();
@@ -574,6 +581,8 @@ mod tests {
                 relation_count: 0,
                 field_config: Some(cfg()),
                 ingest_stats: None,
+                parser: None,
+                mapping_hash: None,
             });
         }
         // Seed two triples (alice->cmd, bob->whoami) tagged to ds.

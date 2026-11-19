@@ -47,7 +47,8 @@ fn build_hub_spray_graph(n_spokes: usize) -> GraphHunter {
     let mut g = GraphHunter::new();
     g.add_entity(Entity::new("attacker", EntityType::User))
         .unwrap();
-    g.add_entity(Entity::new("10.0.0.1", EntityType::IP)).unwrap();
+    g.add_entity(Entity::new("10.0.0.1", EntityType::IP))
+        .unwrap();
     for i in 0..n_spokes {
         let user = format!("user_{i}");
         g.add_entity(Entity::new(&user, EntityType::User)).unwrap();

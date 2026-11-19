@@ -7,21 +7,21 @@ const input = z.object({
     .string()
     .max(2000)
     .describe(
-      "Hypothesis in DSL form, e.g. 'IP -[Connect]-> Host -[Auth]-> User -[Execute]-> Process'",
+      "Chain: 'User -[Execute]-> Process -[DNS]-> Domain'. Join on a shared node: 'User u -[Auth]-> IP i; Host h -[Connect]-> IP i'.",
     ),
   scoring: z
     .enum(["structural", "anomaly", "gnn"])
     .optional()
     .default("structural")
     .describe(
-      "Per-call scoring mode. 'structural' (default): degree/PageRank/betweenness only. 'anomaly': enables score-guided DFS + four-dimension anomaly breakdown (entity rarity, edge rarity, neighborhood concentration, temporal novelty) on every result path. 'gnn': adds GNN-derived threat scores. Replaces the stateful enable_anomaly_scoring latch — every hunt.run is now self-contained and replayable from a transcript.",
+      "structural (default): plain search. anomaly: rarity-guided search, with a per-path anomaly breakdown. gnn: adds GNN threat scores when the build has them.",
     ),
 });
 
 export const huntRun = defineTool({
   name: "hunt_run",
   description:
-    "Run a threat-hunting hypothesis. Pass a DSL chain like 'IP -[Connect]-> Host -[Execute]-> Process' and (optionally) a scoring mode. Returns path count and whether results were truncated. After running, use hunt.results to retrieve paths with the per-mode scores. The transcript is **fully self-contained**: each call carries its own scoring mode, the backend honors the per-call override (Structural always uses plain DFS, Anomaly/Gnn always finalizes the scorer first), so replay produces identical paths regardless of prior session state. The legacy `enable_anomaly_scoring` latch is no longer load-bearing.",
+    "Run a hunting pattern over the graph. A chain follows edges forward in time ('IP -[Connect]-> Host -[Execute]-> Process'). To correlate sources, join clauses on a shared node: name the nodes and separate clauses with ';' ('User u -[Auth]-> IP i; Domain d -[Resolve]-> IP i'); clauses must form a tree. A joined pattern ignores time unless you end it with 'WITHIN 1h': then every edge it matches falls in one window, which is what ties an address to the host holding it at the time. Take entity and relation names from graph_relation_schema first: a pair that does not exist returns 0 paths and a diagnostic. Returns the path count and whether it was truncated; read the paths with hunt_results. A truncated joined pattern names `truncated_in_group`: matches come grouped on the most shared node, smallest group first, so every group but that one is complete. `non_discriminating` in the result means the pattern matches most of the population, so its paths are not findings. A 504 means the hunt was cancelled for running too long: narrow it.",
   category: "hunt",
   version: 1,
   stability: "stable",

@@ -43,8 +43,8 @@ use tokio_util::sync::CancellationToken;
 use crate::http_client::{HttpClient, HttpRequest, StatusClass};
 use crate::token_cache::{AzureTokenCache, TokenKey};
 use crate::{
-    ChunkEncoding, ChunkStream, LogSource, PollStream, QueryScope, RawChunk, SourceError,
-    SourceKind, Watermark,
+    ChunkEncoding, ChunkStream, LogSource, PollStream, QueryScope, RawChunk, SourceCapabilities,
+    SourceError, SourceKind, Watermark,
 };
 
 /// Default Advanced Hunting API endpoint. Overridable for tests and
@@ -236,6 +236,13 @@ impl LogSource for DefenderXdrSource {
 
     fn available_tables(&self) -> &[&'static str] {
         AVAILABLE_TABLES
+    }
+
+    fn capabilities(&self) -> SourceCapabilities {
+        // KQL query API: append-only, time/field filterable, paginated,
+        // backfillable by widening the range; no stable per-row id, no
+        // correction/deletion semantics, opaque ISO-8601 watermark.
+        SourceCapabilities::kql_query_source()
     }
 
     async fn check_auth(&self) -> Result<(), SourceError> {
@@ -612,5 +619,18 @@ mod tests {
             "https://api.security.microsoft.com/.default"
         );
         assert_eq!(source.available_tables().len(), 3);
+    }
+
+    #[test]
+    fn defender_declares_kql_query_capabilities() {
+        let http = Arc::new(MockHttpClient::new());
+        let src = make_source(http);
+        let c = src.capabilities();
+        assert!(c.append_only);
+        assert!(c.supports_time_filter);
+        assert!(c.supports_pagination);
+        assert!(c.supports_backfill);
+        assert!(!c.stable_event_ids);
+        assert!(!c.supports_deletions);
     }
 }

@@ -144,9 +144,16 @@ impl GraphHunterApi {
         let page_size = req.page_size.unwrap_or(cache.len());
         let format = req.format;
 
+        let shape = self.hunt_cache_shape_for(cache.len());
         let scored = self.with_graph_read(req.session.as_ref(), |graph| {
-            let (page_scored, _) =
-                graph.score_and_paginate_paths(&cache, page, page_size, None, dedup_mode);
+            let (page_scored, _) = graph.score_and_paginate_shaped(
+                &cache,
+                page,
+                page_size,
+                None,
+                dedup_mode,
+                shape.as_deref(),
+            );
             Ok(page_scored)
         })?;
 
@@ -198,27 +205,62 @@ impl GraphHunterApi {
             .min(MAX_PAGE_SIZE);
         let offset = req.offset.unwrap_or(0);
 
-        // Build a per-dataset mapping_hash table from FieldConfig before
-        // touching the graph. Datasets without a FieldConfig stay on the
-        // builtin-parser path; datasets with one get a real
-        // `vrl-v{N}:{sha256(vrl_source)}` stamp.
+        // Build a frozen per-dataset provenance-identity table before
+        // touching the graph, derived entirely from `DatasetInfo` — the
+        // record captured at ingest time — never from a "current"/global
+        // mapping. This is what makes the exported `mapping_hash` stable:
+        // editing a mapping after ingest cannot retroactively change an
+        // already-ingested edge's provenance, because export never
+        // consults anything but the frozen `DatasetInfo` for the dataset
+        // the edge was tagged with at ingest.
+        //
+        // Datasets carrying a FROZEN `mapping_hash` (set once at ingest,
+        // see `DatasetInfo::mapping_hash`) stamp that hash directly —
+        // deliberately NOT derived from the (mutable) `field_config`
+        // below it, so a post-ingest mapping edit (e.g. mapping-review
+        // promotion via `promote_field_config_to_latest_dataset`, which
+        // updates `field_config` for UI/replay display but never touches
+        // `mapping_hash`) cannot retroactively relabel the provenance of
+        // edges already ingested under the OLD config. Datasets without a
+        // frozen `mapping_hash` fall back to the `builtin:{parser}`
+        // identity using the parser/format resolved and frozen on
+        // `DatasetInfo` at ingest (`"unknown"` for datasets ingested
+        // before either field existed).
         let session = self.resolve_session(req.session.as_ref())?;
-        let vrl_by_dataset: HashMap<String, graph_hunter_vrl::VrlProgram> = {
+        let identity_by_dataset: HashMap<String, ProvenanceCtx> = {
             let infos = session
                 .datasets
                 .read()
                 .map_err(|e| ApiError::Internal(format!("session datasets lock poisoned: {e}")))?;
             infos
                 .iter()
-                .filter_map(|d| {
-                    d.field_config
-                        .as_ref()
-                        .map(|cfg| (d.id.clone(), graph_hunter_vrl::field_config_to_vrl(cfg)))
+                .map(|d| {
+                    let ctx = match &d.mapping_hash {
+                        Some(hash) => {
+                            ProvenanceCtx::with_mapping_hash(hash.clone(), d.id.clone(), &[])
+                        }
+                        None => {
+                            let parser = d.parser.as_deref().unwrap_or("unknown");
+                            ProvenanceCtx::for_builtin_parser(parser, d.id.clone(), &[])
+                        }
+                    };
+                    (d.id.clone(), ctx)
                 })
                 .collect()
         };
 
         self.with_graph_read(req.session.as_ref(), |graph| {
+            // `to_snapshot` materializes EVERY edge as an owned Relation
+            // (152 B each) into a Vec that grows by doubling, so the peak
+            // is ~1.5x the final size. Logged with the count because the
+            // failure mode is an allocation abort with no stack: the last
+            // line in the log is the only thing that names the caller.
+            // See the ceiling guard in `operations/invariants.rs`.
+            tracing::info!(
+                "to_snapshot: export_hunt_results, {} entities / {} relations",
+                graph.entity_count(),
+                graph.relation_count()
+            );
             let (entities, relations) = graph.to_snapshot();
             let entity_by_id: HashMap<String, &graph_hunter_core::entity::Entity> =
                 entities.iter().map(|e| (e.id.clone(), e)).collect();
@@ -267,7 +309,7 @@ impl GraphHunterApi {
                     skipped += 1;
                     continue;
                 }
-                let prov = provenance_for_relation(relation, &dataset_filter, &vrl_by_dataset);
+                let prov = provenance_for_relation(relation, &dataset_filter, &identity_by_dataset);
                 let event = triple_to_ocsf(source, relation, dest, &prov);
                 let value = serde_json::to_value(&event)
                     .map_err(|e| ApiError::Internal(format!("ocsf serialize: {e}")))?;
@@ -370,32 +412,33 @@ impl GraphHunterApi {
 
 /// Builds a Provenance Extension context for a relation at export time.
 /// The raw event bytes are not retained after ingest, so `raw_event_sha256`
-/// is empty until M5 wires in cold-store lookup. `parser_name` is best-
-/// effort: we read it from relation metadata if the ingestion path
-/// stamped it, otherwise fall back to `"unknown"`.
+/// is empty until M5 wires in cold-store lookup.
+///
+/// The identity always comes from `identity_by_dataset` — the FROZEN
+/// per-dataset table built from `DatasetInfo` before this function is ever
+/// called (see the caller in `export_ocsf`) — never from the relation's
+/// own metadata. That's the frozen-mapping-identity contract: a relation
+/// only carries its `dataset_id` tag; the mapping identity for that
+/// dataset is looked up, not recomputed from anything relation-local.
+///
+/// The `relation.metadata["parser_name"]` fallback below only fires for
+/// relations whose `dataset_id` doesn't resolve to any tracked
+/// `DatasetInfo` at all (e.g. hand-built test fixtures that never
+/// registered a dataset) — a pre-existing, narrower legacy path kept so
+/// those callers still get a best-effort non-empty `parser_name` instead
+/// of a hard error.
 fn provenance_for_relation(
     relation: &graph_hunter_core::relation::Relation,
     dataset_override: &Option<String>,
-    vrl_by_dataset: &HashMap<String, graph_hunter_vrl::VrlProgram>,
+    identity_by_dataset: &HashMap<String, ProvenanceCtx>,
 ) -> ProvenanceCtx {
     let dataset_id = dataset_override
         .clone()
         .or_else(|| relation.dataset_id.as_deref().map(|s| s.to_string()))
         .unwrap_or_else(|| "unknown".to_string());
 
-    // If the dataset that produced this relation has a FieldConfig, the
-    // VRL compiler has already given us a stable mapping_hash — stamp
-    // it. Otherwise fall back to the legacy builtin-parser identity so
-    // hand-written parsers still emit a non-empty hash.
-    if let Some(program) = vrl_by_dataset.get(&dataset_id) {
-        return ProvenanceCtx::for_vrl(
-            program.provenance_id(),
-            program.mapping_version,
-            program.source.as_bytes(),
-            dataset_id,
-            &[],
-            1.0,
-        );
+    if let Some(ctx) = identity_by_dataset.get(&dataset_id) {
+        return ctx.clone();
     }
 
     let parser_name = relation
@@ -451,10 +494,10 @@ fn dedupe_items(items: &[IocItem]) -> Vec<IocItem> {
         if !entry.0.iter().any(|t| t == tag) {
             entry.0.push(tag.clone());
         }
-        if let Some(r) = reason.as_ref().filter(|s| !s.trim().is_empty()) {
-            if !entry.1.iter().any(|x| x == r) {
-                entry.1.push(r.clone());
-            }
+        if let Some(r) = reason.as_ref().filter(|s| !s.trim().is_empty())
+            && !entry.1.iter().any(|x| x == r)
+        {
+            entry.1.push(r.clone());
         }
     }
     order
@@ -570,9 +613,9 @@ fn uuid_from_node(node_id: &str, tag: &str) -> String {
     format!(
         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
         (hash >> 32) as u32,
-        (hash >> 16) as u16 & 0xffff,
-        (hash as u16) & 0xffff,
-        (hash >> 48) as u16 & 0xffff,
+        (hash >> 16) as u16,
+        hash as u16,
+        (hash >> 48) as u16,
         hash & 0xffff_ffff_ffff,
     )
 }
@@ -643,9 +686,7 @@ fn build_kql_ioc_set(items: &[IocItem]) -> String {
     push_table(&mut out, "IoC_Processes", "process_name", &processes);
     push_table(&mut out, "IoC_Hashes", "hash", &hashes);
     if out.lines().count() <= 1 {
-        out.push_str(
-            "// (no IoCs of IP/Domain/File/Process/Hash type in the current tag set)\n",
-        );
+        out.push_str("// (no IoCs of IP/Domain/File/Process/Hash type in the current tag set)\n");
     }
     out
 }
@@ -770,9 +811,9 @@ fn sigma_rule_uuid(ips: &[&str], domains: &[&str]) -> String {
     format!(
         "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
         (hash >> 32) as u32,
-        (hash >> 16) as u16 & 0xffff,
-        (hash as u16) & 0xffff,
-        (second >> 48) as u16 & 0xffff,
+        (hash >> 16) as u16,
+        hash as u16,
+        (second >> 48) as u16,
         second & 0xffff_ffff_ffff,
     )
 }

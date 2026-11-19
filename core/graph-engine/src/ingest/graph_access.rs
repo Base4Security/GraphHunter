@@ -70,6 +70,9 @@ pub const DEFAULT_WRITE_CHUNK_SIZE: usize = 5_000;
 /// other than the await inside a blocking task wrapper — the whole
 /// point of the chunk-and-release design is to keep lock hold times
 /// bounded.
+// `#[async_trait]` expands each method to a `#[must_use]` fn returning a
+// boxed future (already must_use); the lint fires on the macro output.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait GraphAccess: Send + Sync {
     /// Inserts one chunk (up to `chunk_size` triples) from the front
@@ -115,8 +118,7 @@ pub trait GraphAccess: Send + Sync {
                 src.metadata = ev.src_metadata;
                 let mut dst = Entity::new(ev.dst_id, ev.dst_type);
                 dst.metadata = ev.dst_metadata;
-                let mut rel =
-                    Relation::new(&src.id, &dst.id, ev.rel_type, ev.timestamp);
+                let mut rel = Relation::new(&src.id, &dst.id, ev.rel_type, ev.timestamp);
                 rel.metadata = ev.rel_metadata;
                 (src, rel, dst)
             })

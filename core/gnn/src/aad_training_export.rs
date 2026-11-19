@@ -18,7 +18,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::gnn_bridge::{extract_subgraph_features_v2, SubgraphFeaturesV2};
+use crate::gnn_bridge::{SubgraphFeaturesV2, extract_subgraph_features_v2};
 use graph_hunter_core::graph::GraphHunter;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -132,8 +132,10 @@ mod tests {
 
     fn fixture_graph() -> GraphHunter {
         let mut g = GraphHunter::new();
-        g.add_entity(Entity::new("alice", EntityType::User)).unwrap();
-        g.add_entity(Entity::new("1.2.3.4", EntityType::IP)).unwrap();
+        g.add_entity(Entity::new("alice", EntityType::User))
+            .unwrap();
+        g.add_entity(Entity::new("1.2.3.4", EntityType::IP))
+            .unwrap();
         g.add_relation(
             Relation::new("alice", "1.2.3.4", RelationType::Auth, 100)
                 .with_metadata("app", "Browser"),

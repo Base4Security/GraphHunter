@@ -12,7 +12,7 @@
 //!
 //!   - "shared":  build trie + ts_map once, run K enumerations.
 //!   - "rebuild": for each of K queries, build trie + ts_map + run
-//!                one enumeration.
+//!     one enumeration.
 //!
 //! Reports total wall time. The amortized per-query cost is the
 //! reported time / K. K=1 is the no-amortization baseline (where the
@@ -59,9 +59,7 @@ fn run_shared(g: &GraphHunter, k: usize, cap: usize) -> usize {
     let ts_map = MinTimestampMap::build(g, &trie);
     let mut total = 0usize;
     for _ in 0..k {
-        total = total.wrapping_add(
-            enumerate_triangles_lftj_simd(g, &trie, &ts_map, cap).len(),
-        );
+        total = total.wrapping_add(enumerate_triangles_lftj_simd(g, &trie, &ts_map, cap).len());
     }
     total
 }
@@ -71,9 +69,7 @@ fn run_rebuild(g: &GraphHunter, k: usize, cap: usize) -> usize {
     for _ in 0..k {
         let trie = MaterializedCsrTrie::build(g);
         let ts_map = MinTimestampMap::build(g, &trie);
-        total = total.wrapping_add(
-            enumerate_triangles_lftj_simd(g, &trie, &ts_map, cap).len(),
-        );
+        total = total.wrapping_add(enumerate_triangles_lftj_simd(g, &trie, &ts_map, cap).len());
     }
     total
 }
@@ -82,11 +78,7 @@ fn run_rebuild(g: &GraphHunter, k: usize, cap: usize) -> usize {
 /// uses a disjoint time slice. Total enumerate work ≈ original (the
 /// union of windows covers the full timeline) but per-query output is
 /// O(|OUT| / K) — the regime where amortization is supposed to pay.
-fn run_shared_windowed(
-    g: &GraphHunter,
-    windows: &[(i64, i64)],
-    cap: usize,
-) -> usize {
+fn run_shared_windowed(g: &GraphHunter, windows: &[(i64, i64)], cap: usize) -> usize {
     let trie = MaterializedCsrTrie::build(g);
     let ts_map = MinTimestampMap::build(g, &trie);
     let mut total = 0usize;
@@ -98,11 +90,7 @@ fn run_shared_windowed(
     total
 }
 
-fn run_rebuild_windowed(
-    g: &GraphHunter,
-    windows: &[(i64, i64)],
-    cap: usize,
-) -> usize {
+fn run_rebuild_windowed(g: &GraphHunter, windows: &[(i64, i64)], cap: usize) -> usize {
     let mut total = 0usize;
     for &(t_lo, t_hi) in windows {
         let trie = MaterializedCsrTrie::build(g);
@@ -141,23 +129,17 @@ fn bench_multiquery(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new("shared", &label),
                 &(&g, k),
-                |b, &(g, k)| {
-                    b.iter(|| black_box(run_shared(black_box(g), k, usize::MAX)))
-                },
+                |b, &(g, k)| b.iter(|| black_box(run_shared(black_box(g), k, usize::MAX))),
             );
             group.bench_with_input(
                 BenchmarkId::new("rebuild", &label),
                 &(&g, k),
-                |b, &(g, k)| {
-                    b.iter(|| black_box(run_rebuild(black_box(g), k, usize::MAX)))
-                },
+                |b, &(g, k)| b.iter(|| black_box(run_rebuild(black_box(g), k, usize::MAX))),
             );
             group.bench_with_input(
                 BenchmarkId::new("shared-window", &label),
                 &(&g, &wins),
-                |b, &(g, w)| {
-                    b.iter(|| black_box(run_shared_windowed(black_box(g), w, usize::MAX)))
-                },
+                |b, &(g, w)| b.iter(|| black_box(run_shared_windowed(black_box(g), w, usize::MAX))),
             );
             group.bench_with_input(
                 BenchmarkId::new("rebuild-window", &label),

@@ -28,7 +28,7 @@ use super::{CatalogEntry, CatalogSource};
 /// Embedded built-in catalog YAMLs. Order matches `cat-NNN` numbering
 /// but load order doesn't determine precedence (user files always
 /// override built-ins by `id`).
-const BUILTIN_YAMLS: &[(&str, &str)] = &[
+pub(super) const BUILTIN_YAMLS: &[(&str, &str)] = &[
     ("cat-001", include_str!("builtin/cat-001.yaml")),
     ("cat-002", include_str!("builtin/cat-002.yaml")),
     ("cat-003", include_str!("builtin/cat-003.yaml")),
@@ -59,6 +59,8 @@ const BUILTIN_YAMLS: &[(&str, &str)] = &[
     ("cat-028", include_str!("builtin/cat-028.yaml")),
     ("cat-029", include_str!("builtin/cat-029.yaml")),
     ("cat-030", include_str!("builtin/cat-030.yaml")),
+    ("cat-031", include_str!("builtin/cat-031.yaml")),
+    ("cat-032", include_str!("builtin/cat-032.yaml")),
 ];
 
 /// A diagnostic emitted when a YAML file (built-in or user) failed to
@@ -158,10 +160,10 @@ pub(super) fn build_snapshot_with_dir(user_dir: Option<&std::path::Path>) -> Cat
 /// Returns `None` when neither is set — we don't try to create the
 /// directory just to look inside it.
 fn resolve_user_catalog_dir() -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var("GRAPHHUNTER_CATALOG_DIR") {
-        if !explicit.trim().is_empty() {
-            return Some(PathBuf::from(explicit));
-        }
+    if let Ok(explicit) = std::env::var("GRAPHHUNTER_CATALOG_DIR")
+        && !explicit.trim().is_empty()
+    {
+        return Some(PathBuf::from(explicit));
     }
     let home = if cfg!(windows) {
         std::env::var("USERPROFILE").ok()
@@ -442,8 +444,47 @@ k_simplicity: 1
             .find(|e| e.id == "cat-custom")
             .expect("custom entry should be appended");
         assert_eq!(new_entry.name, "Custom Hypothesis");
-        // Total count is 30 built-in + 1 user.
-        assert_eq!(snap.entries.len(), 31);
+        // Every built-in, plus the one user entry. Derived rather than
+        // hardcoded: the literal count made every catalog addition break
+        // three unrelated tests, which trains people to edit the number
+        // instead of reading the failure.
+        assert_eq!(snap.entries.len(), BUILTIN_YAMLS.len() + 1);
+    }
+
+    /// A YAML dropped into `builtin/` but never added to `BUILTIN_YAMLS`
+    /// is silently absent from the catalog — `include_str!` only embeds
+    /// what the list names. This is the mistake the old hardcoded count
+    /// was reaching for, tested directly.
+    #[test]
+    fn every_builtin_yaml_on_disk_is_registered() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("catalog")
+            .join("builtin");
+        let registered: std::collections::BTreeSet<String> = BUILTIN_YAMLS
+            .iter()
+            .map(|(id, _)| format!("{id}.yaml"))
+            .collect();
+
+        let mut unregistered = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("builtin dir") {
+            let name = entry
+                .expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string();
+            // `shape_rules.yaml` is configuration, not a catalog entry.
+            if !name.ends_with(".yaml") || name == "shape_rules.yaml" {
+                continue;
+            }
+            if !registered.contains(&name) {
+                unregistered.push(name);
+            }
+        }
+        assert!(
+            unregistered.is_empty(),
+            "these catalog files exist but are not in BUILTIN_YAMLS, so they are invisible at runtime: {unregistered:?}"
+        );
     }
 
     #[test]
@@ -477,7 +518,7 @@ k_simplicity: 1
     fn missing_user_dir_is_noop() {
         // `None` user dir → snapshot is just the built-ins.
         let snap = build_snapshot_with_dir(None);
-        assert_eq!(snap.entries.len(), 30);
+        assert_eq!(snap.entries.len(), BUILTIN_YAMLS.len());
         assert!(snap.load_errors.is_empty());
     }
 

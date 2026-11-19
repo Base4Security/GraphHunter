@@ -1,8 +1,8 @@
-/// Configuration constants for the graph hunter engine.
-///
-/// Constants here are either used across multiple modules or are likely
-/// to be tuned by operators. Module-private constants live next to their
-/// usage instead.
+//! Configuration constants for the graph hunter engine.
+//!
+//! Constants here are either used across multiple modules or are likely
+//! to be tuned by operators. Module-private constants live next to their
+//! usage instead.
 
 // ── Neighborhood / node-detail query limits ──
 

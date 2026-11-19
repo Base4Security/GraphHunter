@@ -96,6 +96,10 @@ impl std::error::Error for TokenStorageError {}
 /// All methods are async so backends can use async I/O (keyring is
 /// synchronous today, but a future encrypted-file backend would use
 /// `tokio::fs`).
+// `async_trait` tags every generated method with `#[must_use]` even though
+// the returned `Pin<Box<dyn Future>>` already is; the lint fires on the
+// macro expansion, not on code written here.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TokenStorage: Send + Sync {
     /// Loads the stored refresh token for a key, if any.

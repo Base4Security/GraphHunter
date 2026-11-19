@@ -73,6 +73,11 @@ impl ThreatClass {
     }
 }
 
+/// Minimum entities of a type before rarity is measured within that type
+/// rather than against the whole graph. Below this the "peer group" is too
+/// small for "unusual for this type" to mean anything.
+const MIN_PEER_GROUP: usize = 20;
+
 /// Post-processing anomaly scorer that operates on the ingested graph.
 ///
 /// Usage:
@@ -88,8 +93,28 @@ pub struct AnomalyScorer {
     pair_freq: HashMap<(String, String), u64>,
     /// entity_id → first-seen timestamp
     first_seen: HashMap<String, i64>,
+    /// Process image → (observations, first-seen) over every process id
+    /// built from that image. A process id names one instance on one host
+    /// (`process_identity`), which is what makes paths sound but makes
+    /// every instance look maximally rare and maximally new. Rarity and
+    /// novelty are properties of the image, so they are read from here.
+    /// Rebuilt by `finalize`; the per-id maps above stay raw.
+    image_groups: HashMap<String, (u64, i64)>,
     /// entity_id → neighborhood concentration (1 - normalized Shannon entropy)
     nc_cache: HashMap<String, f64>,
+    /// entity_id → entity rarity, normalized against the entity's OWN type
+    /// rather than the whole graph. Populated by `finalize`; empty means
+    /// fall back to the global denominator.
+    ///
+    /// A single global `max_freq` makes rarity incomparable across types.
+    /// On a real Keycloak corpus the busiest node was an infrastructure IP
+    /// with ~100k observations while a busy user account had ~60, so every
+    /// User scored as near-maximally rare — the metric said "everything is
+    /// unusual", which is the same as saying nothing. Normalizing each
+    /// entity against the busiest entity *of its own type* asks the
+    /// question an analyst actually means: is this account unusual **for an
+    /// account**.
+    er_cache: HashMap<String, f64>,
     /// entity_id → GNN threat score in [0, 1] (from GraphOS-APT models)
     gnn_cache: HashMap<String, f64>,
     /// ln(max entity frequency), cached after finalize
@@ -113,7 +138,9 @@ impl AnomalyScorer {
             entity_freq: HashMap::new(),
             pair_freq: HashMap::new(),
             first_seen: HashMap::new(),
+            image_groups: HashMap::new(),
             nc_cache: HashMap::new(),
+            er_cache: HashMap::new(),
             gnn_cache: HashMap::new(),
             log_max_freq: 0.0,
             log_max_pair_freq: 0.0,
@@ -143,11 +170,60 @@ impl AnomalyScorer {
         self.finalized = false;
     }
 
+    /// Observation count used for rarity: the image's total for a scoped
+    /// process id, the entity's own count for everything else.
+    fn freq_of(&self, id: &str) -> u64 {
+        let image = crate::process_identity::image_of(id);
+        if image.len() != id.len()
+            && let Some(&(freq, _)) = self.image_groups.get(image)
+        {
+            return freq;
+        }
+        self.entity_freq.get(id).copied().unwrap_or(1)
+    }
+
+    /// First-seen timestamp used for novelty; same grouping as `freq_of`.
+    fn first_seen_of(&self, id: &str) -> Option<i64> {
+        let image = crate::process_identity::image_of(id);
+        if image.len() != id.len()
+            && let Some(&(_, ts)) = self.image_groups.get(image)
+        {
+            return Some(ts);
+        }
+        self.first_seen.get(id).copied()
+    }
+
     /// Finalize the scorer: compute derived caches from the graph.
     /// Must be called after all ingestion is complete, before scoring paths.
     pub fn finalize(&mut self, graph: &GraphHunter) {
+        // Fold every scoped process id into its image.
+        self.image_groups.clear();
+        for (&sid, entity) in &graph.entities {
+            if entity.entity_type != crate::EntityType::Process {
+                continue;
+            }
+            let id = graph.interner.resolve(sid);
+            let image = crate::process_identity::image_of(id);
+            if image.len() == id.len() {
+                continue;
+            }
+            let freq = self.entity_freq.get(id).copied().unwrap_or(1);
+            let ts = self.first_seen.get(id).copied().unwrap_or(0);
+            let group = self.image_groups.entry(image.to_string()).or_insert((0, 0));
+            group.0 += freq;
+            if ts > 0 && (group.1 == 0 || ts < group.1) {
+                group.1 = ts;
+            }
+        }
+
         // Compute log_max_freq
-        let max_freq = self.entity_freq.values().copied().max().unwrap_or(1);
+        let max_freq = self
+            .entity_freq
+            .values()
+            .copied()
+            .chain(self.image_groups.values().map(|g| g.0))
+            .max()
+            .unwrap_or(1);
         self.log_max_freq = (max_freq as f64).ln();
 
         // Compute log_max_pair_freq
@@ -174,13 +250,52 @@ impl AnomalyScorer {
             self.tau_max = 0;
         }
 
-        // Compute neighborhood concentration for each entity
-        // graph.entities is keyed by StrId; resolve to &str for nc_cache keys
+        // Per-type rarity denominators. Two passes over the entities:
+        // find the busiest entity of each type, then score every entity
+        // against its own type's ceiling. Precomputed here for the same
+        // reason `nc_cache` is — it keeps a `ln()` and a type lookup out
+        // of the path-scoring hot loop.
+        let mut max_freq_by_type: HashMap<String, u64> = HashMap::new();
+        let mut count_by_type: HashMap<String, usize> = HashMap::new();
+        for (&sid, entity) in &graph.entities {
+            let id = graph.interner.resolve(sid);
+            let freq = self.freq_of(id);
+            let key = entity.entity_type.to_string();
+            let slot = max_freq_by_type.entry(key.clone()).or_insert(1);
+            if freq > *slot {
+                *slot = freq;
+            }
+            *count_by_type.entry(key).or_insert(0) += 1;
+        }
+
+        self.er_cache.clear();
         self.nc_cache.clear();
-        for (&sid, _entity) in &graph.entities {
+        for (&sid, entity) in &graph.entities {
             let entity_id_str = graph.interner.resolve(sid);
             let nc = self.compute_nc(sid, graph);
             self.nc_cache.insert(entity_id_str.to_string(), nc);
+
+            let freq = self.freq_of(entity_id_str);
+            let type_key = entity.entity_type.to_string();
+            // A peer group needs peers. With only a handful of entities of
+            // a type, "unusual for this type" has no meaning — the single
+            // IP in a three-node graph is neither rare nor common among
+            // IPs — so those fall back to the global denominator and keep
+            // the long-standing behaviour. The peer-relative measure kicks
+            // in exactly where it was needed: the large, type-skewed
+            // corpora where one infrastructure node dwarfs every account.
+            let peers = count_by_type.get(&type_key).copied().unwrap_or(0);
+            let log_denominator = if peers >= MIN_PEER_GROUP {
+                (max_freq_by_type.get(&type_key).copied().unwrap_or(1) as f64).ln()
+            } else {
+                self.log_max_freq
+            };
+            let er = if log_denominator > 0.0 {
+                (1.0 - (freq as f64).ln() / log_denominator).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            self.er_cache.insert(entity_id_str.to_string(), er);
         }
 
         self.finalized = true;
@@ -241,7 +356,21 @@ impl AnomalyScorer {
     }
 
     /// Score a single path and return the composite score S(p) ∈ [0,1] plus breakdown.
-    pub fn score_path(&self, path: &[String], _graph: &GraphHunter) -> (f64, ScoreBreakdown) {
+    pub fn score_path(&self, path: &[String], graph: &GraphHunter) -> (f64, ScoreBreakdown) {
+        let edges: Vec<(usize, usize)> = (1..path.len()).map(|i| (i - 1, i)).collect();
+        self.score_path_edges(path, &edges, graph)
+    }
+
+    /// [`Self::score_path`] with the result's edges given as position pairs.
+    /// A chain's edges are its consecutive nodes; a joined pattern's are its
+    /// clauses (see `yannakakis::joined_clauses`), and reading consecutive
+    /// nodes there would score pairs that were never an edge.
+    pub fn score_path_edges(
+        &self,
+        path: &[String],
+        edges: &[(usize, usize)],
+        _graph: &GraphHunter,
+    ) -> (f64, ScoreBreakdown) {
         if path.is_empty() || !self.finalized {
             return (
                 0.0,
@@ -255,31 +384,45 @@ impl AnomalyScorer {
             );
         }
 
-        // 1. Entity Rarity: ER(v) = 1 - ln(freq(v)) / ln(max_freq), averaged over path
-        let er_avg = if self.log_max_freq > 0.0 {
+        // 1. Entity Rarity, averaged over the path.
+        //
+        // Peer-relative: `er_cache` holds each entity's rarity measured
+        // against the busiest entity **of its own type** (see the field
+        // docs). Falls back to the global denominator for ids the cache
+        // does not know — an entity observed during ingestion but absent
+        // from the graph handed to `finalize`.
+        let er_avg = {
             let sum: f64 = path
                 .iter()
                 .map(|id| {
-                    let freq = self.entity_freq.get(id).copied().unwrap_or(1);
-                    1.0 - (freq as f64).ln() / self.log_max_freq
+                    self.er_cache.get(id).copied().unwrap_or_else(|| {
+                        if self.log_max_freq > 0.0 {
+                            let freq = self.freq_of(id);
+                            (1.0 - (freq as f64).ln() / self.log_max_freq).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        }
+                    })
                 })
                 .sum();
             (sum / path.len() as f64).clamp(0.0, 1.0)
-        } else {
-            0.0
         };
 
         // 2. Edge Rarity: EdgeR(e) = 1 - ln(freq(s,d)) / ln(max_pair_freq), averaged
-        let edge_r_avg = if path.len() > 1 && self.log_max_pair_freq > 0.0 {
-            let edge_count = path.len() - 1;
-            let sum: f64 = (0..edge_count)
-                .map(|i| {
-                    let pair = (path[i].clone(), path[i + 1].clone());
+        let edges: Vec<&(usize, usize)> = edges
+            .iter()
+            .filter(|(a, b)| *a < path.len() && *b < path.len())
+            .collect();
+        let edge_r_avg = if !edges.is_empty() && self.log_max_pair_freq > 0.0 {
+            let sum: f64 = edges
+                .iter()
+                .map(|&&(a, b)| {
+                    let pair = (path[a].clone(), path[b].clone());
                     let freq = self.pair_freq.get(&pair).copied().unwrap_or(1);
                     1.0 - (freq as f64).ln() / self.log_max_pair_freq
                 })
                 .sum();
-            (sum / edge_count as f64).clamp(0.0, 1.0)
+            (sum / edges.len() as f64).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -299,7 +442,7 @@ impl AnomalyScorer {
             let sum: f64 = path
                 .iter()
                 .map(|id| {
-                    let ts = self.first_seen.get(id).copied().unwrap_or(self.tau_min);
+                    let ts = self.first_seen_of(id).unwrap_or(self.tau_min);
                     let ts = if ts > 0 { ts } else { self.tau_min };
                     (ts - self.tau_min) as f64 / range
                 })
@@ -357,7 +500,7 @@ impl AnomalyScorer {
         }
         // Entity Rarity
         let er = if self.log_max_freq > 0.0 {
-            let freq = self.entity_freq.get(node_id).copied().unwrap_or(1);
+            let freq = self.freq_of(node_id);
             (1.0 - (freq as f64).ln() / self.log_max_freq).clamp(0.0, 1.0)
         } else {
             0.0
@@ -367,11 +510,7 @@ impl AnomalyScorer {
         // Temporal Novelty
         let tn = if self.tau_max > self.tau_min {
             let range = (self.tau_max - self.tau_min) as f64;
-            let ts = self
-                .first_seen
-                .get(node_id)
-                .copied()
-                .unwrap_or(self.tau_min);
+            let ts = self.first_seen_of(node_id).unwrap_or(self.tau_min);
             let ts = if ts > 0 { ts } else { self.tau_min };
             ((ts - self.tau_min) as f64 / range).clamp(0.0, 1.0)
         } else {
@@ -484,5 +623,94 @@ impl AnomalyScorer {
             gnn_threat: outcome.get("gnn_threat").unwrap_or(0.0),
         };
         (outcome.composite, breakdown)
+    }
+}
+
+#[cfg(test)]
+mod peer_baseline_tests {
+    use super::*;
+    use crate::{Entity, EntityType};
+
+    /// Builds a graph shaped like a real identity corpus: many accounts,
+    /// many addresses, and one piece of infrastructure that dwarfs every
+    /// account in observation count.
+    fn skewed_graph() -> GraphHunter {
+        let mut g = GraphHunter::new();
+        for i in 0..MIN_PEER_GROUP + 5 {
+            g.add_entity(Entity::new(format!("user{i}"), EntityType::User))
+                .expect("add user");
+            g.add_entity(Entity::new(format!("ip{i}"), EntityType::IP))
+                .expect("add ip");
+        }
+        g.add_entity(Entity::new("infra_ip", EntityType::IP))
+            .expect("add infra");
+        g
+    }
+
+    /// The behaviour this change exists for.
+    ///
+    /// `user0` is the busiest account in the corpus, so among accounts it
+    /// is the LEAST rare and should score ~0. Measured against a global
+    /// maximum set by an infrastructure node three orders of magnitude
+    /// busier, it instead scored around 0.57 — "moderately rare" — which
+    /// is how an entire population of ordinary accounts ends up looking
+    /// unusual and the metric stops discriminating.
+    #[test]
+    fn busiest_account_is_not_rare_among_accounts() {
+        let g = skewed_graph();
+        let mut scorer = AnomalyScorer::new(ScoringWeights::default());
+        for _ in 0..50 {
+            scorer.observe_entity("user0", 1000);
+        }
+        for i in 1..MIN_PEER_GROUP + 5 {
+            scorer.observe_entity(&format!("user{i}"), 1000);
+            scorer.observe_entity(&format!("ip{i}"), 1000);
+        }
+        scorer.observe_entity("ip0", 1000);
+        for _ in 0..10_000 {
+            scorer.observe_entity("infra_ip", 1000);
+        }
+        scorer.finalize(&g);
+
+        let busiest = scorer.er_cache.get("user0").copied().expect("user0 scored");
+        let ordinary = scorer.er_cache.get("user1").copied().expect("user1 scored");
+
+        assert!(
+            busiest < 0.05,
+            "the busiest account must not read as rare among accounts, got {busiest}"
+        );
+        assert!(
+            ordinary > 0.95,
+            "a once-seen account must still read as rare among accounts, got {ordinary}"
+        );
+
+        // What the global denominator would have produced for the same
+        // account — kept as an explicit contrast so a future refactor
+        // back to global normalization fails here rather than silently.
+        let global = 1.0 - (50f64).ln() / scorer.log_max_freq;
+        assert!(
+            global > 0.5,
+            "sanity: the global denominator really did call it rare ({global})"
+        );
+    }
+
+    /// Small graphs keep the old behaviour: with no peer group, "unusual
+    /// for this type" is unanswerable, so rarity stays global.
+    #[test]
+    fn small_types_fall_back_to_the_global_denominator() {
+        let mut g = GraphHunter::new();
+        g.add_entity(Entity::new("a", EntityType::IP)).expect("a");
+        g.add_entity(Entity::new("b", EntityType::Host)).expect("b");
+        let mut scorer = AnomalyScorer::new(ScoringWeights::default());
+        scorer.observe_entity("a", 1000);
+        for _ in 0..4 {
+            scorer.observe_entity("b", 1000);
+        }
+        scorer.finalize(&g);
+
+        let a = scorer.er_cache.get("a").copied().expect("a scored");
+        // Global max is 4 (b), so a: 1 - ln(1)/ln(4) = 1.0 — unchanged
+        // from before per-type normalization existed.
+        assert!((a - 1.0).abs() < 1e-9, "expected global behaviour, got {a}");
     }
 }

@@ -66,11 +66,11 @@ fn build_graph() -> GraphHunter {
 fn build_scorer(graph: &GraphHunter, weights: ScoringWeights) -> AnomalyScorer {
     let mut s = AnomalyScorer::new(weights);
     // Drive `observe_entity` / `observe_edge` the way ingestion would.
-    for (_sid, entity) in graph.entities.iter() {
+    for entity in graph.entities.values() {
         s.observe_entity(&entity.id, 1_700_000_000);
     }
     // Walk every edge. Use source/dest SIDs to resolve ids.
-    for (&sid, _entity) in &graph.entities {
+    for &sid in graph.entities.keys() {
         if let Some(arc) = graph.streaming.neighbors_arc(sid) {
             let g = arc.read();
             for edge in g.as_slice() {

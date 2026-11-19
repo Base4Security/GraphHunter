@@ -26,6 +26,7 @@ enum SentinelTable {
 /// | Table                  | Triples Produced                                           |
 /// |------------------------|------------------------------------------------------------|
 /// | SecurityEvent (4624/25)| User -[Auth]-> Host                                        |
+/// | SecurityEvent (4634/47)| User -[Logoff]-> Host (`RelationType::Other`)              |
 /// | SecurityEvent (4688)   | User -[Execute]-> Process, Parent -[Execute]-> Child       |
 /// | SecurityEvent (4663)   | Process -[Read]-> File                                     |
 /// | SigninLogs             | User -[Auth]-> IP                                          |
@@ -151,13 +152,13 @@ impl SentinelJsonParser {
             && event.get("FolderPath").is_some()
         {
             // Check if it has ActionType that looks like file events
-            if let Some(action) = Self::extract_str(event, "ActionType") {
-                if action.contains("File") {
-                    eprintln!(
-                        "Warning: table type detected via heuristic (fields: InitiatingProcessFileName, FileName, FolderPath, ActionType={action}), not explicit Type field"
-                    );
-                    return SentinelTable::DeviceFileEvents;
-                }
+            if let Some(action) = Self::extract_str(event, "ActionType")
+                && action.contains("File")
+            {
+                eprintln!(
+                    "Warning: table type detected via heuristic (fields: InitiatingProcessFileName, FileName, FolderPath, ActionType={action}), not explicit Type field"
+                );
+                return SentinelTable::DeviceFileEvents;
             }
             eprintln!(
                 "Warning: table type detected via heuristic (fields: InitiatingProcessFileName, FileName, FolderPath), not explicit Type field"
@@ -198,6 +199,7 @@ impl SentinelJsonParser {
     /// SecurityEvent table (Windows Security Event Log via Sentinel).
     ///
     /// - EventID 4624/4625: User -[Auth]-> Host (with IP in metadata)
+    /// - EventID 4634/4647: User -[Logoff]-> Host
     /// - EventID 4688: User -[Execute]-> Process + Parent -[Execute]-> Child
     /// - EventID 4663: Process -[Read]-> File
     fn parse_security_event(event: &Value) -> Vec<ParsedTriple> {
@@ -211,7 +213,9 @@ impl SentinelJsonParser {
         };
 
         match event_id {
-            4624 | 4625 => Self::parse_security_event_auth(event, timestamp, event_id),
+            4624 | 4625 | 4634 | 4647 => {
+                Self::parse_security_event_auth(event, timestamp, event_id)
+            }
             4688 => Self::parse_security_event_process(event, timestamp),
             4663 => Self::parse_security_event_file_access(event, timestamp),
             _ => Vec::new(),
@@ -234,7 +238,13 @@ impl SentinelJsonParser {
             _ => return Vec::new(),
         };
 
-        let user = Entity::new(account, EntityType::User);
+        let (rel_type, user_meta) = crate::sysmon::logon_family(
+            event_id,
+            Self::extract_str(event, "TargetUserSid"),
+            Self::extract_str(event, "TargetDomainName"),
+        );
+        let mut user = Entity::new(account, EntityType::User);
+        user.metadata.extend(user_meta);
         let mut host = Entity::new(computer, EntityType::Host);
 
         if let Some(ip) = Self::extract_str(event, "IpAddress") {
@@ -246,9 +256,11 @@ impl SentinelJsonParser {
         } else {
             "Failure"
         };
-        let mut rel = Relation::new(&user.id, &host.id, RelationType::Auth, timestamp);
+        let mut rel = Relation::new(&user.id, &host.id, rel_type, timestamp);
         rel.metadata.insert("event_id".into(), event_id.to_string());
-        rel.metadata.insert("status".into(), status.into());
+        if !matches!(event_id, 4634 | 4647) {
+            rel.metadata.insert("status".into(), status.into());
+        }
 
         if let Some(logon_type) = event.get("LogonType").and_then(|v| {
             v.as_u64()
@@ -594,7 +606,9 @@ impl SentinelJsonParser {
             None => return Vec::new(),
         };
         match event_id {
-            4624 | 4625 => Self::parse_security_event_auth_raw(event, timestamp, event_id),
+            4624 | 4625 | 4634 | 4647 => {
+                Self::parse_security_event_auth_raw(event, timestamp, event_id)
+            }
             4688 => Self::parse_security_event_process_raw(event, timestamp),
             4663 => Self::parse_security_event_file_access_raw(event, timestamp),
             _ => Vec::new(),
@@ -619,10 +633,21 @@ impl SentinelJsonParser {
         if let Some(ip) = Self::extract_str(event, "IpAddress") {
             host_meta.insert("source_ip".into(), ip.into());
         }
-        let status = if event_id == 4624 { "Success" } else { "Failure" };
+        let status = if event_id == 4624 {
+            "Success"
+        } else {
+            "Failure"
+        };
+        let (rel_type, user_meta) = crate::sysmon::logon_family(
+            event_id,
+            Self::extract_str(event, "TargetUserSid"),
+            Self::extract_str(event, "TargetDomainName"),
+        );
         let mut rel_meta: HashMap<String, String> = HashMap::new();
         rel_meta.insert("event_id".into(), event_id.to_string());
-        rel_meta.insert("status".into(), status.into());
+        if !matches!(event_id, 4634 | 4647) {
+            rel_meta.insert("status".into(), status.into());
+        }
         if let Some(logon_type) = event.get("LogonType").and_then(|v| {
             v.as_u64()
                 .map(|n| n.to_string())
@@ -633,13 +658,14 @@ impl SentinelJsonParser {
         vec![RawIngestEvent {
             src_id: account.into(),
             src_type: EntityType::User,
-            src_metadata: HashMap::new(),
+            src_metadata: user_meta,
             dst_id: computer.into(),
             dst_type: EntityType::Host,
             dst_metadata: host_meta,
-            rel_type: RelationType::Auth,
+            rel_type,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }]
     }
 
@@ -687,6 +713,7 @@ impl SentinelJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         if let Some(parent_name) = Self::extract_str(event, "ParentProcessName") {
@@ -705,6 +732,7 @@ impl SentinelJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         events
@@ -734,6 +762,7 @@ impl SentinelJsonParser {
             rel_type: RelationType::Read,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }]
     }
 
@@ -786,6 +815,7 @@ impl SentinelJsonParser {
             rel_type: RelationType::Auth,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }]
     }
 
@@ -830,6 +860,7 @@ impl SentinelJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         if let Some(parent) = Self::extract_str(event, "InitiatingProcessFileName") {
@@ -850,6 +881,7 @@ impl SentinelJsonParser {
                 rel_type: RelationType::Execute,
                 rel_metadata: HashMap::new(),
                 timestamp,
+                raw_line: None,
             });
         }
         events
@@ -905,6 +937,7 @@ impl SentinelJsonParser {
             rel_type: RelationType::Connect,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }]
     }
 
@@ -944,6 +977,7 @@ impl SentinelJsonParser {
             rel_type,
             rel_metadata: HashMap::new(),
             timestamp,
+            raw_line: None,
         }]
     }
 
@@ -992,6 +1026,7 @@ impl SentinelJsonParser {
             rel_type: RelationType::Connect,
             rel_metadata: rel_meta,
             timestamp,
+            raw_line: None,
         }]
     }
 
@@ -1026,10 +1061,7 @@ impl LogParser for SentinelJsonParser {
         if trimmed.starts_with('[') {
             let mut buf = trimmed.as_bytes().to_vec();
             if let Ok(events) = simd_json::serde::from_slice::<Vec<Value>>(&mut buf) {
-                return events
-                    .par_iter()
-                    .flat_map(|event| Self::parse_event(event))
-                    .collect();
+                return events.par_iter().flat_map(Self::parse_event).collect();
             }
         }
 
@@ -1050,7 +1082,7 @@ impl LogParser for SentinelJsonParser {
 
     fn parse_with_stats(&self, data: &str) -> (Vec<ParsedTriple>, crate::parser::ParseStats) {
         let events = Self::collect_events(data);
-        crate::generic::parse_events_with_stats(&events, |ev| Self::parse_event(ev))
+        crate::generic::parse_events_with_stats(&events, Self::parse_event)
     }
 
     /// Sentinel Result variant (RH-P1-012).
@@ -1144,9 +1176,7 @@ impl LogParser for SentinelJsonParser {
     /// Uses the same `rayon::par_iter` fan-out as `parse()` so throughput
     /// is identical on large row sets.
     fn parse_rows(&self, rows: &[Value]) -> Vec<ParsedTriple> {
-        rows.par_iter()
-            .flat_map(|event| Self::parse_event(event))
-            .collect()
+        rows.par_iter().flat_map(Self::parse_event).collect()
     }
 
     /// Native raw-event override. Mirrors `parse()` but emits
@@ -1163,10 +1193,7 @@ impl LogParser for SentinelJsonParser {
         if trimmed.starts_with('[') {
             let mut buf = trimmed.as_bytes().to_vec();
             if let Ok(events) = simd_json::serde::from_slice::<Vec<Value>>(&mut buf) {
-                return events
-                    .par_iter()
-                    .flat_map(|event| Self::parse_event_raw(event))
-                    .collect();
+                return events.par_iter().flat_map(Self::parse_event_raw).collect();
             }
         }
 
@@ -1194,7 +1221,10 @@ impl LogParser for SentinelJsonParser {
     fn parse_raw_with_stats(
         &self,
         data: &str,
-    ) -> (Vec<crate::parser::RawIngestEvent>, crate::parser::ParseStats) {
+    ) -> (
+        Vec<crate::parser::RawIngestEvent>,
+        crate::parser::ParseStats,
+    ) {
         use rayon::prelude::*;
         let trimmed = data.trim();
 
@@ -1207,28 +1237,63 @@ impl LogParser for SentinelJsonParser {
             return (events, stats);
         }
 
-        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool)> = trimmed
+        // Per-line: (events, produced_at_least_one_triple, skip_sample).
+        // `skip_sample` is `Some((raw_row, reason))` only when the row was
+        // skipped — the `line.to_string()` allocation is paid solely on
+        // that (rare) branch so per-row throughput is untouched. Unlike
+        // Sysmon's typed-scratch fast path, `event: Option<Value>` is
+        // already materialized here, so classification reuses the same
+        // `classify_skip_reason` the generic/legacy path reports via
+        // `skip_reasons` — the reason stays consistent across paths.
+        type SkipSample = Option<(String, String)>;
+        let per_line: Vec<(Vec<crate::parser::RawIngestEvent>, bool, SkipSample)> = trimmed
             .par_lines()
             .filter(|l| !l.trim().is_empty())
             .map(|line| {
                 let mut buf = line.as_bytes().to_vec();
                 let event = simd_json::serde::from_slice::<Value>(&mut buf).ok();
-                let events = event
-                    .map(|e| Self::parse_event_raw(&e))
+                let mut events = event
+                    .as_ref()
+                    .map(Self::parse_event_raw)
                     .unwrap_or_default();
                 let produced = !events.is_empty();
-                (events, produced)
+                // Attach the verbatim source row to every event this line
+                // produced (field_survival) — a line may yield N events
+                // (e.g. process-create's parent+child triples), all sharing
+                // the same origin row. Paid only on the produce branch, same
+                // cost tradeoff as the skip branch's `line.to_string()` below.
+                if produced {
+                    let raw_line = line.to_string();
+                    for ev in events.iter_mut() {
+                        ev.raw_line = Some(raw_line.clone());
+                    }
+                }
+                let skip = (!produced).then(|| {
+                    let reason = event
+                        .as_ref()
+                        .map(crate::generic::classify_skip_reason)
+                        .unwrap_or("unparseable_row");
+                    (line.to_string(), reason.to_string())
+                });
+                (events, produced, skip)
             })
             .collect();
 
-        let mut stats = crate::parser::ParseStats::default();
-        stats.rows_seen = per_line.len();
+        let mut stats = crate::parser::ParseStats {
+            rows_seen: per_line.len(),
+            ..Default::default()
+        };
         let mut all_events: Vec<crate::parser::RawIngestEvent> = Vec::new();
-        for (events, produced) in per_line {
+        for (events, produced, skip) in per_line {
             if produced {
                 stats.rows_with_triples += 1;
             } else {
                 stats.rows_skipped += 1;
+                if let Some(sample) = skip
+                    && stats.skipped_samples.len() < crate::parser::SKIP_SAMPLE_CAP
+                {
+                    stats.skipped_samples.push(sample);
+                }
             }
             all_events.extend(events);
         }
@@ -1250,9 +1315,15 @@ pub fn sentinel_entity_targets(
     use crate::types::EntityType;
     match ty {
         EntityType::User => &[
-            ("SecurityEvent", &["TargetUserName", "Account", "SubjectUserName"]),
+            (
+                "SecurityEvent",
+                &["TargetUserName", "Account", "SubjectUserName"],
+            ),
             ("SigninLogs", &["UserPrincipalName", "UserDisplayName"]),
-            ("DeviceProcessEvents", &["AccountName", "InitiatingProcessAccountName"]),
+            (
+                "DeviceProcessEvents",
+                &["AccountName", "InitiatingProcessAccountName"],
+            ),
         ],
         EntityType::IP => &[
             ("SigninLogs", &["IPAddress"]),
@@ -1264,9 +1335,23 @@ pub fn sentinel_entity_targets(
             ("DeviceNetworkEvents", &["DeviceName"]),
         ],
         EntityType::Process => &[
-            ("SecurityEvent", &["NewProcessName", "ParentProcessName", "ProcessName", "Process"]),
-            ("DeviceProcessEvents", &["FolderPath", "FileName", "InitiatingProcessFolderPath"]),
-            ("DeviceFileEvents", &["InitiatingProcessFolderPath", "InitiatingProcessFileName"]),
+            (
+                "SecurityEvent",
+                &[
+                    "NewProcessName",
+                    "ParentProcessName",
+                    "ProcessName",
+                    "Process",
+                ],
+            ),
+            (
+                "DeviceProcessEvents",
+                &["FolderPath", "FileName", "InitiatingProcessFolderPath"],
+            ),
+            (
+                "DeviceFileEvents",
+                &["InitiatingProcessFolderPath", "InitiatingProcessFileName"],
+            ),
         ],
         EntityType::File => &[
             ("SecurityEvent", &["ObjectName"]),
@@ -1298,7 +1383,10 @@ pub fn build_hydration_kql(
     time_filter: &str,
     take: u32,
 ) -> String {
-    assert!(!columns.is_empty(), "build_hydration_kql: columns must not be empty");
+    assert!(
+        !columns.is_empty(),
+        "build_hydration_kql: columns must not be empty"
+    );
     let escaped = kql_escape(value);
     let predicate = columns
         .iter()
@@ -1325,7 +1413,9 @@ mod hydration_tests {
     #[test]
     fn targets_for_user_include_signin_upn() {
         let targets = sentinel_entity_targets(&EntityType::User);
-        let signin = targets.iter().find(|(t, _)| *t == "SigninLogs")
+        let signin = targets
+            .iter()
+            .find(|(t, _)| *t == "SigninLogs")
             .expect("User targets should include SigninLogs");
         assert!(signin.1.contains(&"UserPrincipalName"));
     }
@@ -1340,8 +1430,8 @@ mod hydration_tests {
     /// an entity *identifier* (not metadata), grouped by entity type. When a
     /// parser starts reading a new identifier column, add it here AND to
     /// `sentinel_entity_targets` — this test fails until both match.
-    fn parser_identifier_columns() -> &'static [(crate::types::EntityType, &'static str, &'static str)]
-    {
+    fn parser_identifier_columns()
+    -> &'static [(crate::types::EntityType, &'static str, &'static str)] {
         use crate::types::EntityType as E;
         &[
             (E::User, "SecurityEvent", "TargetUserName"),
@@ -1350,7 +1440,11 @@ mod hydration_tests {
             (E::User, "SigninLogs", "UserPrincipalName"),
             (E::User, "SigninLogs", "UserDisplayName"),
             (E::User, "DeviceProcessEvents", "AccountName"),
-            (E::User, "DeviceProcessEvents", "InitiatingProcessAccountName"),
+            (
+                E::User,
+                "DeviceProcessEvents",
+                "InitiatingProcessAccountName",
+            ),
             (E::IP, "SigninLogs", "IPAddress"),
             (E::IP, "DeviceNetworkEvents", "RemoteIP"),
             (E::IP, "CommonSecurityLog", "SourceIP"),
@@ -1363,8 +1457,16 @@ mod hydration_tests {
             (E::Process, "SecurityEvent", "Process"),
             (E::Process, "DeviceProcessEvents", "FolderPath"),
             (E::Process, "DeviceProcessEvents", "FileName"),
-            (E::Process, "DeviceProcessEvents", "InitiatingProcessFolderPath"),
-            (E::Process, "DeviceFileEvents", "InitiatingProcessFolderPath"),
+            (
+                E::Process,
+                "DeviceProcessEvents",
+                "InitiatingProcessFolderPath",
+            ),
+            (
+                E::Process,
+                "DeviceFileEvents",
+                "InitiatingProcessFolderPath",
+            ),
             (E::Process, "DeviceFileEvents", "InitiatingProcessFileName"),
             (E::File, "SecurityEvent", "ObjectName"),
             (E::File, "DeviceFileEvents", "FolderPath"),
@@ -1402,7 +1504,10 @@ mod hydration_tests {
             "where TimeGenerated > ago(1h)",
             100,
         );
-        assert!(kql.contains(r#"UserPrincipalName == "ev\"il""#), "value not escaped: {kql}");
+        assert!(
+            kql.contains(r#"UserPrincipalName == "ev\"il""#),
+            "value not escaped: {kql}"
+        );
     }
 
     #[test]
@@ -1423,5 +1528,48 @@ mod hydration_tests {
                 "parser reads {column} in {table} as {ty:?}, but sentinel_entity_targets omits it",
             );
         }
+    }
+}
+
+/// Fase C-2 Task 3: `raw_line` capture on the native NDJSON per-line emit
+/// path (`parse_raw_with_stats`, produce branch).
+#[cfg(test)]
+mod raw_line_tests {
+    use super::*;
+
+    #[test]
+    fn sentinel_native_parse_attaches_raw_line_to_events() {
+        // NDJSON (no leading `[`) so this exercises the per-line path, not
+        // the whole-array branch that delegates to `parse_with_stats`.
+        let input = r#"{"Type": "SecurityEvent", "TimeGenerated": "2024-01-15T14:30:00Z", "EventID": 4624, "Computer": "DC-01.contoso.local", "TargetUserName": "admin", "IpAddress": "10.0.0.5", "LogonType": 3}"#;
+
+        let (events, _stats) = SentinelJsonParser.parse_raw_with_stats(input);
+
+        assert!(!events.is_empty());
+        // Every produced event carries the original row.
+        assert!(events.iter().all(|e| e.raw_line.is_some()));
+        // The raw_line contains a field from the original row.
+        assert!(
+            events[0]
+                .raw_line
+                .as_ref()
+                .unwrap()
+                .contains("TargetUserName")
+        );
+    }
+
+    #[test]
+    fn sentinel_native_parse_shares_raw_line_across_multi_event_rows() {
+        // 4688 process-create yields 2 events (User->Execute->Process,
+        // Parent->Execute->Child) from a single source row — both must
+        // carry the same raw_line.
+        let input = r#"{"Type": "SecurityEvent", "TimeGenerated": "2024-01-15T14:30:00Z", "EventID": 4688, "Computer": "WS-01.contoso.local", "SubjectUserName": "admin", "NewProcessName": "C:\\Windows\\System32\\cmd.exe", "NewProcessId": "0x1234", "CommandLine": "cmd.exe /c whoami", "ParentProcessName": "C:\\Windows\\explorer.exe"}"#;
+
+        let (events, _stats) = SentinelJsonParser.parse_raw_with_stats(input);
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.raw_line.is_some()));
+        assert_eq!(events[0].raw_line, events[1].raw_line);
+        assert!(events[0].raw_line.as_ref().unwrap().contains("cmd.exe"));
     }
 }

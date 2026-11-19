@@ -1,0 +1,49 @@
+[package]
+name = "graph_hunter_server"
+version = "1.0.0"
+edition = "2024"
+description = "HTTP transport for the canonical Graph Hunter API, plus the hunt journal. Runs embedded in the desktop app or standalone as `graph-hunter-server` (no UI)."
+license = "GPL-3.0-only"
+publish = false
+
+[lib]
+name = "graph_hunter_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "graph-hunter-server"
+path = "src/main.rs"
+
+[dependencies]
+graph_hunter_core = { path = "../../core/graph-engine", features = ["geoip"] }
+graph_hunter_api = { path = "../api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+dirs = "5"
+dotenvy = "0.15"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net"] }
+axum = { version = "0.7", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+subtle = "2"
+# Same allocator as the desktop binary, so memory numbers measured on one
+# transport hold for the other (see `platform/api/examples/ingest_bench.rs`).
+mimalloc = { version = "0.1", default-features = false }
+
+[features]
+default = []
+# Forwarded to `graph_hunter_api`. Off by default so the headless binary
+# builds without ONNX Runtime or the bundled LLM; the desktop app turns
+# them on through its own dependency line. `/health` reports which ones
+# this build has, so a client never has to guess.
+ml-scoring = ["graph_hunter_api/ml-scoring"]
+local-llm-candle = ["graph_hunter_api/local-llm-candle"]
+xgrammar = ["graph_hunter_api/xgrammar"]
+
+[dev-dependencies]
+# `ServiceExt::oneshot` drives the real axum router without binding a
+# socket (cross-transport equivalence test in `http::hunt::tests`).
+tower = { version = "0.5", features = ["util"] }

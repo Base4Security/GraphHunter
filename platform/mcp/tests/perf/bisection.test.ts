@@ -24,7 +24,7 @@ const SHOULD_RUN = process.env.PERF_BISECT === "1";
 const SCENARIO_ROWS = Array.from({ length: 200 }, (_, i) => ({
   Computer: `host-${i % 10}`,
   src: `10.0.${Math.floor(i / 256)}.${i % 256}`,
-  user: `u${i}@telecarga.cl`,
+  user: `u${i}@example.com`,
 }));
 
 const SCENARIO = [

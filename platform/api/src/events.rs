@@ -45,6 +45,9 @@ pub type EmitterHandle = Arc<dyn EventEmitter>;
 
 /// Canonical event names. Transports must use these constants — never
 /// raw strings — so renaming is a compile error, not a runtime bug.
+// `crate::events::events::*` is the public path transports import; renaming
+// the module would break them for no gain.
+#[allow(clippy::module_inception)]
 pub mod events {
     pub const SESSION_LOAD_PROGRESS: &str = "session-load-progress";
     pub const SESSION_SAVE_PROGRESS: &str = "session-save-progress";

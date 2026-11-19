@@ -1,5 +1,6 @@
 /**
- * HTTP client for the GraphHunter desktop app's local API. One instance
+ * HTTP client for GraphHunter's local API (desktop app or headless
+ * `graph-hunter-server`). One instance
  * is threaded through `ToolContext.api`. Ports `apiGet`/`apiPost` from
  * `graph-hunter-mcp/src/index.ts` — same error shape, same timeouts,
  * same JSON-vs-HTML detection.
@@ -22,8 +23,8 @@ export interface ApiClientConfig {
 }
 
 export function createApiClient(cfg: ApiClientConfig): ApiClient {
-  const connErr = `GraphHunter app unreachable at ${cfg.baseUrl}. Ensure: (1) GraphHunter desktop app is running, (2) a session is loaded, (3) data has been ingested so the graph is non-empty.`;
-  const notGhErr = `The server at ${cfg.baseUrl} responded but did not return JSON (e.g. it returned HTML). Another app may be using this port. Use only the GraphHunter desktop app on this port, or set GRAPHHUNTER_API_URL to the correct URL.`;
+  const connErr = `GraphHunter API unreachable at ${cfg.baseUrl}. Start the desktop app or graph-hunter-server, or set GRAPHHUNTER_SERVER_BIN so this MCP server starts it. Then create or load a session (session_create / session_load) and ingest data.`;
+  const notGhErr = `The server at ${cfg.baseUrl} responded but did not return JSON (e.g. it returned HTML). Another app may be using this port. Use only GraphHunter (desktop app or graph-hunter-server) on this port, or set GRAPHHUNTER_API_URL to the correct URL.`;
 
   const authHeaders = (): Record<string, string> =>
     cfg.token ? { Authorization: `Bearer ${cfg.token}` } : {};

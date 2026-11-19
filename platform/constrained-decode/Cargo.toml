@@ -3,7 +3,8 @@ name = "graph_hunter_constrained_decode"
 version = "0.1.0"
 edition = "2024"
 description = "M6: VRL-subset grammar validator and (future) constrained-decoding adapter. Today the value-add is post-hoc validation of LLM-emitted VRL against the same subset `graph_hunter_vrl::field_config_to_vrl` produces, so refinements that drift outside the safe sublanguage are rejected before they reach the review queue."
-license = "GPL-3.0"
+license = "GPL-3.0-only"
+publish = false
 
 [lib]
 name = "graph_hunter_constrained_decode"

@@ -38,6 +38,11 @@ export const sentinelQuery = defineTool({
   category: "sentinel",
   version: 1,
   stability: "stable",
+  // Marks this as the raw-source escape hatch (design spec §14): not a
+  // causal graph search, must not be used internally by hunt/graph flows,
+  // results are source-tabular. Enforced server-side by the /kql
+  // feature-flag gate.
+  escapeHatch: true,
   inputSchema: input,
   outputSchema: z.unknown(),
   async execute(ctx, { query, lookback, ingest, max_rows, dataset, acknowledge_fallback }) {
@@ -46,6 +51,15 @@ export const sentinelQuery = defineTool({
     if (max_rows != null) body.max_rows = max_rows;
     if (dataset) body.dataset = dataset;
     if (acknowledge_fallback != null) body.acknowledge_fallback = acknowledge_fallback;
-    return ctx.api.post("/kql", body, HEAVY);
+    const result = await ctx.api.post("/kql", body, HEAVY);
+    // Label the payload so an agent can never present raw source rows as an
+    // equivalent to a GraphHunter causal search (design spec §14). Spread
+    // (not wrap) the original fields: ContextEnricher.parseRows reads
+    // `.rows` directly off this return value in production, so wrapping in
+    // `{ result }` would silently break the sentinel_query overlap nudge.
+    return {
+      source_tabular: true,
+      ...(result && typeof result === "object" ? (result as Record<string, unknown>) : { result }),
+    };
   },
 });

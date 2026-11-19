@@ -32,13 +32,13 @@ impl TauriEventEmitter {
 
 impl EventEmitter for TauriEventEmitter {
     fn emit(&self, event: &str, payload: serde_json::Value) {
-        if let Ok(guard) = self.handle.read() {
-            if let Some(h) = guard.as_ref() {
-                // Best-effort: dropped events are acceptable (the UI
-                // reconciles next tick). Failing here would corrupt a
-                // long-running load for a single dropped frame.
-                let _ = h.emit(event, payload);
-            }
+        if let Ok(guard) = self.handle.read()
+            && let Some(h) = guard.as_ref()
+        {
+            // Best-effort: dropped events are acceptable (the UI
+            // reconciles next tick). Failing here would corrupt a
+            // long-running load for a single dropped frame.
+            let _ = h.emit(event, payload);
         }
     }
 }

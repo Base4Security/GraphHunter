@@ -72,6 +72,8 @@ export interface EntityRef {
 
 export interface ClientOpts {
   fetchImpl?: typeof fetch;
+  /** Bearer token for the API; the same one the tool client sends. */
+  token?: string;
 }
 
 /**
@@ -129,10 +131,16 @@ export class GraphStateClient {
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     const f = this.opts.fetchImpl ?? fetch;
     try {
+      // Both endpoints sit behind the API's bearer auth. Without the
+      // header every call is a 401, which this client reports as `null`
+      // — i.e. the footer would read "(unavailable)" forever.
+      const headers: Record<string, string> = {};
+      if (this.opts.token) headers.authorization = `Bearer ${this.opts.token}`;
+      if (body) headers["content-type"] = "application/json";
       const resp = await f(url, {
         method,
         signal: ctl.signal,
-        headers: body ? { "content-type": "application/json" } : undefined,
+        headers,
         body: body ? JSON.stringify(body) : undefined,
       } as RequestInit);
       if (!resp.ok) return null;

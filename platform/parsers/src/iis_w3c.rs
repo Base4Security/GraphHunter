@@ -32,7 +32,6 @@ impl LogParser for IisW3cParser {
             if line.starts_with('#') {
                 if let Some(rest) = line.strip_prefix("#Fields:") {
                     fields = rest
-                        .trim()
                         .split_whitespace()
                         .map(|s| s.to_lowercase().to_string())
                         .collect();
@@ -145,7 +144,6 @@ impl LogParser for IisW3cParser {
             if line.starts_with('#') {
                 if let Some(rest) = line.strip_prefix("#Fields:") {
                     fields = rest
-                        .trim()
                         .split_whitespace()
                         .map(|s| s.to_lowercase().to_string())
                         .collect();
@@ -462,7 +460,9 @@ more data
         let parser = IisW3cParser;
         let results = parser.try_parse(log);
         assert!(
-            results.iter().any(|r| matches!(r, Err(ParseError::MissingField(s)) if s.contains("#Fields"))),
+            results
+                .iter()
+                .any(|r| matches!(r, Err(ParseError::MissingField(s)) if s.contains("#Fields"))),
             "expected MissingField error for data line before #Fields header, got: {:?}",
             results
         );
@@ -479,7 +479,9 @@ more data
         let parser = IisW3cParser;
         let results = parser.try_parse(log);
         assert!(
-            results.iter().any(|r| matches!(r, Err(ParseError::MalformedRow { .. }))),
+            results
+                .iter()
+                .any(|r| matches!(r, Err(ParseError::MalformedRow { .. }))),
             "expected MalformedRow error for short row, got: {:?}",
             results
         );
@@ -497,7 +499,9 @@ more data
         let parser = IisW3cParser;
         let results = parser.try_parse(log);
         assert!(
-            results.iter().any(|r| matches!(r, Err(ParseError::MissingField(_)))),
+            results
+                .iter()
+                .any(|r| matches!(r, Err(ParseError::MissingField(_)))),
             "expected MissingField error for dash-only ips, got: {:?}",
             results
         );
@@ -515,8 +519,18 @@ more data
         let results = parser.try_parse(log);
         let ok_count = results.iter().filter(|r| r.is_ok()).count();
         let err_count = results.iter().filter(|r| r.is_err()).count();
-        assert!(ok_count >= 1, "expected at least one Ok row, got {} (results: {:?})", ok_count, results);
-        assert!(err_count >= 1, "expected at least one Err row, got {} (results: {:?})", err_count, results);
+        assert!(
+            ok_count >= 1,
+            "expected at least one Ok row, got {} (results: {:?})",
+            ok_count,
+            results
+        );
+        assert!(
+            err_count >= 1,
+            "expected at least one Err row, got {} (results: {:?})",
+            err_count,
+            results
+        );
     }
 
     #[test]
