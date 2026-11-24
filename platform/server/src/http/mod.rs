@@ -37,6 +37,7 @@ mod invariants;
 mod journal;
 mod misc;
 mod notes;
+mod robustness;
 mod session;
 mod siem;
 mod tags;
@@ -439,6 +440,10 @@ pub(crate) fn build_app(app_state: Arc<ServerState>, api: Arc<GraphHunterApi>) -
         .route("/export_ocsf", post(export::handler_export_ocsf))
         .route("/tpcsa/export", post(tpcsa::handler_export_instance))
         .route("/reconstruct_chain", post(tpcsa::handler_reconstruct_chain))
+        .route(
+            "/attribution_robustness",
+            post(robustness::handler_attribution_robustness),
+        )
         .route(
             "/check_invariants",
             post(invariants::handler_check_invariants),

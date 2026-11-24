@@ -111,6 +111,11 @@ pub struct SessionHeader {
     pub datasets: Vec<DatasetInfo>,
     #[serde(default)]
     pub tags: Vec<EntityTag>,
+    /// Entities a later source typed differently from the first, so the
+    /// load warning survives a save. A header field, not body: older
+    /// builds ignore it and older files load with none — no body bump.
+    #[serde(default)]
+    pub type_conflicts: Vec<graph_hunter_core::TypeConflictRecord>,
     /// Layout version of the entity/relation body that follows the header.
     /// Absent in pre-versioning files → defaults to 1.
     #[serde(default = "default_body_format_version")]
@@ -402,6 +407,7 @@ mod tests {
             notes: vec![],
             datasets: vec![],
             tags: vec![],
+            type_conflicts: vec![],
             body_format_version: 1,
         };
         let mut buf = Vec::new();
@@ -425,6 +431,7 @@ mod tests {
             notes: vec![],
             datasets: vec![],
             tags: vec![],
+            type_conflicts: vec![],
             body_format_version: BODY_FORMAT_VERSION,
         };
         let entities = vec![
@@ -482,6 +489,7 @@ mod tests {
             notes: vec![],
             datasets: vec![],
             tags: vec![],
+            type_conflicts: vec![],
             body_format_version: 1,
         };
         let entities = vec![

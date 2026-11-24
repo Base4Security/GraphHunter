@@ -47,7 +47,7 @@ export const GROUPS: Record<string, { summary: string; tools: string[] }> = {
     ],
   },
   analysis: {
-    summary: "paths, neighbourhoods, heatmaps, subnet and channel analytics, score explanations, hunt diff",
+    summary: "paths, neighbourhoods, heatmaps, subnet and channel analytics, score explanations, hunt diff, attribution robustness",
     tools: [
       "graph_neighbors",
       "graph_path",
@@ -62,6 +62,7 @@ export const GROUPS: Record<string, { summary: string; tools: string[] }> = {
       "node_score_explanation",
       "scores_recompute",
       "hunt_diff",
+      "hunt_robustness",
       "hunt_parse",
       "catalog_get",
       "enrich",

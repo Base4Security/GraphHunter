@@ -205,6 +205,15 @@ pub struct TypeConflict {
     pub example: String,
 }
 
+/// The entities behind one [`TypeConflict`], by id, so a saved session
+/// keeps reporting it. Interned ids are not stable across graphs.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TypeConflictRecord {
+    pub kept: EntityType,
+    pub refused: EntityType,
+    pub ids: Vec<String>,
+}
+
 /// Per (kept, refused) type pair, the entities that hit it.
 type TypeConflicts = HashMap<(EntityType, EntityType), HashSet<StrId>>;
 
@@ -836,6 +845,30 @@ impl GraphHunter {
             .collect()
     }
 
+    /// Outgoing relations of `source_id` as the matcher sees them: read from
+    /// the search snapshot, so edges appended after finalize are included
+    /// (`get_relations` reads the base lists only) and the order is by
+    /// timestamp.
+    pub fn snapshot_relations(&self, source_id: &str) -> Vec<Relation> {
+        let Some(sid) = self.interner.get(source_id) else {
+            return Vec::new();
+        };
+        let snap = self.streaming_snapshot();
+        let Some(neighbors) = snap.neighbors(sid) else {
+            return Vec::new();
+        };
+        neighbors
+            .as_slice()
+            .iter()
+            .map(|edge| {
+                // SAFETY: layout-identical with CompactRelation.
+                let compact: CompactRelation =
+                    unsafe { std::ptr::read(edge as *const _ as *const CompactRelation) };
+                self.materialize_relation(&compact)
+            })
+            .collect()
+    }
+
     /// Retrieves outgoing relations of a specific type from a given entity (materialized).
     /// NOTE: returns ALL outgoing edges; callers must filter by rel_type themselves.
     pub fn get_relations_by_type(
@@ -895,7 +928,29 @@ impl GraphHunter {
     /// the kept type, are not counted.
     pub fn type_conflicts(&self) -> Vec<TypeConflict> {
         let mut out: Vec<TypeConflict> = self
-            .type_conflicts
+            .live_type_conflicts()
+            .map(|(kept, refused, live)| TypeConflict {
+                kept: kept.clone(),
+                refused: refused.clone(),
+                entities: live.len(),
+                example: live[0].to_string(),
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.entities
+                .cmp(&a.entities)
+                .then_with(|| a.kept.to_string().cmp(&b.kept.to_string()))
+                .then_with(|| a.refused.to_string().cmp(&b.refused.to_string()))
+        });
+        out
+    }
+
+    /// Per type pair, the ids of the entities that still exist with the
+    /// kept type, sorted. Pairs left with none are skipped.
+    fn live_type_conflicts(
+        &self,
+    ) -> impl Iterator<Item = (&EntityType, &EntityType, Vec<&str>)> + '_ {
+        self.type_conflicts
             .iter()
             .filter_map(|((kept, refused), sids)| {
                 let mut live: Vec<&str> = sids
@@ -908,21 +963,47 @@ impl GraphHunter {
                     .map(|&sid| self.interner.resolve(sid))
                     .collect();
                 live.sort_unstable();
-                Some(TypeConflict {
-                    kept: kept.clone(),
-                    refused: refused.clone(),
-                    entities: live.len(),
-                    example: (*live.first()?).to_string(),
-                })
+                (!live.is_empty()).then_some((kept, refused, live))
+            })
+    }
+
+    /// The type conflicts as saveable records, for session persistence.
+    /// Sorted by pair so a saved file does not depend on hashing.
+    pub fn type_conflict_records(&self) -> Vec<TypeConflictRecord> {
+        let mut out: Vec<TypeConflictRecord> = self
+            .live_type_conflicts()
+            .map(|(kept, refused, live)| TypeConflictRecord {
+                kept: kept.clone(),
+                refused: refused.clone(),
+                ids: live.into_iter().map(str::to_string).collect(),
             })
             .collect();
         out.sort_by(|a, b| {
-            b.entities
-                .cmp(&a.entities)
-                .then_with(|| a.kept.to_string().cmp(&b.kept.to_string()))
-                .then_with(|| a.refused.to_string().cmp(&b.refused.to_string()))
+            (a.kept.to_string(), a.refused.to_string())
+                .cmp(&(b.kept.to_string(), b.refused.to_string()))
         });
         out
+    }
+
+    /// Restores conflicts saved with [`Self::type_conflict_records`], once
+    /// the session's entities are loaded. Ids the graph does not hold, or
+    /// holds with another type, are dropped: the file is user input, and a
+    /// conflict is only reported for an entity that still has it.
+    pub fn restore_type_conflicts(&mut self, records: &[TypeConflictRecord]) {
+        for r in records {
+            for id in &r.ids {
+                let Some(sid) = self.interner.get(id) else {
+                    continue;
+                };
+                if self
+                    .entities
+                    .get(&sid)
+                    .is_some_and(|e| e.entity_type == r.kept)
+                {
+                    note_type_conflict(&mut self.type_conflicts, sid, &r.kept, &r.refused);
+                }
+            }
+        }
     }
 
     /// The interned id for `id`, or `None` when the graph has never seen
@@ -3161,9 +3242,12 @@ impl GraphHunter {
 
         self.edges_sorted = true; // finalize() sorted them
         // Heavy-logs #3.5: drop the NLF cache so the next matcher
-        // call rebuilds against the post-mutation graph state.
+        // call rebuilds against the post-mutation graph state. The search
+        // snapshot is a cache of the edges too: the rebuild above replaced
+        // them, so it goes as well, or the next hunt reads the old ones.
         self.nlf = std::sync::OnceLock::new();
         self.khop_reach = std::sync::OnceLock::new();
+        self.streaming_snapshot = std::sync::OnceLock::new();
         self.bump_mutation_version();
         Ok((entities_removed, relations_removed))
     }
@@ -4301,9 +4385,12 @@ impl GraphHunter {
 
         self.edges_sorted = true; // finalize() sorted them
         // Heavy-logs #3.5: drop the NLF cache so the next matcher
-        // call rebuilds against the post-mutation graph state.
+        // call rebuilds against the post-mutation graph state. The search
+        // snapshot is a cache of the edges too: the rebuild above replaced
+        // them, so it goes as well, or the next hunt reads the old ones.
         self.nlf = std::sync::OnceLock::new();
         self.khop_reach = std::sync::OnceLock::new();
+        self.streaming_snapshot = std::sync::OnceLock::new();
         self.bump_mutation_version();
         Ok(CompactionStats {
             edges_before,
