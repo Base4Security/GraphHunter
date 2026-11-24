@@ -40,6 +40,7 @@ pub mod invariants;
 pub mod mapping_library;
 pub mod preview;
 pub mod relation;
+pub mod robustness;
 pub mod scoring;
 pub mod semijoin;
 pub mod sentinel;
@@ -83,7 +84,7 @@ pub use field_preview::{
     suggest_entity_type_with_source,
 };
 pub use generic::GenericParser;
-pub use graph::{CompactionStats, GraphHunter};
+pub use graph::{CompactionStats, GraphHunter, TypeConflict, TypeConflictRecord};
 pub use ingest_adapter::{IngestAdapter, LogSourceAdapter, TripleBatch, TripleBatchStream};
 /// Forward-compatibility alias: the plan (P2-B) eventually renames
 /// `GraphHunter` → `InMemoryGraph` once every call site has migrated

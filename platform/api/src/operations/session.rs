@@ -315,6 +315,7 @@ impl GraphHunterApi {
             notes,
             datasets,
             tags,
+            type_conflicts: graph.type_conflict_records(),
             body_format_version: crate::state::session_binary::BODY_FORMAT_VERSION,
         };
         crate::state::session_binary::write_header(&mut w, &header)
@@ -547,6 +548,7 @@ fn load_binary_into_graph<R: std::io::Read>(
         event_names::SESSION_LOAD_PROGRESS,
         json_progress("relations", relation_count, relation_count),
     );
+    graph.restore_type_conflicts(&header.type_conflicts);
 
     let file = SessionFile {
         id: header.id,
@@ -735,6 +737,7 @@ mod tests {
             notes: vec![],
             datasets: vec![],
             tags: vec![],
+            type_conflicts: vec![],
             body_format_version: body_version,
         };
         let mut buf = Vec::new();
@@ -757,6 +760,84 @@ mod tests {
         assert!(msg.contains("newer"), "msg: {msg}");
         assert!(msg.contains("999"), "msg: {msg}");
         assert!(msg.contains("drift-sess"), "msg: {msg}");
+    }
+
+    /// A firewall types an address as an IP, a CMDB later as a Host. The
+    /// load warning is built from the graph, so a saved session must carry
+    /// the conflict, or reopening it hides the problem.
+    #[test]
+    fn type_conflicts_survive_save_and_load() {
+        use crate::state::session_binary::{
+            BODY_FORMAT_VERSION, SessionHeader, write_entities, write_header, write_relations,
+        };
+        use graph_hunter_core::{Entity, EntityType, Relation, RelationType};
+
+        let rel = || Relation::new("10.20.206.10", "203.0.113.42", RelationType::Connect, 1);
+        let flow = |src_type: EntityType| {
+            (
+                Entity::new("10.20.206.10", src_type),
+                rel(),
+                Entity::new("203.0.113.42", EntityType::IP),
+            )
+        };
+        let mut g = GraphHunter::new();
+        g.insert_triples(vec![flow(EntityType::IP)], Some("firewall"))
+            .unwrap();
+        g.insert_triples(vec![flow(EntityType::Host)], Some("cmdb"))
+            .unwrap();
+        let before = g.type_conflicts();
+        assert_eq!(before.len(), 1);
+
+        let header = SessionHeader {
+            id: "conflicts".into(),
+            name: "conflicts".into(),
+            created_at: 0,
+            path_node_ids: vec![],
+            notes: vec![],
+            datasets: vec![],
+            tags: vec![],
+            type_conflicts: g.type_conflict_records(),
+            body_format_version: BODY_FORMAT_VERSION,
+        };
+        let mut buf = Vec::new();
+        write_header(&mut buf, &header).unwrap();
+        write_entities(
+            &mut buf,
+            g.entities.len() as u64,
+            g.entities.values().map(|e| &**e),
+        )
+        .unwrap();
+        write_relations(&mut buf, 1, vec![rel()]).unwrap();
+
+        let (loaded, _, _, _) =
+            load_binary_into_graph(&mut std::io::Cursor::new(buf), &test_emitter()).unwrap();
+        assert_eq!(loaded.type_conflicts(), before);
+        assert!(
+            crate::operations::ingestion::compute_ingest_warnings(&loaded)
+                .iter()
+                .any(|w| w.contains("1 entity typed IP") && w.contains("10.20.206.10")),
+        );
+    }
+
+    /// Headers written before the field existed load with no conflicts,
+    /// and a header that names an id the body does not hold (a hand-edited
+    /// file) reports nothing for it rather than inventing an entity.
+    #[test]
+    fn type_conflicts_absent_or_dangling_load_as_none() {
+        use crate::state::session_binary::SessionHeader;
+
+        let old: SessionHeader =
+            serde_json::from_str(r#"{"id":"s","name":"s","created_at":0,"body_format_version":2}"#)
+                .unwrap();
+        assert!(old.type_conflicts.is_empty());
+
+        let mut g = GraphHunter::new();
+        g.restore_type_conflicts(&[graph_hunter_core::TypeConflictRecord {
+            kept: graph_hunter_core::EntityType::IP,
+            refused: graph_hunter_core::EntityType::Host,
+            ids: vec!["192.0.2.99".into()],
+        }]);
+        assert!(g.type_conflicts().is_empty());
     }
 
     #[test]
@@ -810,6 +891,7 @@ mod tests {
             notes: vec![],
             datasets: vec![],
             tags: vec![],
+            type_conflicts: vec![],
             body_format_version: BODY_FORMAT_VERSION,
         };
         let entities = vec![
@@ -859,6 +941,7 @@ mod tests {
             notes: vec![],
             datasets: vec![],
             tags: vec![],
+            type_conflicts: vec![],
             body_format_version: 1,
         };
         let entities = vec![
@@ -973,6 +1056,7 @@ mod tests {
             notes: vec![],
             datasets: vec![],
             tags: vec![],
+            type_conflicts: vec![],
             body_format_version: 1,
         };
         {

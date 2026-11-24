@@ -4,6 +4,7 @@ import { huntRun } from "./run.js";
 import { huntResults } from "./results.js";
 import { huntDiff } from "./diff.js";
 import { huntExportTpcsaInstance, huntReconstructChain } from "./reconstruct.js";
+import { huntRobustness } from "./robustness.js";
 
 export const huntTools: Tool[] = [
   huntParse,
@@ -12,4 +13,5 @@ export const huntTools: Tool[] = [
   huntDiff,
   huntReconstructChain,
   huntExportTpcsaInstance,
+  huntRobustness,
 ];

@@ -28,6 +28,7 @@ pub mod invariants;
 pub mod mapping_library;
 pub mod negotiation;
 pub mod precision;
+pub mod robustness;
 pub mod schema;
 pub mod sentinel;
 pub mod sentinel_publish;
